@@ -9,32 +9,12 @@ connection. It decides which services to ask (the table below), keeps the scope,
 """
 import logging
 
-from cveFeed import local_egress
-
 logger = logging.getLogger(__name__)
 
-# What the server said when it let the attempt through, kept as the finding's evidence: (host, port) -> short text. A test's injected checker notes
-# it just before returning True and run_db_exposure_checks takes it; runs are sequential, so one table is enough.
-EVIDENCE = {}
-
-
-def _note(host, port, text):
-    EVIDENCE[(host, port)] = str(text)[:300]
-
-
-def _remote_only(host, port):
-    """The table's entry for a check that a Sentinel runs: this server carries no database client and opens no connection."""
-    raise RuntimeError('a database exposure check runs on a Sentinel only')
-
-
+# which database a service is, by a fragment of nmap's service name or product (the label names the finding)
 CHECKS = {
-    'redis': ('Redis', _remote_only),
-    'memcached': ('Memcached', _remote_only),
-    'postgres': ('PostgreSQL', _remote_only), 'postgresql': ('PostgreSQL', _remote_only),
-    'elastic': ('Elasticsearch', _remote_only),
-    'couchdb': ('CouchDB', _remote_only),
-    'mysql': ('MySQL', _remote_only), 'mariadb': ('MySQL', _remote_only),
-    'mongodb': ('MongoDB', _remote_only), 'mongo': ('MongoDB', _remote_only),
+    'redis': 'Redis', 'memcached': 'Memcached', 'postgres': 'PostgreSQL', 'postgresql': 'PostgreSQL', 'elastic': 'Elasticsearch', 'couchdb': 'CouchDB',
+    'mysql': 'MySQL', 'mariadb': 'MySQL', 'mongodb': 'MongoDB', 'mongo': 'MongoDB',
 }
 
 
@@ -44,12 +24,12 @@ DB_KEYS = {'Redis': 'redis', 'Memcached': 'memcached', 'PostgreSQL': 'postgres',
 
 
 def checker_for(port, table=None):
-    """(label, check_fn) for a Port that looks like one of the databases above, else (None, None)."""
+    """The label of a Port that looks like one of the databases of ``table`` (default ``CHECKS``), else None."""
     text = f'{port.service_name or ""} {port.product or ""}'.lower()
-    for key, (label, fn) in (table if table is not None else CHECKS).items():
+    for key, label in (CHECKS if table is None else table).items():
         if key in text:
-            return label, fn
-    return None, None
+            return label
+    return None
 
 
 def _excluded_names(project):
@@ -61,8 +41,8 @@ def _excluded_names(project):
 def run_db_exposure_checks(scan_id, checks=None):
     """One read-only, no-credential connection attempt per database-like port this scan found. Persists
     a critical Vulnerability for every one that let the attempt through. Checker errors are non-fatal;
-    authorization lookup failures stop this stage before another connection or finding write.
-    ``checks`` overrides the {name-fragment: (label, fn)} table (tests inject fakes here)."""
+    authorization lookup failures stop this stage before another connection or finding write. Every attempt is a Sentinel's ``db_probe``.
+    ``checks`` replaces the {name-fragment: label} table (``{}`` checks nothing: the pipeline tests that do not exercise this stage)."""
     from cveFeed import activity
     from cveFeed.exclusions import normalize
     from reNgine import resources
@@ -72,11 +52,9 @@ def run_db_exposure_checks(scan_id, checks=None):
     from reNgine.tasks import save_vulnerability
     from startScan.models import ScanHistory, Subdomain
 
-    table = checks if checks is not None else CHECKS
     scan = ScanHistory.objects.select_related('domain').get(pk=scan_id)
     domain, project = scan.domain, scan.domain.project_id
-    targets = []  # (subdomain, host, port_obj, label, check_fn)
-    EVIDENCE.clear()
+    targets = []  # (subdomain, host, port_obj, label)
     banned = _excluded_names(project)
     from cveFeed.bounty_gate import Gate
     gate = Gate(blocked=())  # a bug bounty program's scope: a host it does not name, or an address it excludes, is never connected to
@@ -87,18 +65,18 @@ def run_db_exposure_checks(scan_id, checks=None):
             if not is_scannable_ip(ip.address, project=project) or gate.refusal(project, ip.address, unattended=False, derived=True):
                 continue
             for port in open_ports(ip):
-                label, fn = checker_for(port, table)
-                if fn:
-                    targets.append((sub, ip.address, port, label, fn))
+                label = checker_for(port, checks)
+                if label:
+                    targets.append((sub, ip.address, port, label))
     if not targets:
         return {'checked': 0, 'exposed': 0}
     groups = {}
-    for sub, host, port, label, fn in targets:
-        groups.setdefault((host, port.number, label), (fn, []))[1].append(sub)
+    for sub, host, port, label in targets:
+        groups.setdefault((host, port.number, label), (None, []))[1].append(sub)
     from agentapi import sentinel_dispatch
     try:
-        # the probes go to a scanner (the table is the real one: a test's own checkers are never second-guessed); the findings are made here
-        sentinel = checks is None and sentinel_dispatch.scanner_or_local(domain.project, 'db_probe')
+        # the probes go to a scanner; the findings are made here
+        sentinel = sentinel_dispatch.scanner_or_local(domain.project, 'db_probe')
     except resources.ScannerUnavailable as exc:  # no scanner can take it (the kind has no local path): the services stay due
         return {'checked': 0, 'exposed': 0, 'skipped': f'no scanner could take this work ({exc.kind})'}
     running = activity.log(
@@ -127,6 +105,12 @@ def run_db_exposure_checks(scan_id, checks=None):
             if created:
                 activity.log('validate', f'{label} on {host}:{number} has no authentication required'
                              + (f' (reply: {reply})' if reply else ''), project=project, severity='critical')
+            if reply:  # the version the reply states (redis 7.2.4, PostgreSQL 15.4, MySQL 8.0.35) as a version reading of the host
+                try:
+                    from cveFeed import source_versions
+                    source_versions.store_db(sub, number, reply)
+                except Exception:  # noqa: BLE001 - the finding stands without the reading
+                    logger.exception('could not store the database version %s:%s states', host, number)
 
     def in_scope(host, subs):
         # Exclusion is organization-wide even when its author could not purge this project's records. Recheck at dispatch, not only while planning.
@@ -136,7 +120,6 @@ def run_db_exposure_checks(scan_id, checks=None):
 
     # Names that share an address share the service: one probe per (address, port), and the finding goes to every host that
     # answers on it, each with the same evidence (one critical per host stays visible on each host's page).
-    local = list(groups.items()) if checks is not None else []  # an injected checker (tests only) runs here; the real table never does
     try:
         if sentinel:
             due = [(key, value) for key, value in groups.items() if in_scope(key[0], value[1]) and key[2] in DB_KEYS]
@@ -150,28 +133,7 @@ def run_db_exposure_checks(scan_id, checks=None):
                 checked += 1
                 if result.get('open') is True:
                     found_open(host, number, label, subs, result.get('evidence') or '')
-        if local:
-            # under the resource gate like the other scanner stages: a pause or a stopped scan ends the stage between connections
-            with resources.heavy_job('route-probe', label=domain.name) as job:
-                for (host, number, label), (fn, subs) in local:
-                    job.raise_if_killed()
-                    subs = in_scope(host, subs)
-                    if not subs:
-                        continue
-                    held = local_egress.admit_one(number, 'db-exposure', host)  # the opt-in skip list and the egress governor (cveFeed.local_egress)
-                    if held:
-                        logger.info('db exposure check of %s:%s not run from this server: %s', host, number, local_egress.held_text(number, held))
-                        continue
-                    local_egress.record_one(number, 'db-exposure', project=project, address=host)
-                    checked += 1
-                    try:
-                        is_open = fn(host, number)
-                    except Exception:  # noqa: BLE001 - a checker crashing must never take the pipeline down
-                        logger.exception('db exposure check %s failed for %s:%s', label, host, number)
-                        continue
-                    if is_open:
-                        found_open(host, number, label, subs, EVIDENCE.pop((host, number), ''))
-    except (resources.ScanAborted, resources.MemoryBusy, resources.MemoryKill) as exc:  # the rest is checked on the next scan
+    except (resources.ScanAborted, resources.MemoryBusy) as exc:  # the rest is checked on the next scan
         if isinstance(exc, resources.ScannerUnavailable):  # a scanner that is offline is not memory pressure
             activity.settle(running, 'done', message=f'Database exposure check for {domain.name} is waiting: no scanner could take this work ({exc.kind}): '
                             f'{exposed} of {checked} service(s) open with no authentication so far; the rest is checked on the next scan')

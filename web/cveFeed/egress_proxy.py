@@ -2,8 +2,8 @@
 
 One place decides whether scan traffic leaves through a proxy and which one. The setting is ``scanEngine.Proxy`` (``use_proxy`` and one proxy
 URL per line, ``http``, ``https``, ``socks5`` or ``socks5h``); a line that is not one of those is skipped, never guessed at. The setting is read
-at most once every few seconds, so a hot path (every probe asks) does not query the database per call. A proxy is picked per request, round
-robin over the valid lines the caller can use.
+at most once every few seconds, so a hot path does not query the database per call. The built-in scanner is sent the proxies, the bypass list
+and whether private addresses go through it (``agentapi.sentinel_settings.builtin_vantage``) and applies them itself.
 
 This server no longer sends traffic to a scanned target (every probe and tool run is a Sentinel's, which keeps its own egress), so no
 in-process connection is opened through a proxy here. No call to a third-party API (CVE feeds, AI providers, Shodan, GitHub, HackerOne, runZero, Tailscale, crt.sh) uses it.
@@ -16,7 +16,6 @@ A proxy URL's password is never logged or put in an error: log ``describe(spec)`
 """
 import base64
 import ipaddress
-import itertools
 import logging
 import os
 import threading
@@ -27,17 +26,10 @@ from urllib.parse import quote, unquote, urlsplit
 logger = logging.getLogger(__name__)
 
 SCHEMES = ('http', 'https', 'socks5', 'socks5h')
-IN_PROCESS_SCHEMES = ('http', 'socks5', 'socks5h')  # a TLS session cannot be nested in the TLS of an https:// proxy with the ssl module
 DEFAULT_PORTS = {'http': 80, 'https': 443, 'socks5': 1080, 'socks5h': 1080}
 CACHE_SECONDS = 5
 MAX_LINE = 400
-MAX_REPLY_HEADER = 16 * 1024
 STACK_HOSTS = frozenset({'localhost', 'db', 'redis', 'web', 'celery', 'celery-beat', 'proxy', 'certs', 'tailscale'})
-
-
-class ProxyUnavailable(RuntimeError):
-    """The proxy is switched on but no configured proxy can carry this request (the tool or client does not speak its kind). The request must
-    not go out directly: the caller skips it and says so."""
 
 
 @dataclass(frozen=True, repr=False)
@@ -111,7 +103,6 @@ def parse(line):
 
 _cache = {'at': None, 'specs': ()}
 _cache_lock = threading.Lock()
-_turn = itertools.count()
 
 
 def reset_cache():
@@ -206,25 +197,3 @@ def bypass(host):
         if name == entry.lstrip('.') or name.endswith('.' + entry.lstrip('.')):
             return True
     return False
-
-
-# ----------------------------------------------------------------------------- choosing a proxy
-
-def pick(host=None, schemes=SCHEMES):
-    """The proxy for one request, or None for a direct connection (the setting is off, or ``host`` is one that never goes through a proxy).
-    Round robin over the configured proxies whose scheme is in ``schemes``. Raises ``ProxyUnavailable`` when the setting is on and no proxy
-    can carry this kind of request."""
-    specs = configured()
-    if not specs or (host is not None and bypass(host)):
-        return None
-    usable = [s for s in specs if s.scheme in schemes]
-    if not usable:
-        raise ProxyUnavailable('Settings > Proxy is on, but none of its proxies is of a kind this check can use (' + ', '.join(schemes) + ')')
-    return usable[next(_turn) % len(usable)]
-
-
-def requests_proxies(host=None):
-    """The ``proxies`` argument of a ``requests`` call: ``{}`` for a direct connection, else the picked proxy for http and https URLs. A session
-    built for it must not read the environment's proxy settings (``trust_env = False``) so no proxy is added behind the setting's back."""
-    spec = pick(host)
-    return {'http': spec.url, 'https': spec.url} if spec is not None else {}

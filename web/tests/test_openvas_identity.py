@@ -70,7 +70,6 @@ class Fixture:
         self.ssh = CVEEntry.objects.create(cve_id='CVE-2024-6387', title='regreSSHion', published_at=timezone.now(), cvss=8.1,
                                            affected=[{'vendor': 'OpenBSD', 'product': 'OpenSSH', 'ranges': [{'introduced': '8.5p1', 'fixed': '9.8p1'}]}])
         mock.patch('cveFeed.scoring.rescore_for_matches').start()
-        mock.patch('reNgine.tasks.geo_localize.delay').start()
         mock.patch('cveFeed.tasks.run_hygiene_task.delay').start()
         self.addCleanup(mock.patch.stopall)
 

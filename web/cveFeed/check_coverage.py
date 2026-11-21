@@ -540,9 +540,42 @@ def plan_ssh(h, ev):
     return [Unit(f'{address}:{number}', ev.ledger_runs(('ssh-probe', 'ssh-probe-failed'), h.project_id, f'{address}:{number}')) for address, number in ports]
 
 
+def plan_java(h, ev):
+    """The Java runtime reads (``cveFeed.java_runtime``, the ``java_runtime`` kind): a web check the host's products warrant (Spring for the actuator
+    and Jolokia, Solr, GeoServer, Druid, Elasticsearch or OpenSearch) on a web host, or a JDWP endpoint on an address a scanner may use. One unit,
+    the host: the reads of a host go in one task."""
+    from cveFeed import java_runtime
+    from cveFeed.correlation import split_name_version
+    if not java_runtime.enabled():
+        return 'the Java runtime reads are switched off (CVENGINE_JAVA_RUNTIME=0)'
+    products = [split_name_version(t) for t in h.techs] + [((getattr(p, 'product', '') or '').strip(), getattr(p, 'version', '') or '')
+                                                            for a in h.addresses.values() for p in a.ports]
+    jdwp = any(java_runtime.jdwp_kind(p) for a in h.scannable() for p in a.ports)
+    if not jdwp and not (h.web and java_runtime.web_checks(products)):
+        return 'no Spring, Jolokia, Solr, GeoServer, Druid, Elasticsearch or OpenSearch web service, and no Java debug port'
+    reason = None if jdwp else _targetable(h)
+    return reason or [Unit(h.name, ev.ledger_runs(('java-runtime', 'java-runtime-failed'), h.project_id, h.name))]
+
+
+def plan_versions(h, ev):
+    """The version source reads (``cveFeed.version_sources``, the ``version_read`` kind): a catalogue entry the host's products warrant (its
+    technologies or port products), or a port of an entry's own (Docker's 2375, etcd's 2379, a Prometheus exporter's 9100 ...). One unit, the
+    host: the reads of a host go in one task."""
+    from cveFeed import version_sources
+    from cveFeed.correlation import split_name_version
+    if not version_sources.enabled():
+        return 'the version source reads are switched off (CVENGINE_VERSION_SOURCES=0)'
+    ports = [p for a in h.scannable() for p in a.ports]
+    products = [split_name_version(t) for t in h.techs] + [((getattr(p, 'product', '') or '').strip(), getattr(p, 'version', '') or '')
+                                                            for a in h.addresses.values() for p in a.ports]
+    if not version_sources.wanted(h.name, products, ports, h.web_bases):
+        return 'no product, platform or port with a known version source (Grafana, Jira, Vault, Docker, Kubernetes, a Prometheus exporter ...)'
+    return _targetable(h) or [Unit(h.name, ev.ledger_runs(('version-source', 'version-source-failed'), h.project_id, h.name))]
+
+
 def plan_db_exposure(h, ev):
     from cveFeed import db_exposure
-    if not any(p.protocol in TCP and db_exposure.checker_for(p)[1] for a in h.scannable() for p in a.ports):
+    if not any(p.protocol in TCP and db_exposure.checker_for(p) for a in h.scannable() for p in a.ports):
         return 'no open Redis, Memcached, PostgreSQL, MySQL, MongoDB, Elasticsearch or CouchDB port'
     return [Unit(h.name, ev.stage_runs(h.scan_id, 'db_exposure_scan'))]
 
@@ -553,6 +586,40 @@ def _targetable(h):
 
 def plan_nuclei_tech(h, ev):
     return _targetable(h) or _one(h, ev, ('nuclei-light',))
+
+
+NETDETECT_KINDS = ('nuclei-netdetect', 'nuclei-netdetect-failed', 'nuclei-netdetect-nocheck')
+
+
+def _netdetect_ports(h):
+    """The open non-web ports of the host's scannable addresses whose class a ``network/detection`` template covers (``cveFeed.network_detection``)."""
+    from cvengine_scanner import nuclei_allowlist
+
+    from cveFeed import nuclei_services
+    classes = set(nuclei_allowlist.detection_classes())
+    out = set()
+    for a in h.scannable():
+        for p in a.ports:
+            try:
+                klass = nuclei_services.classify_port(p)
+            except AttributeError:  # a port fact without the fields the classifier reads
+                continue
+            if klass in classes:
+                out.add((a.address, p.number))
+    return sorted(out)[:MAX_UNITS]
+
+
+def plan_netdetect(h, ev):
+    """The network detection pass (``nuclei_netdetect_scan``, on a Sentinel): one unit per open non-web port a detection template covers. The pass
+    records its runs per ``host:port`` under the name the scan targeted, the host name or the address, so both are read."""
+    why = _targetable(h)
+    if why:
+        return why
+    ports = _netdetect_ports(h)
+    if not ports:
+        return 'no open non-web service a network detection template covers'
+    return [Unit(f'{address}:{number}', ev.ledger_runs(NETDETECT_KINDS, h.project_id, f'{h.name}:{number}')
+                 + ev.ledger_runs(NETDETECT_KINDS, h.project_id, f'{address}:{number}')) for address, number in ports]
 
 
 def plan_nuclei(h, ev):
@@ -874,8 +941,14 @@ CHECKS = (
     Check('udp', 'UDP exposure sweep', plan_udp, kinds=('udp-scan', 'udp-scan-failed'), sweeps=('udp-kick',)),
     Check('rdp-screenshot', 'RDP login screen capture', plan_rdp, kinds=('rdp-shot',), stages=('rdp_screenshot',)),
     Check('ssh-inspection', 'SSH inspection (host key and banner, on a Sentinel)', plan_ssh, kinds=('ssh-probe', 'ssh-probe-failed'), stages=('ssh_probe',), ttl_kind='ssh-probe'),
+    Check('java-runtime', 'Java runtime reads (actuator, Jolokia, status pages, JDWP; on a Sentinel)', plan_java,
+          kinds=('java-runtime', 'java-runtime-failed'), stages=('java_runtime',), ttl_kind='java-runtime'),
+    Check('version-sources', 'Version source reads (product version endpoints, platform APIs, metrics; on a Sentinel)', plan_versions,
+          kinds=('version-source', 'version-source-failed'), stages=('version_sources',), ttl_kind='version-source'),
     Check('db-exposure', 'Unauthenticated database check', plan_db_exposure, stages=('db_exposure_scan',)),
     Check('nuclei-tech', 'Nuclei technology pass', plan_nuclei_tech, kinds=('nuclei-light',), stages=('nuclei_light_scan',)),
+    Check('nuclei-netdetect', 'Nuclei network service detection (non-web ports, on a Sentinel)', plan_netdetect, kinds=NETDETECT_KINDS,
+          ttl_kind='nuclei-netdetect'),
     Check('nuclei', 'Nuclei template scan', plan_nuclei, kinds=('nuclei', 'nuclei-nocheck'), stages=('nuclei_targeted_scan',)),
     Check('nuclei-deep', 'Weekly deep Nuclei', plan_nuclei_deep, kinds=('nuclei-deep-host', 'nuclei-deep-target')),
     Check('nuclei-cve', 'CVE template tests', plan_nuclei_cve, kinds=('nuclei-cve',)),
@@ -911,6 +984,8 @@ EXCLUDED = {
         'supplier': 'a third-party supplier host card; suppliers are not owned hosts and are deliberately kept out of this registry',
         'supplier-failed': 'the retry window of the supplier sweep',
         'udp-scan-noipv6': 'an IPv6 address a Sentinel had no route to, not scanned for a day (it is not a scan, so the udp check still calls the address due)',
+        'service-features': 'the service feature reads (HTTP/3, PHP on Windows, WebDAV, VPN portals) ride on the version probes of the same stage; '
+                            'they read a precondition of a CVE match, not a check a host is owed',
     },
     'sweeps': {
         'buckets': 'cloud storage candidates belong to the project, not to one host',
@@ -981,25 +1056,6 @@ def _sentinel_online(h, ev):
     return state
 
 
-SKIP_AWARE = ('nmap', 'naabu', 'full-ports', 'tls-audit')  # the checks a port on the opt-in skip list (CVENGINE_LOCAL_SKIP_PORTS) leaves incomplete when run here
-
-
-def _skip_note(check_id, h):
-    """``skipped on the server: port 25`` for a port-scanning check while the opt-in skip list is set (the TLS audit only for a host that has a
-    skipped TLS port), else ''. The check's state is unchanged: what a Sentinel ran still counts, and nothing pretends the server ran it."""
-    if check_id not in SKIP_AWARE:
-        return ''
-    from cveFeed import local_egress
-    skip = local_egress.skipped_ports()
-    if not skip:
-        return ''
-    if check_id == 'tls-audit':
-        skip = skip & set(_tls_numbers(h, starttls=True))
-        if not skip:
-            return ''
-    return f'skipped on the server: port {", ".join(str(p) for p in sorted(skip))}'
-
-
 def coverage(h, ev, rich=False, paused=''):
     """``{'done', 'applicable', 'paused', 'checks': [...]}`` for one host. ``paused`` (``excluded`` or ``archived``) makes every check not
     apply: an excluded host is never scanned and an archived one has left scan scheduling."""
@@ -1018,9 +1074,6 @@ def coverage(h, ev, rich=False, paused=''):
             entry['detail'] = plan
         else:
             state, last, detail = _judge(check, plan, ev.now)
-            skipped = _skip_note(check.id, h)
-            if skipped:
-                detail = f'{detail}; {skipped}' if detail else skipped
             if h.internal and state == 'due' and not last and not _sentinel_online(h, ev):
                 detail = f'{detail}; no Sentinel inside the network is online' if detail else 'no Sentinel inside the network is online'
             entry.update(state=state, last_run=last.isoformat() if last else None, detail=detail)

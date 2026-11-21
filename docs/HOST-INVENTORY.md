@@ -22,12 +22,13 @@ Nothing here changes a host. The scripts only read.
 Linux and macOS:
 
 ```sh
-(umask 077; cat > cvengine-inventory.token) \
+(umask 077; printf 'Paste the cvENGINE inventory token and press Enter: ' >&2; stty -echo 2>/dev/null; IFS= read -r t; \
+  stty echo 2>/dev/null; echo >&2; printf '%s\n' "$t" > cvengine-inventory.token) \
   && curl -fsS --cacert ca.crt https://cvengine.example.test/staticfiles/cve/inventory/cvengine-inventory.sh -o cvengine-inventory.sh \
   && sh cvengine-inventory.sh --server https://cvengine.example.test --project my-project --token-file cvengine-inventory.token --ca-file ca.crt
 ```
 
-(Paste the token, press Enter, then Ctrl-D. The file is readable only by you; move it to `/etc/cvengine-inventory.token` for scheduled runs.)
+(It asks for the token: paste it and press Enter; what you paste is not shown. The file is readable only by you; move it to `/etc/cvengine-inventory.token` for scheduled runs. Run in a terminal, the script then says what it is doing: reading the packages, the rest of the host, sending, and the server's answer. A scheduled run prints only the result.)
 
 Windows (PowerShell 5.1 or 7):
 
@@ -250,7 +251,8 @@ report.
    label and "(reported by the host)" in lists. The `local_only` rule is unchanged for everything else: the external correlation never reads the
    local pool, and the sweep that closes scan matches of local-only CVEs leaves host-reported ones alone.
 5. **Distribution backports.** Ubuntu, Debian and RHEL fix CVEs without changing the upstream version, so an upstream range cannot decide a
-   package. When cvENGINE holds the distribution's fixed version for the CVE and package (the tracker data behind `distro_status`), it judges
+   package. When cvENGINE holds the distribution's fixed version for the CVE and package (the tracker data behind `distro_status`; for RHEL,
+   CentOS, Rocky Linux and AlmaLinux, Red Hat's security data), it judges
    the package release against it: patched is kept at confidence 0.2 and labeled, vulnerable is 0.95. Without that data a distribution package
    is at most 0.6 (other ecosystems start from 0.8 for `apk` and the running kernel, 0.85 for `pacman` and anything else, and 0.95 for an operating system build). **The kernel of a backporting distribution is not matched at all** (its version number says nothing about its patches); the
    report says so. The kernel of Arch, Alpine, Fedora and other upstream-tracking systems is matched.

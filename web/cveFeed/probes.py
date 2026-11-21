@@ -46,8 +46,8 @@ BODY_SCAN = 64 * 1024  # a response is read for markers in its first 64 KB only:
 PROBES = (
     {'id': 'headers-root', 'label': 'Response headers and page markers of the front page', 'family': 'http', 'leads': WEB,
      'requests': (('GET', '/'),), 'handler': 'headers', 'safety': 'one GET of the front page'},
-    {'id': 'error-page', 'label': 'Server error page signature (nginx, Apache, Tomcat, Jetty, IIS footers)', 'family': 'http',
-     'leads': r'nginx|openresty|apache|httpd|tomcat|jetty|iis|internetinformation|express|nextjs|springboot|ingress', 'requests': (('GET', PROBE_PATH),),
+    {'id': 'error-page', 'label': 'Server error page signature (nginx, Apache, Tomcat, JBoss Web, Jetty, IIS footers)', 'family': 'http',
+     'leads': r'nginx|openresty|apache|httpd|tomcat|jboss|jetty|iis|internetinformation|express|nextjs|springboot|ingress', 'requests': (('GET', PROBE_PATH),),
      'safety': 'one GET of a path no site serves', 'rules': (
          {'request': 0, 'where': 'body', 'regex': r'<center>nginx/(\d+\.\d+\.\d+)</center>', 'product': 'nginx', 'version': 1,
           'kind': 'version', 'confidence': 0.95, 'source': 'body:nginx-error-page'},
@@ -57,12 +57,25 @@ PROBES = (
           'confidence': 0.8, 'source': 'body:nginx-error-page'},
          {'request': 0, 'where': 'body', 'regex': r'<hr><center>nginx</center>', 'product': 'nginx', 'variant': 'nginx', 'kind': 'identity',
           'confidence': 0.7, 'source': 'body:nginx-error-page'},
-         {'request': 0, 'where': 'body', 'regex': r'(?i)Apache/(\d+\.\d+\.\d+) (?:\([^)]{1,30}\) )?Server at', 'product': 'Apache HTTP Server',
+         # Apache's footer (ServerSignature On) is the whole server banner, modules included when ServerTokens allows them:
+         # "<address>Apache/2.4.6 (CentOS) OpenSSL/1.0.2k-fips PHP/7.4.33 Server at example.com Port 80</address>" (server/core.c
+         # ap_psignature): the web server, and the OpenSSL, PHP and Python releases it lists
+         {'request': 0, 'where': 'body', 'regex': r'(?i)Apache/(\d+\.\d+\.\d+) (?:[^<>]{1,300}? )?Server at ', 'product': 'Apache HTTP Server',
           'version': 1, 'kind': 'version', 'confidence': 0.9, 'source': 'body:apache-error-page'},
+         {'request': 0, 'where': 'body', 'regex': r'(?i)<address>Apache/\d+\.\d+\.\d+ [^<>]{0,300}?\bOpenSSL/(\d+\.\d+\.\d+[a-z]{0,2})(?:-[A-Za-z0-9]{1,12})? [^<>]{0,300}?Server at ',
+          'product': 'OpenSSL', 'version': 1, 'kind': 'version', 'confidence': 0.85, 'source': 'body:apache-error-page'},
+         {'request': 0, 'where': 'body', 'regex': r'(?i)<address>Apache/\d+\.\d+\.\d+ [^<>]{0,300}?\bPHP/(\d+\.\d+\.\d+)[^ <>]{0,40} [^<>]{0,300}?Server at ',
+          'product': 'PHP', 'version': 1, 'kind': 'version', 'confidence': 0.85, 'source': 'body:apache-error-page'},
+         {'request': 0, 'where': 'body', 'regex': r'(?i)<address>Apache/\d+\.\d+\.\d+ [^<>]{0,300}?\bPython/(\d+\.\d+\.\d+)[^ <>]{0,40} [^<>]{0,300}?Server at ',
+          'product': 'Python', 'version': 1, 'kind': 'version', 'confidence': 0.85, 'source': 'body:apache-error-page'},
          {'request': 0, 'where': 'body', 'regex': r'Apache Tomcat/(\d+\.\d+\.\d+[\w.-]*)', 'product': 'Apache Tomcat', 'version': 1,
           'kind': 'version', 'confidence': 0.9, 'source': 'body:tomcat-error-page'},
          {'request': 0, 'where': 'body', 'regex': r'Powered by Jetty:// (\d+\.\d+\.\d+[\w.-]*)', 'product': 'Jetty', 'version': 1,
           'kind': 'version', 'confidence': 0.9, 'source': 'body:jetty-error-page'},
+         # JBoss AS 4 to 7 and EAP 5 and 6 serve Tomcat's error template with their own servlet container's name: "<h3>JBoss Web/7.0.13.Final</h3>"
+         # (AS 7.1), "<h3>JBossWeb/2.0.1.GA</h3>" (AS 4.2); WildFly's Undertow page states no version and is not read
+         {'request': 0, 'where': 'body', 'regex': r'<h3>JBoss ?Web/(\d+\.\d+\.\d+)(?:\.(?:GA|Final|CR\d{1,2}|Beta\d{1,2}|SP\d{1,2}))?</h3>',
+          'product': 'JBoss Web', 'version': 1, 'kind': 'version', 'confidence': 0.9, 'source': 'body:jbossweb-error-page'},
          {'request': 0, 'where': 'title', 'regex': r'IIS (\d+\.\d+) Detailed Error', 'product': 'Microsoft IIS', 'version': 1,
           'kind': 'version', 'confidence': 0.85, 'source': 'title:iis-detailed-error'},
          {'request': 0, 'where': 'body', 'regex': r'^[ \t]{0,8}default backend - 404[ \t]{0,8}$', 'product': 'nginx', 'variant': 'kubernetes-ingress',
@@ -132,6 +145,7 @@ IDENTITY_PROBES = ('error-page', 'nginx-variants')  # the probes that say which 
 LOOKALIKES = {'nginx': {'ingressnginx', 'nginxingress', 'nginxui', 'nginxproxymanager', 'nginxunit', 'nginxrtmpmodule'}}
 LOOKALIKE_VARIANTS = {'nginx': {'nginx-ui', 'nginx-proxy-manager', 'kubernetes-ingress'}}
 PLAIN_VARIANTS = {'nginx': 'nginx', 'express': 'express', 'next.js': 'next.js'}
+JAVA_RUNTIME = 'Java runtime'  # the product of an observation that states the JVM (cvengine_scanner.probes.version_probes.JAVA_RUNTIME)
 
 
 def _compiled():
@@ -501,6 +515,10 @@ def technology_names(observations):
         library = (o.get('evidence') or {}).get('library') if isinstance(o.get('evidence'), dict) else None
         if o['kind'] == 'version' and isinstance(library, dict) and library.get('tech_names'):
             names += [str(n)[:500] for n in library['tech_names'] if ':' in str(n)]  # the effective copy, or each copy of an unresolved set
+        elif o['kind'] == 'version' and o['product'] == JAVA_RUNTIME:
+            continue  # the JVM a page states is a Java runtime reading of its own (cveFeed.java_runtime), never a technology
+        elif o['kind'] == 'version' and isinstance(o.get('evidence'), dict) and o['evidence'].get('on_port'):
+            continue  # a version the port row itself states (cveFeed.network_detection filled it): the port is matched, not a second technology
         elif o['kind'] == 'version' and o['outcome'] == 'found' and o['version']:
             names.append(f"{o['product']}:{o['version']}")
         elif o['kind'] == 'wordpress' and o['outcome'] == 'found':
@@ -510,19 +528,16 @@ def technology_names(observations):
     return list(dict.fromkeys(names))
 
 
-def apply_to_subdomain(sub, observations):
-    """Add the observations' technologies to the host row so correlation reads them like any detected technology. Returns how many were new."""
-    from startScan.ip_rows import get_or_create_first
-    from startScan.models import Technology
-    added = 0
-    have = {t.name for t in sub.technologies.all()}
-    for name in technology_names(observations):
-        if name in have:
-            continue
-        tech, _ = get_or_create_first(Technology, name=name[:500])
-        sub.technologies.add(tech)
-        added += 1
-    return added
+def apply_to_subdomain(sub, observations, source=None):
+    """Add the observations' technologies to the host row so correlation reads them like any detected technology, linked under ``source``
+    (``cveFeed.tech_links``: the probes', ``probe``, by default); a technology the host already has is confirmed (its link's time). Returns how
+    many were new."""
+    from cveFeed import tech_links, tech_rows
+    names = technology_names(observations)
+    if not names:
+        return 0
+    # one row per spelling (cveFeed.tech_rows)
+    return tech_links.link_host(sub, [tech_rows.technology(name) for name in names], source or tech_links.PROBE)
 
 
 def apply_known(scan):
@@ -534,13 +549,19 @@ def apply_known(scan):
     project = scan.domain.project_id
     cutoff = timezone.now() - timedelta(seconds=ledger.ttl(SERVICE) * 4)
     by_host = {}
-    # only what a probe read (not the candidate signals or the WordPress scan's state rows): a hint is never turned into a technology
-    for row in ProbeObservation.objects.filter(project_id=project, outcome='found', observed_at__gte=cutoff, probe__in=list(BY_ID)):
-        by_host.setdefault(row.host, []).append({'kind': row.kind, 'product': row.product, 'version': row.version, 'variant': row.variant,
-                                                 'outcome': row.outcome, 'evidence': row.evidence or {}})
+    # only what a probe read (not the candidate signals or the WordPress scan's state rows): a hint is never turned into a technology; a product a
+    # version source read (cveFeed.version_sources, probe vsrc:<entry>) is one too
+    from django.db.models import Q
+    read = Q(probe__in=list(BY_ID)) | Q(probe__startswith='vsrc:', kind='version')
+    from cveFeed import tech_links
+    for row in ProbeObservation.objects.filter(read, project_id=project, outcome='found', observed_at__gte=cutoff):
+        source = tech_links.VERSION_SOURCE if row.probe.startswith('vsrc:') else tech_links.PROBE
+        by_host.setdefault(row.host, {}).setdefault(source, []).append({
+            'kind': row.kind, 'product': row.product, 'version': row.version, 'variant': row.variant, 'outcome': row.outcome, 'evidence': row.evidence or {}})
     added = 0
     for sub in Subdomain.objects.filter(scan_history=scan, name__in=list(by_host)).prefetch_related('technologies'):
-        added += apply_to_subdomain(sub, by_host.get(sub.name.lower(), []))
+        for source, observations in sorted(by_host.get(sub.name.lower(), {}).items()):
+            added += apply_to_subdomain(sub, observations, source)
     return added
 
 
@@ -648,6 +669,72 @@ def summarize(found):
     return '; '.join(dict.fromkeys(parts))[:300] or 'nothing the probe could read'
 
 
+# --- service feature reads (cveFeed.service_features; the Sentinel's probes.service_reads) -------------------------------------------------
+FEATURE_SERVICE = 'service-features'  # the ledger service of a host's feature reads (7 days, inside service_features.FRESH)
+WEB_FEATURES = ('http3', 'php_windows', 'webdav', 'vpn_fortinet', 'vpn_globalprotect', 'vpn_cisco', 'vpn_citrix', 'vpn_ivanti')
+# the appliances whose portal is read, only on a host already identified as that vendor (a technology, a port's product or the host's own name
+# for it): no portal page is ever asked of a host nothing names as the vendor
+VENDOR_READS = (
+    ('vpn_fortinet', re.compile(r'forti ?gate|forti ?os\b|forti ?proxy|fortinet', re.I)),
+    ('vpn_globalprotect', re.compile(r'global ?protect|\bpan-?os\b|palo ?alto', re.I)),
+    ('vpn_cisco', re.compile(r'adaptive security appliance|\bcisco[ _-]?(?:asa|ftd)\b|firepower threat defense|secure firewall (?:asa|threat)|webvpn|anyconnect', re.I)),
+    ('vpn_citrix', re.compile(r'netscaler|citrix[ _-]?(?:adc|gateway|access gateway)', re.I)),
+    ('vpn_ivanti', re.compile(r'pulse[ _-]?(?:connect[ _-]?)?secure|ivanti[ _-]?connect[ _-]?secure|\bconnect secure\b', re.I)),
+)
+# web servers whose CVEs include ones that need a feature these reads cover (WebDAV in IIS and Apache, HTTP/3 in nginx, PHP on Windows)
+FEATURE_SERVERS = re.compile(r'\biis\b|internet ?information|apache|httpd|nginx|openresty|\bphp\b|litespeed', re.I)
+
+
+def _host_words(sub):
+    """What the host is known to run, as one text: its technologies and its ports' service names and products (prefetched)."""
+    words = [t.name for t in sub.technologies.all()]
+    for ip in sub.ip_addresses.all():
+        for port in ip.ports.all():
+            words += [port.service_name or '', port.product or '']
+    return ' '.join(w for w in words if w)[:4000]
+
+
+def features_needed(project_id, names):
+    """``{host name: {feature}}``: the web features the current CVE matches of ``names`` need (``service_features.requirements``), one query."""
+    from cveFeed import correlation, service_features
+    from cveFeed.models import CVEMatch
+    needing = service_features.index()
+    if not needing or not names:
+        return {}
+    out = {}
+    rows = (CVEMatch.objects.filter(subdomain__target_domain__project_id=project_id, subdomain__name__in=list(names), cve_entry_id__in=list(needing))
+            .filter(correlation.latest_scan_q('subdomain__')).values_list('subdomain__name', 'cve_entry_id'))
+    for name, cve_id in rows:
+        wanted = {f for f in needing.get(cve_id, {}) if f in WEB_FEATURES}
+        if wanted:
+            out.setdefault(name.lower(), set()).update(wanted)
+    return out
+
+
+def feature_entry(sub, needed=(), edge_fronted=False):
+    """The planned feature read of ``sub`` (a ``headers-root`` probe of its first web base carrying ``features``), or None. Planned for a host an
+    appliance vendor is named on (its portal is read), a host whose current matches need a web feature, or one that runs a web server whose
+    advisories do (IIS, Apache, nginx, PHP). The front page gives HTTP/3 and PHP on Windows with no request of its own; one OPTIONS gives WebDAV
+    (``webdav``), and each vendor's portal page and one control path its ``vpn_*`` read. Not for a host an edge answers for: the edge would
+    answer every read, and its readings are unknown anyway (``service_features.Server.edge_sensitive``)."""
+    from cveFeed import route_auth
+    if edge_fronted:
+        return None
+    bases = route_auth.web_bases(sub)
+    if not bases:
+        return None
+    words = _host_words(sub)
+    vendors = [read for read, pattern in VENDOR_READS if pattern.search(words) or pattern.search(sub.name or '')]
+    if not (vendors or set(needed) or FEATURE_SERVERS.search(words)):
+        return None
+    return {'probe': 'headers-root', 'label': 'Service features (HTTP/3, PHP on Windows, WebDAV' + (', VPN portal' if vendors else '') + ')',
+            'family': 'http', 'target': {'base': bases[0]}, 'for': ['service features'], 'features': ['webdav', *vendors], 'feature_only': True}
+
+
+def feature_asset(host, entry):
+    return f"{host.lower()}|features|{entry['target']['base']}"
+
+
 def run_for_scan(scan_id, force=False):
     """The pipeline stage: for each host of the scan with unversioned products or unidentified ports, run the probes ``plan_for_host`` picks
     (at most MAX_PROBES_PER_HOST that are due; the http probes are a Sentinel's: ``http_probe``), inside the ledger TTL and ``max_hosts`` per scan, honouring exclusions, scan stop and pause. Returns ``{'hosts', 'probes', 'versions', 'reused', 'errors'}``."""
@@ -662,16 +749,19 @@ def run_for_scan(scan_id, force=False):
     stats = {'hosts': 0, 'probes': 0, 'versions': 0, 'reused': reused, 'errors': 0}
     subs = Subdomain.objects.filter(scan_history=scan, name__in=allowed).prefetch_related('technologies', 'ip_addresses__ports', 'waf')
     due = []
+    needed = features_needed(project, {s.name for s in subs})
     for sub in subs.select_related('target_domain').order_by('name'):
         leads = leads_for(sub) + unidentified_port_leads(sub)
-        if not leads:
-            continue
-        plan = plan_for_host(sub, leads, edge_fronted=host_context.edge_for(sub, project)['fronted'], limit=None)
-        assets = {asset_key(sub.name, e): e for e in plan}
-        covered = set() if force else ledger.fresh(SERVICE, assets, project)
-        # the cap counts what is due, in plan order: a port no product was named on is probed once the products' probes are fresh in the
-        # ledger, never in their place
-        todo = dict(itertools.islice(((a, e) for a, e in assets.items() if ledger._norm(a) not in covered), MAX_PROBES_PER_HOST))
+        todo = {}
+        fronted = host_context.edge_for(sub, project)['fronted']
+        if leads:
+            plan = plan_for_host(sub, leads, edge_fronted=fronted, limit=None)
+            assets = {asset_key(sub.name, e): e for e in plan}
+            covered = set() if force else ledger.fresh(SERVICE, assets, project)
+            # the cap counts what is due, in plan order: a port no product was named on is probed once the products' probes are fresh in the
+            # ledger, never in their place
+            todo = dict(itertools.islice(((a, e) for a, e in assets.items() if ledger._norm(a) not in covered), MAX_PROBES_PER_HOST))
+        _add_feature_read(sub, todo, needed.get(sub.name.lower(), ()), fronted, project, force)
         if todo:
             due.append((sub, todo))
     # hosts with nothing due were dropped above, so the cap below cuts only work that is due: the never-probed and longest-waiting go first
@@ -710,10 +800,12 @@ def run_for_scan(scan_id, force=False):
                 continue
             except Exception as exc:  # noqa: BLE001 - one probe failing never stops the rest; it is retried next time, not recorded as clean
                 logger.warning('probe %s failed on host %s: %s', entry['probe'], sub.pk, type(exc).__name__)
-                ledger.record(SERVICE, [asset], project, scan, 'failed')
+                ledger.record(FEATURE_SERVICE if entry.get('feature_only') else SERVICE, [asset], project, scan, 'failed')
                 stats['errors'] += 1
                 continue
-            ledger.record(SERVICE, [asset], project, scan)  # a challenged answer is a result too: asked again after the window, not at every scan
+            ledger.record(FEATURE_SERVICE if entry.get('feature_only') else SERVICE, [asset], project, scan)  # a challenged answer is a result too
+            if entry.get('feature_asset'):  # the feature reads rode on this host's own headers-root probe
+                ledger.record(FEATURE_SERVICE, [entry['feature_asset']], project, scan)
             stats['probes'] += 1
             stats['versions'] += sum(1 for o in found if o['kind'] == 'version' and o['outcome'] == 'found')
             ran = True
@@ -722,6 +814,23 @@ def run_for_scan(scan_id, force=False):
                                               f'{stats["versions"]} version(s) found' + ('; the web probes wait for a scanner' if waiting else '')),
                     **stats)
     return stats
+
+
+def _add_feature_read(sub, todo, needed, fronted, project, force=False):
+    """Add ``sub``'s feature read (``feature_entry``) to its due probes ``todo`` when the ledger says it is due: on the host's own
+    ``headers-root`` probe of the same base when one is due (no second front page), else as an entry of its own. Outside the per-host cap."""
+    from cveFeed import ledger
+    entry = feature_entry(sub, needed, fronted)
+    if entry is None:
+        return
+    asset = feature_asset(sub.name, entry)
+    if not force and ledger._norm(asset) in ledger.fresh(FEATURE_SERVICE, {asset: entry}, project):
+        return
+    ride = next((e for e in todo.values() if e['probe'] == 'headers-root' and e['target'].get('base') == entry['target']['base']), None)
+    if ride is not None:
+        todo[next(a for a, e in todo.items() if e is ride)] = {**ride, 'features': entry['features'], 'feature_asset': asset}
+    else:
+        todo[asset] = entry
 
 
 def _remote_http(scan, due):
@@ -739,8 +848,17 @@ def _remote_http(scan, due):
 
 
 def apply_remote(project_id, domain_id, sub, entry, found):
-    """Store and apply what a Sentinel's run of one planned probe found (``run_one``'s second half: the observations are the scanner's)."""
+    """Store and apply what a Sentinel's run of one planned probe found (``run_one``'s second half: the observations are the scanner's). A page
+    that stated the Java runtime (``Java runtime`` observations of the headers and error-page probes) becomes a Java runtime reading of the host."""
     record(project_id, domain_id, sub.name, entry['probe'], found)
-    if apply_to_subdomain(sub, found):
+    added = apply_to_subdomain(sub, found)
+    java = any(o.get('product') == JAVA_RUNTIME and o.get('outcome') == 'found' for o in found)
+    if java:
+        from cveFeed import java_runtime
+        try:
+            java_runtime.refresh_host(sub)
+        except Exception:  # noqa: BLE001 - the probe's own result stands without it
+            logger.exception('could not store the Java runtime a probe read on host %s', sub.pk)
+    if added or java:
         recorrelate(sub)
     return found

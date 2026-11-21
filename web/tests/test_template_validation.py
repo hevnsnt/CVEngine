@@ -41,7 +41,7 @@ class Base(TestCase):
                                            cvss=9.8, affected=[], references=[], published_at=timezone.now())
         self.dir = tempfile.mkdtemp()
         for patcher in (mock.patch.object(templategen, 'GENERATED_DIR', str(Path(self.dir) / 'generated')),
-                        mock.patch.object(templategen, 'TEMPLATES_ROOT', str(Path(self.dir) / 'installed')),
+                        mock.patch('cvengine_scanner.template_index.load', return_value={'nuclei_templates': '', 'rules': 0, 'reasons': [], 'templates': {}, 'sha256': ''}),
                         mock.patch('cveFeed.ai_jobs.ai_on', return_value=True)):
             patcher.start()
             self.addCleanup(patcher.stop)

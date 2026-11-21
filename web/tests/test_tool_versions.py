@@ -24,11 +24,9 @@ class ToolVersionCheckTests(SimpleTestCase):
 				return [{'version': 'go99.1rc1', 'stable': False}, {'version': 'go99.0.1', 'stable': True}]
 			return {'results': [{'name': 'stable'}, {'name': 'v99.2.0'}, {'name': 'v1.0.0'}]}
 		rows = {r['tool']: r for r in tools.collect(get)}
-		for tool in ('nuclei', 'go (toolchain)', 'python-gvm (OpenVAS add-on client)'):
-			self.assertTrue(rows[tool]['behind'], tool)
-		self.assertEqual((rows['nuclei']['latest'], rows['go (toolchain)']['latest']), ('99.0.0', '99.0.1'))
-		self.assertIn('| nuclei |', tools.report(list(rows.values())))
-		for gone in ('nmap', 'wpscan', 'naabu', 'bbot', 'tzdata (bbot)', 'wafw00f', 'testssl.sh'):  # the scan tools run on the Sentinels
+		self.assertTrue(rows['tailscale (sidecar image)']['behind'])
+		self.assertIn('| tailscale (sidecar image) |', tools.report(list(rows.values())))
+		for gone in ('nuclei', 'go (toolchain)', 'nmap', 'wpscan', 'naabu', 'bbot', 'tzdata (bbot)', 'wafw00f', 'testssl.sh'):  # every scan tool runs on the Sentinels
 			self.assertNotIn(gone, rows)
 
 	def test_an_unreachable_site_is_unknown_not_a_crash(self):
@@ -43,15 +41,15 @@ class ToolVersionCheckTests(SimpleTestCase):
 
 	def test_every_image_build_tool_is_pinned_to_a_version(self):
 		rows = {r['tool']: r for r in tools.collect(lambda url, as_json=True: {})}
-		for tool in ('nuclei', 'go (toolchain)', 'python-gvm (OpenVAS add-on client)'):
-			self.assertRegex(rows[tool]['pinned'], r'^\d+(\.\d+)+$', tool)
+		self.assertRegex(rows['tailscale (sidecar image)']['pinned'], r'^\d+(\.\d+)+$')
+		self.assertNotIn('nuclei', rows)  # the server image builds no scan tool
 
 	def test_a_tool_missing_from_the_checkout_is_skipped_but_a_required_one_is_not(self):
 		with mock.patch.object(tools, 'pinned', return_value=None):
 			rows = tools.collect(lambda url, as_json=True: {})
 		names = {r['tool'] for r in rows}
 		self.assertNotIn('tailscale (sidecar image)', names)
-		self.assertIn('nuclei', names)
+		self.assertEqual(names, set())  # the server image pins no required tool any more
 
 	def exit_status(self, rows, *flags):
 		with mock.patch.object(tools, 'collect', return_value=rows), mock.patch.object(sys, 'argv', ['c', *flags]), \
@@ -73,15 +71,7 @@ class ToolVersionCheckTests(SimpleTestCase):
 		self.assertEqual(self.exit_status(unreachable, '--fail-if-behind'), 1)
 		self.assertEqual(self.exit_status(missing_pin + unreachable), 0)
 
-	def test_a_renamed_pin_is_found_missing_by_collect(self):
-		with mock.patch.object(tools, 'pinned', side_effect=lambda path, pattern: None if 'NUCLEI_VERSION' in pattern else '1.0'):
-			rows = {r['tool']: r for r in tools.collect(lambda url, as_json=True: {})}
-		self.assertIsNone(rows['nuclei']['pinned'])
 
-	def test_the_go_toolchain_has_a_checksum_for_each_architecture(self):
-		dockerfile = open(os.path.join(os.path.dirname(PATH), '..', 'web', 'Dockerfile'), encoding='utf-8').read()
-		for name in ('GO_SHA256_AMD64', 'GO_SHA256_ARM64'):
-			self.assertRegex(dockerfile, rf'(?m)^ARG {name}=[0-9a-f]{{64}}$')
 
 	def test_the_github_token_goes_to_the_github_api_only(self):
 		"""Unauthenticated, api.github.com is limited to 60 requests an hour per address, which shared CI runners use up: the lookup then reads as unknown and the

@@ -69,6 +69,17 @@ def record_for(cve, detection_row=None):
 DROPPED_IDS_KEPT = 200
 
 
+def covered_through(newest):
+    """What a seed may say the feed is complete through: the newest publication time it holds, but never past this install's own coverage
+    watermark (cveFeed.feed_watermark), since a catalog with a gap behind its newest CVE is not complete through that CVE. None when the
+    install has no watermark: the importer then reads its usual window back instead of trusting the newest entry."""
+    from cveFeed import feed_watermark
+    through = feed_watermark.current().covered_through
+    if newest is None or through is None:
+        return None
+    return min(newest, through)
+
+
 def export_seed(path, progress=None, scrub=None, stage=None):
     """Write the catalog to ``path`` (and ``path`` + ``.manifest.json`` beside it). Returns the manifest.
 
@@ -103,7 +114,7 @@ def export_seed(path, progress=None, scrub=None, stage=None):
 
     # the newest publication time the snapshot holds: what a consumer may assume the feed is complete through (the export time says when
     # it was written, not what the catalog had read by then)
-    covers_through = _iso(CVEEntry.objects.aggregate(newest=Max('published_at'))['newest'])
+    covers_through = _iso(covered_through(CVEEntry.objects.aggregate(newest=Max('published_at'))['newest']))
     directory = os.path.dirname(os.path.abspath(path))
     handle, tmp = tempfile.mkstemp(prefix='.cve-seed-', dir=directory)
     os.close(handle)
@@ -309,7 +320,8 @@ def import_seed(path, batch=1000, progress=None):
     # the feed is complete through what the snapshot holds (older seeds only say when they were written, which is later than that:
     # the walk's margin and the coverage window absorb the difference)
     from cveFeed import feed_watermark
-    feed_watermark.note_snapshot(_time(manifest.get('covers_through')) or _time(manifest.get('generated_at')))
+    # a seed that states covers_through as null says it does not know: the walk reads its usual window back (the export time would claim more)
+    feed_watermark.note_snapshot(_time(manifest.get('covers_through')) if 'covers_through' in manifest else _time(manifest.get('generated_at')))
     return counts
 
 

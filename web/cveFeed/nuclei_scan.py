@@ -3,19 +3,19 @@
 Targets are every discovered host plus its IPs, and host:port for each open port discovery reported on a
 non-default port, so every service is probed rather than just the front door. Nothing here runs a scan tool: every pass takes a ``stream``
 (``agentapi.sentinel_dispatch.wrap_nuclei_stream``) that hands the targets to a Sentinel, and with no scanner able to take the work the stream
-raises ``ScannerUnavailable`` and the targets stay due. This module builds the target list, keeps the approved template snapshot a Sentinel is
-sent (``template_bundle``), and turns the lines a Sentinel reported into findings.
+raises ``ScannerUnavailable`` and the targets stay due. This module builds the target list, names the template policy in force, and turns the lines a
+Sentinel reported into findings. The server keeps no copy of the templates: the Sentinel builds the approved set from its own baked templates and the
+template index of the scanner library (``cvengine_scanner.template_index``), which is also what this server reads about them.
 """
 import hashlib
 import logging
 import os
 import re
-import shutil
 import tempfile
-import threading
-import time
 
 from cvengine_scanner.flags import NUCLEI_DEFAULT_PORTS, host_of
+
+from cveFeed import tech_links
 
 logger = logging.getLogger(__name__)
 
@@ -23,42 +23,6 @@ NUCLEI_CHUNK = 100  # targets handed to a stream per call: the ledger is written
 # A run's flags and the ports a bare host is probed on are the scanner library's (cvengine_scanner.flags), shared with every Sentinel.
 TEMPLATE_POLICY_REV = 'readonly-5'  # readonly-5 also reads a pw field, a multipart password part, a body written inside a string and a URL-encoded field name; readonly-3 also refused a template that sends a credential of its own (a fixed Authorization or Cookie header, a user name in a URL)
 ALL_TEMPLATES_REV = 'all-5'  # all-5 also reads a pw field, a multipart password part, a body written inside a string and a URL-encoded field name, and (with credential checks off) leaves out a template it cannot parse; all-1 ran default-login and bruteforce templates; all-2 left them out unless a person allowed them; all-3 also left out a fixed credential header or user name in a URL; all-4 also a fixed password in a body, a placeholder over a fixed value, and the default-login and bruteforce tags themselves (``all-4-cred`` lifts all of it)
-_APPROVED = {'root': None, 'at': 0, 'value': None}
-_APPROVED_LOCK = threading.Lock()
-
-
-# Templates whose absence quietly removes a whole capability: their exclusion is an error, not a policy statistic.
-ESSENTIAL_TEMPLATES = ('http/technologies/tech-detect.yaml',)
-
-
-def _policy_reason(problem):
-    """A skip reason without the per-template detail, so equal reasons count together ("forbidden key 'payloads'")."""
-    reason = re.sub(r'^template not validated: ', '', str(problem)).strip()
-    return re.sub(r'\d+', 'N', reason)[:90]
-
-
-def _report_policy(revision, count, skipped, essential_skipped):
-    """Put the outcome of a template-policy snapshot in the activity and error log, once per snapshot revision for all processes.
-    An empty snapshot, or an essential template the policy excluded, is logged as failed; otherwise a done line with the counts."""
-    total = count + sum(skipped.values())
-    top = ', '.join(f'{reason} ({n})' for reason, n in sorted(skipped.items(), key=lambda kv: -kv[1])[:4])
-    message = f'Nuclei template policy approved {count:,} of {total:,} installed templates'
-    if skipped:
-        message += f'; skipped: {top}'
-    failed = not count or bool(essential_skipped)
-    if essential_skipped:
-        message = (f'Nuclei template policy excludes {", ".join(sorted(essential_skipped))} '
-                   f'({"; ".join(sorted(set(essential_skipped.values())))}), so that detection does not run. ' + message)
-    (logger.error if failed else logger.info)('%s', message)
-    try:
-        from django.core.cache import cache
-        if not cache.add(f'cvengine:nuclei-policy-logged:{revision}', 1, timeout=7 * 86400):
-            return
-    except Exception:  # noqa: BLE001 - without the cache every process logs its own snapshot
-        pass
-    from cveFeed import activity
-    activity.log('run_check', message, status='failed' if failed else 'done', approved=count, installed=total,
-                 skipped=dict(sorted(skipped.items(), key=lambda kv: -kv[1])[:10]), essential_excluded=essential_skipped)
 
 
 def policy_rev():
@@ -69,107 +33,28 @@ def policy_rev():
     return TEMPLATE_POLICY_REV
 
 
-def approved_templates():
-    with _APPROVED_LOCK:
-        return _approved_templates_locked()
+def policy_flags():
+    """``(read_only, allow_credentials)`` of the policy in force, as the template index reads them (``cvengine_scanner.template_index.policy_problem``)."""
+    from cveFeed import validation
+    return not validation.all_templates_allowed(), validation.credential_checks_allowed()
 
 
-def with_approved_snapshot(use):
-    """``use(directory, revision, count, rev)`` for the current approved snapshot, called while the snapshot lock is held, so what ``use`` does
-    with the directory (the Sentinel template bundle is packed from it) cannot race a rebuild of the snapshot."""
-    with _APPROVED_LOCK:
-        directory, revision, count = _approved_templates_locked()
-        return use(directory, revision, count, _APPROVED.get('rev'))
-
-
-def approved_snapshot_cached():
-    """The current snapshot ``(directory, revision, count)`` when it is already built and still fresh, else ``None``: never builds one, never
-    waits for the lock (a snapshot build can take a while), for a caller that only wants what is cheap to know."""
-    from cveFeed import templategen
-    value = _APPROVED['value']
-    if (value and _APPROVED['root'] == os.path.realpath(templategen.TEMPLATES_ROOT) and _APPROVED.get('rev') == policy_rev()
-            and os.path.isdir(value[0]) and time.monotonic() - _APPROVED['at'] < 3600):
-        return value
-    return None
-
-
-def _approved_templates_locked():
-    """Snapshot only installed templates passing the same destination/read-only gate as targeted checks."""
-    from cveFeed import templategen, validation
-    root = os.path.realpath(templategen.TEMPLATES_ROOT)
-    rev = policy_rev()
-    if (_APPROVED['root'] == root and _APPROVED.get('rev') == rev and _APPROVED['value'] and os.path.isdir(_APPROVED['value'][0])
-            and time.monotonic() - _APPROVED['at'] < 3600):
-        return _APPROVED['value']
-    if not os.path.isdir(root):
-        raise RuntimeError('Nuclei template library is unavailable')
-    dest = tempfile.mkdtemp(prefix='cvengine-approved-templates-')
-    digest = hashlib.sha256(rev.encode())
-    count, skipped, essential_skipped = 0, {}, {}
-    try:
-        for base, dirs, files in os.walk(root):
-            dirs[:] = sorted(d for d in dirs if not os.path.islink(os.path.join(base, d)))
-            for name in sorted(files):
-                if not name.endswith(('.yaml', '.yml')):
-                    continue
-                path = os.path.join(base, name)
-                try:
-                    if os.path.islink(path) or os.path.getsize(path) > validation.MAX_INSTALLED_TEMPLATE_BYTES:
-                        continue
-                    with open(path, 'rb') as source:
-                        content = source.read(validation.MAX_INSTALLED_TEMPLATE_BYTES + 1)
-                except OSError:
-                    continue
-                relative = os.path.relpath(path, root)
-                problem = ('larger than the template size limit' if len(content) > validation.MAX_INSTALLED_TEMPLATE_BYTES
-                           else validation.installed_template_problem(content.decode('utf-8', 'replace')))
-                if problem:
-                    reason = _policy_reason(problem)
-                    skipped[reason] = skipped.get(reason, 0) + 1
-                    if relative in ESSENTIAL_TEMPLATES:
-                        essential_skipped[relative] = reason
-                    continue
-                target = os.path.join(dest, relative)
-                os.makedirs(os.path.dirname(target), exist_ok=True)
-                with open(target, 'wb') as copy:
-                    copy.write(content)
-                digest.update(relative.encode())
-                digest.update(content)
-                count += 1
-        if not count:
-            _report_policy(rev, 0, skipped, essential_skipped)
-            raise RuntimeError('No installed Nuclei templates passed the read-only policy')
-    except Exception:
-        shutil.rmtree(dest, ignore_errors=True)
-        raise
-    old = _APPROVED['value']
-    revision = digest.hexdigest()[:12]
-    _report_policy(revision, count, skipped, essential_skipped)
-    if old and old[1] == revision and os.path.isdir(old[0]):
-        shutil.rmtree(dest, ignore_errors=True)
-        _APPROVED['at'] = time.monotonic()
-        return old
-    retained = _APPROVED.setdefault('retained', [])
-    if old:
-        retained.append((old[0], time.monotonic()))
-    # A Sentinel's template bundle can be packed from an immutable snapshot for hours after the next one is built.
-    for path, created in list(retained):
-        if time.monotonic() - created > 6 * 3600:
-            shutil.rmtree(path, ignore_errors=True)
-            retained.remove((path, created))
-    _APPROVED.update(root=root, at=time.monotonic(), value=(dest, revision, count), rev=rev)
-    return _APPROVED['value']
+def approved_revision():
+    """A short name of the approved template set in force: the policy and the template index it is read from (a new release, a new rule or another policy
+    is another set, so the hosts are due for it). Raises ``RuntimeError`` when the installed scanner library has no template index: no nuclei work can be
+    planned without one, and nothing falls back to a set this server would have to keep."""
+    from cvengine_scanner import template_index
+    index = template_index.load()
+    if not index['templates']:
+        raise RuntimeError('the installed Sentinel library has no nuclei template index')
+    return hashlib.sha256(f'{policy_rev()}:{index["sha256"]}'.encode()).hexdigest()[:12]
 
 
 def cve_service(cve_id):
     """Coverage key changes when this CVE's selected template or execution policy changes."""
-    from cveFeed.validation import resolve_template
+    from cveFeed.validation import resolve_template, template_fingerprint
     template_path, _ = resolve_template(cve_id)
-    try:
-        with open(template_path, 'rb') as source:
-            revision = hashlib.sha256(policy_rev().encode() + source.read(200_001)).hexdigest()[:10]
-    except OSError:
-        revision = hashlib.sha256(policy_rev().encode()).hexdigest()[:10]
+    revision = hashlib.sha256(policy_rev().encode() + template_fingerprint(template_path).encode()).hexdigest()[:10]
     return f'nuclei-cve:{cve_id}:{revision}'[:64]
 
 
@@ -195,7 +80,7 @@ def build_targets(hostnames, ips, ports):
 def scan_targets(scan):
     """Hostnames, IPs and (host, port) pairs discovered for ``scan``."""
     from startScan.models import Subdomain, open_ports
-    from targetApp.target_types import blocked_names, internal_scope_active, is_scannable_ip, sentinel_only_target
+    from targetApp.target_types import blocked_address, internal_scope_active, is_scannable_ip, sentinel_only_target
     from cveFeed.exclusions import excluded_names, normalize
     hostnames, ips, ports = set(), set(), set()
     internal = internal_scope_active()  # an internal scan (cveFeed.internal_scan) may target the project's own internal addresses: its stream is a Sentinel's
@@ -207,11 +92,11 @@ def scan_targets(scan):
     subs = [s for s in Subdomain.objects.filter(scan_history=scan).prefetch_related('ip_addresses__ports')
             if not (banned and normalize(s.name) in banned) and gate.allows(project, s.name, unattended=False)
             and (not scan.domain.exact_host_only() or scan.domain.includes_host(s.name))]  # =example.com: only that host is ever a target
-    # a discovered name is attacker-controlled DNS: never hand a scanner one that points inside (one parallel, bounded pass)
-    pointing_inside = blocked_names([s.name for s in subs], project=scan.domain.project_id)
+    # a discovered name is attacker-controlled DNS, and this server looks none up: the Sentinel judges every address a name resolves to when it runs, and an
+    # outside pass is sent as external work (``sentinel_dispatch._nuclei_target``), so a name that points inside is refused there and named, never scanned
     for sub in subs:
-        if sub.name in pointing_inside and not (internal and sentinel_only_target(sub.name, scan.domain.project_id)):
-            continue
+        if blocked_address(sub.name, project=scan.domain.project_id) and not (internal and sentinel_only_target(sub.name, scan.domain.project_id)):
+            continue  # a host named by an address is judged as that address (no lookup: a name is judged by the Sentinel)
         hostnames.add(sub.name)
         for ip in sub.ip_addresses.all():
             if gate.refusal(project, ip.address, unattended=False, derived=True):
@@ -414,6 +299,8 @@ def _run_nuclei(scan_id, stream, tags=None, targets=None, severities=None, servi
         for ip in sub.ip_addresses.all():
             by_ip.setdefault(ip.address, sub)
     screen = nuclei_fp.RunScreen(echo_ports=_echo_ports(subs), project=project, scan=scan)
+    from cveFeed.panel_versions import Collector
+    panels = Collector()  # an info-level panel hit's extracted version is a version reading of the host too (cveFeed.panel_versions)
 
     def save(line):
         nonlocal new
@@ -430,6 +317,7 @@ def _run_nuclei(scan_id, stream, tags=None, targets=None, severities=None, servi
         vuln, created = save_vulnerability(
             target_domain=domain, scan_history=scan, subdomain=sub,
             http_url=line.get('matched-at') or line.get('host') or host, **data)
+        panels.offer(line, sub)
         sev = line.get('info', {}).get('severity', 'unknown')
         counts[sev if sev in counts else 'unknown'] += 1
         if created:
@@ -472,6 +360,7 @@ def _run_nuclei(scan_id, stream, tags=None, targets=None, severities=None, servi
                             save(line)
                     for line in screen.release():  # protocol matches, judged with the chunk's other matches on their port
                         save(line)
+                    panels.flush()  # the chunk's panel versions, stored and their hosts correlated again
                 finally:
                     os.unlink(path)
                 record_reached(service, chunk, project, scan, stream)
@@ -561,11 +450,27 @@ def tech_name_from(line):
         name = matcher
     else:
         name = re.sub(r'\s+(version|detect|detected|detection|server|fingerprint)$', '', (info.get('name') or '').strip(), flags=re.I)
+        for _ in range(3):  # "Microsoft IIS version detect": the template words left before the last one ("Server" only ever as the last)
+            stripped = re.sub(r'[\s:–-]+(version|detect|detected|detection|fingerprint)$', '', name, flags=re.I).strip()
+            if stripped == name or not stripped:
+                break
+            name = stripped
         name = re.sub(r'[\s:–-]+$', '', name)  # "AWS Service - Detection" leaves a dangling dash
+    from cveFeed.correlation import stored_technology_name
     name = (name or '').strip()[:100]
+    if stored_technology_name(name) != name:  # a Server-header token ("nginx/1.28.3") is the product and the version it states
+        from cveFeed import js_libraries
+        return js_libraries.unversioned(stored_technology_name(name))
     # every version the template extracted, read the same way each run: nuclei hands several back in no fixed order, and taking the first
-    # made the stored version flip between runs. The highest is kept (the conservative reading: it matches the fewest advisories)
-    found = {str(v).strip().lstrip('vV')[:30] for v in line.get('extracted-results') or [] if re.match(r'[vV]?\d', str(v or '').strip())}
+    # made the stored version flip between runs. The highest is kept (the conservative reading: it matches the fewest advisories). A value that
+    # is not a bare version ("nginx/1.18.0", "OpenSSL/1.0.2k", "Cleo VLTrader/5.8.0.21", a whole Server header a kval extractor returned) is read
+    # for the version that follows the product's own name in it (network_detection.versions_of), never another product's version
+    values = [str(v or '').strip() for v in line.get('extracted-results') or []]
+    found = {v.lstrip('vV')[:30] for v in values if re.match(r'[vV]?\d', v)}
+    named = [v for v in values if v and not re.match(r'[vV]?\d', v)]
+    if name and named:
+        from cveFeed import network_detection
+        found |= {v[:30] for v in network_detection.versions_of({'template-id': template, 'info': {'name': name}, 'extracted-results': named}, name)}
     version = max(found, key=_version_order) if found else ''
     if name and version:
         from cveFeed import js_libraries
@@ -574,27 +479,96 @@ def tech_name_from(line):
     return name
 
 
+TECH_SOURCE = tech_links.NUCLEI  # SubdomainTechnology.source of a technology the technology templates named
+
+
+def tech_cpe_from(line, index=None):
+    """The CPE prefix the template of a ``http/technologies`` result names for the technology it reports (``cpe:2.3:a:apache:tomcat``), or '': its
+    ``info.metadata`` vendor and product, else its ``classification.cpe``, else those of the installed template of that id
+    (``nuclei_templates.technology_products``: a Sentinel's line carries no metadata). A template that names the product by its matcher
+    (``tech-detect``, the WAF and favicon templates) names many products, so its metadata says nothing about the one that fired: none (the server
+    may derive one from the name: ``TechLinks``, ``tech_links.derived_cpe``)."""
+    from cveFeed import nuclei_templates
+    template = str(line.get('template-id') or '')
+    if not template or matcher_named(template):
+        return ''
+    if index is None:
+        index = nuclei_templates.technology_products()
+    vendor, product, part = nuclei_templates.line_metadata(line, index)
+    return nuclei_templates.cpe_prefix(vendor, product, part)
+
+
+def matcher_named(template):
+    """Whether a template names the product by the matcher that fired (``tech-detect``, the WAF and favicon templates) rather than in its metadata."""
+    return template == 'tech-detect' or bool(MATCHER_NAMED.search(template or ''))
+
+
+def link_technologies(links, source=TECH_SOURCE, now=None):
+    """Write host technology links ``{(subdomain id, technology id): cpe}`` with their ``source`` and ``observed_at`` (``tech_links.link``: a stated
+    CPE is written also when the host already had the technology from elsewhere; a link that names none never clears one)."""
+    return tech_links.link(links, source, now=now)
+
+
+class TechLinks:
+    """The technology links of the light pass's result lines, written when a chunk is in (``flush``); the stage and an adopted Sentinel result
+    (``agentapi.sentinel_adopt``) both read their lines through it. Each line names a technology (``tech_name_from``) with the CPE its template
+    states (``tech_cpe_from``, source ``nuclei``); a template that names products by matcher states none, and the CPE the server derives from the
+    name (``tech_links.derived_cpe``) is written under ``nuclei:derived``, never over a stated one. ``found`` is ``{host name: {technology names}}``."""
+
+    def __init__(self, products=None):
+        from cveFeed import nuclei_templates
+        self.products = nuclei_templates.technology_products() if products is None else products
+        self.rows, self.derived_of = {}, {}  # one Technology lookup and one derivation per name per pass
+        self.stated, self.derived = {}, {}  # {(host id, technology id): cpe}, by source
+        self.found = {}
+
+    def offer(self, line, sub):
+        """Take one result line of host row ``sub``; returns the technology name it gave, or ''."""
+        from cveFeed import tech_rows
+        name = tech_name_from(line)
+        if not (name and sub is not None):
+            return ''
+        if name not in self.rows:
+            self.rows[name] = tech_rows.technology(name)  # one row per spelling (cveFeed.tech_rows)
+        key = (sub.pk, self.rows[name].pk)
+        self.found.setdefault(sub.name, set()).add(name)
+        cpe = tech_cpe_from(line, self.products)
+        if not cpe and matcher_named(str(line.get('template-id') or '')) and not self.stated.get(key):
+            if name not in self.derived_of:
+                self.derived_of[name] = tech_links.derived_cpe(name)
+            if self.derived_of[name]:
+                self.derived[key] = self.derived_of[name]
+                self.stated.pop(key, None)  # a derived CPE says more than none
+                return name
+        if cpe or key not in self.derived:
+            self.stated[key] = self.stated.get(key) or cpe  # the CPE the template names (one with a CPE wins)
+        if cpe:
+            self.derived.pop(key, None)  # a stated CPE outranks a derived one
+        return name
+
+    def flush(self):
+        if self.stated:
+            tech_links.link(self.stated, tech_links.NUCLEI)
+        if self.derived:
+            tech_links.link(self.derived, tech_links.NUCLEI_DERIVED)
+        self.stated.clear()
+        self.derived.clear()
+
+    def techs(self):
+        return {h: sorted(v) for h, v in self.found.items()}
+
+
 def _version_order(text):
     """A sort key for an extracted version string: its numeric parts, then the text (so equal numbers still order one way every run)."""
     return ([int(p) for p in re.findall(r'\d+', text)[:8]], text)
 
 
 def reuse_technologies(scan, project, hosts):
-    """Copy the technologies another scan of this project recorded for ``hosts`` onto this scan's rows for them. Returns how
-    many hosts got any."""
-    from startScan.models import Subdomain
-    mine = {s.name: s for s in Subdomain.objects.filter(scan_history=scan, name__in=hosts).prefetch_related('technologies')
-            if not s.technologies.all()}
-    if not mine:
-        return 0
-    source = {}
-    for other in Subdomain.objects.filter(target_domain__project_id=project, name__in=list(mine)).exclude(scan_history=scan) \
-            .prefetch_related('technologies').order_by('-id').iterator(chunk_size=500):
-        if other.name not in source and other.technologies.all():
-            source[other.name] = [t.id for t in other.technologies.all()]
-    through = Subdomain.technologies.through
-    through.objects.bulk_create([through(subdomain_id=mine[name].pk, technology_id=tid) for name, ids in source.items() for tid in ids])
-    return len(source)
+    """Carry the technologies the light pass's last run found on ``hosts`` (``{ledger target: host}``, or host names) onto this scan's rows for
+    them: what the rows lack, even when another source already gave them some (``tech_carry.carry``). Returns how many hosts got any."""
+    from cveFeed import tech_carry
+    assets = hosts if isinstance(hosts, dict) else {h: h for h in hosts}
+    return len(tech_carry.carry(scan, project, assets, LIGHT_SERVICE))
 
 
 def run_light_nuclei(scan_id, stream, force=False):
@@ -604,7 +578,7 @@ def run_light_nuclei(scan_id, stream, force=False):
     technologies recorded then. Returns ``{'targets', 'technologies', 'hosts', 'techs': {host: [names]}}``."""
     from cveFeed import activity, ledger
     from reNgine.resources import ScannerUnavailable
-    from startScan.models import ScanHistory, Subdomain, Technology
+    from startScan.models import ScanHistory, Subdomain
     scan = ScanHistory.objects.select_related('domain').get(pk=scan_id)
     domain, project = scan.domain, scan.domain.project_id
     targets = build_targets(*scan_targets(scan))
@@ -616,20 +590,15 @@ def run_light_nuclei(scan_id, stream, force=False):
     covered = set() if force else ledger.fresh(service, targets, project)
     held = set() if force else backed_off(service, [t for t in targets if t not in covered], project)  # only partly checked within the day: asked again after it
     todo = [t for t in targets if t not in covered and t not in held]
-    reused = reuse_technologies(scan, project, {host_of({'host': t}) for t in covered}) if covered else 0
+    reused = reuse_technologies(scan, project, {t: host_of({'host': t}) for t in covered}) if covered else 0
     by_name = {s.name: s for s in Subdomain.objects.filter(scan_history=scan)}
     by_ip = {}
     for sub in by_name.values():
         for ip in sub.ip_addresses.all():
             by_ip.setdefault(ip.address, sub)
-    found, scanned = {}, []
-    tech_rows, pending = {}, set()  # one Technology lookup per name per run; the host links are written once per chunk
-    link = Subdomain.technologies.through
-
-    def flush_links():
-        if pending:
-            link.objects.bulk_create([link(subdomain_id=s, technology_id=t) for s, t in pending], ignore_conflicts=True)
-            pending.clear()
+    scanned = []
+    links = TechLinks()  # the host links are written once per chunk
+    found = links.found
     with ledger.claim_many(f'{service}@{project}', todo) as won:
         won_targets = [t for t in todo if t in set(won)]
         if not won_targets:
@@ -651,18 +620,10 @@ def run_light_nuclei(scan_id, stream, force=False):
                     path = f.name
                 try:
                     for line in stream(path):
-                        name = tech_name_from(line)
-                        sub = by_name.get(host_of(line)) or by_ip.get(host_of(line))
-                        if not (name and sub):
-                            continue
-                        if name not in tech_rows:
-                            tech_rows[name] = Technology.objects.filter(name=name).order_by('id').first() \
-                                or Technology.objects.create(name=name)
-                        pending.add((sub.pk, tech_rows[name].pk))
-                        found.setdefault(sub.name, set()).add(name)
+                        links.offer(line, by_name.get(host_of(line)) or by_ip.get(host_of(line)))
                 finally:
                     os.unlink(path)
-                    flush_links()  # what a killed chunk already saw is kept
+                    links.flush()  # what a killed chunk already saw is kept
                 record_reached(service, chunk, project, scan, stream)
                 scanned += chunk
         except ScannerUnavailable as exc:  # no scanner could take it and this kind may not run here: not the targets' failure, they stay due
@@ -755,19 +716,19 @@ def run_targeted_nuclei(scan_id, stream, provider=False, light_techs=None, cve_r
     installed templates use (the static table is the fallback), hosts that share a choice are scanned together so nuclei
     runs once per group, and each CVE matched to a host gets its own template test. Whatever the ledger says was covered
     recently is not run again, except the CVE checks when ``force_cve_checks`` is set (a re-test after a change). ``provider=False``
-    means "ask the configured provider"; None means no AI."""
+    means "the AI if one is configured" (its questions are AI jobs for the reviewer container: the pass does not wait for them); None means
+    no AI."""
     from cveFeed import activity
     from cveFeed.nuclei_templates import host_profile, plan_targeting, profile_sources
     from startScan.models import ScanHistory, Subdomain
     scan = ScanHistory.objects.select_related('domain').get(pk=scan_id)
     domain, project = scan.domain, scan.domain.project_id
-    if provider is False:
-        try:
-            from reNgine.ai_settings import get_configured_provider
-            provider = get_configured_provider()
-        except Exception:  # noqa: BLE001 - a misconfigured provider means the static table, not a failed scan
-            logger.warning('no usable AI provider for the targeted nuclei pass', exc_info=True)
-            provider = None
+    from cveFeed import ai_jobs
+    try:
+        ai = provider is not None and ai_jobs.ai_on()
+    except Exception:  # noqa: BLE001 - a misconfigured provider means the static table, not a failed scan
+        logger.warning('AI settings could not be read for the targeted nuclei pass', exc_info=True)
+        ai = False
     hostnames, _ips, _ports = scan_targets(scan)  # the same filter as every other stage: nothing that resolves inside
     subs = [sub for sub in Subdomain.objects.filter(scan_history=scan).prefetch_related(
         'technologies', 'ip_addresses__ports', 'vulnerability_set', 'cve_matches__cve_entry') if sub.name in hostnames]
@@ -781,9 +742,10 @@ def run_targeted_nuclei(scan_id, stream, provider=False, light_techs=None, cve_r
     from agentapi import stage_runs
     # asked once: when the pass waits on Sentinels and a later pass continues it (agentapi.stage_runs), the plan is the one the AI gave first
     ai_notes = []
-    groups, skipped = stage_runs.once('targeting_plan', lambda: plan_targeting(profiles, provider, notes=ai_notes))
+    groups, skipped = stage_runs.once('targeting_plan', lambda: plan_targeting(profiles, ai, notes=ai_notes, project=project))
     for note in ai_notes[:1]:  # asked once, so said once: a later pass of the run has no notes
-        activity.log('run_check', f'AI nuclei targeting for {domain.name} gave no answer: {note}; the scan used the standard templates',
+        activity.log('run_check', (f'AI nuclei targeting for {domain.name}: {note}' if note.startswith('the AI reviewer container was asked') else
+                                   f'AI nuclei targeting for {domain.name} gave no answer: {note}; the scan used the standard templates'),
                      project=project, scan_id=scan.id)
     result = {'targets': 0, 'findings': 0, 'groups': len(groups), 'hosts': len(profiles) - len(skipped), 'skipped': len(skipped),
               'reused': 0}
@@ -817,8 +779,7 @@ def run_targeted_nuclei(scan_id, stream, provider=False, light_techs=None, cve_r
         if out.get('error'):
             errors.append(out['error'])
     try:
-        from cveFeed import ai_jobs
-        ai = provider is not None and ai_jobs.ai_on()  # provider=None is "no AI" for the whole pass; the draft itself is the reviewer container's
+        # provider=None is "no AI" for the whole pass; the draft itself is the reviewer container's
         checks = run_cve_checks(scan, subs, ai, cve_runner, force=force_cve_checks)
     except Exception as exc:  # noqa: BLE001
         logger.exception('CVE checks failed for scan %s', scan_id)

@@ -57,7 +57,6 @@ class RetireCallerTests(ChangeFixture, TestCase):
 class HostPipelineCallerTests(ChangeFixture, TestCase):
     def setUp(self):
         super().setUp()
-        mock.patch('reNgine.tasks.geo_localize.delay').start()
         mock.patch('cveFeed.tasks.run_hygiene_task.delay').start()
         self.addCleanup(mock.patch.stopall)
 

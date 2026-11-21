@@ -50,10 +50,12 @@ class _BackfillBase(TestCase):
 		self.client.get_entry.side_effect = lambda cid: _full(cid, _ago(3))
 		self.client.tech_entry_ids.return_value = []  # the scheduled run also reads the watched technology feeds
 		self.client.iter_pages.side_effect = _listing([])
+		self.client.published_between.return_value = []  # below the listing: the date windows (cve_now.CVENowClient.published_between)
 		patches = [mock.patch('cveFeed.tasks.CVENowClient', return_value=self.client),
-				   mock.patch('cveFeed.tasks.auto_fire_new_cves.delay')]
+				   mock.patch('cveFeed.tasks.auto_fire_new_cves.delay'), mock.patch('cveFeed.tasks.correlate_new_cves.delay')]
 		self.fire = patches[1].start()
 		patches[0].start()
+		patches[2].start()
 		self.addCleanup(mock.patch.stopall)
 		self.sleeps = []
 
@@ -258,6 +260,45 @@ class BackfillTests(_BackfillBase):
 		self.assertEqual((out['created'], out['failed']), (2, 1))
 
 
+class DateWindowTests(_BackfillBase):
+	"""Below the newest 400 (a 401 ``depth_limit`` without a key) the window is read by date windows; the listing ending is never the floor."""
+
+	def test_a_listing_that_ends_above_the_floor_reads_the_rest_by_date_windows(self):
+		self._watermark(covered_through=timezone.now() - datetime.timedelta(days=6))
+		self.client.iter_pages.side_effect = _listing([{'id': 'CVE-2026-10', **_pub(0, 2)}, {'id': 'CVE-2026-9', **_pub(0, 5)}])
+		self.client.published_between.return_value = [('CVE-2026-8', None), ('CVE-2026-7', _ago(4)), ('CVE-2026-9', None)]
+		self._store('CVE-2026-7', None)
+		out = self._run()
+		floor, below, now = self.client.published_between.call_args.args
+		self.assertLess(abs((floor - (timezone.now() - datetime.timedelta(days=9))).total_seconds()), 60)  # the watermark less the margin
+		self.assertLess(abs((below - (timezone.now() - datetime.timedelta(hours=5))).total_seconds()), 60)  # the oldest the listing gave
+		self.assertEqual(set(CVEEntry.objects.values_list('cve_id', flat=True)), {'CVE-2026-10', 'CVE-2026-9', 'CVE-2026-8', 'CVE-2026-7'})
+		self.assertIn('covered_through', out)
+		self.assertEqual(out['window_listed'], 3)
+
+	def test_a_window_that_could_not_be_listed_reads_what_it_found_and_does_not_advance(self):
+		row = self._watermark(covered_through=timezone.now() - datetime.timedelta(days=6))
+		self.client.iter_pages.side_effect = _listing([{'id': 'CVE-2026-10', **_pub(0, 2)}])
+		self.client.published_between.side_effect = cve_now.WindowIncomplete('cve.now has no archive page for 2026-11-10')
+		out = self._run()
+		self.assertEqual(out['status'], 'incomplete')
+		self.assertTrue(CVEEntry.objects.filter(cve_id='CVE-2026-10').exists())  # what the listing gave is still read
+		self.assertEqual(self._reload().covered_through, row.covered_through)
+		self.assertNotIn('covered_through', out)
+
+	def test_a_window_with_more_missing_than_one_run_reads_says_it_continues(self):
+		self._watermark(covered_through=timezone.now() - datetime.timedelta(days=6))
+		self.client.published_between.return_value = [(f'CVE-2026-{n}', None) for n in range(5)]
+		mock.patch.object(tasks, 'GAP_MAX_NEW', 3).start()
+		out = self._run(max_new=3)
+		self.assertEqual(out['created'], 3)
+		self.assertTrue(out['continues'])
+		self.assertNotIn('covered_through', out)
+		out = self._run(max_new=3)
+		self.assertIn('covered_through', out)
+		self.assertEqual(CVEEntry.objects.count(), 5)
+
+
 class WatermarkStatusTests(_BackfillBase):
 	def test_the_status_says_how_far_behind_the_feed_is(self):
 		from cveFeed import feed_watermark
@@ -297,6 +338,18 @@ class ClientPagingTests(unittest.TestCase):
 			list(client.iter_pages(cursor='c1', page_size=1))
 		self.assertEqual(listed.call_args.kwargs['cursor'], 'c1')  # a walk continues from where it stopped
 
+	def test_a_page_past_the_depth_limit_ends_the_listing_quietly(self):
+		client = cve_now.CVENowClient(session=mock.Mock(headers={}))
+		client.sleep = mock.Mock()
+		refused = cve_now.DepthLimit('401', response=SimpleNamespace(status_code=401))
+		with mock.patch.object(client, 'list_entries', side_effect=[([{'id': 'CVE-2026-1'}], 'c1'), refused]):
+			got = [e['id'] for e in client.iter_entries(max_entries=10)]
+		self.assertEqual(got, ['CVE-2026-1'])
+		self.assertTrue(client.depth_limited)
+		with mock.patch.object(client, 'list_entries', side_effect=[([{'id': 'CVE-2026-1'}], 'c1'), refused]):
+			self.assertEqual(len(list(client.iter_pages(max_entries=10))), 1)
+		self.assertTrue(client.depth_limited)
+
 	def test_no_pause_by_default(self):
 		client = cve_now.CVENowClient(session=mock.Mock(headers={}))
 		client.sleep = mock.Mock()
@@ -317,7 +370,7 @@ class ClientRetryTests(unittest.TestCase):
 	def _resp(self, status, headers=None, body=None):
 		r = mock.Mock(status_code=status, headers=headers or {})
 		r.json.return_value = body or {}
-		r.raise_for_status.side_effect = None if status < 400 else _http_error(status)
+		r.raise_for_status.side_effect = None if status < 400 else requests.HTTPError(f'{status}', response=r)
 		return r
 
 	def test_429_is_retried_after_the_servers_retry_after(self):
@@ -348,6 +401,63 @@ class ClientRetryTests(unittest.TestCase):
 		self.assertEqual(cve_now._retry_delay(mock.Mock(headers={'Retry-After': 'soon'}), 2), 4.0)
 		self.assertEqual(cve_now._retry_delay(mock.Mock(headers={'Retry-After': '-5'}), 0), 0.0)
 		self.assertEqual(cve_now._retry_delay(mock.Mock(headers={}), 1), 2.0)
+
+	def test_a_list_page_reads_items_and_next_cursor(self):
+		client, session = self._client(self._resp(200, body={'items': [{'id': 'CVE-2026-1'}], 'entries': [{'id': 'CVE-2026-1'}], 'next_cursor': 'n1'}))
+		self.assertEqual(client.list_entries(limit=200), ([{'id': 'CVE-2026-1'}], 'n1'))
+
+	def test_a_list_page_in_the_old_shape_still_pages(self):
+		client, _ = self._client(self._resp(200, body={'entries': [{'id': 'CVE-2026-2'}], 'nextCursor': 'o1'}))
+		self.assertEqual(client.list_entries(), ([{'id': 'CVE-2026-2'}], 'o1'))
+		client, _ = self._client(self._resp(200, body={'items': [], 'next_cursor': None}))
+		self.assertEqual(client.list_entries(), ([], None))
+
+	def test_a_401_depth_limit_is_its_own_error_and_other_refusals_are_not(self):
+		client, _ = self._client(self._resp(401, body={'error': 'depth_limit'}))
+		with self.assertRaises(cve_now.DepthLimit):
+			client.list_entries(cursor='deep')
+		client, _ = self._client(self._resp(403, body={'error': 'forbidden'}))
+		with self.assertRaises(requests.HTTPError) as caught:
+			client.list_entries(cursor='deep')
+		self.assertNotIsInstance(caught.exception, cve_now.DepthLimit)
+		client, _ = self._client(self._resp(401, body={'error': 'unauthorized'}))
+		with self.assertRaises(requests.HTTPError) as caught:
+			client.list_entries()
+		self.assertNotIsInstance(caught.exception, cve_now.DepthLimit)
+
+	def test_the_delta_listing_sends_since_and_the_etag_and_reads_a_304(self):
+		page = {'items': [{'id': 'CVE-2026-1', 'updatedAt': 'x'}, {'id': 'CVE-2026-2', 'status': 'withdrawn'}], 'next_cursor': 'd1',
+				'next_since': '2026-11-18T03:03:14.813Z', 'has_more': True}
+		ok = self._resp(200, {'ETag': '"e1"'}, page)
+		client, session = self._client(ok, self._resp(304, {'ETag': '"e1"'}))
+		since = datetime.datetime(2026, 11, 18, 0, 0, tzinfo=datetime.timezone.utc)
+		got = client.changes(since)
+		self.assertEqual(session.get.call_args.kwargs['params'], {'since': '2026-11-18T00:00:00.000Z', 'limit': 200})
+		self.assertEqual((len(got['items']), got['next_cursor'], got['has_more'], got['etag']), (2, 'd1', True, '"e1"'))
+		again = client.changes(got['next_since'], etag=got['etag'])
+		self.assertTrue(again['not_modified'])
+		self.assertEqual(again['items'], [])
+		self.assertEqual(session.get.call_args.kwargs['headers'], {'If-None-Match': '"e1"'})
+
+	def test_a_days_archive_gives_its_cve_ids_only(self):
+		text = ('# CVEs published 2026-11-06\n\n## Early warnings\n\n- [SZB-659381b7e7](https://cve.now/SZB-659381b7e7): CISA adds CVE-2026-19868\n'
+				'## CVEs\n\n- [CVE-2026-71881](https://cve.now/CVE-2026-71881.md): GBIF (CVSS 4.8, x)\n'
+				'- [GHSA-47W9-6R3F-938G](https://cve.now/GHSA-47W9-6R3F-938G.md): LXD\n- [CVE-2026-109469](https://cve.now/CVE-2026-109469.md): y\n'
+				'- [CVE-2026-71881](https://cve.now/CVE-2026-71881.md): again\n')
+		resp = self._resp(200)
+		resp.text = text
+		client, session = self._client(resp)
+		self.assertEqual(client.archive_day_ids(datetime.date(2026, 11, 6)), ['CVE-2026-71881', 'CVE-2026-109469'])
+		self.assertEqual(session.get.call_args.args[0], 'https://cve.now/archive/2026-11-06.md')
+
+	def test_the_exploitation_objects_are_read_as_flags(self):
+		flags = cve_now.exploitation_flags({'kev': {'dateAdded': '2021-12-10', 'dueDate': '2021-12-24'}, 'epssReached': {'date': '2026-10-22'},
+											'exploitDb': {'ids': ['50592'], 'publishedAt': '2021-12-14'}})
+		self.assertEqual(flags, {'kev': True, 'epssReached': True, 'exploitDb': True})
+		self.assertEqual(cve_now.exploitation_flags({'kev': None, 'epssReached': None, 'exploitDb': None}),
+						 {'kev': None, 'epssReached': None, 'exploitDb': None})
+		self.assertEqual(cve_now.exploitation_flags({'kev': True, 'epssReached': False}), {'kev': True, 'epssReached': False, 'exploitDb': None})
+		self.assertEqual(cve_now.exploitation_flags(None), {'kev': None, 'epssReached': None, 'exploitDb': None})
 
 	def test_tech_feed_ids_drop_the_update_suffix_and_duplicates(self):
 		body = {'items': [{'id': 'CVE-2026-109618#2026-10-23T00:16:34.627Z'}, {'id': 'CVE-2026-109619'},

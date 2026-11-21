@@ -24,7 +24,6 @@ Pillow>=13.0.0,<14
 PyYAML==6.0.3
 PySocks==1.7.1
 psycopg2==2.9.13
-python-gvm==27.10.1
 redis==8.1.0
 requests==2.34.2
 tldextract==5.4.0
@@ -42,4 +41,4 @@ packaging==26.3
 # readers this server shares with every Sentinel. Pinned to a full commit sha of the Sentinel main branch (the release tag v1.4.0 predates most kinds; a sha pin is not a version change). The
 # result contract (cvengine_scanner/contract/sentinel_contract.json) is read from this install: a contract change is a Sentinel pull request first,
 # then a pull request here that bumps this sha (docs/SENTINELS.md, "The result contract"). Bumping it is a pull request of its own.
-cvengine-scanner @ git+https://github.com/hevnsnt/cvENGINE-sentinel@5ac80a23b43fb571443fd5e9d8b553852b67e393
+cvengine-scanner @ git+https://github.com/hevnsnt/cvENGINE-sentinel@a918bc89cd7a4c5710e0f2566634556444dfe551

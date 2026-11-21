@@ -1,0 +1,59 @@
+{
+  "outcome": "done",
+  "os_reliable": true,
+  "hosts": [
+    {
+      "ip": "203.0.113.5",
+      "os_guess": "Linux 3.10 - 4.11",
+      "scanned": [80, 3306, 6379],
+      "ports": [
+        {
+          "number": 80,
+          "protocol": "tcp",
+          "state": "open",
+          "service_name": "http",
+          "product": "Apache httpd",
+          "version": "2.4.6",
+          "service_extra": "(CentOS) OpenSSL/1.0.2k-fips PHP/5.4.16",
+          "method": "probed",
+          "confidence": "10",
+          "cpes": ["cpe:/a:apache:http_server:2.4.6", "cpe:/o:redhat:enterprise_linux:7", "cpe:/a:openssl:openssl:1.0.2k"],
+          "cpe": "cpe:/a:apache:http_server:2.4.6",
+          "scripts": {
+            "http-server-header": "Apache/2.4.6 (CentOS) OpenSSL/1.0.2k-fips PHP/5.4.16",
+            "http-title": "Test Page for the Apache HTTP Server on CentOS"
+          }
+        },
+        {
+          "number": 3306,
+          "protocol": "tcp",
+          "state": "open",
+          "service_name": "mysql",
+          "product": "MySQL",
+          "version": "",
+          "method": "probed",
+          "confidence": "10",
+          "cpes": ["cpe:/a:mysql:mysql"],
+          "cpe": "cpe:/a:mysql:mysql",
+          "scripts": {
+            "mysql-info": "\n  Protocol: 10\n  Version: 5.5.5-10.6.12-MariaDB\n  Thread ID: 42\n  Capabilities flags: 63486\n  Some Capabilities: Support41Auth, ConnectWithDatabase\n  Status: Autocommit\n  Salt: xxxxxxxxxxxxxxxxxxxx\n  Auth Plugin Name: mysql_native_password"
+          }
+        },
+        {
+          "number": 6379,
+          "protocol": "tcp",
+          "state": "open",
+          "service_name": "redis",
+          "product": "Redis key-value store",
+          "version": "",
+          "method": "probed",
+          "confidence": "10",
+          "cpes": [],
+          "scripts": {
+            "redis-info": "\n  Version: 7.2.4\n  Operating System: Linux 5.15.0-91-generic x86_64\n  Architecture: 64 bits\n  Process ID: 1\n  Used CPU (sys): 0.12"
+          }
+        }
+      ]
+    }
+  ]
+}

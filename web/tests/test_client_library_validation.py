@@ -286,8 +286,7 @@ class Base(TestCase):
 		self.domain = Domain.objects.create(name='v.test', project=self.project, insert_date=timezone.now())
 		self.cve = CVEEntry.objects.create(cve_id='CVE-2020-11023', title='Potential XSS vulnerability in jQuery', kev=True, cvss=6.9,
 										   published_at=timezone.now(), affected=JQUERY_11023)
-		for patched in (mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False),
-						mock.patch('targetApp.target_types.is_scannable_ip', return_value=True),
+		for patched in (mock.patch('targetApp.target_types.is_scannable_ip', return_value=True),
 						mock.patch('cveFeed.activity.log', return_value=None),
 						mock.patch('cveFeed.notify._send', return_value=False),
 						mock.patch('cveFeed.js_libraries.SCRIPT_HOST_GAP', 0)):
@@ -541,16 +540,6 @@ class LibraryValidationTests(Base):
 					self.assertEqual(step['result'], 'blocked')
 					self.assertIn(words, step['summary'])
 				self.assert_open(m)
-
-	def test_a_port_the_egress_governor_holds_is_not_read_and_nothing_is_concluded(self):
-		from cveFeed import local_egress
-		m = self.match()
-		site = Site(error=local_egress.PortHeld(443, 'paced'))
-		row, _stats, _calls = self.validate(site)
-		self.assertEqual(row.validation_status, 'failed')
-		self.assertIn('not run from this server', self.step(row)['summary'])
-		self.assert_open(m)
-
 
 	def test_a_failed_read_changes_nothing_and_is_retried(self):
 		m = self.match()

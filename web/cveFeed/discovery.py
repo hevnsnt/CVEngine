@@ -16,6 +16,7 @@ from django.utils import timezone
 
 from cveFeed import scanner_wait, snapshot_cache
 from reNgine import discovery_events as bbot_lib
+from reNgine.state_machines import SCAN
 
 logger = logging.getLogger(__name__)
 
@@ -252,10 +253,15 @@ def _report_module_failures(hard_failures, scan):
 def persist_screenshot_blobs(scan, screenshots):
     """Write each screenshot a Sentinel sent with a discovery batch (``sentinel_stream.clean_partial`` already checked its host, name, type and
     size) into this scan's scan-results storage and record it on the matching Subdomain.
-    A screenshot whose host has no Subdomain in this scan, or whose bytes cannot be written, is skipped quietly."""
+    The file is named by the server, never by the Sentinel: ``sentinel-<random>.<png|jpg>``, the extension from the picture type its bytes were checked
+    to be (checked again here: a batch stored before an update was cleaned by older code). So a name like ``x.html`` can never be stored, and two hosts
+    whose files had the same name never overwrite each other.
+    A screenshot whose host has no Subdomain in this scan, whose bytes are not the picture they claim, or that cannot be written, is skipped quietly."""
     if not screenshots:
         return
     import base64
+    import uuid
+
     from cveFeed import shots
     from startScan.models import Subdomain
     dest_dir = os.path.join(settings.MEDIA_ROOT, f'{scan.domain.name}_{scan.id}', 'screenshots')
@@ -263,19 +269,28 @@ def persist_screenshot_blobs(scan, screenshots):
     shots.warn_unavailable(scan)
     for shot in screenshots:
         subdomain = Subdomain.objects.filter(scan_history=scan, name=shot.get('host') or '').first()
-        name = os.path.basename(str(shot.get('filename') or ''))
-        if not subdomain or not name or name.startswith('.'):
+        if not subdomain:
             continue
         try:
             raw = base64.b64decode(shot.get('data') or '', validate=True)
+            kind = shots.image_type(raw)
+            if kind is None or shot.get('content_type', kind) != kind:
+                continue  # not a PNG or JPEG, or not the one it says it is: never written
             os.makedirs(dest_dir, exist_ok=True)
-            dest = os.path.join(dest_dir, f'sentinel-{name}')
+            dest = os.path.join(dest_dir, f'sentinel-{uuid.uuid4().hex}.{shots.extension_for(kind)}')
             with open(dest + '.part', 'wb') as out:
                 out.write(raw)
             os.replace(dest + '.part', dest)
         except (OSError, ValueError):
             logger.exception('could not store a Sentinel screenshot of %s for scan %s', subdomain.name, scan.id)
             continue
+        before = os.path.join(settings.MEDIA_ROOT, subdomain.screenshot_path) if subdomain.screenshot_path else ''
+        if before and os.path.dirname(os.path.abspath(before)) == os.path.abspath(dest_dir) and os.path.basename(before).startswith('sentinel-'):
+            for stale in (before, f'{before}.thumb-{shots.THUMB_WIDTH}.jpg'):  # this scan's earlier picture of the host: replaced, not left behind
+                try:
+                    os.remove(stale)
+                except OSError:
+                    pass
         subdomain.screenshot_path = os.path.relpath(dest, settings.MEDIA_ROOT)
         if hashed < shots.MAX_HASH_PER_FLUSH:
             subdomain.screenshot_hash = shots.dhash_file(dest)
@@ -393,14 +408,14 @@ def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, finalize=True):
     web_events = {'URL': 0, 'HTTP_RESPONSE': 0}  # what the scanner's web module reported, counted over the whole run
     hard_failures = []  # (module, reason) for modules whose set-up hard-failed, e.g. a screenshot module without a working browser
     try:
-        # Same policy the nuclei, route-auth and validation stages apply: never start a scanner against a name
-        # that currently resolves to a loopback, link-local, metadata or (unless allowed) internal address.
-        from targetApp.target_types import resolves_to_blocked, sentinel_only_target
+        # Never start a scanner against an address a scanner must not touch. A name is not looked up here: the Sentinel that runs the discovery
+        # judges every address it resolves to (and refuses a loopback, link-local, metadata or private one) when it connects.
+        from targetApp.target_types import blocked_address, sentinel_only_target
         if sentinel_only_target(scan.domain.name, scan.domain.project_id):
             raise TargetRefused(f'{scan.domain.name} is inside an internal range of this project: only a Sentinel inside that network scans it, '
                                 'never this server')
-        if resolves_to_blocked(scan.domain.name, project=scan.domain.project_id):
-            raise TargetRefused(f'{scan.domain.name} resolves to a loopback, link-local or internal address; '
+        if blocked_address(scan.domain.name, project=scan.domain.project_id):
+            raise TargetRefused(f'{scan.domain.name} is a loopback, link-local or internal address; '
                                 'discovery refused (CVENGINE_ALLOW_PRIVATE_TARGETS=1 allows internal ranges)')
         remote = _discover_on_sentinel(scan, mode, ctx, extra_args, stored, shown)
         stored, finished_mode, web_events = remote['stored'], remote['mode'], remote['web_events']
@@ -421,12 +436,12 @@ def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, finalize=True):
     except Exception as exc:  # the scan must end in a visible state, never stay "running"
         logger.exception('discovery failed for scan %s', scan_id)
         status, error = FAILED, str(exc)[:290]
-    ScanActivity.objects.filter(scan_of=scan, name='bbot_discovery').update(
-        status=FAILED if partial else status, time=timezone.now(), error_message=(partial or error) or None)
+    SCAN.move(ScanActivity.objects.filter(scan_of=scan, name='bbot_discovery'), field='status', target=FAILED if partial else status, time=timezone.now(), error_message=(partial or error) or None)
     if finalize or status == FAILED:
-        scan.scan_status, scan.stop_scan_date, scan.error_message = status, timezone.now(), error or None
-        scan.save(update_fields=['scan_status', 'stop_scan_date', 'error_message'])
-        snapshot_cache.bump_on_commit()  # a scan that ended changes which hosts are current
+        # only from a state that may take it: a scan a person stopped meanwhile stays stopped (reNgine.state_machines.SCAN)
+        if SCAN.move(ScanHistory.objects.filter(pk=scan.pk), status, stop_scan_date=timezone.now(), error_message=error or None):
+            snapshot_cache.bump_on_commit()  # a scan that ended changes which hosts are current
+        scan.refresh_from_db(fields=['scan_status', 'stop_scan_date', 'error_message'])
     from startScan.models import Subdomain
     found = Subdomain.objects.filter(scan_history=scan).count()
     if refused:
@@ -505,8 +520,8 @@ def run_pipeline(scan_id, *args, **kwargs):
     if sentinel_only_target(scan.domain.name, scan.domain.project_id):  # nothing at all runs from this server against a Sentinel-only address
         message = (f'{scan.domain.name} is inside an internal range of this project: only a Sentinel inside that network scans it, '
                    'never this server')
-        ScanHistory.objects.filter(pk=scan_id).update(scan_status=FAILED, stop_scan_date=timezone.now(), error_message=message[:290])
-        ScanActivity.objects.filter(scan_of=scan, name='bbot_discovery').update(status=FAILED, time=timezone.now(), error_message=message[:290])
+        SCAN.move(ScanHistory.objects.filter(pk=scan_id), FAILED, stop_scan_date=timezone.now(), error_message=message[:290])
+        SCAN.move(ScanActivity.objects.filter(scan_of=scan, name='bbot_discovery'), field='status', target=FAILED, time=timezone.now(), error_message=message[:290])
         activity.log('discovery', f'Refused discovery of {scan.domain.name}: Sentinel-only target', project=scan.domain.project_id, scan_id=scan_id)
         return {'scan_id': scan_id, 'status': FAILED, 'error': message}
     keep = {}
@@ -523,8 +538,8 @@ def run_pipeline(scan_id, *args, **kwargs):
     if str(holder) == str(scan_id):
         return {'scan_id': scan_id, 'status': 'duplicate'}  # the queue delivered this very task twice; the first one is running
     message = f'another discovery of {scan.domain.name} is already running (scan #{holder})'
-    ScanHistory.objects.filter(pk=scan_id).update(scan_status=3, stop_scan_date=timezone.now(), error_message=message[:290])
-    ScanActivity.objects.filter(scan_of=scan, name='bbot_discovery').update(status=3, time=timezone.now(), error_message=message[:290])
+    SCAN.move(ScanHistory.objects.filter(pk=scan_id), 3, stop_scan_date=timezone.now(), error_message=message[:290])
+    SCAN.move(ScanActivity.objects.filter(scan_of=scan, name='bbot_discovery'), field='status', target=3, time=timezone.now(), error_message=message[:290])
     activity.log('discovery', f'Skipped a second discovery of {scan.domain.name}: scan #{holder} is already running',
                  project=scan.domain.project_id, scan_id=scan_id)
     return {'scan_id': scan_id, 'status': 'skipped', 'error': message}
@@ -579,8 +594,7 @@ def discover_ip(scan, ptr=None, certificate=None):
     except Exception as exc:  # noqa: BLE001 - the scan ends in a visible state
         logger.exception('ip discovery failed for scan %s', scan.id)
         status, error = FAILED, str(exc)[:290]
-    ScanActivity.objects.filter(scan_of=scan, name='bbot_discovery').update(
-        status=status, time=timezone.now(), error_message=error or None, title='IP lookup (reverse DNS, certificate)')
+    SCAN.move(ScanActivity.objects.filter(scan_of=scan, name='bbot_discovery'), field='status', target=status, time=timezone.now(), error_message=error or None, title='IP lookup (reverse DNS, certificate)')
     names = sorted({n for v in found.values() for n in v})
     activity.settle(running, 'done' if status == SUCCESS else 'failed', message=(
         f'{ip}: ' + (f'answers to {", ".join(names[:5])}{" and more" if len(names) > 5 else ""}' if names else 'no reverse DNS or certificate names'))
@@ -630,8 +644,11 @@ def seed_from_scan(scan, source):
     ips, techs = Subdomain.ip_addresses.through, Subdomain.technologies.through
     ips.objects.bulk_create([ips(subdomain_id=c.pk, ipaddress_id=ip.pk) for c, o in zip(copies, originals)
                              for ip in o.ip_addresses.all()])
-    techs.objects.bulk_create([techs(subdomain_id=c.pk, technology_id=t.pk) for c, o in zip(copies, originals)
-                               for t in o.technologies.all()])
+    # a copied link keeps where it came from (its source, the CPE its reading named, when it was seen: cveFeed.tech_links)
+    meta = {(r.subdomain_id, r.technology_id): r for r in techs.objects.filter(subdomain_id__in=[o.pk for o in originals])}
+    techs.objects.bulk_create([techs(subdomain_id=c.pk, technology_id=t.pk, **({'source': was.source, 'cpe': was.cpe, 'observed_at': was.observed_at}
+                                                                            if (was := meta.get((o.pk, t.pk))) else {}))
+                               for c, o in zip(copies, originals) for t in o.technologies.all()])
     return len(copies)
 
 
@@ -646,8 +663,7 @@ def reuse_discovery(scan, source, parent):
     except Exception:  # noqa: BLE001
         logger.exception('could not reuse scan %s for scan %s', source.id, scan.id)
         return False
-    ScanActivity.objects.filter(scan_of=scan, name='bbot_discovery').update(
-        status=SUCCESS, time=timezone.now(), title=f'BBOT discovery (covered by scan #{source.id} of {parent})')
+    SCAN.move(ScanActivity.objects.filter(scan_of=scan, name='bbot_discovery'), field='status', target=SUCCESS, time=timezone.now(), title=f'BBOT discovery (covered by scan #{source.id} of {parent})')
     activity.log('discovery', f'Discovery of {scan.domain.name} covered by scan #{source.id} of {parent}: {copied} host(s) reused, '
                  f'discovery not run', project=scan.domain.project_id, scan_id=scan.id, hosts=copied)
     return True
@@ -682,8 +698,9 @@ def _stage(scan, title, name, run, failed=lambda result: bool(result.get('error'
         logger.exception('%s failed for scan %s', name, scan.id)
         result = {**(fallback or {}), 'error': str(exc)[:290]}
     error = result.get('error') or result.get('full_error')
-    ScanActivity.objects.filter(scan_of=scan, name=name).update(
-        status=FAILED if (failed(result) or error) else SUCCESS, time=timezone.now(), error_message=error)
+    # a stage a person stopped (the stop marks the running stage aborted) stays stopped, whatever the stage returned on its way out
+    SCAN.move(ScanActivity.objects.filter(scan_of=scan, name=name), FAILED if (failed(result) or error) else SUCCESS, field='status',
+              time=timezone.now(), error_message=error)
     if current is not None:
         current.memo[memo] = stage_runs._jsonable(result)
     return result
@@ -712,25 +729,25 @@ def _run_pipeline(scan_id, mode=bbot_lib.DEFAULT_MODE, light_stream=None, target
     from cveFeed.exclusions import is_excluded
     if is_excluded(scan.domain.project_id, scan.domain.name):  # the organization excluded this host for good after the scan was queued
         message = f'{scan.domain.name} is excluded for this organization and is not scanned'
-        ScanHistory.objects.filter(pk=scan_id).update(scan_status=FAILED, stop_scan_date=timezone.now(), error_message=message)
+        SCAN.move(ScanHistory.objects.filter(pk=scan_id), FAILED, stop_scan_date=timezone.now(), error_message=message)
         return {'scan_id': scan_id, 'status': FAILED, 'error': message}
     from targetApp.models import Domain
     if scan.initiated_by_id is None and scan.domain.discovery_mode == Domain.DISCOVERY_MANUAL:  # set to manual only after the system queued it: no person asked for this one
         message = f'{scan.domain.name} is set to manual only and is not scanned on its own; choose a discovery mode to scan it'
-        ScanHistory.objects.filter(pk=scan_id).update(scan_status=FAILED, stop_scan_date=timezone.now(), error_message=message[:290])
+        SCAN.move(ScanHistory.objects.filter(pk=scan_id), FAILED, stop_scan_date=timezone.now(), error_message=message[:290])
         return {'scan_id': scan_id, 'status': FAILED, 'error': message}
     from cveFeed.bounty_gate import Gate
     why = Gate().refusal(scan.domain.project_id, scan.domain.name, unattended=scan.initiated_by_id is None)  # a bug bounty program: confirmed automated testing (unless a person started this) and a target its scope names
     if why:
         message = f'{scan.domain.name} is not scanned: {why}'
-        ScanHistory.objects.filter(pk=scan_id).update(scan_status=FAILED, stop_scan_date=timezone.now(), error_message=message[:290])
+        SCAN.move(ScanHistory.objects.filter(pk=scan_id), FAILED, stop_scan_date=timezone.now(), error_message=message[:290])
         return {'scan_id': scan_id, 'status': FAILED, 'error': message}
     from targetApp.target_types import IP, classify_target
     covered = None
     if classify_target(scan.domain.name) == IP:  # the discovery finds subdomains; a bare IP has none
         found = discover_ip(scan, **(ip_lookups or {}))
         if found['status'] != SUCCESS:
-            ScanHistory.objects.filter(pk=scan_id).update(scan_status=FAILED, stop_scan_date=timezone.now(), error_message=found['error'] or None)
+            SCAN.move(ScanHistory.objects.filter(pk=scan_id), FAILED, stop_scan_date=timezone.now(), error_message=found['error'] or None)
             return found
     else:
         try:
@@ -773,7 +790,7 @@ def _resume_pipeline(context):
 def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, port_stage_run=None, db_exposure_checks=None,
                 provider=False, cve_runner=None, hygiene=True, retest=False,
                 force=False, hygiene_host=None, wpscan_runner=None, rdp_reader=None,
-                node2shell_checker=None, by_person=False, screenshot_queuer=None):
+                by_person=False, screenshot_queuer=None):
     """Everything after discovery: nmap, the exposure check, the light nuclei pass, the web route auth check, correlation, the targeted nuclei pass, AI triage of what the scan produced (which queues the read-only
     validation checks, one task per project) and (unless ``hygiene`` is off) the hygiene sweep of the target. Shared by a full discovery and by the new-hosts pipeline;
     the stop flag is honoured between stages."""
@@ -834,6 +851,20 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, port_st
 
     if stopped(scan_id):
         return gone
+    # The services that do not speak HTTP (RDP, Redis, MongoDB, VNC, ActiveMQ, the SSH and FTP variants): nuclei's network/detection templates on the
+    # non-web ports, through a Sentinel that runs the pass (contract 10). Only when the scan has such a port; it fills what nmap did not say, before correlation.
+    from cveFeed import network_detection
+    netdetect_result = None
+    if network_detection.has_work(scan):
+        def run_netdetect():
+            try:
+                stream = sentinel_dispatch.wrap_nuclei_stream(scan, 'nuclei_light')  # a Sentinel's, always (a test's light_stream is the tech pass's)
+                return network_detection.run_for_scan(scan_id, stream, force=bool(retest or force))
+            except resources.ScannerUnavailable as exc:  # no Sentinel runs it (none live, or only older ones): the ports stay due, the stage does not fail
+                return _waiting_for_scanner(scan, network_detection.TITLE, exc, {'targets': 0, 'ports': 0, 'readings': 0})
+        netdetect_result = _stage(scan, network_detection.TITLE, network_detection.STAGE, run_netdetect, fallback={'targets': 0, 'ports': 0, 'readings': 0})
+        if stopped(scan_id):
+            return gone
     from cveFeed import waf_fingerprint
     waf_kwargs = {}
     if retest or force:
@@ -880,6 +911,26 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, port_st
                           fallback={'hosts': 0})  # finds the version of what the stages above saw without one, before correlation reads it
     if stopped(scan_id):
         return gone
+    from cveFeed import java_runtime
+
+    def run_java():  # the Java runtime the hosts give away (stored data first, then the Sentinel's reads), before correlation reads it
+        try:
+            return java_runtime.run_for_scan(scan_id, force=bool(retest or force))
+        except resources.ScannerUnavailable as exc:  # the passive readings are stored; the active reads stay due for a scanner
+            return _waiting_for_scanner(scan, 'Java runtime', exc, {'hosts': 0})
+    java_result = _stage(scan, 'Java runtime', 'java_runtime', run_java, fallback={'hosts': 0})
+    if stopped(scan_id):
+        return gone
+    from cveFeed import version_sources
+
+    def run_versions():  # the versions hosts state at their version sources (stored headers first, then the Sentinel's reads), before correlation
+        try:
+            return version_sources.run_for_scan(scan_id, force=bool(retest or force))
+        except resources.ScannerUnavailable as exc:  # the passive readings are stored; the reads stay due for a scanner
+            return _waiting_for_scanner(scan, 'Version sources', exc, {'hosts': 0})
+    versions_result = _stage(scan, 'Version sources', 'version_sources', run_versions, fallback={'hosts': 0})
+    if stopped(scan_id):
+        return gone
     from cveFeed import subdir_apps
     _once('subdir_apps', lambda: subdir_apps.carry_forward(scan))  # the versioned applications the background subdirectory sweep found, on this scan's fresh host rows
     wp_kwargs = {'runner': wpscan_runner} if wpscan_runner else {}
@@ -890,7 +941,7 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, port_st
     if stopped(scan_id):
         return gone
     from cveFeed import node2shell_scan
-    n2s_kwargs = {'checker': node2shell_checker} if node2shell_checker else {}
+    n2s_kwargs = {}
     if retest or force:
         n2s_kwargs['force'] = True
     node2shell_result = None
@@ -950,18 +1001,21 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, port_st
     # ``failed_stages`` (assessments and re-tests read that); failing the whole scan would hide every host it found and keep
     # correlating the previous scan's ports and technologies.
     failed_names = list(ScanActivity.objects.filter(scan_of=scan, status=FAILED).values_list('name', flat=True))
-    scan.scan_status, scan.stop_scan_date = SUCCESS, timezone.now()
-    scan.error_message = ('Failed stages: ' + ', '.join(failed_names))[:290] if failed_names else None
-    scan.save(update_fields=['scan_status', 'stop_scan_date', 'error_message'])
+    # One conditional write: a Stop that lands after the check above leaves the scan stopped instead of being overwritten with a success.
+    if not SCAN.move(ScanHistory.objects.filter(pk=scan.pk), SUCCESS, stop_scan_date=timezone.now(),
+                     error_message=('Failed stages: ' + ', '.join(failed_names))[:290] if failed_names else None):
+        return gone
+    scan.refresh_from_db(fields=['scan_status', 'stop_scan_date', 'error_message'])
     snapshot_cache.bump_on_commit()  # the scan's hosts are now the target's current inventory: the live screen's counts move with it
     found['status'] = scan.scan_status
     found['error'] = scan.error_message or ''
     found['failed_stages'] = failed_names
     if hygiene and not hygiene_host:
         run_hygiene_task.delay(scan.domain_id)  # certificates and email authentication for what was just found
-    result = {**found, 'nmap': nmap_result, 'db_exposure': db_result, 'nuclei_light': light_result, 'route_auth': route_result, 'secrets_scan': secrets_result,
+    result = {**found, 'nmap': nmap_result, 'db_exposure': db_result, 'nuclei_light': light_result, 'network_detection': netdetect_result, 'route_auth': route_result, 'secrets_scan': secrets_result,
               'correlation': correlation, 'nuclei_targeted': targeted_result, 'triage': triage_result,
-              'asset_changes': changes_result, 'ssh_probe': ssh_result}
+              'asset_changes': changes_result, 'ssh_probe': ssh_result, 'java_runtime': java_result,
+              'version_sources': versions_result}
     if hygiene_result is not None:
         result['hygiene'] = hygiene_result
     if waf_result is not None:
@@ -1058,7 +1112,7 @@ def run_host_pipeline(domain_id, names, resolver=None, celery_id=None, retest=Fa
         from cveFeed.models import HostAssessment
         HostAssessment.objects.filter(pk__in=assessment_ids).update(scan=scan)
         if not HostAssessment.objects.filter(pk__in=assessment_ids, status='running').exists():  # every one was stopped while it waited
-            ScanHistory.objects.filter(pk=scan.pk).update(scan_status=ABORTED, stop_scan_date=timezone.now())
+            SCAN.move(ScanHistory.objects.filter(pk=scan.pk), ABORTED, stop_scan_date=timezone.now())
             return {'scan_id': scan.pk, 'status': 'aborted'}
     step = ScanActivity.objects.create(scan_of=scan, title='Resolve and record new hosts', name='host_resolve', time=now, status=QUEUED)
     mark_running(scan.id)
@@ -1115,11 +1169,11 @@ def run_host_pipeline(domain_id, names, resolver=None, celery_id=None, retest=Fa
                 if not wanted:  # every lookup failed: nothing was learned, and the run says so instead of reporting success
                     message = ('The lookups are waiting for a free Sentinel; nothing was recorded and the hosts are looked up again' if lookups_waited
                                else f'DNS could not answer any lookup ({next(iter(lookup_errors.values()))}); nothing was recorded')
-                    ScanHistory.objects.filter(pk=scan.pk).update(scan_status=FAILED, stop_scan_date=timezone.now(), error_message=message[:290])
+                    SCAN.move(ScanHistory.objects.filter(pk=scan.pk), FAILED, stop_scan_date=timezone.now(), error_message=message[:290])
                     return {**found, 'status': 'inconclusive', 'error': message, **({'per_host': per_host} if per_host else {})}
             if force and not pairs:
                 message = 'No scannable IP address resolved; no active checks ran'
-                ScanHistory.objects.filter(pk=scan.pk).update(scan_status=FAILED, stop_scan_date=timezone.now(), error_message=message)
+                SCAN.move(ScanHistory.objects.filter(pk=scan.pk), FAILED, stop_scan_date=timezone.now(), error_message=message)
                 return {**found, 'status': 'inconclusive', 'error': message, **({'per_host': per_host} if per_host else {})}
             scanned = [n for n in wanted if n in resolved_names] if force else wanted  # the hosts the stages have something to do for
             kwargs = dict(hygiene=hygiene, hygiene_host=scanned if assessment_ids else None, retest=retest, force=force, by_person=by_person,
@@ -1138,7 +1192,7 @@ def run_host_pipeline(domain_id, names, resolver=None, celery_id=None, retest=Fa
     except Exception as exc:  # noqa: BLE001 - the scan must end in a visible state
         logger.exception('host pipeline failed for scan %s', scan.id)
         ScanActivity.objects.filter(pk=step.pk).update(status=FAILED, time=timezone.now(), error_message=str(exc)[:290])
-        ScanHistory.objects.filter(pk=scan.id).update(scan_status=FAILED, stop_scan_date=timezone.now(), error_message=str(exc)[:290])
+        SCAN.move(ScanHistory.objects.filter(pk=scan.id), FAILED, stop_scan_date=timezone.now(), error_message=str(exc)[:290])
         return {'scan_id': scan.id, 'status': FAILED, 'error': str(exc)[:290], **({'per_host': per_host} if per_host else {})}
 
 
@@ -1159,5 +1213,5 @@ def _resume_host_pipeline(context):
     except Exception as exc:  # noqa: BLE001 - the scan must end in a visible state
         logger.exception('host pipeline failed for scan %s', scan_id)
         ScanActivity.objects.filter(pk=context.get('step_id')).update(status=FAILED, time=timezone.now(), error_message=str(exc)[:290])
-        ScanHistory.objects.filter(pk=scan_id).update(scan_status=FAILED, stop_scan_date=timezone.now(), error_message=str(exc)[:290])
+        SCAN.move(ScanHistory.objects.filter(pk=scan_id), FAILED, stop_scan_date=timezone.now(), error_message=str(exc)[:290])
         return {'scan_id': scan_id, 'status': FAILED, 'error': str(exc)[:290], **({'per_host': per_host} if per_host else {})}

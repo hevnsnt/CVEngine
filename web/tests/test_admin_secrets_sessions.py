@@ -8,11 +8,9 @@ class AdminSecretsTests(TestCase):
 		self.client.force_login(self.root)
 
 	def test_the_admin_never_shows_a_stored_key_in_a_form_or_a_list(self):
-		from dashboard.models import NetlasAPIKey, OpenAiAPIKey
-		netlas = NetlasAPIKey.objects.create(key='nl-very-secret-value')
-		openai = OpenAiAPIKey.objects.create(key='sk-very-secret-value')
-		for url in (f'/admin/dashboard/netlasapikey/{netlas.pk}/change/', f'/admin/dashboard/openaiapikey/{openai.pk}/change/',
-					f'/admin/dashboard/netlasapikey/', f'/admin/dashboard/openaiapikey/'):
+		from dashboard.models import ChaosAPIKey
+		chaos = ChaosAPIKey.objects.create(key='ch-very-secret-value')
+		for url in (f'/admin/dashboard/chaosapikey/{chaos.pk}/change/', '/admin/dashboard/chaosapikey/'):
 			response = self.client.get(url)
 			self.assertEqual(response.status_code, 200, url)
 			self.assertNotContains(response, 'very-secret-value')

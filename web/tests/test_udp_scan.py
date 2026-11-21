@@ -89,8 +89,7 @@ class UdpBase(TestCase):
 		self.domain = Domain.objects.create(name='udp.test', project=self.project, insert_date=now)
 		self.engine = EngineType.objects.create(engine_name='e', yaml_configuration='x', default_engine=True)
 		self.scan = ScanHistory.objects.create(domain=self.domain, scan_type=self.engine, start_scan_date=now, scan_status=2, results_dir='/tmp')
-		for p in (mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False),
-		          mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.run_hygiene_task.delay'),
+		for p in (mock.patch('cveFeed.tasks.run_hygiene_task.delay'),
 		          mock.patch('cveFeed.udp_scan.CLAIM_KEY', 'cvengine:udpscan:test'),
 		          # These fixtures do not build full core-stage coverage; the deep-scan coverage gate (see
 		          # cveFeed.coverage_topup.backlog_exists, tests/test_coverage_gate.py) is exercised on its own there.
@@ -174,12 +173,10 @@ class FlagTests(SimpleTestCase):
 			with mock.patch.dict(os.environ, {'CVENGINE_UDPSCAN': value}):
 				self.assertFalse(udp_scan.enabled(), value)
 
-	def test_the_heavy_kind_and_queue_are_registered(self):
+	def test_the_task_and_queue_are_registered(self):
 		from cveFeed.tasks import background_full_scan, udp_scan_sweep
 		from agentapi import system_status
 		self.assertEqual((udp_scan_sweep.name, udp_scan_sweep.queue), ('udp_scan_sweep', 'udp_queue'))
-		self.assertEqual(resources.MAX_CONCURRENT['nmap-udp-bg'], 1)
-		self.assertIn('nmap-udp-bg', resources.BASE_COSTS_MB)
 		self.assertIn('udp_queue', system_status.QUEUES)
 		here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 		with open(os.path.join(here, 'celery-entrypoint.sh'), encoding='utf-8') as handle:
@@ -651,7 +648,7 @@ class GatingTests(UdpBase):
 	def test_a_host_that_resolves_somewhere_blocked_is_skipped(self):
 		self.ip('192.0.2.1', name='rebind.udp.test')
 		ok = self.ip('192.0.2.2', name='fine.udp.test')
-		with mock.patch('targetApp.target_types.resolves_to_blocked', side_effect=lambda name: name.startswith('rebind')):
+		with mock.patch('targetApp.target_types.blocked_address', side_effect=lambda name, project=None: name.startswith('rebind')):
 			self.assertEqual(udp_scan.pick().pk, ok.pk)
 
 	def test_an_archived_host_is_not_scanned(self):

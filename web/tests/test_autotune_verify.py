@@ -13,7 +13,7 @@ from django.utils import timezone
 from cveFeed import autotune, autotune_policy as policy, autotune_signals as signals
 from cveFeed.models import AutoTuneSettings, ScanControl, TuningDecision
 from reNgine import resources
-from tests.test_autotune import (BASE, BATCH, DEPTH, DISCOVERY32, NMAP8, NOW, REFRESH_GAP, SETTLED, SETTINGS, STAGE16, TWO_SENTINELS, WORK_GAP, Isolated,
+from tests.test_autotune import (BASE, BATCH, DEPTH, DISCOVERY32, NOW, REFRESH_GAP, SETTLED, SETTINGS, STAGE16, TWO_SENTINELS, WORK_GAP, Isolated,
                                  change, decide, history, merge)
 
 QUEUE_BEFORE = {'discovery': {'active': 8, 'ceiling': 8, 'queued': 40}, 'sentinel': {'live': 2, 'slots': 9}}
@@ -49,9 +49,6 @@ class VerdictTests(SimpleTestCase):
         ('assess_oldest_s', 7200, 600, 'helped'),
         ('assess_oldest_s', 3600, 3000, 'no_effect'),
         ('assess_oldest_s', 600, 3000, 'regressed'),
-        ('wait_share', 1.0, 0.2, 'helped'),
-        ('wait_share', 0.2, 0.9, 'regressed'),
-        ('wait_share', 0.5, 0.45, 'no_effect'),
         ('conductor_saturated_share', 1.0, 0.0, 'helped'),
         ('conductor_idle_share', 0.0, 1.0, 'regressed'),
         ('sentinel_idle_share', 0.9, 0.3, 'helped'),
@@ -88,11 +85,13 @@ class VerdictTests(SimpleTestCase):
             self.assertNotEqual(got.outcome, 'helped')
         for broken in ({}, {'metric': 'made_up', 'value': 1}, {'metric': None}):
             self.assertEqual(policy.verdict(broken, before('discovery_queue', 1)).outcome, 'unknown')
-        self.assertEqual(policy.verdict(before('discovery_queue', 40), before('wait_share', 0.1)).outcome, 'unknown')  # not the same measurement
+        self.assertEqual(policy.verdict(before('discovery_queue', 40), before('assess_oldest_s', 0.1)).outcome, 'unknown')  # not the same measurement
         # a regression the guards see is still a regression when the expected measurement is unknown
         self.assertEqual(policy.verdict(before('discovery_queue', None), before('discovery_queue', None, kills=1)).outcome, 'regressed')
 
     def test_every_metric_has_a_direction_floor_and_label_and_every_setting_a_metric(self):
+        self.assertNotIn('wait_share', policy.METRICS)  # runs waiting for a memory slot: no scanner runs on the server any more
+        self.assertEqual(policy.verdict(before('discovery_queue', 1), {'metric': 'wait_share', 'value': 0}).outcome, 'unknown')
         for name, (better, floor, label) in policy.METRICS.items():
             self.assertIn(better, ('lower', 'higher'))
             self.assertGreater(floor, 0)
@@ -102,7 +101,6 @@ class VerdictTests(SimpleTestCase):
                 self.assertIn(policy.expectation(setting, direction), policy.METRICS)
 
     def test_what_a_change_expects_to_improve(self):
-        self.assertEqual(policy.expectation(NMAP8, 'more'), 'wait_share')
         self.assertEqual(policy.expectation(DISCOVERY32, 'more'), 'discovery_queue')
         self.assertEqual(policy.expectation(BATCH, 'more'), 'assess_oldest_s')
         self.assertEqual(policy.expectation(DEPTH, 'more'), 'conductor_saturated_share')
@@ -125,19 +123,16 @@ class MeasureTests(SimpleTestCase):
         self.assertEqual(policy.measure(BATCH, history(3))['value'], 0.0)                              # nothing queued: a known zero
         self.assertIsNone(policy.measure(STAGE16, history(3))['value'])                                # no live Sentinel: not measured
         self.assertEqual(policy.measure(STAGE16, history(3, sentinel={'live': 2, 'slots': 9, 'in_use': 3}))['value'], 0.667)
-        self.assertIsNone(policy.measure(NMAP8, history(3, memory={'reported': False}))['value'])
-        self.assertEqual(policy.measure(NMAP8, history(3))['value'], 1.0)
         self.assertIsNone(policy.measure(DEPTH, history(3, conductor={'state': 'unknown'}))['value'])
         self.assertEqual(policy.measure(DEPTH, history(3, conductor={'state': 'saturated'}))['value'], 1.0)
         empty = policy.measure(DISCOVERY32, [])
         self.assertEqual((empty['value'], empty['trouble'], empty['n']), (None, None, 0))
 
     def test_kills_and_restarts_are_counted_and_unknown_when_nothing_measured_them(self):
-        got = policy.measure(DISCOVERY32, history(3, maint={'oom_kills_24h': 2, 'lane_restarts_24h': 1}, memory={'kills': 1}))
-        self.assertEqual((got['kills'], got['oom']), (3, 3))
+        got = policy.measure(DISCOVERY32, history(3, maint={'oom_kills_24h': 2, 'lane_restarts_24h': 1}))
+        self.assertEqual((got['kills'], got['oom']), (None, 3))  # nothing on the server counts kills of its own: only the kernel's and the lane restarts
         got = policy.measure(DISCOVERY32, history(3))
-        self.assertEqual((got['kills'], got['oom']), (0, None))
-        self.assertEqual(policy.measure(DISCOVERY32, history(3, memory={'reported': False}))['kills'], None)
+        self.assertEqual((got['kills'], got['oom']), (None, None))
 
     def test_trouble_is_what_the_trouble_rule_says(self):
         self.assertEqual(policy.measure(DISCOVERY32, history(3, memory={'free_frac': 0.05}), direction='less')['trouble'], 1)
@@ -204,11 +199,10 @@ class PauseEvidenceTests(SimpleTestCase):
     def test_a_memory_pause_is_trouble_for_what_holds_memory_only(self):
         busy = history(3)
         why = 'the watchdog paused the starting of work'
-        for setting in (DISCOVERY32, DEPTH, WORK_GAP, NMAP8):
-            self.assertEqual(policy.trouble(setting, busy, why), why, setting.key)  # nmap has two runs going in BASE
+        for setting in (DISCOVERY32, DEPTH, WORK_GAP):
+            self.assertEqual(policy.trouble(setting, busy, why), why, setting.key)
         for setting in (BATCH, STAGE16, REFRESH_GAP):
             self.assertIsNone(policy.trouble(setting, busy, why), setting.key)
-        self.assertIsNone(policy.trouble(NMAP8, history(3, memory={'running': {'nmap': 0}, 'waiting': {'nmap': 0}}), why))  # no run of it was going
         self.assertIsNone(policy.trouble(DISCOVERY32, busy))                               # no pause, no trouble
         plan = decide(DISCOVERY32, 16, 8, busy, past=SETTLED, pause=why)
         self.assertEqual((plan['phase'], plan['pressure'], plan['new']), ('back_off', True, 12))
@@ -334,17 +328,19 @@ class VerifyRunTests(Isolated, TestCase):
                                                 applied=True, phase='aim_high')
             TuningDecision.objects.filter(pk=old.pk).update(created_at=self.start - timedelta(hours=3))
         row = AutoTuneSettings.current()
-        row.values = {'discovery_concurrency': 8, 'heavy.nmap': 2, 'assess_batch': 16}
+        row.values = {'discovery_concurrency': 8, 'stage_parallel': 4, 'assess_batch': 16}
         row.save()
         autotune.publish(row)
         for i, s in enumerate(history(31, end=(self.start - timedelta(minutes=1)).timestamp())):
-            autotune.store_sample(merge(s, {'discovery': {'active': 8, 'ceiling': 8, 'queued': 30}}))
+            autotune.store_sample(merge(s, self.PROBING))
 
     BUSY = {'discovery': {'active': 8, 'ceiling': 8, 'queued': 30}}
+    # the discovery pool full with scans queued, and two Sentinels with free slots: the pool, the stage chunks and the refresh gap each have a probe to make
+    PROBING = {**BUSY, 'sentinel': {'live': 2, 'slots': 9, 'in_use': 3}}
 
     def test_only_one_calm_change_is_unverified_at_a_time(self):
         self.probing_state()
-        summary = self.run_at(0, self.BUSY)
+        summary = self.run_at(0, self.PROBING)
         probes = [c for c in summary['changes']]
         self.assertEqual(len(probes), 1, summary['changes'])
         first = TuningDecision.objects.get(pk=probes[0]['id'])
@@ -353,8 +349,8 @@ class VerifyRunTests(Isolated, TestCase):
         self.assertTrue(waiting, summary['settings'])  # others had a probe to make and waited
         self.assertTrue(autotune.calm_change_unverified())
         for minutes in (10, 20):
-            self.assertEqual(self.run_at(minutes, self.BUSY)['changes'], [], minutes)  # still unverified: nothing else calm
-        summary = self.run_at(30, self.BUSY)  # judged first, then the next calm change may go
+            self.assertEqual(self.run_at(minutes, self.PROBING)['changes'], [], minutes)  # still unverified: nothing else calm
+        summary = self.run_at(30, self.PROBING)  # judged first, then the next calm change may go
         self.assertEqual([j['id'] for j in summary['verified']], [first.pk])
         self.assertEqual(TuningDecision.objects.get(pk=first.pk).verified_at is not None, True)
         self.assertEqual(len(summary['changes']), 1)
@@ -362,9 +358,9 @@ class VerifyRunTests(Isolated, TestCase):
 
     def test_a_forced_back_off_does_not_wait_for_an_unverified_change(self):
         self.probing_state()
-        self.run_at(0, self.BUSY)
+        self.run_at(0, self.PROBING)
         self.assertTrue(autotune.calm_change_unverified())
-        summary = self.run_at(10, {'memory': {'free_frac': 0.05, 'running': {'nmap': 2}}})
+        summary = self.run_at(10, {'memory': {'free_frac': 0.05}})
         backs = [c for c in summary['changes']]
         self.assertTrue(backs)
         decisions = TuningDecision.objects.filter(pk__in=[c['id'] for c in backs])
@@ -391,7 +387,7 @@ class VerifyRunTests(Isolated, TestCase):
 
     def test_an_emergency_back_off_still_acts_with_a_change_unverified(self):
         self.probing_state()
-        self.run_at(0, self.BUSY)
+        self.run_at(0, self.PROBING)
         self.assertTrue(autotune.calm_change_unverified())
         from django.db import OperationalError
         row = AutoTuneSettings.current()
@@ -405,7 +401,7 @@ class VerifyRunTests(Isolated, TestCase):
                     mock.patch.object(autotune, '_resize_discovery_directly'):
                 results.append(autotune.run(self.start + timedelta(minutes=minutes)))
         self.assertEqual({c['setting']: (c['from'], c['to']) for c in results[1]['changes']}, {'discovery_concurrency': (24, 18), 'work_depth': (8, 6)})
-        self.run_at(30, self.BUSY)  # the database answers again: recorded, and not judged (nothing to compare)
+        self.run_at(30, self.PROBING)  # the database answers again: recorded, and not judged (nothing to compare)
         emergency = TuningDecision.objects.filter(phase='emergency')
         self.assertTrue(emergency.exists())
         self.assertFalse(emergency.exclude(outcome='').exists())

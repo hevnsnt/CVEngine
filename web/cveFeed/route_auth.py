@@ -334,12 +334,12 @@ def _chunks(items, size=CHUNK):
 
 
 def host_allowed(host, project=None):
-    """The SSRF gate: an IP must be one a scanner may touch (``project`` may authorise a tailnet device of its own), and a name must
-    not resolve to anything blocked."""
-    from targetApp.target_types import IP, classify_target, is_scannable_ip, resolves_to_blocked
+    """The SSRF gate: an IP must be one a scanner may touch (``project`` may authorise a tailnet device of its own). A name is not looked up here: the
+    Sentinel that runs the probe judges every address it resolves to when it connects (``target_types.blocked_address``)."""
+    from targetApp.target_types import IP, classify_target, is_scannable_ip
     if classify_target(host) == IP:
         return is_scannable_ip(host, project=project)
-    return not resolves_to_blocked(host)
+    return bool(str(host or '').strip())
 
 
 def _retired_endpoints(scan):
@@ -570,7 +570,8 @@ def _feed_inventory(scan, project, probed, now):
 def link_technologies(scan, probed):
     """Record what each host's front page says it runs (see cvengine_scanner.fingerprint) as the host's technologies in this scan, so the
     correlation engine reads a PHP version from an X-Powered-By header like any other detected technology. Only the root page of a
-    host speaks for the host; names already on the host are left alone. Returns the number of links added."""
+    host speaks for the host; a name already on the host is confirmed (its link's time, source ``route``: cveFeed.tech_links). Returns the number of links added."""
+    from cveFeed import tech_links
     from startScan.models import Subdomain, Technology
     names = {}
     for url, result in probed.items():
@@ -582,14 +583,11 @@ def link_technologies(scan, probed):
     if not names:
         return 0
     cache, added = {}, 0
-    for sub in Subdomain.objects.filter(scan_history_id=scan.id, name__in=list(names)).prefetch_related('technologies'):
-        have = {t.name for t in sub.technologies.all()}
-        new = []
-        for name in sorted(names.get(sub.name.lower(), ()) - have):
+    for sub in Subdomain.objects.filter(scan_history_id=scan.id, name__in=list(names)):
+        techs = []
+        for name in sorted(names.get(sub.name.lower(), ())):
             if name not in cache:
                 cache[name] = Technology.objects.filter(name=name).first() or Technology.objects.create(name=name)
-            new.append(cache[name])
-        if new:
-            sub.technologies.add(*new)
-            added += len(new)
+            techs.append(cache[name])
+        added += tech_links.link_host(sub, techs, tech_links.ROUTE)  # source route; a name the host already has is confirmed (its link's time)
     return added

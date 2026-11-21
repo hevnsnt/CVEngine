@@ -78,9 +78,12 @@ def edge_for(sub, project_id):
     return edge_of(sub, project_id, _probe_rows(project_id, sub.name.lower()), ((root.evidence or {}).get('headers') if root else None) or {})
 
 
-def _root_route(sub, project_id):
+def _root_route(sub, project_id, rows=None):
+    """The front page's route row (the https one when both were checked). ``rows``: the host's root rows in ``checked_at`` order, when the
+    caller read them already (``host_contexts``)."""
     from cveFeed.models import RouteAuth
-    rows = RouteAuth.objects.filter(project_id=project_id, host=sub.name.lower(), path='/', retired_at__isnull=True).order_by('checked_at')
+    if rows is None:
+        rows = RouteAuth.objects.filter(project_id=project_id, host=sub.name.lower(), path='/', retired_at__isnull=True).order_by('checked_at')
     chosen = None
     for row in rows:
         if chosen is None or row.url.startswith('https'):
@@ -181,12 +184,16 @@ def _os(sub, names):
 TAILSCALE_FACTS = ('os', 'client_version', 'tags', 'update_available')  # never the device name, its addresses or the signed-in user
 
 
-def _tailscale(project_id, host):
+_UNREAD = object()  # a pre-read single row that was not read (``host_contexts`` passes None for "read, and there is none")
+
+
+def _tailscale(project_id, host, row=_UNREAD):
     """What Tailscale said about the device this host is (a tailnet device is a target named by its tailnet address), or None: only the
     operating system, client version, tags, whether an update is available and whether it is online. Its name, hostname, addresses and the
     login of its owner stay out of a prompt (no host names or addresses, and a person's login is personal data)."""
     from cveFeed.models import TailscaleDevice
-    row = TailscaleDevice.objects.filter(project_id=project_id, domain__name=host, departed_at__isnull=True).first()
+    if row is _UNREAD:
+        row = TailscaleDevice.objects.filter(project_id=project_id, domain__name=host, departed_at__isnull=True).first()
     if row is None:
         return None
     facts = {k: _s(json.dumps(v, default=str) if isinstance(v, (list, dict)) else v, 100) for k, v in (row.facts or {}).items()
@@ -194,41 +201,51 @@ def _tailscale(project_id, host):
     return {'online': row.online, **facts}
 
 
-def _certificates(project_id, host):
+def _certificates(project_id, host, rows=None):
     from cveFeed.triage import note_raw
     from cveFeed.models import TlsCertificate
-    rows = TlsCertificate.objects.filter(domain__project_id=project_id, host=host)[:MAX_CERTS]
+    if rows is None:
+        rows = TlsCertificate.objects.filter(domain__project_id=project_id, host=host)[:MAX_CERTS]
     return [{'port': r.port, 'issuer': _s(r.issuer, 80), 'days_left': r.days_left, 'protocol': note_raw(r.protocol), 'legacy_tls': r.legacy_tls,
              'san_count': len(r.sans or [])} for r in rows]
 
 
-def _inventory(project_id, host):
+def _inventory(project_id, host, row=_UNREAD):
     """The host's own report (cveFeed.host_inventory), when that feature is installed: OS, kernel and package counts, never the list."""
     try:
         from cveFeed.models import HostInventory
     except ImportError:
         return None
-    row = HostInventory.objects.filter(project_id=project_id, host=host).order_by('-reported_at').first()
+    if row is _UNREAD:
+        row = HostInventory.objects.filter(project_id=project_id, host=host).order_by('-reported_at').first()
     if row is None:
         return None
     return {'os': _s(f'{row.os_name} {row.os_version}', 100), 'kernel': _s(row.os_kernel, 60), 'packages': row.package_count,
             'reported_at': row.reported_at.isoformat()}
 
 
-def _steps(project_id, host):
+def _steps(project_id, host, rows=None):
     from cveFeed.models import Triage
     out = []
-    for row in Triage.objects.filter(project_id=project_id, host=host).exclude(validation_steps=[]).order_by('-validated_at')[:4]:
+    if rows is None:
+        rows = Triage.objects.filter(project_id=project_id, host=host).exclude(validation_steps=[]).order_by('-validated_at')[:4]
+    for row in rows:
         for step in (row.validation_steps or [])[-3:]:
             out.append({'kind': _s(step.get('kind'), 20), 'result': _s(step.get('result'), 20), 'summary': _s(step.get('summary'), 160)})
     return out[:MAX_STEPS]
 
 
-def _matches(sub, names):
+MATCH_ORDER = ('-confidence', 'cve_entry__cve_id', 'matched_product', 'matched_version', 'source', 'id')
+MATCH_FIELDS = ('cve_entry__cve_id', 'matched_product', 'matched_version', 'version_in_range', 'ai_verdict')
+
+
+def _matches(sub, names, rows=None):
+    """The host's other CVE matches. ``rows``: their ``MATCH_FIELDS`` tuples in ``MATCH_ORDER``, when the caller read them already."""
     from cveFeed.models import CVEMatch
-    rows = CVEMatch.objects.filter(subdomain=sub).select_related('cve_entry').order_by('-confidence', 'cve_entry__cve_id', 'matched_product', 'matched_version', 'source', 'id')[:MAX_MATCHES]
-    return [{'cve': r.cve_entry.cve_id, 'product': _s(r.matched_product, 60, names), 'version': _s(r.matched_version, 40, names),
-             'in_range': r.version_in_range, 'verdict': r.ai_verdict} for r in rows]
+    if rows is None:
+        rows = CVEMatch.objects.filter(subdomain=sub).order_by(*MATCH_ORDER).values_list(*MATCH_FIELDS)[:MAX_MATCHES]
+    return [{'cve': cve, 'product': _s(product, 60, names), 'version': _s(version, 40, names), 'in_range': in_range, 'verdict': verdict}
+            for cve, product, version, in_range, verdict in rows]
 
 
 def _probe_rows(project_id, host):
@@ -260,17 +277,19 @@ def wordpress_summary(rows):
     return {'status': state, 'core': core, 'plugins': plugins[:40], 'themes': themes[:10]}
 
 
-def host_context(sub, project_id=None, focus=None):
+def host_context(sub, project_id=None, focus=None, pre=None):
     """The host's context dict (see the module docstring). ``sub`` is a Subdomain with ``technologies``, ``ip_addresses__ports`` and
-    ``waf`` ideally prefetched; ``focus`` (a product name) puts that product's leads and probe rows first. Pure reads, bounded."""
+    ``waf`` ideally prefetched; ``focus`` (a product name) puts that product's leads and probe rows first. Pure reads, bounded. ``pre``: what
+    ``host_contexts`` read for this host together with others (else each part is read here)."""
     from cveFeed import hosting, probes
     from cveFeed.models import HostLabel
     project_id = project_id or (sub.target_domain.project_id if sub.target_domain_id else None)
     host = sub.name.lower()
     names = _names_of(sub)
-    root = _root_route(sub, project_id)
+    pre = pre or {}
+    root = _root_route(sub, project_id, pre.get('routes'))
     evidence = dict((root.evidence or {}) if root else {})
-    rows = _probe_rows(project_id, host)
+    rows = pre['probes'] if 'probes' in pre else _probe_rows(project_id, host)
     route_headers = evidence.get('headers') or {}
     observed = {f['name']: f['source'] for f in evidence.get('fingerprints') or []}
     observed.update({(f'{r.product}:{r.version}' if r.version else r.product): r.source for r in rows if r.kind == 'version'})
@@ -290,9 +309,11 @@ def host_context(sub, project_id=None, focus=None):
         'ports': _ports(sub, names), 'web': web,
         'hosting': {k: _s(info.get(k), 60, names) for k in ('provider', 'kind', 'infrastructure')} | {'shared_ip': info['shared_ip']},
         'edge': {**edge, 'note': EDGE_NOTE if edge['fronted'] else ''},
-        'labels': sorted({_s(label, 40) for label in HostLabel.objects.filter(project_id=project_id, host=host).values_list('label', flat=True)[:30]}),
-        'operating_system': _os(sub, names), 'tailscale': _tailscale(project_id, host), 'certificates': _certificates(project_id, host), 'host_inventory': _inventory(project_id, host),
-        'probe_results': _probes(rows, names), 'earlier_checks': _steps(project_id, host), 'other_cve_matches': _matches(sub, names),
+        'labels': sorted({_s(label, 40) for label in (pre['labels'] if 'labels' in pre else
+                                                      HostLabel.objects.filter(project_id=project_id, host=host).values_list('label', flat=True)[:30])}),
+        'operating_system': _os(sub, names), 'tailscale': _tailscale(project_id, host, pre.get('tailscale', _UNREAD)),
+        'certificates': _certificates(project_id, host, pre.get('certificates')), 'host_inventory': _inventory(project_id, host, pre.get('inventory', _UNREAD)),
+        'probe_results': _probes(rows, names), 'earlier_checks': _steps(project_id, host, pre.get('steps')), 'other_cve_matches': _matches(sub, names, pre.get('matches')),
         'wordpress': wordpress_summary(rows),
         'rules': [UNVERSIONED_NOTE] + ([EDGE_NOTE] if edge['fronted'] else []),
     }
@@ -304,6 +325,76 @@ def host_context(sub, project_id=None, focus=None):
         context['notes'] = ['No host inventory report exists for this host: a kernel, driver or package level cannot be read from the network. '
                             'Only the host inventory reporter can place them.']
     return context
+
+
+def _top(queryset, partition, order, limit):
+    """The first ``limit`` rows of each ``partition`` of ``queryset`` in ``order``: one query for many hosts, where ``qs.order_by(*order)[:limit]`` would
+    be one per host."""
+    from django.db.models import F, Window
+    from django.db.models.functions import RowNumber
+    terms = [F(o[1:]).desc() if o.startswith('-') else F(o).asc() for o in order]
+    return queryset.annotate(_rank=Window(RowNumber(), partition_by=[F(partition)], order_by=terms)).filter(_rank__lte=limit).order_by(partition, *order)
+
+
+def _read_together(project_id, subs):
+    """``{host: pre}`` for ``host_context``: each table it reads, read once for all ``subs`` of one project (each host's part as the per-host query
+    would have returned it)."""
+    from cveFeed.models import CVEMatch, HostInventory, HostLabel, ProbeObservation, RouteAuth, TailscaleDevice, TlsCertificate, Triage
+    hosts = sorted({sub.name.lower() for sub in subs})
+    pre = {host: {'routes': [], 'probes': [], 'labels': [], 'tailscale': None, 'certificates': [], 'inventory': None, 'steps': []} for host in hosts}
+    for row in RouteAuth.objects.filter(project_id=project_id, host__in=hosts, path='/', retired_at__isnull=True).order_by('checked_at', 'id'):
+        pre[row.host]['routes'].append(row)
+    probes = ProbeObservation.objects.filter(project_id=project_id, host__in=hosts).exclude(kind='vhost').exclude(probe='openvas')
+    for row in _top(probes, 'host', ('-observed_at', '-id'), MAX_PROBES):
+        pre[row.host]['probes'].append(row)
+    for host, label in HostLabel.objects.filter(project_id=project_id, host__in=hosts).order_by('host', 'id').values_list('host', 'label'):
+        if len(pre[host]['labels']) < 30:
+            pre[host]['labels'].append(label)
+    for row in TailscaleDevice.objects.filter(project_id=project_id, domain__name__in=hosts, departed_at__isnull=True).select_related('domain').order_by('-id'):
+        if row.domain.name in pre:
+            pre[row.domain.name]['tailscale'] = row  # the lowest id last: the row ``.first()`` returns
+    for row in _top(TlsCertificate.objects.filter(domain__project_id=project_id, host__in=hosts), 'host', ('not_after', 'id'), MAX_CERTS):
+        pre[row.host]['certificates'].append(row)
+    for row in HostInventory.objects.filter(project_id=project_id, host__in=hosts).order_by('host', '-reported_at', '-id').distinct('host'):
+        pre[row.host]['inventory'] = row
+    steps = Triage.objects.filter(project_id=project_id, host__in=hosts).exclude(validation_steps=[]).only('host', 'validation_steps', 'validated_at')
+    for row in _top(steps, 'host', ('-validated_at', '-id'), 4):
+        pre[row.host]['steps'].append(row)
+    matches = {}
+    for row in _top(CVEMatch.objects.filter(subdomain_id__in={sub.pk for sub in subs}), 'subdomain_id', MATCH_ORDER, MAX_MATCHES).values_list('subdomain_id', *MATCH_FIELDS):
+        matches.setdefault(row[0], []).append(row[1:])
+    return pre, matches
+
+
+def prefetch_hosts(subs):
+    """Prefetch what ``host_context`` reads of each Subdomain (addresses, their ports, technologies, WAF rows) for all of ``subs`` at once. In id
+    order, the order a read of one host's rows returns them in (through the link table's unique index): the technologies' order is part of what
+    the model is shown, and so of a match's signature."""
+    from django.db.models import Prefetch, prefetch_related_objects
+
+    from startScan.models import IpAddress, Port, Technology
+    prefetch_related_objects([sub for sub in subs if sub is not None], Prefetch('ip_addresses', IpAddress.objects.order_by('id')),
+                             Prefetch('ip_addresses__ports', Port.objects.order_by('id')), Prefetch('technologies', Technology.objects.order_by('id')), 'waf')
+
+
+def host_contexts(subs, project_id=None):
+    """``{subdomain id: host_context(sub, project_id)}`` for many hosts at once: their ports, addresses, technologies and WAF rows are prefetched, and
+    every other table ``host_context`` reads is read once per project for all of them, not once per host (``triage.track`` describes hundreds of
+    matches on hundreds of hosts in one call). Same contexts as one call per host."""
+    unique = list({sub.pk: sub for sub in subs if sub is not None and sub.pk}.values())
+    if not unique:
+        return {}
+    prefetch_hosts(unique)
+    by_project = {}
+    for sub in unique:
+        pid = project_id or (sub.target_domain.project_id if sub.target_domain_id else None)
+        by_project.setdefault(pid, []).append(sub)
+    out = {}
+    for pid, group in by_project.items():
+        pre, matches = _read_together(pid, group)
+        for sub in group:
+            out[sub.pk] = host_context(sub, pid, pre={**pre[sub.name.lower()], 'matches': matches.get(sub.pk, [])})
+    return out
 
 
 def signal_digest(context):

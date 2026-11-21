@@ -248,27 +248,11 @@ def main():
         elif action == 'log':
             with os.fdopen(regular_fd(sys.argv[2]), 'rb') as source:
                 publish(web_fd, '.update-log', iter(lambda: source.read(65536), b''))
-        elif action == 'openvas-wanted':
-            # the OpenVAS switch the app asked for: "on" or "off", nothing else, read without following a link the container may have planted
-            try:
-                with os.fdopen(regular_fd('.openvas-wanted', dir_fd=web_fd), 'rb') as source:
-                    value = source.read(8).strip()
-            except (FileNotFoundError, OSError, ValueError):
-                return
-            if value in (b'on', b'off'):
-                print(value.decode('ascii'))
-        elif action == 'openvas-applied':
-            # the answer scripts/openvas-sync.sh leaves for the app: one line of JSON, published like every other state file
-            row = json.loads(sys.argv[2])
-            if (not isinstance(row, dict) or row.get('want') not in ('on', 'off') or row.get('state') not in ('applying', 'ok', 'failed')
-                    or not isinstance(row.get('ok'), bool) or not isinstance(row.get('error'), str) or len(row['error']) > 200
-                    or not isinstance(row.get('at'), int)):
-                raise ValueError('invalid OpenVAS answer')
-            publish(web_fd, '.openvas-applied', [json.dumps(row).encode('utf-8') + b'\n'])
-        elif action in ('sentinels-choice', 'plan-wanted'):
+        elif action in ('sentinels-choice', 'sentinels-peek', 'plan-wanted'):
             # the answer to "which scanners run" the app handed over: one of internal, both, external, nothing else, read without following a link the
-            # container may have planted. sentinels-choice (it rides with an update approval) is removed once read; plan-wanted stays until plan-done.
-            name = '.update-sentinels' if action == 'sentinels-choice' else '.scanner-plan-wanted'
+            # container may have planted. sentinels-choice (it rides with an update approval) is removed once read; sentinels-peek reads the same file and
+            # leaves it (scripts/apply-update.sh reads it once per run and removes it with the approval); plan-wanted stays until plan-done.
+            name = '.scanner-plan-wanted' if action == 'plan-wanted' else '.update-sentinels'
             try:
                 with os.fdopen(regular_fd(name, dir_fd=web_fd), 'rb') as source:
                     value = source.read(16).strip()
@@ -303,18 +287,9 @@ def main():
                 if code != 'scanner_kept' or not re.fullmatch(r'\d+[kmg]?', limit) or not 0 <= externals <= 100000:
                     raise ValueError('invalid update notice')
                 publish(web_fd, '.update-notice.json', [json.dumps({'code': code, 'limit': limit, 'externals': externals, 'at': time.time()}).encode('utf-8') + b'\n'])
-        elif action == 'openvas-restarted':
-            # the answer to web/.openvas-restart (scripts/openvas-sync.sh restart-gvmd): when the request was carried out, so it runs once
-            publish(web_fd, '.openvas-restarted', [json.dumps({'at': int(time.time()), 'ok': sys.argv[2:3] == ['ok']}).encode('ascii') + b'\n'])
         elif action == 'scanner-update-done':
             # scripts/update-watch.sh started the scanner update the app asked for (web/.scanner-update-requested): one marker, so one request runs once
             publish(web_fd, '.scanner-update-done', [json.dumps({'at': int(time.time())}).encode('ascii') + b'\n'])
-        elif action == 'openvas-log':
-            # the tail of the host-private log of the OpenVAS switch, for the app's "see web/.openvas-log" hint
-            with os.fdopen(regular_fd(sys.argv[2]), 'rb') as source:
-                size = os.fstat(source.fileno()).st_size
-                source.seek(max(0, size - 65536))
-                publish(web_fd, '.openvas-log', [source.read(65536)])
         elif action == 'cert-status':
             # the outcome of scripts/renew-certs.sh for the app (Settings > Updates, get_system_status): result, the certificate's notAfter as
             # openssl prints it ("Nov 30 00:33:02 2027 GMT", empty when unknown: the earlier value is kept) and an error line. renewed_at

@@ -37,6 +37,8 @@ TICK_SECONDS = 40            # a tick ends itself after this long (the command k
 # R1 and R2 may act 16 times a day (not 4): a worker container that crashes every quarter of an hour needs a restart each time it goes silent, and a rule that has
 # used its day leaves a hung lane hung (the owner's server, 2026-11-09: the cap of 4 was spent by 9:28 am and a lane stood silent for 50 minutes). The loop
 # protection is the flap guard (an action that did not fix it holds the rule for an hour), the 15 minute gap and the host's own limit.
+PROCESS_SECONDS = 50         # the whole command, from the moment its process started, ends within this (scripts/watchdog.sh kills it at 55). TICK_SECONDS counts from the start of the tick, not of the process: on 11/12 the web container needed 15 s or more to import Django on the loaded VPS, a full tick then ran past 55 s and was killed ("tick failed (exit 124)", 399 times by 11/15) before it could record or print anything
+MIN_TICK_SECONDS = 5         # less than this left after start-up and the tick would only be cut off: it says so and does nothing
 VERIFY_SECONDS = 120         # R10: the check that follows an action
 HOST_WAIT_SECONDS = 600      # a host request nobody carried out in this long is a watchdog that is not running on the host
 HOLD_SECONDS = 3600          # R10: after an action that did not work, nothing more for this rule for this long
@@ -132,6 +134,9 @@ def _lanes_text(names):
 
 # R1 ----------------------------------------------------------------------------------------------------------------------------
 
+ALIVE_EXCUSE_SECONDS = 900  # a lane that answers no ping but keeps beating is excused this long; after that its remote control is down and the restart is justified
+
+
 def check_lanes(ctx):
     snap = ctx.snap
     if not snap.get('redis_ok') or snap.get('lanes') is None:
@@ -142,18 +147,102 @@ def check_lanes(ctx):
         from reNgine import lane_memory
         finished = lane_memory.recent_progress()
         running = lane_memory.in_flight()
+        beating = lane_memory.alive()
     except Exception:  # noqa: BLE001 - no evidence of work means the old rule: a silent lane is absent
-        finished, running = {}, {}
-    working = set(finished) | set(running)
+        finished, running, beating = {}, {}, {}
+    since = _silent_since(ctx, silent)
+    # A lane that finished a task lately or has one in flight is working. A lane that is idle is alive while its own beat is fresh: the beat is the worker's own
+    # greenlet, so it answers "is this lane there" through a 25 s collection that a 3 s ping cannot wait for. It stops when the process is dead or stalled for good.
+    # A lane silent to ping for ALIVE_EXCUSE_SECONDS is not excused by its beat alone: its remote control is down, which a restart repairs.
+    beat_ok = {lane: age for lane, age in beating.items() if ctx.epoch - since.get(lane + '_worker', ctx.epoch) <= ALIVE_EXCUSE_SECONDS}
+    working = set(finished) | set(running) | set(beat_ok)
     absent = [p for p in silent if p.removesuffix('_worker') not in working]  # the lane table says cve_feed_worker, the memory report cve_feed
     queues = snap.get('queues') or {}
     if not absent:
+        _count_checks(ctx, False)
         if silent:
-            return Check(False, f'All four worker lanes answer, except {_lanes_text(silent)}, which missed a ping but is at work ({_work_evidence(silent, finished, running)}): busy, not gone.')
+            doing = _work_evidence(silent, finished, running)
+            if doing:
+                return Check(False, f'All four worker lanes answer, except {_lanes_text(silent)}, which missed a ping but is at work ({doing}): busy, not gone.')
+            return Check(False, f'All four worker lanes answer, except {_lanes_text(silent)}, which missed a ping but is alive ({_beat_evidence(silent, beat_ok)}): not gone.')
         return Check(False, 'All four worker lanes answer.')
     waiting = {LANE_WORDS.get(p, p): queues.get(status[p]['queue'], 0) for p in absent}
+    _count_checks(ctx, True)
     parts = ', '.join(f'{w}: {n} waiting' for w, n in waiting.items())
-    return Check(True, f'No answer from the {_lanes_text(absent)} lane{"s" if len(absent) != 1 else ""} ({parts}).', {'absent': absent, 'waiting': waiting})
+    evidence = {'absent': absent, 'waiting': waiting, 'answered': sorted(n for p, lane in status.items() if lane['present'] for n in lane['workers']),
+                'ping_seconds': snapshot.PING_SECONDS, 'snapshot_seconds': snap.get('seconds')}
+    evidence.update(_lane_signs(absent))
+    excused_out = [p for p in absent if p.removesuffix('_worker') in beating]
+    if excused_out:
+        evidence['remote_control_down'] = excused_out
+    return Check(True, f'No answer from the {_lanes_text(absent)} lane{"s" if len(absent) != 1 else ""} ({parts}).', evidence)
+
+
+def _silent_since(ctx, silent):
+    """{lane prefix: epoch of the first check of the current run in which it did not answer}, kept in R1's state; a lane that answers is dropped."""
+    state = ctx.states.get('R1')
+    held = dict(((state.data or {}) if state else {}).get('silent_since') or {})
+    since = {p: held.get(p, ctx.epoch) for p in silent}
+    if state is not None:
+        state.data = {**(state.data or {}), 'silent_since': since}
+    return since
+
+
+def _beat_evidence(silent, beat_ok):
+    return '; '.join(dict.fromkeys(f'its own heartbeat is {beat_ok[p.removesuffix("_worker")]} seconds old' for p in silent if p.removesuffix('_worker') in beat_ok))
+
+
+def _count_checks(ctx, missed):
+    """R1's own count of the checks in a row that found a lane silent (a check that could not ask, or a tick that was cut off, does not count and does not reset it): the log
+    says how many looks the 3 minutes rest on."""
+    state = ctx.states.get('R1')
+    if state is None:
+        return
+    data = dict(state.data or {})
+    data['silent_checks'] = int(data.get('silent_checks') or 0) + 1 if missed else 0
+    state.data = data
+
+
+def _lane_signs(absent):
+    """What the silent lanes' own records say, for the log: the age of each one's liveness record, what it had in flight, the worst garbage collection it published."""
+    out = {'beat': {}, 'gc_worst_s': {}}
+    try:
+        from reNgine import lane_memory
+        now = time.time()
+        beats = lane_memory.beats(now)
+        for p in absent:
+            lane = p.removesuffix('_worker')
+            if lane in beats:
+                out['beat'][lane] = beats[lane]
+            gc = lane_memory.gc_timing(lane, now)
+            if gc and gc.get('worst_s') is not None:
+                out['gc_worst_s'][lane] = gc['worst_s']
+    except Exception:  # noqa: BLE001 - the signs are for the log; their absence changes nothing
+        logger.debug('watchdog: could not read the lane records', exc_info=True)
+    return out
+
+
+def silence_report(rule_code, chk, silent_seconds, checks=None):
+    """One plain line for every restart request: which lane was silent, for how long, what the ping returned and why the watchdog acted. Goes into the event row, the web log
+    and the notice, so the cause of a restart is read from a record and not inferred afterwards."""
+    ev = chk.evidence or {}
+    absent = ev.get('absent') or []
+    if not absent:
+        return f'{rule_code}: {chk.text}'
+    lanes = ', '.join(f'{p.removesuffix("_worker")} (queue {ev.get("waiting", {}).get(LANE_WORDS.get(p, p), "?")} waiting)' for p in absent)
+    bits = [f'silent lane: {lanes}', f'silent for {int(silent_seconds)} s' + (f' over {checks} checks in a row' if checks else '')]
+    ans = ev.get('answered') or []
+    bits.append(f'ping: no reply within {ev.get("ping_seconds", snapshot.PING_SECONDS)} s from {", ".join(a.split("@")[0] for a in absent)}; replied: {", ".join(a.split("@")[0] for a in ans) or "nobody"}')
+    for p in absent:
+        lane = p.removesuffix('_worker')
+        beat = (ev.get('beat') or {}).get(lane)
+        bits.append(f'{lane} liveness record: ' + (f'{beat["age_seconds"]} s old, {len(beat["running"])} task(s) in flight' if beat else 'none'))
+        if lane in (ev.get('gc_worst_s') or {}):
+            bits.append(f'{lane} worst collection {ev["gc_worst_s"][lane]} s')
+    if ev.get('snapshot_seconds') is not None:
+        bits.append(f'snapshot took {ev["snapshot_seconds"]} s')
+    bits.append('reason: ' + ('no ping reply for the whole confirm time, and its heartbeat is fresh but the lane has answered no ping for over ' + str(ALIVE_EXCUSE_SECONDS // 60) + ' minutes (remote control down)' if ev.get('remote_control_down') else 'no ping reply for the whole confirm time and no sign of life or work'))
+    return f'{rule_code} restart-celery: ' + '; '.join(bits)
 
 
 def _work_evidence(silent, finished, running):
@@ -537,13 +626,11 @@ def check_pressure(ctx):
 def act_pressure(ctx, chk):
     """Pause the automatic starting of heavy work (running work carries on), and for disk ask the host for the safe prune."""
     from cveFeed import scan_control
-    from cveFeed.models import ScanControl
     why = 'disk nearly full' if chk.evidence.get('disk') else 'memory nearly full'
     paused = False
     try:
-        if not ScanControl.objects.filter(pk=1, paused=True).exists():
-            scan_control.request_drain_pause(PAUSE_REASON + why)
-            paused = True
+        # its own pause (scan_control.OWNER_WATCHDOG), not an update's: no update window, no held Sentinel leases, and an update's release leaves it
+        paused = scan_control.request_pressure_pause(why)
     except Exception:  # noqa: BLE001
         logger.warning('watchdog: could not pause the starting of work', exc_info=True)
     state = ctx.states['R7']
@@ -558,14 +645,11 @@ def act_pressure(ctx, chk):
 def release_pressure_pause(ctx):
     """Resume what R7 paused, once the pressure has been gone for a while (only a pause the watchdog set, never a person's)."""
     from cveFeed import scan_control
-    from cveFeed.models import ScanControl
     state = ctx.states['R7']
     if not (state.data or {}).get('paused_at'):
         return None
-    row = ScanControl.objects.filter(pk=1).first()
     state.data = {k: v for k, v in (state.data or {}).items() if k not in ('paused_at', 'paused_for')}
-    if row and row.paused and row.paused_by_update and str(row.reason).startswith(PAUSE_REASON):
-        scan_control.release_update_pause()
+    if scan_control.release_pressure_pause():  # its own pause only; it never closes an update's window
         return 'resumed the automatic starting of work'
     return None
 
@@ -954,7 +1038,11 @@ def _act(rule, state, ctx, chk):
         _record_action(state, ctx)
         state.verify = {'action': rule.host_action, 'host_id': req['id'], 'requested_at': now_iso, 'symptom_at': symptom_at, 'acted_at': now_iso}
         _set(state, 'acting', f'Asked the host to {rule.host_action.replace("-", " ")}.')
-        event(rule.code, 'action', observation=chk.text, action=rule.host_action, result='Asked the host to carry it out.', request=req['id'])
+        silent_for = (ctx.now - state.fire_since).total_seconds() if state.fire_since else 0
+        report = silence_report(rule.code, chk, silent_for, (state.data or {}).get('silent_checks')) if rule.code == 'R1' else f'{rule.code} {rule.host_action}: {chk.text} (seen for {int(silent_for)} s)'
+        logger.warning('watchdog %s: %s (request %s)', rule.code, report, req['id'])
+        event(rule.code, 'action', observation=chk.text, action=rule.host_action, result=('Asked the host to carry it out. ' + report)[:500], request=req['id'],
+              silent_seconds=int(silent_for), report=report[:900], evidence={k: v for k, v in (chk.evidence or {}).items() if k in ('absent', 'waiting', 'answered', 'ping_seconds', 'snapshot_seconds', 'beat', 'gc_worst_s', 'hung')})
         notice(rule.code, 'warning', f'{rule.notice_title or rule.title}; the watchdog is {rule.doing or "acting"}', notice_detail)
         return True
     if rule.act:
@@ -1156,6 +1244,26 @@ def _expire_open_problem_notice(rule):
 
 def _alarm(signum, frame):
     raise TickTimeout()
+
+
+def process_age_seconds():
+    """Seconds since this process started (0.0 where /proc cannot say): the start-up of Django is part of the command's time."""
+    try:
+        with open('/proc/self/stat') as f:
+            started_ticks = int(f.read().rsplit(')', 1)[1].split()[19])
+        with open('/proc/uptime') as f:
+            uptime = float(f.read().split()[0])
+        return max(0.0, uptime - started_ticks / os.sysconf('SC_CLK_TCK'))
+    except (OSError, ValueError, IndexError):
+        return 0.0
+
+
+def tick_budget(age):
+    """``(tick limit, hard limit)`` in seconds from now for a process that is ``age`` seconds old, or None when too little of ``PROCESS_SECONDS`` is left to be worth a tick."""
+    left = PROCESS_SECONDS - age
+    if left < MIN_TICK_SECONDS:
+        return None
+    return min(TICK_SECONDS, left - 2), min(TICK_SECONDS + 8, left)
 
 
 def tick(now=None, probes=None, limit=TICK_SECONDS, alarm=True):

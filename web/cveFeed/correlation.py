@@ -9,7 +9,9 @@ which is what makes exposure precise rather than noisy.
 The version/name helpers are pure Python (no Django import) so they are unit
 testable on their own.
 """
+import json
 import logging
+import os
 import re
 from functools import cmp_to_key
 
@@ -20,6 +22,7 @@ from cveFeed import distro as distro_lib
 from cveFeed import js_libraries
 from cveFeed import match_policy
 from cveFeed import runzero
+from cveFeed import service_features
 
 logger = logging.getLogger(__name__)
 
@@ -63,8 +66,78 @@ def split_name_version(tech_name):
     if ":" in name:
         base, _, ver = name.rpartition(":")
         if ver and ver[0].isdigit():
-            return base.strip(), ver.strip()
+            return base.strip(), stated_version(base, ver.strip())
+    slash = split_slash_version(name)
+    if slash:
+        return slash[0], slash[1]
     return name, ""
+
+
+# A Server-header token stored whole as a product or a technology name ("nginx/1.28.3", "awselb/2.0", "nginx/1.24.0 (Ubuntu)"): nmap's
+# http-server-header script fills an unidentified service's product with the header, so the version sits in the name and the name matches
+# nothing. The product is one word (no space, no "/" or ":", so never a path or a URL) and what follows the "/" is a version (digits and
+# dots, a "v" before it allowed), then the end or a space (a comment, a module). A protocol's own "HTTP/1.1" is not a product.
+_SLASH_VERSION_RE = re.compile(r"^([A-Za-z][A-Za-z0-9._+-]*)/[vV]?(\d+(?:\.\d+)*)(?:\s+(.*))?$", re.DOTALL)
+_PROTOCOL_NAMES = frozenset({"http", "https", "spdy", "quic", "tls", "ssl", "dtls", "sip", "rtsp", "rtp", "ftp", "smtp", "h2", "h3"})
+
+
+def split_slash_version(text):
+    """``(product, version, rest)`` of a ``product/version`` Server-header token stored as a name, or None when the text is not one (a path,
+    a URL, ``foo/bar``, a protocol). ``rest`` is what followed it: the comment without its parentheses ("Ubuntu") or the next tokens. A bare
+    major or a SKU ("Microsoft-Azure-Application-Gateway/v2") is no version (it would sit inside every "before 2.x" range), and a protocol's
+    version (``stated_version``: Microsoft-HTTPAPI/2.0) is never the product's: the product is still split off, without one."""
+    found = _SLASH_VERSION_RE.match(str(text or "").strip()[:500])
+    if not found or found.group(1).lower() in _PROTOCOL_NAMES:
+        return None
+    product, number, rest = found.group(1), found.group(2), (found.group(3) or "").strip()
+    if rest.startswith("(") and rest.endswith(")") and rest.count("(") == 1:
+        rest = rest[1:-1].strip()
+    return product, stated_version(product, number if "." in number else ""), rest
+
+
+def split_port_product(product, version=""):
+    """``(product, version, rest)`` of a stored port product as correlation reads it: a ``product/version`` header token is split
+    (``split_slash_version``), a version the scanner stated in its own column wins, and a protocol's version is dropped."""
+    product, version = str(product or "").strip(), str(version or "").strip()
+    slash = split_slash_version(product)
+    if slash:
+        return slash[0], stated_version(slash[0], version) or slash[1], slash[2]
+    return product, stated_version(product, version), ""
+
+
+def stored_technology_name(name):
+    """A technology name in the stored form ("Name" or "Name:version"): a ``product/version`` header token becomes ``product:version``."""
+    slash = split_slash_version(name)
+    if not slash:
+        return name
+    return f"{slash[0]}:{slash[1]}" if slash[1] else slash[0]
+
+
+def stated_version(name, version):
+    """``version``, or "" when the name's "/x.y" is the version of a protocol or an API, never of the product
+    (``protocol_versions`` in data/product_aliases.json: Microsoft-HTTPAPI/2.0 is the HTTP Server API's version, not a Windows build)."""
+    return "" if version and _norm(name) in PROTOCOL_VERSION_NAMES else version
+
+
+# a technology template named for the product ("Nginx version", "Microsoft IIS Detect"): the technology pass drops the word now, rows an
+# earlier build stored still carry it
+_TEMPLATE_WORD_RE = re.compile(r"\s+(?:version|detect|detected|detection|fingerprint)\s*$", re.IGNORECASE)
+
+
+def tech_name(name):
+    """The product a stored technology name names, as correlation matches it: the name without a trailing template word, and a
+    detector's name for a reading that names another product (``renames`` in data/product_aliases.json: "AspNet Version Disclosure" is
+    the X-AspNet-Version header, read as ASP.NET and then as its CLR line by ``read_technology``)."""
+    stripped = _TEMPLATE_WORD_RE.sub("", name or "")
+    stripped = stripped if stripped.strip() else (name or "")
+    return TECH_RENAMES.get(_norm(stripped), stripped)
+
+
+def read_technology(stored):
+    """``(name, version)`` of a stored technology as correlation reads it: split (``split_name_version``), the template word and a
+    detector's name dropped (``tech_name``), and an X-AspNet-Version CLR line read as the .NET Framework's (``versions.legacy_aspnet``)."""
+    name, version = split_name_version(stored or "")
+    return versions.legacy_aspnet(tech_name(name), version)
 
 
 _EPOCH_RE = re.compile(r"^\s*\d+:(?=\d)")  # a dpkg/rpm epoch: "1:8.9p1-3ubuntu0.6"
@@ -81,7 +154,19 @@ _MARIADB_PREFIX_RE = re.compile(r"^5\.5\.5-(?=\d)")
 # Junos: 22.4R2-S2 is the second service release of release 2 of 22.4, so 22.4R2 < 22.4R2-S1 < 22.4R2-S2 < 22.4R3 < 23.2R1. The release and the
 # service release become the third and fourth components. Only a two-part version of 8 or later followed by an upper-case R and a number
 # (the form Juniper alone uses), so no other version string is read differently.
-_JUNOS_RELEASE_RE = re.compile(r"^R(\d+)(?:-S(\d+))?(?![0-9A-Za-z])")
+_JUNOS_RELEASE_RE = re.compile(r"^R(\d+)(?:-S(\d+)|\.(\d+))?(?![0-9A-Za-z])")
+# Ivanti and Pulse Connect Secure write a service release the same way with a dot: 22.7R2.5 is the fifth service release of 22.7R2, so
+# 22.7R2 < 22.7R2.4 < 22.7R2.5 < 22.7R3 (the third group above; Junos's own respins, 15.1R7.9, order the same way).
+# NetScaler (Citrix ADC and Gateway) names a build of a release train: 13.1-49.15 is build 49.15 of 13.1, so 13.1-48.47 < 13.1-49.15 < 14.1-4.42.
+# Only a two-part train of 10 or later followed by a dash and a two-part build; it reads as a patched release (an upper bound "13.1" names the
+# whole train, as "8.9" does for 8.9p1).
+_TRAIN_BUILD_RE = re.compile(r"^-(\d{1,3})\.(\d{1,4})(?![\d.A-Za-z])")
+# PAN-OS names a hotfix of a release: 10.2.9-h1 is the first hotfix of 10.2.9, so 10.2.9 < 10.2.9-h1 < 10.2.9-h3 < 10.2.10.
+_HOTFIX_RE = re.compile(r"^-h(\d{1,3})(?![0-9A-Za-z])")
+# ImageMagick's "7.1.2-35": a numeric revision after a dash, a release of its own (7.1.2-35 is not 7.1.2-4). Never a distribution build
+# ("2.4.57-11.el9", "1.18.0-6ubuntu14": the lookahead refuses a dot or a letter after the number). VMware ESXi's build reads the same way:
+# "7.0.3-21930508" is build 21930508 of 7.0 Update 3 (``esxi_ranges``), so it orders against another 7.0.3 build by the build number.
+_DASH_REVISION_RE = re.compile(r"^-(\d{1,9})(?![\d.A-Za-z_+~])")
 _DATE_RE = re.compile(r"^(\d{4})[-/](\d{1,2})(?:[-/](\d{1,2}))?(?![\d.])")
 _PRE_RANK = {"dev": -6, "snapshot": -6, "alpha": -5, "a": -5, "beta": -4, "b": -4, "m": -3, "pre": -2, "cr": -1, "rc": -1}
 
@@ -106,7 +191,7 @@ def parse_version(value, strict=False):
     start with a digit, so a ref like "main" or a hash can never be read as version 3."""
     if not value:
         return None
-    text = _EPOCH_RE.sub("", str(value)).strip()
+    text = _EPOCH_RE.sub("", str(value)).strip().replace("\\", "")  # a CPE escapes "15.2\\(4\\)m7"
     if text[:1] in ("v", "V") and text[1:2].isdigit():
         text = text[1:]
     text = _MARIADB_PREFIX_RE.sub("", text)  # MariaDB's handshake says "5.5.5-10.6.12-MariaDB": the real version follows the prefix
@@ -116,6 +201,13 @@ def parse_version(value, strict=False):
     match = None if dated else (_VER_RE.match(text) if strict else _VER_RE.search(text))
     if not match and not dated:
         return None
+    if match and text[match.end():match.end() + 1] == "(":
+        # a Cisco build ("15.2(4)M7"): never a range bound, and as a host's version it can only equal a listed build (``_Build``)
+        if strict:
+            return None
+        build = _Build(int(part) for part in match.group(1).split("."))
+        build.text = build_key(text[match.start():].split()[0])
+        return build
     try:
         parts = [int(part) for part in dated.groups(default="0")[:3]] if dated else [int(part) for part in match.group(1).split(".")]
     except ValueError:
@@ -125,7 +217,18 @@ def parse_version(value, strict=False):
     rest = text[match.end():]
     junos = _JUNOS_RELEASE_RE.match(rest) if len(parts) == 2 and parts[0] >= 8 else None
     if junos:
-        return tuple(parts + [int(junos.group(1)), int(junos.group(2) or 0)])
+        return tuple(parts + [int(junos.group(1)), int(junos.group(2) or junos.group(3) or 0)])
+    train = _TRAIN_BUILD_RE.match(rest) if len(parts) == 2 and parts[0] >= 10 else None
+    if train:
+        return _patched(parts, parts + [int(train.group(1)), int(train.group(2))])
+    hotfix = _HOTFIX_RE.match(rest) if len(parts) == 3 else None
+    if hotfix:
+        return _patched(parts, parts + [int(hotfix.group(1))])
+    revision = _DASH_REVISION_RE.match(rest) if len(parts) >= 3 else None
+    if revision:  # the release as before, carrying its revision: ``_vcmp`` orders two versions that both carry one by it (7.1.2-4 < 7.1.2-35)
+        out = _Revised(parts)
+        out.revision = int(revision.group(1))
+        return out
     pre = _PRE_RE.match(rest)
     if pre and (pre.group(1) or pre.group(3)):
         parts += [_PRE_RANK[(pre.group(1) or pre.group(2)).lower()], int(pre.group(3) or 0)]
@@ -138,19 +241,69 @@ def parse_version(value, strict=False):
     return tuple(parts)
 
 
+# A build a vendor names with a parenthesised rebuild: Cisco IOS "15.2(4)M7", NX-OS "9.3(8)" and "7.0(3)I7(5a)", ASA's own "9.16(4)18", Zyxel
+# "2.90(AAHK.2)C0". Read for its first numbers it is 15.2, which would put every 15.2 build (and, as a bound, every 15.x release) inside a
+# range it says nothing about. Such a version is only ever compared for equality with a build an advisory lists (``item_verdict``), the way
+# NVD's CPEs spell it: lower case, the parentheses kept ("15.2(4)m7").
+_BUILD_KEY_RE = re.compile(r"^[0-9][0-9a-z.()_+~-]*$")
+_LEADING_ZEROS_RE = re.compile(r"(?<![0-9])0+(?=[0-9])")  # IOS XE prints 17.09.04a for the build its advisories list as 17.9.4a
+_DIGIT_BUILD_RE = re.compile(r"^(\d+(?:\.\d+)*)\((\d+)\)(\d*)$")  # ASA "9.16(4)18" is the build its advisories list as 9.16.4.18
+MAX_BUILD_LENGTH = 64
+MAX_BUILDS_PER_ITEM = 2000  # Cisco's largest list (CVE-2023-20109, IOS) has 674
+
+
+class _Build(tuple):
+    """A host's version that is a parenthesised build (see ``build_key``): it compares like the release it starts with everywhere outside
+    matching, as it always did, and matching never reads it against a range, only against the exact builds an advisory lists."""
+    text = None
+
+
+def build_key(value):
+    """The normalized text of one exact build, for equality only: lower case, no "v" prefix, no leading zeros in a number, parentheses kept
+    ("15.2(4)M7" -> "15.2(4)m7", "17.09.04a" -> "17.9.4a"). None for text that is not one build (empty, too long, spaces or other words)."""
+    text = str(value or "").strip().lower().replace("\\", "")
+    if text[:1] == "v" and text[1:2].isdigit():
+        text = text[1:]
+    text = _LEADING_ZEROS_RE.sub("", text)
+    return text if len(text) <= MAX_BUILD_LENGTH and _BUILD_KEY_RE.match(text) else None
+
+
+def build_keys(value):
+    """Every key the build ``value`` is listed under: its own, and for a build whose parenthesised part and suffix are numbers (ASA's
+    "9.16(4)18", "9.8(4)") the dotted form the advisories use ("9.16.4.18", "9.8.4")."""
+    key = build_key(value)
+    if not key:
+        return []
+    digits = _DIGIT_BUILD_RE.match(key)
+    return [key] + ([".".join(p for p in digits.groups() if p)] if digits else [])
+
+
+class _Revised(tuple):
+    """A version with a numeric revision after a dash (ImageMagick's "7.1.2-35"). It is the release (7, 1, 2) everywhere, as it always was,
+    so a Debian-style "1.2.3-1" still equals 1.2.3; ``_vcmp`` orders it by ``revision`` only against another version that carries one, which
+    is when an advisory's own bound says "fixed in 7.1.2-4"."""
+    revision = None
+
+
 def _vcmp(a, b):
-    """Compare two version tuples, zero-padded so (1,18) == (1,18,0)."""
+    """Compare two version tuples, zero-padded so (1,18) == (1,18,0). Two versions of one release that both carry a dash revision
+    (``_Revised``) compare by it."""
+    ra, rb = getattr(a, "revision", None), getattr(b, "revision", None)
     n = max(len(a), len(b))
-    a = a + (0,) * (n - len(a))
-    b = b + (0,) * (n - len(b))
+    a = tuple(a) + (0,) * (n - len(a))
+    b = tuple(b) + (0,) * (n - len(b))
+    if a == b and ra is not None and rb is not None:
+        return (ra > rb) - (ra < rb)
     return (a > b) - (a < b)
 
 
 def version_in_range(ver, rng):
     """Return True / False / None(unknown) for ver within an affected range dict. A range with no usable bound is unknown,
     never "in range": only a real bound can put a version inside it."""
-    if ver is None or isinstance(rng, _Unpaired):
-        return None  # a bound that pairing could not place (``pair_split_ranges``) says nothing certain about any version
+    if ver is None or isinstance(rng, _Unpaired) or isinstance(ver, _Build):
+        # a bound that pairing could not place (``pair_split_ranges``) says nothing certain about any version, and a parenthesised build is
+        # never placed inside a range by its first numbers (``item_verdict`` compares it with the listed builds)
+        return None
     if str(rng.get("type") or "SEMVER").upper() not in ("SEMVER", "ECOSYSTEM"):
         return None  # a GIT range is commit hashes: it cannot be compared with a version
     bounds = [(rng.get(key), parse_version(rng.get(key), strict=True)) for key in ("introduced", "fixed", "lastAffected")]
@@ -159,6 +312,13 @@ def version_in_range(ver, rng):
     introduced, fixed, last = (parsed for _raw, parsed in bounds)
     if introduced is None and fixed is None and last is None:
         return None  # no usable bound: the range says nothing about this version
+    if rng.get("line_only"):
+        # an ESXi release line whose fix is named by a patch id with no build (``esxi_ranges``): a version of another line is outside it, one
+        # of this line is unknown (the patch id cannot be compared with a build)
+        inside = (introduced is None or _vcmp(ver, introduced) >= 0) and (fixed is None or _vcmp(ver, fixed) < 0)
+        return None if inside else False
+    if rng.get("build_bound") and fixed is not None and getattr(ver, "revision", None) is None and _vcmp(ver, fixed) == 0:
+        return None  # the update the fix belongs to, read without its build (nmap's "7.0.3"): which build it runs is not known
     if introduced is not None and _vcmp(ver, introduced) < 0:
         return False
     if fixed is not None and _vcmp(ver, fixed) >= 0:
@@ -249,37 +409,58 @@ def affected_product_tokens(affected_item):
     return tokens
 
 
-# Names scanners report that differ from the feed's product naming: normalized tech token -> product tokens naming the
-# same software. Dropping the vendor token must not create false negatives for these. Aliases are the only widening.
-PRODUCT_ALIASES = {
-    # "httpserver" is the NVD-style product ("http_server"); "apachehttpserver" is how the CNA's own record names it ("Apache HTTP Server")
-    "apachehttpd": {"httpserver", "apachehttpserver", "apache2"},
-    "apachehttpserver": {"httpserver", "apache2"},
-    "httpd": {"httpserver", "apachehttpserver", "apache2"},
-    "apache": {"httpserver", "apachehttpserver", "apache2"},
-    "microsoftiishttpd": {"internetinformationservices", "iis"},
-    "microsoftiis": {"internetinformationservices", "iis"},
-    "iis": {"internetinformationservices"},
-    "eximsmtpd": {"exim"},
-    "phpfpm": {"php"},  # PHP's FastCGI process manager is PHP, and its advisories are PHP's
-    "iscbind": {"bind", "bind9"},
-    "bind": {"bind9"},  # ISC's CPE calls the daemon bind; some advisories call it BIND9
-    "bind9": {"bind"},
-    "nextjs": {"next"},  # the npm package of Next.js is named "next"
-    # product strings nmap's service detection really prints, which name the product with extra words the advisory's name lacks: a version seen
-    # for one of these is the product's (validation.interpret needs the pair to agree before it reaffirms a CVE from a version)
-    "apachetomcatcoyotejspengine": {"tomcat"},
-    "apachecoyote": {"tomcat"},
-    "nodejsexpressframework": {"express"},
-    "vmwareesxisoapapi": {"esxi"},
-    "ciscoioshttpconfig": {"ios"},
-    "golangnethttpserver": {"go"},
-    "pythonbasehttpserver": {"python"},
-    # package names a host's own package manager reports (cveFeed.inventory_match): the feed names the same software differently
-    "apache2": {"httpserver", "apachehttpserver"},
-    "opensshserver": {"openssh"},
-    "linuxkernel": {"linux"},
-}
+# Names scanners report that differ from the feed's product naming, read from data/product_aliases.json (every entry cites the CPE or CVE
+# record that spells the product that way; cveFeed.tech_coverage measures what is still unmatched). Dropping the vendor token must not create
+# false negatives for these. Aliases are the only widening, and each is held to its vendors.
+ALIASES_FILE = os.path.join(os.path.dirname(__file__), "data", "product_aliases.json")
+PRODUCT_ALIASES = {}  # normalized tech token -> product tokens naming the same software
+ALIAS_VENDORS = {}  # (tech token, product token) -> vendor tokens the record must name, when it names one
+NAME_VENDORS = {}  # tech token -> (vendor tokens, a record must name one): a bare name another vendor uses for a different product
+AMBIGUOUS_PRODUCTS = set()  # product tokens two vendors use: a record naming no vendor never confirms a name for them
+VENDOR_CLASSES = {}  # vendor token -> the vendor tokens that are the same vendor across renames and acquisitions
+TECH_RENAMES = {}  # normalized detector name -> the product name its reading is read as ("AspNet Version Disclosure" -> "ASP.NET")
+PROTOCOL_VERSION_NAMES = set()  # normalized names whose stated version is a protocol's or an API's, never the product's
+
+
+def _vendor_tokens(values):
+    return tuple(t for t in (_norm(v, True) for v in values or ()) if t)
+
+
+def load_aliases(path=ALIASES_FILE):
+    """Read the alias data into the tables above (replacing what they held). Returns the parsed document."""
+    with open(path, encoding="utf-8") as fh:
+        doc = json.load(fh)
+    aliases, alias_vendors, name_vendors, ambiguous, classes = {}, {}, {}, set(), {}
+    for entry in doc.get("aliases", ()):
+        vendors = _vendor_tokens(entry.get("vendors"))
+        products = {t for t in (_norm(p, True) for p in entry.get("products", ())) if len(t) >= _MIN_TOKEN}
+        for name in entry.get("names", ()):
+            token = _norm(name)
+            for product in products - {token}:
+                aliases.setdefault(token, set()).add(product)
+                alias_vendors[(token, product)] = vendors
+    for entry in doc.get("restrict", ()):
+        for name in entry.get("names", ()):
+            name_vendors[_norm(name)] = (_vendor_tokens(entry.get("vendors")), bool(entry.get("require_vendor")))
+    for entry in doc.get("ambiguous_products", ()):
+        ambiguous.add(_norm(entry.get("product"), True))
+    for entry in doc.get("vendor_renames", ()):
+        group = frozenset(_vendor_tokens(entry.get("vendors")))
+        for vendor in group:
+            classes[vendor] = classes.get(vendor, frozenset()) | group
+    renames = {_norm(name): entry["to"] for entry in doc.get("renames", ()) for name in entry.get("names", ()) if entry.get("to")}
+    protocol = {_norm(name) for entry in doc.get("protocol_versions", ()) for name in entry.get("names", ())}
+    for table, value in ((PRODUCT_ALIASES, aliases), (ALIAS_VENDORS, alias_vendors), (NAME_VENDORS, name_vendors), (VENDOR_CLASSES, classes),
+                         (TECH_RENAMES, renames)):
+        table.clear()
+        table.update(value)
+    for table, value in ((AMBIGUOUS_PRODUCTS, ambiguous), (PROTOCOL_VERSION_NAMES, protocol)):
+        table.clear()
+        table.update(value)
+    return doc
+
+
+load_aliases()
 
 
 def parse_cpe(cpe):
@@ -445,8 +626,137 @@ def clean_affected(value):
         ranges = item.get("ranges")
         if ranges is not None:
             item = {**item, "ranges": [r for r in ranges[:MAX_RANGES_PER_ITEM] if isinstance(r, dict)] if isinstance(ranges, list) else []}
+            if item["ranges"] and _is_netscaler(item):
+                item["ranges"] = [_netscaler_range(r) for r in item["ranges"]]
+            if item["ranges"] and is_llamacpp(item):  # build tags read as the build number (``llamacpp_range``)
+                item["ranges"] = [llamacpp_range(r) for r in item["ranges"]]
+        if _is_esxi(item):  # read by build (``esxi_ranges``), as Broadcom writes its fixes
+            ranges = esxi_ranges(item.get("ranges") or [], item.get("versions"))
+            if ranges != (item.get("ranges") or []):
+                item = {**item, "ranges": ranges}
+        if "builds" in item:  # the exact builds the advisory lists (cveFeed.intel.convert_affected), each a ``build_key``
+            builds = item["builds"]
+            builds = [b for b in (build_key(b) for b in builds[:MAX_BUILDS_PER_ITEM] if isinstance(b, str)) if b] if isinstance(builds, list) else []
+            item = {**item, "builds": list(dict.fromkeys(builds))}
+            if not item["builds"]:
+                del item["builds"]
         out.append(item)
     return out
+
+
+_NETSCALER_TRAIN_RE = re.compile(r"^(\d{2}\.\d)(?:-[A-Za-z]{2,8})?$")  # 13.1, 13.1-FIPS, 12.1-NDcPP
+_NETSCALER_BUILD_RE = re.compile(r"^\d{1,3}\.\d{1,4}$")
+
+
+def _is_netscaler(item):
+    vendor, product = _norm(item.get("vendor")), _norm(item.get("product"))
+    return product.startswith("netscaler") or (vendor in ("citrix", "netscaler") and product in ("adc", "gateway", "applicationdeliverycontroller"))
+
+
+def _netscaler_range(rng):
+    """A NetScaler record's range read the way Citrix writes it: the release train as ``introduced`` and only the build as the bound
+    (``introduced 13.1, fixed 49.15`` is 13.1 up to build 49.15, so ``fixed`` reads 13.1-49.15). Read literally it would put every later train
+    (14.1) inside it. A range already written with whole builds is unchanged."""
+    train = _NETSCALER_TRAIN_RE.match(str(rng.get("introduced") or "").strip())
+    if not train:
+        return rng
+    out = dict(rng)
+    for key in ("fixed", "lastAffected"):
+        bound = str(rng.get(key) or "").strip()
+        if _NETSCALER_BUILD_RE.match(bound):
+            out[key] = f"{train.group(1)}-{bound}"
+    return out
+
+
+# llama.cpp names its releases by build number: the tag ``b5662`` (its server's /props ``build_info`` says "b5662-a1b2c3d", ``llama-server
+# --version`` "version: 5662 (a1b2c3d)"), and its advisories write their bounds that way (the CVE List's "< b5662", cve.now's
+# ``{"introduced": "b5899", "fixed": "b10261"}``). A strict bound must start with a digit, so "b5662" read as nothing and every such range was
+# unknown. The reading is held to llama.cpp: only an affected entry that names it (``is_llamacpp``: ggml-org's or ggerganov's llama.cpp, as
+# NVD, the CVE List, GitHub and huntr name it) has its build tags read as the build number, so "b5662" is 5662 there and still nothing for any
+# other product. Its other numbering (a 0.x range some records add, a commit) is left as it was: a build number is never inside a 0.x range.
+LLAMACPP_BUILD_RE = re.compile(r"^b(\d{1,6})(?:-[0-9a-f]{4,40})?$")
+_LLAMACPP_PRODUCTS = frozenset({"llamacpp", "ggerganovllamacpp", "ggmlorgllamacpp"})
+_LLAMACPP_VENDORS = frozenset({"", "ggmlorg", "ggml", "ggerganov"})
+
+
+def is_llamacpp(item):
+    """Whether an affected entry is llama.cpp's: product (or package) ``llama.cpp`` (``llama_cpp`` in a CPE, ``ggerganov/llama.cpp`` or
+    ``ggml-org/llama.cpp`` in huntr's and GitHub's records) of ggml-org, ggml, ggerganov or no vendor. llama-cpp-python is another product."""
+    if not isinstance(item, dict) or _real_vendor(item) not in _LLAMACPP_VENDORS:
+        return False
+    return any(_norm(item.get(key), True) in _LLAMACPP_PRODUCTS for key in ("product", "package") if isinstance(item.get(key), str))
+
+
+def llamacpp_build(text):
+    """The build number a llama.cpp build tag states ("b5662" or "b5662-a1b2c3d" -> "5662"), or ''. Build 0 is a build made without git
+    information: it says nothing."""
+    found = LLAMACPP_BUILD_RE.match(str(text or "").strip())
+    return str(int(found.group(1))) if found and int(found.group(1)) > 0 else ""
+
+
+def llamacpp_range(rng):
+    """A llama.cpp range with each bound that is a build tag read as its build number (``fixed: b5662`` -> ``fixed: 5662``); every other
+    bound is kept as it was."""
+    if not isinstance(rng, dict):
+        return rng
+    out = dict(rng)
+    for key in ("introduced", "fixed", "lastAffected"):
+        build = llamacpp_build(rng.get(key))
+        if build:
+            out[key] = build
+    return out
+
+
+# VMware ESXi names a fix by the patch release and its build:"ESXi80U3d-24585383" is build 24585383 of 8.0 Update 3 (patch d), the build
+# its own vmware-version reply states as version 8.0.3, build 24585383. Builds only grow, so within one update a build below the fix is
+# affected. A patch id of the 6.x releases ("ESXi670-202102401-SG") names no build: only its release line is known.
+_ESXI_FIX_RE = re.compile(r"^ESXi(\d)(\d)(?:U(\d{1,2}))?[a-z]{0,3}-(\d{6,9})$", re.IGNORECASE)
+_ESXI_PATCH_RE = re.compile(r"^ESXi(\d)(\d)0-\d{9}-[A-Z]{1,4}$", re.IGNORECASE)
+_ESXI_BEFORE_RE = re.compile(r"^\s*(\d{1,2}\.\d{1,2})(?:\.x)?\s+before\s+(ESXi\S{6,40})\s*$", re.IGNORECASE)
+
+
+def _is_esxi(item):
+    product = _norm(item.get("product"))
+    return product in ("esxi", "vmwareesxi", "esx", "vmwareesx") and _real_vendor(item) in ("", "vmware")
+
+
+def esxi_ranges(ranges, versions=None):
+    """An ESXi record's ranges read by build (``_ESXI_FIX_RE``). Each fix becomes the range of its own update, from that update's first build
+    up to the fix's build (``8.0.3`` to ``8.0.3-24585383``, ``build_bound``: an 8.0.3 read without its build is unknown there), and the updates
+    of the line below it that no listed fix covers are affected whole (``8.0`` to ``8.0.2`` when only Update 2 and 3 have fixes, the CVE List
+    writing every fix of a line from the line's start). A patch id with no build keeps only its line (``line_only``: unknown inside it). A
+    record cve.now passed on as bare ``versions`` ("7.0 before ESXi70U1c-17325551") is read the same way when every line of it is one of these
+    forms. Any other range is kept as it was."""
+    ranges = [r for r in ranges if isinstance(r, dict)]
+    if not ranges and isinstance(versions, list):
+        listed = [_ESXI_BEFORE_RE.match(v) if isinstance(v, str) else None for v in versions[:20]]
+        if not listed or not all(listed):
+            return ranges
+        ranges = [{"introduced": m.group(1), "fixed": m.group(2)} for m in listed]
+    lines, rest = {}, []
+    for rng in ranges:
+        fixed = str(rng.get("fixed") or "").strip()
+        build, patch = _ESXI_FIX_RE.match(fixed), _ESXI_PATCH_RE.match(fixed)
+        if build:
+            line = f"{build.group(1)}.{build.group(2)}"
+            lines.setdefault((line, rng.get("type")), {}).setdefault(int(build.group(3) or 0), set()).add(int(build.group(4)))
+        elif patch:
+            line = (int(patch.group(1)), int(patch.group(2)))
+            rest.append({**({"type": rng["type"]} if rng.get("type") else {}), "introduced": f"{line[0]}.{line[1]}",
+                         "fixed": f"{line[0]}.{line[1] + 1}", "line_only": True})
+        else:
+            rest.append(rng)
+    out = []
+    for (line, kind), updates in sorted(lines.items()):
+        typed = {"type": kind} if kind else {}
+        covered = -1
+        for update in sorted(updates):
+            if update > covered + 1:  # the updates below this fix that no other listed fix covers: every build of them is affected
+                out.append({**typed, "introduced": line if covered < 0 else f"{line}.{covered + 1}", "fixed": f"{line}.{update}"})
+            # the highest build listed for the update: two fixes of one update (a later respin) are read as the later one
+            out.append({**typed, "introduced": f"{line}.{update}", "fixed": f"{line}.{update}-{max(updates[update])}", "build_bound": True})
+            covered = update
+    return out + rest
 
 
 def build_product_index(cves):
@@ -481,34 +791,121 @@ def _fuzzy_ids(token, product_index):
     return ids
 
 
-def _vendor_ok(item, *hints):
-    """True when the item names no vendor, or its vendor contains one of the (normalized) hints."""
+# what a feed writes for a vendor it does not name
+_NO_VENDOR = frozenset({"na", "unknown", "none", "unspecified"})
+
+
+def _real_vendor(item):
+    """The item's normalized vendor, or '' when it names none (or writes a placeholder such as "n/a" or "[UNKNOWN]")."""
     vendor = _norm(item.get("vendor"), True)
-    return not vendor or any(h in vendor or vendor in h for h in hints)
+    return "" if vendor in _NO_VENDOR else vendor
 
 
-# alias target -> vendor words that must appear when the item names a vendor (Oracle's "HTTP Server" is not Apache's)
-_ALIAS_VENDOR = {"httpserver": ("apache",), "apache2": ("apache",), "bind9": ("isc",)}
+def _with_renames(hints):
+    """The hints with every other spelling of the same vendor (data/product_aliases.json vendor_renames: nmap's igor_sysoev is F5's nginx)."""
+    out = []
+    for hint in hints:
+        out.append(hint)
+        out.extend(VENDOR_CLASSES.get(hint, ()))
+    return out
 
 
-def _item_hits(item, token, aliases=(), cpe_product=None, cpe_vendor=""):
+def _vendor_ok(item, *hints):
+    """True when the item names no vendor, or its vendor contains one of the (normalized) hints or another spelling of it."""
+    vendor = _real_vendor(item)
+    return not vendor or any(h and (h in vendor or vendor in h) for h in _with_renames(hints))
+
+
+def _vendor_led(token):
+    """``(lead, rest token)`` for each way a discovered name may start with its vendor: "Ivanti Connect Secure" is ("ivanti", "connectsecure"),
+    "Palo Alto Networks GlobalProtect" also ("paloaltonetworks", "globalprotect"). The rest must still name a product on its own, and a record
+    reached this way must name that vendor (``_led_by``)."""
+    out = []
+    for words in _words_for(token):
+        for k in range(1, min(3, len(words) - 1) + 1):
+            lead, rest = words[:k], words[k:]
+            if len("".join(lead)) >= _MIN_TOKEN and _word_run_ok(rest):
+                out.append((lead, _norm(" ".join(rest))))
+    return out
+
+
+def _led_by(item, lead):
+    """Whether the item's vendor is the vendor a name leads with: the same token ("paloaltonetworks"), its first words ("Progress Software
+    Corporation" for "Progress"), or another spelling of it."""
+    vendor = _real_vendor(item)
+    if not vendor:
+        return False
+    joined = "".join(lead)
+    if vendor == joined or vendor in VENDOR_CLASSES.get(joined, ()):
+        return True
+    return tuple(_WORD_RE.findall(str(item.get("vendor") or "").lower()))[:len(lead)] == tuple(lead)
+
+
+def _named_vendor(tech_token, product_token):
+    """The vendor words a discovered name puts in front of the product it matched, and that the product's own name does not carry: "cisco"
+    for "Cisco IOS" matched to "IOS", nothing for "Cisco IOS XE Software" matched to itself. Empty when the name names no vendor."""
+    product_words = {w for words in _words_for(product_token) for w in words}
+    for words in _words_for(tech_token):
+        lead = []
+        for word in words[:-1]:
+            if word not in VENDOR_PREFIX_WORDS or word in product_words:
+                break
+            lead.append(word)
+        if lead:
+            return tuple(lead)
+    return ()
+
+
+def _named_vendor_ok(tech_token, product_token, item):
+    """Whether the vendor a discovered name gives ("Cisco IOS") agrees with the vendor the affected entry names. A vendor word lets a name
+    match the bare product ("IOS"), so it must be that vendor's product: Apple's iOS is not Cisco's IOS. An entry with no vendor, or whose
+    vendor is the project itself ("nginx" for nginx, "getbootstrap" for bootstrap), is not contradicted."""
+    lead = _named_vendor(tech_token, product_token)
+    if not lead:
+        return True
+    vendor = _norm(item.get("vendor"), True)
+    if not vendor or vendor in _NO_VENDOR:
+        return True
+    named = "".join(lead)
+    if named in vendor or vendor in named or any(len(w) >= 3 and w in vendor for w in lead):
+        return True
+    return product_token in vendor
+
+
+def _item_hits(item, token, aliases=(), cpe_product=None, cpe_vendor="", led=()):
     """Whether one affected entry names the discovered product. With a CPE the product must equal it (and the vendor,
-    when the entry has one, must agree); otherwise fuzzy token containment, plus exact alias names."""
+    when the entry has one, must agree); otherwise fuzzy token containment, plus the aliases of data/product_aliases.json held to their
+    vendors, plus a name that leads with the entry's own vendor (``led``, from ``_vendor_led``)."""
+    restrict = NAME_VENDORS.get(token)
+    if restrict:  # a bare name another vendor also uses for a different product ("Express", ".NET")
+        vendors, required = restrict
+        if (required and not _real_vendor(item)) or not _vendor_ok(item, *vendors):
+            return False
     own = {_norm(item.get(k), True) for k in ("product", "package")} - {""}
     if cpe_product:
         if cpe_product in own:
             return _vendor_ok(item, cpe_vendor, cpe_vendor[:6])
         # an entry named some other way (the CNA's own "Apache HTTP Server" next to NVD's "http_server") still counts when it is the same
-        # vendor's: the CPE must not hide the records that do not use its spelling
-        if not _vendor_ok(item, cpe_vendor, cpe_vendor[:6]) or not item.get("vendor"):
+        # vendor's: the CPE must not hide the records that do not use its spelling. An entry that names no vendor counts only when its own
+        # product name starts with the CPE's vendor ("Apache Tomcat" for cpe:/a:apache:tomcat)
+        if not _vendor_ok(item, cpe_vendor, cpe_vendor[:6]):
+            return False
+        if not _real_vendor(item) and not (len(cpe_vendor) >= _MIN_TOKEN and any(
+                o.startswith(v) for o in own for v in _with_renames((cpe_vendor,)) if len(v) >= _MIN_TOKEN)):
             return False
     tokens = affected_product_tokens(item)
-    if any(name_matches_token(token, t) for t in tokens):
+    unvouched = not _real_vendor(item) and bool(tokens & AMBIGUOUS_PRODUCTS)  # "iOS" with no vendor: Apple's or Cisco's?
+    if any(name_matches_token(token, t) and _named_vendor_ok(token, t, item) for t in tokens) and not unvouched:
         return True
     for alias in aliases:
-        if alias in tokens and (alias not in _ALIAS_VENDOR or _vendor_ok(item, *_ALIAS_VENDOR[alias])):
+        vendors = ALIAS_VENDORS.get((token, alias), ())
+        if alias in tokens and _vendor_ok(item, *vendors) and not unvouched:
             return True
-    return False
+        # the alias read as a name ("Microsoft Exchange Server" for "Microsoft Exchange Server 2019 Cumulative Update 12"), only for an entry
+        # that names one of the alias's vendors
+        if vendors and _real_vendor(item) and _vendor_ok(item, *vendors) and any(name_matches_token(alias, t) for t in tokens):
+            return True
+    return any(_led_by(item, lead) and any(name_matches_token(rest, t) for t in tokens) for lead, rest in led)
 
 
 def _bounded(rng):
@@ -635,8 +1032,8 @@ def range_verdict(ver, ranges):
     ``no_lower_bound`` is True when the answer came from a fix-only branch list (``fix_only_branch_verdict``). One entry with no usable
     bound is unknown. Main correlation and the WordPress matcher both decide through this, so they cannot read a range list differently."""
     prepared = prepared_ranges(ranges)
-    if not prepared:
-        return None, None, False
+    if not prepared or isinstance(ver, _Build):
+        return None, None, False  # a parenthesised build is compared only with listed builds (``item_verdict``)
     if fix_only_branch_list(prepared):
         # no lower bounds were published: each fix is compared only with the releases of its own line (issue 205)
         result, fixed = fix_only_branch_verdict(ver, prepared)
@@ -648,6 +1045,49 @@ def range_verdict(ver, ranges):
             return True, {k: str(v)[:60] for k, v in rng.items() if k in ("introduced", "fixed", "lastAffected")}, False
         unknown = unknown or result is None
     return (None if unknown else False), None, False
+
+
+def range_holds(version, rng):
+    """True / False / None for the version text ``version`` against one range a match was decided on (``evidence['range']``): an exact build
+    (``{"build": ...}``) holds only that build, any other range is read as ``version_in_range`` reads it."""
+    if isinstance(rng, dict) and rng.get("build"):
+        keys = build_keys(version)
+        return (build_key(rng["build"]) in keys) if keys else None
+    return version_in_range(parse_version(version), rng or {})
+
+
+def _exact_single(rng):
+    """A range that is one exact version (``introduced`` == ``lastAffected``, no fix): how one listed build is written as a range."""
+    return isinstance(rng, dict) and bool(rng.get("introduced")) and rng.get("introduced") == rng.get("lastAffected") and not rng.get("fixed")
+
+
+def item_verdict(ver, item, raw=None):
+    """``range_verdict`` for one affected entry, with the exact builds it lists (``builds``, see cveFeed.intel.convert_affected).
+
+    ``raw`` is the version text as read (``ver`` parsed from it). A version that is one of the listed builds is in range. An entry that lists
+    exact builds and no other range is a closed list: a version that is not on it is not in range (15.2(4)M8 against a list holding
+    15.2(4)M7), whatever its numbers. A parenthesised build (``_Build``) is never read against a range: it is in range only as a listed build
+    or a bound of exactly that build, and unknown against any other range. Without ``raw`` text an entry's ranges decide, as before."""
+    ranges = [r for r in item.get("ranges") or [] if isinstance(r, dict)]
+    builds = item.get("builds") if isinstance(item.get("builds"), list) else []
+    keys = build_keys(raw if raw is not None else getattr(ver, "text", None))
+    if keys:
+        listed = set(builds)
+        hit = next((k for k in keys if k in listed), None)
+        if hit:
+            return True, {"build": hit}, False
+        if isinstance(ver, _Build):
+            for rng in ranges:  # a bound that names exactly this build ("through 2.90(AAHK.2)C0")
+                for bound in ("introduced", "lastAffected"):
+                    if rng.get(bound) and build_key(rng[bound]) in keys and str(rng.get("type") or "SEMVER").upper() in ("SEMVER", "ECOSYSTEM"):
+                        return True, {k: str(v)[:60] for k, v in rng.items() if k in ("introduced", "fixed", "lastAffected")}, False
+        if listed:
+            ranges = [r for r in ranges if not (_exact_single(r) and build_key(r["introduced"]) in listed)]
+            if not ranges:
+                return False, None, False  # a closed list of builds, and this version is not on it
+    if isinstance(ver, _Build):
+        return None, None, False
+    return range_verdict(ver, ranges)
 
 
 def _is_branch_range(rng):
@@ -670,6 +1110,8 @@ def branch_unlisted(ver, ranges):
     """True when ``ver`` is older than every branch a branch-by-branch advisory lists. Such an advisory names only the branches
     that received a fix; an older branch is not cleared by it (end-of-life releases never get a fix, so are usually still
     exposed), so the answer for it is "unknown", not "not in range"."""
+    if isinstance(ver, _Build):
+        return False  # a parenthesised build is never placed by its first numbers
     lowest = lowest_listed_branch(ranges)
     return bool(lowest and ver and _vcmp(ver[:len(lowest)], lowest) < 0)
 
@@ -713,20 +1155,12 @@ def fix_only_branch_verdict(ver, ranges):
     return None, None
 
 
-def _match_candidates(name, ver, token, product_index, cve_by_id, cpe=None, details=None):
-    """Yield (cve, matched_product, in_range) for CVEs plausibly affecting a
-    discovered product `token` (normalized) at version `ver` (tuple or None).
-
-    Only the ranges of the affected entry that names the product are tested, never another product of the same vendor.
-    An entry with no usable version bound gives in_range None (unknown), never True. ``cpe`` (nmap's 'cpe:/a:vendor:
-    product:version') names the product exactly; it is tried first and the name match is the fallback.
-
-    ``details``, when given, is a dict that receives ``{cve.id: {"affected_index", "range"}}``: which affected entry and which
-    range decided the result (the evidence stored on the match).
-
-    Reads only the pre-built product_index / cve_by_id; shared by the technology
-    fingerprint path and the nmap/Port service path so both score identically.
-    """
+def named_hits(token, product_index, cve_by_id, cpe=None, cpe_derived=False):
+    """Yield ``(cve, [(affected index, item), ...])`` for every CVE with an affected entry that names the discovered product ``token``
+    (normalized): its CPE's vendor and product first, then the name itself and its aliases (``PRODUCT_ALIASES``, ``ALIAS_VENDORS``). The one
+    place that decides whether a name connects to a CVE record: ``_match_candidates`` judges versions on these entries and
+    ``cveFeed.tech_coverage`` counts them. A CPE the server derived from the name (``cpe_derived``: ``cveFeed.tech_links.derived_cpe``, no
+    source stated it) only adds the entries it names: an entry the name reaches without it still counts, so it never hides one."""
     cpe_parts = parse_cpe(cpe)
     candidate_ids, cpe_product, cpe_vendor = set(), None, ""
     if cpe_parts:
@@ -735,23 +1169,52 @@ def _match_candidates(name, ver, token, product_index, cve_by_id, cpe=None, deta
         if not candidate_ids:
             cpe_product = None
     aliases = tuple(sorted(PRODUCT_ALIASES.get(token, ())))
+    led = _vendor_led(token)
     # the name match is always added: a CPE names the product exactly, but CVEs whose own record spells it differently are still about it
     candidate_ids |= set(_fuzzy_ids(token, product_index))
     for alias in aliases:
         candidate_ids |= product_index.get(alias, set())
-
+        if ALIAS_VENDORS.get((token, alias)):
+            candidate_ids |= _fuzzy_ids(alias, product_index)
+    for _lead, rest in led:
+        candidate_ids |= _fuzzy_ids(rest, product_index)
     for cid in candidate_ids:
         cve = cve_by_id[cid]
-        hit = [(i, item) for i, item in enumerate(cve.affected or []) if _item_hits(item, token, aliases, cpe_product, cpe_vendor)]
-        if not hit:
-            continue
+        hit = [(i, item) for i, item in enumerate(cve.affected or []) if _item_hits(item, token, aliases, cpe_product, cpe_vendor, led)
+               or (cpe_derived and cpe_product and _item_hits(item, token, aliases, None, "", led))]
+        if hit:
+            yield cve, hit
+
+
+def _match_candidates(name, ver, token, product_index, cve_by_id, cpe=None, details=None, raw=None, cpe_derived=False):
+    """Yield (cve, matched_product, in_range) for CVEs plausibly affecting a
+    discovered product `token` (normalized) at version `ver` (tuple or None).
+
+    Only the ranges of the affected entry that names the product are tested, never another product of the same vendor.
+    An entry with no usable version bound gives in_range None (unknown), never True. ``cpe`` (nmap's 'cpe:/a:vendor:
+    product:version') names the product exactly; it is tried first and the name match is the fallback.
+
+    ``details``, when given, is a dict that receives ``{cve.id: {"affected_index", "range"}}``: which affected entry and which
+    range decided the result (the evidence stored on the match). ``raw`` is the version text ``ver`` was read from: with it a version is
+    also compared with the exact builds an entry lists (``item_verdict``).
+
+    Reads only the pre-built product_index / cve_by_id; shared by the technology
+    fingerprint path and the nmap/Port service path so both score identically.
+    """
+    from cveFeed.version_catalogue import line_conflict, product_line
+    line = product_line(name)  # a SharePoint or Exchange line the host's name states: an entry for another line is not this product's
+    for cve, hit in named_hits(token, product_index, cve_by_id, cpe, cpe_derived=cpe_derived):
         # Every hit names the same product (see name_matches_token): a wrapper or repackaging with its own version numbers
         # ("jquery-rails", "ingress-nginx") is another product and was never a hit, so its ranges are never compared.
+        if line:
+            hit = [(index, item) for index, item in hit if not line_conflict(line, item)]
+            if not hit:
+                continue  # every entry names another line (a 2019-only record for a 2016 farm): not this product's CVE
         in_range, matched_product = None, name
         if ver is not None:
             in_range, unknown = False, False
             for index, item in hit:
-                result, rng, no_lower_bound = range_verdict(ver, item.get("ranges") or [])
+                result, rng, no_lower_bound = item_verdict(ver, item, raw)
                 if result is True:
                     in_range = True
                     matched_product = item.get("product") or item.get("package") or name
@@ -795,31 +1258,162 @@ class DbFixLookup:
     def __call__(self, distro, package, cve_id):
         key = (distro, package, cve_id)
         if key not in self.memo:
+            from django.db.models import Q
+
             from cveFeed.models import DistroFix
-            self.memo[key] = [{"release": r.release, "fixed_version": r.fixed_version, "status": r.status}
-                              for r in DistroFix.objects.filter(distro=distro, package=package, cve_id=cve_id)]
+            which = Q(package=package)
+            if distro == "rhel":
+                which |= Q(package__startswith=package + ":")  # Red Hat's module streams of the package ("httpd:2.4"): distro.judge picks one
+            self.memo[key] = [{"release": r.release, "fixed_version": r.fixed_version, "status": r.status, "package": r.package,
+                               "advisory": r.advisory}
+                              for r in DistroFix.objects.filter(which, distro=distro, cve_id=cve_id)]
         return self.memo[key]
 
 
 def port_distro(port):
-    """The distro info of a Port row: what nmap persisted, else read from its banner fields now (rows older than the distro
-    columns). The package name is derived, never stored."""
-    info = {"distro": getattr(port, "distro", "") or "", "release": getattr(port, "distro_release", "") or "",
-            "package_release": getattr(port, "package_release", "") or "", "upstream_version": getattr(port, "upstream_version", "") or ""}
-    if not info["distro"]:
-        info = distro_lib.parse_distro(port.product, port.version, getattr(port, "service_extra", ""), [getattr(port, "cpe", "")])
-    info["package"] = distro_lib.package_for(port.product, info["distro"], info["upstream_version"]) if info["distro"] else ""
+    """The distro info of a Port row, read from its banner fields (product, version, extra info, the CPEs nmap reported and kept in
+    ``extra``, the banner's first line) by ``distro.parse_distro``: the same reading ingest persisted on the row, made again so a row stored by
+    an older parser is read by today's (the upgrade backfill ``backfill_distro_readings`` rewrites the columns too). A row whose fields say
+    nothing keeps what its columns hold. The package name is derived, never trusted from storage. Read once per row and banner."""
+    extra = getattr(port, "extra", None) or {}
+    cpes = extra.get("cpes") or [getattr(port, "cpe", "")]
+    key = (port.product, port.version, getattr(port, "service_extra", ""), tuple(cpes), getattr(port, "banner", "") or "",
+           getattr(port, "distro", ""), getattr(port, "distro_release", ""), getattr(port, "package_release", ""))
+    cached = getattr(port, "_cv_distro", None)
+    if cached and cached[0] == key:
+        return dict(cached[1])
+    info = distro_lib.parse_distro(port.product, port.version, getattr(port, "service_extra", ""), cpes, getattr(port, "banner", "") or "")
+    if info["distro"] and info["distro"] == getattr(port, "distro", ""):
+        # the columns may hold more than the fields show (a build another source of the same row stated): the same distribution's build wins
+        if not info["package_release"] and getattr(port, "package_release", ""):
+            info["package_release"], info["reading"] = port.package_release, "package"
+            info["upstream_version"] = getattr(port, "upstream_version", "") or distro_lib.upstream_of(port.package_release)
+            info["package"] = distro_lib.package_for(port.product, info["distro"], info["upstream_version"])
+            info.pop("third_party", None)
+            other = distro_lib.third_party(info["distro"], info["package_release"])
+            if other:
+                info["third_party"] = other
+        if not info["release"] and getattr(port, "distro_release", ""):
+            info["release"], info["release_basis"] = port.distro_release, "stored"
+    if not info["distro"] and getattr(port, "distro", ""):
+        info = {"distro": port.distro, "release": getattr(port, "distro_release", "") or "",
+                "package_release": getattr(port, "package_release", "") or "", "upstream_version": getattr(port, "upstream_version", "") or ""}
+        if info["distro"] in distro_lib.RHEL_FAMILY and not info["release"]:
+            info["release"] = distro_lib.rhel_release(cpes)
+        info["package"] = distro_lib.package_for(port.product, info["distro"], info["upstream_version"])
+    try:
+        port._cv_distro = (key, dict(info))
+    except AttributeError:  # an object that takes no attributes is read again next time
+        pass
     return info
+
+
+def stored_distro(info):
+    """What a Port row keeps of a distro reading beyond its four columns (``Port.extra['distro']``): the source package and what the host page
+    and search read (codename, how the release was read, whether the build is known, another publisher, an unsynced tracker). {} for none."""
+    if not info.get("distro"):
+        return {}
+    keep = ("package", "codename", "release_basis", "reading", "third_party", "tracker")
+    return {k: str(info[k])[:64] for k in keep if info.get(k)}
+
+
+def _host_readings(subdomain, ports=None):
+    """``(families, releases)`` the host's open services, its addresses' OS reports and its Server header name: the distribution families seen,
+    and per family the releases read."""
+    from startScan.models import open_services
+    families, releases = set(), {}
+    ports = ports if ports is not None else [p for ip in subdomain.ip_addresses.all() for p in open_services(ip)]
+    for port in ports:
+        info = port_distro(port)
+        if info.get("distro"):
+            families.add(info["distro"])
+            if info.get("release"):
+                releases.setdefault(info["distro"], set()).add(info["release"])
+    for ip in subdomain.ip_addresses.all():
+        family = distro_lib.rhel_family_of_text(getattr(ip, "os_guess", "") or "")
+        if family:
+            families.add(family)
+            release = distro_lib.rhel_release(text=ip.os_guess)
+            if release:
+                releases.setdefault(family, set()).add(release)
+    header = getattr(subdomain, "webserver", "") or ""
+    if header:
+        seen = distro_lib.parse_distro("", "", header)
+        if seen.get("distro"):
+            families.add(seen["distro"])
+            if seen.get("release"):
+                releases.setdefault(seen["distro"], set()).add(seen["release"])
+    return families, releases
+
+
+def host_distro(subdomain, ports=None, readings=None):
+    """The Red Hat family distribution a host runs, as ``{"distro", "release"}``, or ``{}``: what its open services say (the banner and
+    the OS CPE nmap read, ``port_distro``), the Server header it sent (``Apache/2.4.37 (Red Hat Enterprise Linux)``) and the operating
+    system its addresses report (a host inventory's "Red Hat Enterprise Linux 8.9"). A technology seen in the host's web response (Apache,
+    OpenSSL, PHP) carries no distribution of its own, so it is judged against this. Only the Red Hat family is read this way, and any
+    sign of another distribution makes it ``{}``: nothing is guessed. Releases that disagree leave the release unknown."""
+    families, by_family = readings or _host_readings(subdomain, ports)
+    if not families or not families <= set(distro_lib.RHEL_FAMILY):
+        return {}
+    releases = set().union(*by_family.values()) if by_family else set()
+    return {"distro": "centos" if families == {"centos"} else "rhel", "release": releases.pop() if len(releases) == 1 else ""}
+
+
+def host_debian_hint(subdomain, ports=None, readings=None):
+    """The Debian or Ubuntu distribution a host's services and Server header name (``{"distro", "release"}``), or ``{}``: every reading must
+    name the same one, and the release is kept only when the readings that state one agree. A technology on such a host (the Apache, PHP or
+    OpenSSL a web response names) is judged as a hint by it (``tech_distro``): never shown fixed, because its build is not known."""
+    families, by_family = readings or _host_readings(subdomain, ports)
+    if len(families) != 1 or not families <= {"ubuntu", "debian"}:
+        return {}
+    family = next(iter(families))
+    releases = by_family.get(family) or set()
+    return {"distro": family, "release": releases.pop() if len(releases) == 1 else "", "hint": True}
+
+
+def tech_distro(host, name, version, raw=""):
+    """The distro info a technology is judged by. When the technology's own text is a package build (``PHP:8.1.2-1ubuntu2.14``, a banner token
+    ``OpenSSH_9.6p1 Ubuntu-3ubuntu13.5`` in ``raw``), that build. Otherwise, on a Red Hat family host (``host_distro``) or a host every reading
+    of which names Debian or Ubuntu (``host_debian_hint``): the package that product is there, its upstream version, no package release (a web
+    response never shows the build). ``None`` when there is none or the product is not a package cvENGINE maps."""
+    if not version:
+        return None
+    own = distro_lib.parse_distro(name, version, "", (), raw if raw and "_" in raw else "")
+    if own.get("distro") and own.get("package") and own.get("package_release"):
+        if host and host.get("distro") == own["distro"] and not own.get("release") and host.get("release"):
+            own["release"], own["release_basis"] = host["release"], "host"
+        return {**own, "basis": "own"}
+    if not host:
+        return None
+    upstream = re.split(r"\s", version.strip())[0]
+    package = distro_lib.package_for(name, host["distro"], upstream)
+    if not package:
+        return None
+    out = {"distro": host["distro"], "release": host.get("release", ""), "package": package, "package_release": "",
+           "upstream_version": upstream, "basis": "host"}
+    if host.get("hint"):
+        from cveFeed import distro_releases
+        if not out["release"]:
+            out["release"] = distro_releases.release_from_table(host["distro"], package, upstream)
+            if out["release"]:
+                out["release_basis"] = "table"
+        else:
+            out["release_basis"] = "host"
+        if out["release"]:
+            out["codename"] = distro_releases.codename(host["distro"], out["release"])
+        out["reading"] = "marker"
+    return out
 
 
 def _record_matches(subdomain, name, version, token, source, product_index,
                     cve_by_id, min_confidence, scan_history, rows=None, cpe="", distro=None, fix_lookup=None, evidence=None,
-                    corroborated=(), leads=None, confidence_cap=None):
+                    corroborated=(), leads=None, confidence_cap=None, cpe_derived=False):
     """Work out the CVEMatch rows for one discovered product on a subdomain and append them to ``rows``
     (written in a batch by ``save_matches``). Returns the number of matches found. ``leads``, when given, is a dict that receives
     ``{cve.id: {(domain id, host name)}}`` for the CVEs a product seen without a version could be about."""
     if not version and cpe:  # nmap sometimes names the version only in the CPE
         version = (parse_cpe(cpe) or ("", "", ""))[2]
+    version = stated_version(name, version)  # a protocol's version is no version of the product (Microsoft HTTPAPI httpd 2.0)
     ver = parse_version(version)
     if match_policy.is_os_sighting(name, cpe):
         return 0  # an operating system fingerprint is decided by the host's own report, not by its name
@@ -827,13 +1421,13 @@ def _record_matches(subdomain, name, version, token, source, product_index,
         # A product seen without a version is a lead (match_policy.unversioned_products), never a match: naming a product says nothing
         # about which of its advisories apply.
         if leads is not None:
-            for cve, _product, _in_range in _match_candidates(name, None, token, product_index, cve_by_id, cpe=cpe):
+            for cve, _product, _in_range in _match_candidates(name, None, token, product_index, cve_by_id, cpe=cpe, cpe_derived=cpe_derived):
                 leads.setdefault(cve.id, set()).add((subdomain.target_domain_id, subdomain.name))
         return 0
     found = 0
     details = {}
     for cve, matched_product, in_range in _match_candidates(
-            name, ver, token, product_index, cve_by_id, cpe=cpe, details=details):
+            name, ver, token, product_index, cve_by_id, cpe=cpe, details=details, raw=version, cpe_derived=cpe_derived):
         confidence = confidence_for(ver, in_range, cve.kev)
         if confidence_cap is not None and confidence > 0.0:
             confidence = min(confidence, confidence_cap)  # how far the version itself can be trusted (a library's file-name hint)
@@ -850,20 +1444,27 @@ def _record_matches(subdomain, name, version, token, source, product_index,
             if not cve.kev:
                 continue
             unbounded = True
-        status, fixed = distro_lib.NO_DATA, ""
+        status, fixed, fix = distro_lib.NO_DATA, "", None
         if distro and distro.get("distro") and in_range is True:
             # Upstream says in range; the distro may have backported the fix. Never dropped: a patched match is kept,
             # at low confidence and labelled, so a wrong distro reading can only demote it, not hide it.
-            rows_for = fix_lookup(distro["distro"], distro.get("package", ""), getattr(cve, "cve_id", "")) \
+            rows_for = fix_lookup(distro_lib.fix_distro(distro["distro"]), distro.get("package", ""), getattr(cve, "cve_id", "")) \
                 if fix_lookup and distro.get("package") else []
-            status, fixed = distro_lib.judge(distro, rows_for)
+            status, fixed, row = distro_lib.judge_row(distro, rows_for)
+            fix = distro_fix_evidence(distro, row, fixed)
             if status == distro_lib.PATCHED:
                 confidence = 0.2
             elif status == distro_lib.VULNERABLE:
                 confidence = 0.95  # the distro's own tracker lists this package release as affected: the strongest evidence there is
+            elif status == distro_lib.BACKPORT:
+                confidence = min(confidence, BACKPORT_CONFIDENCE)  # a fixed build exists for the release: likelier patched than not
         reported = bool(corroborated) and getattr(cve, "cve_id", "") in corroborated and status != distro_lib.PATCHED
         if reported:  # runZero's own scan reports it too (cveFeed.runzero_sync): more evidence, never a verdict and never a new match
             confidence = runzero.boosted(confidence)
+        preconditions = {}
+        if service_features.index().get(cve.id):  # the CVE needs a service feature (HTTP/2): a reading that the host offers it raises the confidence
+            confidence, preconditions = service_features.adjust(
+                confidence, service_features.preconditions_for(subdomain, cve), eligible=in_range is not False and status != distro_lib.PATCHED)
         rows.append({
             "cve_entry_id": cve.id, "subdomain_id": subdomain.id, "source": source,
             "matched_product": matched_product[:255], "matched_version": version[:100],
@@ -872,10 +1473,29 @@ def _record_matches(subdomain, name, version, token, source, product_index,
             "distro_status": status, "distro_fixed_version": fixed[:64],
             "evidence": {**(evidence or {}), "raw_version": version[:100], **details.get(cve.id, {}), **({"unbounded": True} if unbounded else {}),
                          **({"runzero": True} if reported else {}),
-                         **({"distro": {k: v for k, v in distro.items() if v}} if distro and distro.get("distro") else {})},
+                         **({"preconditions": preconditions} if preconditions else {}),
+                         **({"distro": {k: v for k, v in distro.items() if v}} if distro and distro.get("distro") else {}),
+                         **({"distro_fix": fix} if fix else {})},
         })
         found += 1
     return found
+
+
+BACKPORT_CONFIDENCE = 0.5  # distro.BACKPORT: a fixed build exists for the host's release and the installed build is not known
+
+
+def distro_fix_evidence(info, row, fixed):
+    """``evidence.distro_fix`` of a match judged by a Red Hat row: the release, the package (a module stream's "httpd:2.4"), the fixed
+    build and the advisory that shipped it, so a person can be told which build fixes it. None for other distributions (their evidence
+    is unchanged) and when no single row decided the verdict."""
+    if not row or distro_lib.fix_distro(info.get("distro", "")) != "rhel":
+        return None
+    out = {"source": "redhat", "release": str(row.get("release") or ""), "package": row.get("package") or info.get("package", ""),
+           "status": row.get("status") or "", "fixed": (fixed or "")[:128], "advisory": (row.get("advisory") or "")[:32]}
+    build = distro_lib.fixed_build(out)
+    if build:
+        out["fixed_build"] = build[:160]
+    return {k: v for k, v in out.items() if v}
 
 
 def signature_of(obj):
@@ -891,8 +1511,10 @@ SCRIPT_READ = 'Closed automatically: fresh script read'
 # CVEMatch.source of an OpenVAS NVT result (cveFeed.openvas_scan.SOURCE): reported by a test of the product, not correlated from its name
 OPENVAS_SOURCE = 'openvas'
 # the first wording of the same closure ("invalid product correlation") is still on rows closed before it was reworded: it is read the same
+# a service feature the CVE needs is not offered by the host (cveFeed.service_features: HTTP/2 for the nginx HTTP/2 module flaws)
+PRECONDITION_CLOSED = 'Closed automatically: precondition not met'
 AUTO_CLOSED = (DIFFERENT_PRODUCT, 'Closed automatically: invalid product correlation', 'Closed automatically: local-only',
-               match_policy.NO_EVIDENCE, SCRIPT_READ)
+               match_policy.NO_EVIDENCE, SCRIPT_READ, PRECONDITION_CLOSED)
 
 
 def closure_summary(reason):
@@ -1008,9 +1630,18 @@ def invalid_identity_reason(match):
     if getattr(match.cve_entry, 'local_only', False):  # not a product question: nothing outside the host can decide this CVE
         from cveFeed.locality import reason_text
         return reason_text()
+    from cveFeed import service_features
+    reason = service_features.closure_reason(match)  # the CVE needs a service feature (HTTP/2) that fresh, direct readings say the host lacks
+    if reason:
+        return reason
     reason = library_provenance_reason(match)
     if reason:
         return reason
+    if match.source in ('java', 'runtime', 'build_range', 'windows'):  # build_range: cveFeed.edge_builds matched the CVE's own vendor and product;
+        # windows: cveFeed.windows_builds matched the CVE's own entry naming the Windows release
+        # Not a name match either (runtime: cveFeed.version_sources, the same for a language runtime): the CVE's own affected entry names the Java runtime (java_runtime.is_runtime_item) and the host's runtime was
+        # read or is unknown; the stored name is the fixed "Java runtime", which no advisory spells, so a name comparison would close every one
+        return ''
     if match.source == OPENVAS_SOURCE:
         # Not a correlation: the NVT that reported the CVE tested this product on this port itself, whatever its confidence. Its stored
         # name is the NVT and port ("OpenVAS NVT <oid> on 22/tcp"), never an advisory product, so a name comparison would close every
@@ -1031,7 +1662,7 @@ def invalid_identity_reason(match):
         return ''
     cve = match.cve_entry
     index = build_product_index([cve])
-    if any(_match_candidates(name, None, token, index, {cve.pk: cve}, cpe=cpe)):
+    if any(_match_candidates(name, None, token, index, {cve.pk: cve}, cpe=cpe, cpe_derived=bool((match.evidence or {}).get('cpe_derived')))):
         return ''
     seen = _names([name])
     covers = _names(item.get('product') or item.get('package') for item in affected if isinstance(item, dict))
@@ -1176,11 +1807,17 @@ def _carry_remediation(fresh):
                     match.fire_notified_at, match.fire_notified_rule = now, rule
 
 
-def save_matches(rows, covered=None):
+def save_matches(rows, covered=None, retriage=True):
     """Upsert CVEMatch rows in two statements: bulk_create(ignore_conflicts) for the new ones, bulk_update for the
     existing ones whose evidence changed. Remediation fields are never touched. When the version or its range result
     changes, the AI verdict of the old evidence is replaced by the stored verdict for the new one (or cleared), so the new
     signature is judged, not inherited.
+
+    ``retriage``: once the write is committed, the new matches and the ones whose evidence changed are tracked and triaged again
+    (``retriage_after_commit``): their Triage row takes the signature of what they hold now (a changed version, range result or
+    distribution answer resets it) and the question is asked within the triage caps. Without it a panel version, a Recog reading, a
+    version source, a probe or a KEV re-read that moved a match left its row ``triaged`` on the old evidence, which no sweep looks at. A
+    scan's own correlation passes ``False``: the scan's triage stage tracks everything the scan produced.
 
     ``covered`` is ``(subdomain_ids, cve_ids)``: the hosts these rows were computed for and the CVE pool they were checked
     against. Matches of those hosts and CVEs that the rows no longer contain (the version moved out of range, the product is
@@ -1206,7 +1843,7 @@ def save_matches(rows, covered=None):
         return 0
     existing = {
         (m.cve_entry_id, m.subdomain_id, m.source, m.matched_product): m
-        for m in CVEMatch.objects.filter(subdomain_id__in={k[1] for k in unique}).select_related("cve_entry", "triage").only(
+        for m in CVEMatch.objects.filter(subdomain_id__in={k[1] for k in unique}).order_by().select_related("cve_entry", "triage").only(
             "id", "cve_entry_id", "subdomain_id", "source", "matched_product", "ai_verdict", "ai_reason", "ai_model", "template_result",
             "cve_entry__kev", "cve_entry__exploit_db", "triage__validation_status", *_MATCH_FIELDS)}
     # a NEW KEV match from a technology fingerprint older than a day is held until the version is read again (cveFeed.kev_freshness)
@@ -1280,6 +1917,9 @@ def save_matches(rows, covered=None):
         CVEMatch.objects.bulk_create(fresh, ignore_conflicts=True, batch_size=1000)
     if changed:
         CVEMatch.objects.bulk_update(changed, [*_MATCH_FIELDS, "ai_verdict", "ai_reason", "ai_model", "updated_at"], batch_size=1000)
+    if retriage and (fresh or changed):
+        retriage_after_commit([m.pk for m in changed],
+                              [(m.cve_entry_id, m.subdomain_id, m.source, m.matched_product) for m in fresh])
     touched |= {k[1] for k in moved}
     if touched:
         from cveFeed import scoring
@@ -1301,7 +1941,43 @@ def save_matches(rows, covered=None):
     return len(unique)
 
 
-_CORRELATED_SOURCES = ("tech", "port")
+RETRIAGE_CHUNK = 500  # matches per retriage task
+
+
+def _fresh_ids(keys):
+    """The ids of the matches ``keys`` (``(cve_entry_id, subdomain_id, source, matched_product)``) name: a conflict-tolerant insert sets none."""
+    from cveFeed.models import CVEMatch
+    wanted = set(keys)
+    if not wanted:
+        return []
+    rows = CVEMatch.objects.filter(subdomain_id__in={k[1] for k in wanted}, cve_entry_id__in={k[0] for k in wanted}).values_list(
+        "pk", "cve_entry_id", "subdomain_id", "source", "matched_product")
+    return [pk for pk, *key in rows if tuple(key) in wanted]
+
+
+def retriage_after_commit(changed_ids, fresh_keys=()):
+    """Once the surrounding transaction commits, queue ``retriage_matches`` for these matches (``RETRIAGE_CHUNK`` a task): the changed ones by id,
+    the new ones by their key. A broker that is down loses nothing for good: the hourly triage sweep's backfill gives a new match its row, and the
+    next correlation that reads the host tracks a changed one."""
+    from django.db import transaction
+    changed_ids, fresh_keys = list(changed_ids), list(fresh_keys)
+
+    def queue():
+        try:
+            from cveFeed.tasks import retriage_matches
+            ids = sorted(set(changed_ids) | set(_fresh_ids(fresh_keys)))
+            for start in range(0, len(ids), RETRIAGE_CHUNK):
+                retriage_matches.delay(ids[start:start + RETRIAGE_CHUNK])
+        except Exception:  # noqa: BLE001 - the write is committed; the sweep and the next correlation catch up
+            logger.warning('could not queue the triage of %d changed and %d new match(es)', len(changed_ids), len(fresh_keys), exc_info=True)
+    transaction.on_commit(queue)
+
+
+_CORRELATED_SOURCES = ("tech", "port", "java", "runtime", "bundled", "build_range", "windows")  # java: cveFeed.java_runtime; runtime, bundled: cveFeed.version_sources; build_range: cveFeed.edge_builds; windows: cveFeed.windows_builds
+
+
+# a CVE that is no vulnerability any more: rejected by its CNA, or withdrawn or merged (superseded) into another entry by the feed (cve.now's tombstones)
+DEAD_STATUS_RE = r"reject|withdrawn|merged|superseded"
 
 
 def close_rejected():
@@ -1311,14 +1987,14 @@ def close_rejected():
 
     from cveFeed.models import CVEMatch
     from cveFeed import scoring
-    open_matches = CVEMatch.objects.filter(cve_entry__status__icontains="reject").exclude(
+    open_matches = CVEMatch.objects.filter(cve_entry__status__iregex=DEAD_STATUS_RE).exclude(
         ai_verdict="not_affected", ai_reason__startswith="Closed automatically:")
     closed = 0
     while rows := list(open_matches.order_by('pk').values_list('pk', 'subdomain_id')[:scoring.CHUNK]):
         ids = [pk for pk, _ in rows]
         updated = open_matches.filter(pk__in=ids).update(
             ai_verdict="not_affected", confidence=0.0, updated_at=timezone.now(),
-            ai_reason="Closed automatically: the CVE was rejected by its CNA.")
+            ai_reason="Closed automatically: the CVE was rejected by its CNA, or withdrawn or merged into another entry by the feed.")
         closed += updated
         if updated:
             scoring.rescore_subdomain_ids({subdomain_id for _, subdomain_id in rows})
@@ -1336,7 +2012,7 @@ def close_stale(current, covered):
     if not subdomain_ids:
         return set()
     stale_keep, hosts = [], set()
-    for m in CVEMatch.objects.filter(subdomain_id__in=list(subdomain_ids), source__in=_CORRELATED_SOURCES).only(
+    for m in CVEMatch.objects.filter(subdomain_id__in=list(subdomain_ids), source__in=_CORRELATED_SOURCES).order_by().only(
             "id", "cve_entry_id", "subdomain_id", "source", "matched_product", "matched_version", "evidence", "ai_verdict", "ai_reason",
             "template_result", "remediation_status", "version_in_range", "assignee_id", "distro_status"):
         if m.cve_entry_id not in cve_ids or (m.cve_entry_id, m.subdomain_id, m.source, m.matched_product) in current:
@@ -1367,11 +2043,19 @@ def close_stale(current, covered):
         from cveFeed import activity
         from startScan.models import Subdomain
         projects = dict(Subdomain.objects.filter(pk__in=hosts).values_list('id', 'target_domain__project_id'))
+        closed = {}  # project id -> [match id]: one activity line per project, not one per match (a rescan can close hundreds)
         for match in stale_keep:
             if projects.get(match.subdomain_id):
-                activity.log('confirm', 'CVE candidate closed after its product or version disappeared from inventory',
-                             project=projects[match.subdomain_id], match_id=match.pk, decision='closed_not_applicable')
+                closed.setdefault(projects[match.subdomain_id], []).append(match.pk)
+        for project_id, ids in closed.items():
+            message = ('CVE candidate closed after its product or version disappeared from inventory' if len(ids) == 1 else
+                       f'{len(ids)} CVE candidates closed after their product or version disappeared from inventory')
+            activity.log('confirm', message, project=project_id, match_id=ids[0], match_ids=ids[:CLOSED_SAMPLE], count=len(ids),
+                         decision='closed_not_applicable')
     return hosts
+
+
+CLOSED_SAMPLE = 20  # match ids named in a close_stale activity line: enough to find them, never a row the size of the sweep
 
 
 def _vouched_on_another_row(subdomain, name, version):
@@ -1434,11 +2118,21 @@ def collect_subdomain_matches(subdomain, product_index, cve_by_id, min_confidenc
     libraries = js_libraries.HostLibraries.for_subdomain(subdomain) if any(js_libraries.is_library(t.name) for t in technologies) else None
     # a core version that is a number a library's own file on the host states is that library's (jQuery 3.7.1 is not WordPress 3.7.1)
     wrong = cms_evidence.superseded(subdomain, technologies, libraries.file_versions() if libraries is not None else ())
+    readings = _host_readings(subdomain)
+    host = host_distro(subdomain, readings=readings)  # a Red Hat family host: its technologies are judged against Red Hat's data too
+    hint = host or host_debian_hint(subdomain, readings=readings)  # a Debian or Ubuntu host: a hint for its technologies, never a fix
+    # the CPE a first-party reading named a technology by (nmap's other CPEs on a port, cveFeed.source_versions): matched CPE first like a port's
+    from cveFeed import source_versions
+    tech_cpes = source_versions.technology_cpes(subdomain) if technologies else {}
+    # a CPE the server derived from a name matcher's name (cveFeed.tech_links): matched the same way, and said so on the evidence
+    derived_cpes = {n: c for n, c in source_versions.link_cpes(subdomain).items() if n in source_versions.derived_link_cpes(subdomain)} if technologies else {}
     for tech in technologies:
         name, version = split_name_version(tech.name)
         if wrong and (cms.key(name), version) in wrong:
             continue
-        name, version = versions.legacy_aspnet(name, version)  # an earlier build stored X-AspNet-Version's CLR line as "ASP.NET"
+        # the template word and a detector's name dropped, and an X-AspNet-Version CLR line (an earlier build's "ASP.NET", the technology template's
+        # "AspNet Version Disclosure") read as the .NET Framework's
+        name, version = read_technology(tech.name)
         token = _norm(name)
         if len(token) < _MIN_TOKEN:
             continue
@@ -1453,24 +2147,31 @@ def collect_subdomain_matches(subdomain, product_index, cve_by_id, min_confidenc
                            'version_note': 'kept: vouched for on an earlier scan of this host, although its page does not show this version'}
             if skip:
                 continue
+        tech_cpe = tech_cpes.get(tech.name or "", "")
+        derived = bool(tech_cpe) and derived_cpes.get(tech.name or "") == tech_cpe  # derived from the name: it only adds (named_hits)
         _record_matches(
             subdomain, name, version, token, "tech",
-            product_index, cve_by_id, min_confidence, scan_history, rows, evidence={"source": "tech", "source_id": tech.id, **library},
-            leads=leads, confidence_cap=cap)
+            product_index, cve_by_id, min_confidence, scan_history, rows, evidence={"source": "tech", "source_id": tech.id, **library,
+                                                                                   **({"cpe": tech_cpe[:255]} if tech_cpe else {}),
+                                                                                   **({"cpe_derived": True} if derived else {})},
+            leads=leads, confidence_cap=cap, distro=tech_distro(hint, name, version, tech.name), fix_lookup=fix_lookup, cpe=tech_cpe, cpe_derived=derived)
 
     # nmap -sV service data on the host's open ports (Shodan-style inventory).
     from startScan.models import open_services
     for ip in subdomain.ip_addresses.all():
         for port in open_services(ip):  # a UDP service that identified itself (SNMP, NTP, SSDP, memcached) is evidence like a TCP one
-            name = (port.product or "").strip()
+            # a Server-header token nmap stored whole ("nginx/1.28.3") is the product and its version
+            name, version, _rest = split_port_product(port.product, port.version)
             token = _norm(name)
             if len(token) < _MIN_TOKEN:
                 continue
-            version = (port.version or "").strip()
+            info = port_distro(port)
+            if host and info.get("distro") in distro_lib.RHEL_FAMILY and not info.get("release") and host.get("release"):
+                info["release"] = host["release"]  # the release another service or the host's OS states
             _record_matches(
                 subdomain, name, version, token, "port",
                 product_index, cve_by_id, min_confidence, scan_history, rows, cpe=port.cpe or "",
-                distro=port_distro(port), fix_lookup=fix_lookup, corroborated=runzero.reported_cves(ip, port.number),
+                distro=info, fix_lookup=fix_lookup, corroborated=runzero.reported_cves(ip, port.number),
                 evidence={"source": "port", "source_id": port.id, "ip": ip.address, "port": port.number, "protocol": port.protocol or "tcp",
                           "service_extra": (port.service_extra or "")[:255], "cpe": (port.cpe or "")[:255],
                           "method": ((port.extra or {}).get("method") or ""),
@@ -1478,6 +2179,39 @@ def collect_subdomain_matches(subdomain, product_index, cve_by_id, min_confidenc
                           # packaged, OS-serviced or unknown product's does not); always written, so a row without it predates the rule
                           "vendor_banner": match_policy.vendor_built(name)},
                 leads=leads)
+
+    # The versions a third party reported for the host (cveFeed.source_versions: Shodan's InternetDB CPEs, runZero's operating system), under the
+    # freshness rule: never when a first-party reading names the product, never older than REPORTED_MAX_AGE_DAYS; CPE first, confidence capped.
+    source_versions.collect_reported(subdomain, product_index, cve_by_id, rows, scan_history=scan_history, min_confidence=min_confidence,
+                                     fix_lookup=fix_lookup)
+    # The products a source names with no version (cveFeed.identities: a FortiGate's OS guess or factory certificate, a Recog identity): leads only
+    from cveFeed import identities
+    identities.collect_leads(subdomain, product_index, cve_by_id, rows, scan_history=scan_history, min_confidence=min_confidence, leads=leads)
+
+    # The Java runtime the host was read to run (cveFeed.java_runtime): a CVE in the JDK itself names the runtime, not a technology or a port
+    # product, so it is tested against the host's Java runtime readings, and a host where Java is clear but its version unknown is a candidate.
+    from cveFeed import java_runtime
+    java_runtime.collect_matches(subdomain, cve_by_id, rows, scan_history=scan_history, min_confidence=min_confidence, fix_lookup=fix_lookup,
+                                 host_distro=host)
+
+    # The language runtimes the host states (cveFeed.version_sources): Python, Go, Node.js, PHP, Ruby, .NET Framework, Erlang/OTP, matched
+    # against the CVEs whose own record names the runtime by vendor and product, by the Java runtime's rules; a CVE already matched above is not
+    # matched twice.
+    from cveFeed import version_sources
+    version_sources.collect_matches(subdomain, cve_by_id, rows, scan_history=scan_history, min_confidence=min_confidence, fix_lookup=fix_lookup)
+
+    # The components a vendor bundles with a product release the host states (cveFeed.bundled_components: Atlassian's Tomcat, Elasticsearch's
+    # Lucene and Log4j, the Jetty in jenkins.war ...): named like a technology, but an inferred version is never a version inside a range, so
+    # at most a needs-validation candidate; a CVE already matched above is not matched twice.
+    version_sources.collect_bundled(subdomain, product_index, cve_by_id, rows, scan_history=scan_history, min_confidence=min_confidence)
+    # The build RANGE an edge appliance's static files put it in (cveFeed.edge_builds: PAN-OS, FortiOS, Pulse Connect Secure): a CVE whose own
+    # record names the product and that a release of the range can reach is a needs-validation candidate, never a version in range.
+    from cveFeed import edge_builds
+    edge_builds.collect_matches(subdomain, cve_by_id, rows, scan_history=scan_history, min_confidence=min_confidence)
+    # The Windows release an NTLM challenge states (cveFeed.windows_builds): the release is known, its update revision is not, so a KEV or
+    # critical network CVE whose own record names the release and whose range covers it is a needs-validation candidate, never a version in range.
+    from cveFeed import windows_builds
+    windows_builds.collect_matches(subdomain, cve_by_id, rows, scan_history=scan_history, min_confidence=min_confidence)
     return rows
 
 
@@ -1485,32 +2219,47 @@ def correlate_subdomain(subdomain, product_index, cve_by_id, min_confidence=0.0,
     """Create/update CVEMatch rows for one subdomain. Returns number of matches."""
     return save_matches(collect_subdomain_matches(
         subdomain, product_index, cve_by_id, min_confidence=min_confidence, scan_history=scan_history, fix_lookup=fix_lookup),
-        covered=({subdomain.id}, set(cve_by_id)))
+        covered=({subdomain.id}, set(cve_by_id)), retriage=scan_history is None)
 
 
 def correlate_subdomains(subdomains, product_index, cve_by_id, min_confidence=0.0, scan_history=None, batch=500,
-                         fix_lookup=None, leads=None):
+                         fix_lookup=None, leads=None, retriage=None):
     """Correlate an iterable of subdomains, writing the matches ``batch`` hosts at a time. ``leads`` (a dict) receives the
-    hosts that run a CVE's product with no version found (see ``_record_matches``).
+    hosts that run a CVE's product with no version found (see ``_record_matches``). ``retriage`` (``save_matches``) defaults to true outside a
+    scan: a scan's triage stage tracks what the scan produced, every other caller (a probe, a version source, a KEV re-read) has no stage after it.
     Returns (hosts walked, matches recorded)."""
+    retriage = scan_history is None if retriage is None else retriage
     hosts = matches = 0
     rows, ids = [], set()
     pool = set(cve_by_id)
     fix_lookup = fix_lookup or DbFixLookup()
-    for sub in subdomains:
-        hosts += 1
-        ids.add(sub.id)
-        collect_subdomain_matches(sub, product_index, cve_by_id, min_confidence, scan_history, rows, fix_lookup, leads)
-        if hosts % batch == 0:
-            matches += save_matches(rows, covered=(ids, pool))
-            rows, ids = [], set()
-    return hosts, matches + save_matches(rows, covered=(ids, pool))
+    from itertools import islice
+
+    from cveFeed import source_versions, version_sources
+    walk = iter(subdomains)
+    while True:
+        chunk = list(islice(walk, batch))
+        if not chunk:
+            break
+        if product_index:
+            version_sources.prefetch_bundled(chunk)  # the hosts' bundled component readings in one query, not one per host
+            source_versions.prefetch(chunk)  # their source readings (cveFeed.source_versions) in one query, not one per host
+            version_sources.prefetch_readings(chunk, cve_by_id)  # their runtime, version range and Java runtime rows, one query each, not one per host
+        for sub in chunk:
+            hosts += 1
+            ids.add(sub.id)
+            collect_subdomain_matches(sub, product_index, cve_by_id, min_confidence, scan_history, rows, fix_lookup, leads)
+            if hosts % batch == 0:
+                matches += save_matches(rows, covered=(ids, pool), retriage=retriage)
+                rows, ids = [], set()
+    return hosts, matches + save_matches(rows, covered=(ids, pool), retriage=retriage)
 
 
 # One product index per process, rebuilt only when the CVE table changes (a new or re-synced entry moves the key).
 _INDEX_CACHE = {"key": None, "value": None}
 _LOCAL_CACHE = {"key": None, "value": None}
-_CVE_FIELDS = ("id", "cve_id", "affected", "kev", "epss_reached", "exploit_db", "cvss")
+_CVE_FIELDS = ("id", "cve_id", "affected", "kev", "epss_reached", "exploit_db", "cvss", "cvss_vector", "published_at",
+               "local_only")  # the vector, date and locality: cveFeed.windows_builds.eligible
 
 
 def _pool(qs, cache, key):
@@ -1535,7 +2284,7 @@ def cve_pool(cve_limit=None):
     if _INDEX_CACHE["key"] == key:
         return _INDEX_CACHE["value"]
     # a rejected CVE matches nothing, and neither does one only usable from the host itself (cveFeed.locality)
-    qs = CVEEntry.objects.exclude(status__icontains="reject").exclude(local_only=True).only(*_CVE_FIELDS).order_by("-published_at")
+    qs = CVEEntry.objects.exclude(status__iregex=DEAD_STATUS_RE).exclude(local_only=True).only(*_CVE_FIELDS).order_by("-published_at")
     return _pool(qs[:cve_limit] if cve_limit else qs, _INDEX_CACHE, key)
 
 
@@ -1546,7 +2295,7 @@ def local_pool():
 
     from cveFeed.models import CVEEntry
 
-    qs = CVEEntry.objects.exclude(status__icontains="reject").filter(local_only=True)
+    qs = CVEEntry.objects.exclude(status__iregex=DEAD_STATUS_RE).filter(local_only=True)
     stamp = qs.aggregate(n=Count("id"), latest=Max("synced_at"))
     return _pool(qs.only(*_CVE_FIELDS).order_by("-published_at"), _LOCAL_CACHE, (stamp["n"], stamp["latest"]))
 
@@ -1554,7 +2303,28 @@ def local_pool():
 def _index_hit(token, product_index):
     """Whether any product of the index can be ``token``: by name, or by an alias (nmap's "Apache httpd" is the advisory's "HTTP Server")."""
     return (any(name_matches_token(token, product_token) for product_token in _candidate_tokens(token, product_index))
-            or any(alias in product_index for alias in PRODUCT_ALIASES.get(token, ())))
+            or any(alias in product_index or (ALIAS_VENDORS.get((token, alias)) and _fuzzy_ids(alias, product_index))
+                   for alias in PRODUCT_ALIASES.get(token, ()))
+            or any(_fuzzy_ids(rest, product_index) for _lead, rest in _vendor_led(token)))
+
+
+def names_rules_touch(name, product_index, cpe="", source="tech"):
+    """Whether the name rules of data/product_aliases.json and ``_vendor_led`` can change what a stored name connects to: an alias or a
+    restriction names it, its template word is dropped (``tech_name``), it leads with a vendor whose product is in the index, a product two
+    vendors use is among its candidates, or its CPE is one the vendor renames or the no-vendor rule read differently. The update backfill
+    (manage.py backfill_name_aliases) correlates again the hosts carrying such a name."""
+    base = tech_name(name) if source == "tech" else (name or "")
+    token = _norm(base)
+    if len(token) < _MIN_TOKEN:
+        return False
+    if base != (name or "") or token in PRODUCT_ALIASES or token in NAME_VENDORS:
+        return True
+    if any(_fuzzy_ids(rest, product_index) for _lead, rest in _vendor_led(token)):
+        return True
+    if any(t in product_index and name_matches_token(token, t) for t in AMBIGUOUS_PRODUCTS):
+        return True
+    parts = parse_cpe(cpe)
+    return bool(parts and parts[1] in product_index)
 
 
 def latest_scan_q(prefix=""):
@@ -1609,8 +2379,8 @@ def candidate_subdomains(product_index, base=None):
     from startScan.models import IpAddress, Port, Subdomain, Technology
 
     tech_ids, tokens = [], {}
-    for tech_id, tech_name in Technology.objects.values_list("id", "name").iterator():
-        token = _norm(split_name_version(tech_name)[0])
+    for tech_id, stored in Technology.objects.values_list("id", "name").iterator():
+        token = _norm(tech_name(split_name_version(stored)[0]))
         if len(token) < _MIN_TOKEN:
             continue
         if token not in tokens:
@@ -1619,7 +2389,7 @@ def candidate_subdomains(product_index, base=None):
             tech_ids.append(tech_id)
     products = set()
     for product in Port.objects.exclude(product="").values_list("product", flat=True).distinct():
-        token = _norm(product.strip())
+        token = _norm(split_port_product(product)[0])
         if len(token) >= _MIN_TOKEN and _index_hit(token, product_index):
             products.add(product)
 
@@ -1627,5 +2397,28 @@ def candidate_subdomains(product_index, base=None):
     ips = IpAddress.ports.through.objects.filter(port__product__in=products).values("ipaddress_id")
     by_port = Subdomain.ip_addresses.through.objects.filter(ipaddress_id__in=ips).values("subdomain_id")
     matched = CVEMatch.objects.filter(source__in=_CORRELATED_SOURCES).values("subdomain_id")  # re-checked so a stale match closes
-    qs = (Subdomain.objects if base is None else base).filter(Q(id__in=by_tech) | Q(id__in=by_port) | Q(id__in=matched)).filter(latest_scan_q())
+    wanted = Q(id__in=by_tech) | Q(id__in=by_port) | Q(id__in=matched)
+    from cveFeed import java_runtime
+    if java_runtime.index_has_runtime(product_index):
+        # a runtime CVE in the pool: every host where Java is clear is a candidate, whatever its technologies say (cveFeed.java_runtime)
+        wanted |= Q(id__in=java_runtime.java_host_ids(Subdomain.objects if base is None else base))
+    from cveFeed import version_sources
+    if version_sources.index_has_runtime(product_index):
+        # a language runtime CVE in the pool: every host with a runtime reading is a candidate (cveFeed.version_sources)
+        wanted |= Q(id__in=version_sources.runtime_host_ids(Subdomain.objects if base is None else base))
+    if product_index:
+        # a host whose vendor bundle names a component (cveFeed.bundled_components) is a candidate for that component's CVEs
+        wanted |= Q(id__in=version_sources.bundled_host_ids(Subdomain.objects if base is None else base))
+    if product_index:
+        # a host a third party reported a version for (cveFeed.source_versions): a candidate, the freshness rule decides at correlation
+        from cveFeed import source_versions
+        wanted |= Q(id__in=source_versions.reported_host_ids(Subdomain.objects if base is None else base))
+    from cveFeed import edge_builds
+    if product_index:
+        # an edge appliance's build range (cveFeed.edge_builds): matched by the CVE's vendor and product, not by a technology token
+        wanted |= Q(id__in=edge_builds.range_host_ids(Subdomain.objects if base is None else base))
+        # a Windows release an NTLM challenge states (cveFeed.windows_builds): matched by the CVE's own entry naming the release
+        from cveFeed import windows_builds
+        wanted |= Q(id__in=windows_builds.host_ids(Subdomain.objects if base is None else base))
+    qs = (Subdomain.objects if base is None else base).filter(wanted).filter(latest_scan_q())
     return qs.prefetch_related("technologies", "ip_addresses__ports")

@@ -19,6 +19,7 @@ echo "docker $*" >> "$STUB_DIR/calls.log"
 case " $* " in
   *" watchdog_tick "*)
     if [ -f "$STUB_DIR/tick_fails" ]; then echo "Traceback: boom"; exit 1; fi
+    if [ -f "$STUB_DIR/tick_times_out" ]; then sleep 1; exit 124; fi
     if [ -f "$STUB_DIR/tick_slow" ]; then sleep 4; fi
     if [ -f "$STUB_DIR/tick_acts" ]; then echo '{"ok": true, "acted": ["R1"]}'; else echo '{"ok": true, "acted": [], "seconds": 0.1}'; fi
     exit 0;;
@@ -96,6 +97,13 @@ class WatchdogScriptTests(unittest.TestCase):
         self.assertIn('python3 manage.py watchdog_tick', call[0])
         self.assertEqual(self.log_text(), '')  # a tick that did nothing leaves no line
 
+    def test_a_tick_the_time_limit_killed_says_so_and_how_long_it_ran(self):
+        """399 lines read only "tick failed (exit 124)": nothing said it was the time limit, or that start-up counted."""
+        (self.stub / 'tick_times_out').write_text('x')
+        self.assertEqual(self.run_script('tick').returncode, 0)
+        line = self.log_text()
+        self.assertRegex(line, r'tick failed \(exit 124\): took [1-9]\d* s; timed out: the command did not end within its time limit, start-up of the web container included;')
+
     def test_the_layout_comes_from_dotenv_too(self):
         (self.work / 'docker-compose.over.yml').write_text('services: {}\n')
         (self.work / '.env').write_text('CVENGINE_COMPOSE_FILES=docker-compose.yml,docker-compose.over.yml\n')
@@ -148,12 +156,13 @@ class WatchdogScriptTests(unittest.TestCase):
         finally:
             os.close(fd)
 
-    def test_the_scanner_and_the_tailscale_sidecar_follow_celery_when_they_exist(self):
+    def test_the_scanner_and_the_tailscale_sidecar_are_left_alone_when_celery_is_recreated(self):
+        # they have a network of their own (the sidecar is in the scanner's namespace): recreating celery does not touch them
         (self.stub / 'services').write_text('web\ncelery\nscanner\ntailscale\n')
         self.request()
         self.run_script('act')
         recreated = [c.split('--force-recreate ')[1].strip() for c in self.docker_calls() if '--force-recreate' in c]
-        self.assertEqual(recreated, ['celery', 'scanner', 'tailscale'])
+        self.assertEqual(recreated, ['celery'])
 
     def test_restart_celery_beat_and_the_prune(self):
         self.request('restart-celery-beat', 'R6')

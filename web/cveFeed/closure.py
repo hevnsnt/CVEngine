@@ -6,9 +6,11 @@ have their own statuses (``SUPPLIER_*`` below). A person closes a finding as fix
 note on why (``clean_note``); the note is stored in the finding's own note field with who and when, and the change is written to the
 finding's audit trail. The engine closes CVE matches on its own too (the AI or a correlation rule rules one out, a later scan no longer
 reports a scanner finding, a hygiene check no longer finds one); those keep the reason they already store, and ``closure_of`` reads it
-back as the closure note, marked ``closed_automatically``. An automatic closure is never labelled a false positive, with one exception: the AI
+back as the closure note, marked ``closed_automatically``. An automatic closure is never labelled a false positive, with two exceptions: the AI
 reviewer (cveFeed.reviewer) closes a finding it found to be one as ``false_positive`` with no user and a note that starts with ``AUTOMATIC``,
-and only after the server's own checks (no hard evidence, nobody worked it); that reads back as automatic too.
+and only after the server's own checks (no hard evidence, nobody worked it); and the finding a template check filed is closed the
+same way once that check's hit is known to have read only the version string (``templategen.close_version_hit_findings``, only while
+nobody changed it). Both read back as automatic too.
 
 Kept free of Django imports so every layer (models, counts, the API, reports) can import it.
 """

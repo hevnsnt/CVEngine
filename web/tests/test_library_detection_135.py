@@ -55,7 +55,12 @@ class BbotLibraryIngestTests(RouteFixture, TestCase):
             result.technologies.add(('www.rt.test', cpe))
         persist_bbot_result(result, {'scan_history_id': scan.id, 'domain_id': self.domain.id})
         names = set(Subdomain.objects.get(scan_history=scan, name='www.rt.test').technologies.values_list('name', flat=True))
-        self.assertEqual(names, {'jQuery', 'Bootstrap', 'wordpress:3.7.1', 'nginx'})  # one bare jQuery, never 1.2.1 / 3.4.1 / 3.2.1
+        self.assertEqual(names, set())  # every Shodan CPE is a third-party reading (cveFeed.source_versions), never a first-party technology
+        # one bare jQuery, never 1.2.1 / 3.4.1 / 3.2.1: a library's version is read from its own file; a CPE that is not a library keeps its version
+        from cveFeed.models import ProbeObservation
+        self.assertEqual(set(ProbeObservation.objects.filter(probe='vsrc:shodan-idb').values_list('kind', 'product', 'version')),
+                         {('reported', 'wordpress', '3.7.1'), ('reported', 'jquery', ''), ('reported', 'getbootstrap bootstrap', ''),
+                          ('reported', 'nginx', '')})
 
 
 # a WordPress front page: core's jQuery 3.7.1, jQuery Migrate 3.4.1, the SmartMenus plugin (a "jQuery Plugin" banner), a forms plugin's and a

@@ -56,6 +56,24 @@ class SentinelTokenScopeTests(SentinelBase):
         self.assertEqual((status, out['task']), (200, None))
         self.assertEqual(call(raw, 'GET', '/api/v1/sentinel/tasks/1')[0], 404)  # allowed by the scope, no such task of its own
 
+    def test_a_sentinel_token_can_fetch_the_custom_secret_rules_bundle(self):
+        """``GET sentinel/secret-rules/bundle`` is documented as Sentinel-token-only and the Sentinel client calls it for a ``secrets_scan`` task with
+        custom rules, but the path was missing from ``auth.SENTINEL_PATH``, so every Sentinel was answered 403 and ran without the rules."""
+        from cveFeed import secret_rules
+        raw = enroll(self.t['dana'])['token']
+        bundle = '/api/v1/sentinel/secret-rules/bundle'
+        self.assertTrue(auth.SENTINEL_PATH.match(bundle))
+        self.assertEqual(Client().get(bundle, HTTP_AUTHORIZATION=f'Bearer {raw}').status_code, 404)  # allowed through; there are no custom rules yet
+        good = 'rules:\n- name: Example\n  id: custom.example\n  pattern: exm_[a-z0-9]{20}\n'
+        saved = secret_rules.save(self.root, good, [], [])
+        response = Client().get(bundle, HTTP_AUTHORIZATION=f'Bearer {raw}')
+        self.assertEqual((response.status_code, response.content.decode()), (200, good))
+        self.assertEqual(response['ETag'], f'"{saved["bundle_sha256"]}"')
+        self.assertEqual(Client().get(bundle, HTTP_AUTHORIZATION=f'Bearer {raw}', HTTP_IF_NONE_MATCH=response['ETag']).status_code, 304)
+        self.assertEqual(Client().get(bundle, HTTP_AUTHORIZATION=f'Bearer {self.t["dana"]}').status_code, 403)  # a person's token is not a Sentinel's
+        for other in ('/api/v1/sentinel/secret-rules', '/api/v1/sentinel/secret-rules/bundle/x', '/api/v1/sentinel/secret-rules/other'):
+            self.assertFalse(auth.SENTINEL_PATH.match(other), other)
+
     def test_a_person_cannot_ask_for_a_sentinel_token(self):
         client = Client()
         client.force_login(self.dana)
@@ -260,7 +278,7 @@ class InternalOnlyClaimTests(SentinelBase):
         self.inside_token = create_token(self.dana, 'inside')[1]
         self.inside = register_sentinel(self.inside_token, name='inside', capabilities=['nmap', 'nuclei_light', 'wpscan', 'network:internal'])[1]
         Agent.objects.filter(pk=self.inside['id']).update(network='internal')  # granted by the server, not by what the Sentinel declares
-        Agent.objects.filter(pk__in=[self.external['id'], self.inside['id']]).update(info={'features': ['credential_filter']})  # a current client: only one that leaves out credential checks is offered nuclei work while they are off
+        Agent.objects.filter(pk__in=[self.external['id'], self.inside['id']]).update(info={'features': ['credential_filter'], 'contract_version': 11})  # a current client: only one that leaves out credential checks is offered nuclei work while they are off
 
     def _nuclei(self, targets):
         return SentinelTask.objects.create(project=self.pa, kind='nuclei_light', target={'targets': targets, 'tags': [], 'severities': []}, ips=[])
@@ -291,7 +309,7 @@ class HostScopeNarrowingTests(SentinelBase):
     def _sentinel(self, hosts):
         status, out = register_sentinel(self.t['dana'], name='narrow', capabilities=['nuclei_light', 'wpscan'], scope={'projects': ['sen-a'], 'hosts': hosts})
         self.assertEqual(status, 201, out)
-        Agent.objects.filter(pk=out['id']).update(info={'features': ['credential_filter']})  # a current client (see InternalOnlyClaimTests)
+        Agent.objects.filter(pk=out['id']).update(info={'features': ['credential_filter'], 'contract_version': 11})  # a current client (see InternalOnlyClaimTests)
 
     def test_a_nuclei_task_outside_the_declared_hosts_is_not_claimable(self):
         self._sentinel(['192.0.2.0/24'])
@@ -526,12 +544,12 @@ class NetworkAuthorityTests(SentinelBase):
     def test_an_external_sentinel_gets_no_internal_work_and_is_not_eligible(self):
         InternalRange.objects.create(project=self.pa, cidr='10.0.0.0/24')
         boot = self.boot('external')
-        Agent.objects.filter(pk=boot['id']).update(status='active', last_seen=timezone.now(), info={'features': ['credential_filter']})
+        Agent.objects.filter(pk=boot['id']).update(status='active', last_seen=timezone.now(), info={'features': ['credential_filter'], 'contract_version': 11})
         task = SentinelTask.objects.create(project=self.pa, kind='nuclei_light', target={'targets': ['10.0.0.5'], 'tags': [], 'severities': []}, ips=[])
         self.assertIsNone(call(boot['token'], 'POST', '/api/v1/sentinel/tasks/next', {'wait': 0})[1]['task'])
         self.assertEqual(sentinels.eligible_sentinels(self.pa, 'nuclei_light', internal=True), [])
         inside = self.boot('internal')
-        Agent.objects.filter(pk=inside['id']).update(status='active', last_seen=timezone.now(), info={'features': ['credential_filter']})
+        Agent.objects.filter(pk=inside['id']).update(status='active', last_seen=timezone.now(), info={'features': ['credential_filter'], 'contract_version': 11})
         self.assertEqual(call(inside['token'], 'POST', '/api/v1/sentinel/tasks/next', {'wait': 0})[1]['task']['id'], task.pk)
 
     def test_only_an_administrator_moves_a_sentinel_across_the_boundary(self):
@@ -623,3 +641,11 @@ class NetworkAuthorityTests(SentinelBase):
         migration.grandfather_internal(apps, None)
         agent.refresh_from_db()
         self.assertEqual(agent.network, 'internal')
+
+
+class TaskLabelTests(SimpleTestCase):
+    def test_a_comma_joined_host_list_is_spaced_so_the_label_wraps(self):
+        # dns_resolve, http_probe and secrets_scan store their names comma-joined with no spaces: on the Sentinels pages that ran on as one unbreakable word
+        task = SentinelTask(kind='dns_resolve', host='a.example.org,b.example.org,c.example.org')
+        self.assertEqual(sentinels.task_label(task), 'a.example.org, b.example.org, c.example.org')
+        self.assertEqual(sentinels.task_label(SentinelTask(kind='nmap', host='one.example.org')), 'one.example.org')

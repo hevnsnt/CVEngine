@@ -49,7 +49,7 @@ FAMILIES = (
     ('discovery', 'Names and addresses', 'Names, addresses and certificates: how cvENGINE learns what you own. The basics are always on.',
      ('bbot_discovery', 'discover', 'dns_resolve', 'alive_check', 'identity_check', 'dangling_dns_check')),
     ('web', 'Websites', 'Web fingerprints, hidden routes, virtual hosts, cloud storage and supplier checks.',
-     ('http_probe', 'waf', 'vhost_probe', 'subdir_probe', 'route_probe', 'route_probe_signed', 'page_read', 'path_probe', 'bucket_check', 'supplier_check')),
+     ('http_probe', 'java_runtime', 'version_read', 'version_digest', 'version_rows', 'waf', 'vhost_probe', 'subdir_probe', 'route_probe', 'route_probe_signed', 'page_read', 'path_probe', 'bucket_check', 'supplier_check')),
     ('network', 'Open ports and services', 'Which ports answer and which service and version is behind them. Includes the heavy full-port and UDP sweeps.',
      ('nmap', 'naabu', 'nmap_full', 'nmap_verify', 'nmap_udp', 'db_probe')),
     ('tls_mail', 'Certificates and email', 'TLS configuration, expiring certificates, SPF, DKIM and DMARC.', ('testssl', 'hygiene_check')),
@@ -206,10 +206,7 @@ def clean_domain(value):
         text = text[2:]
     if target_types.classify_target(text) != target_types.DOMAIN:
         raise WizardError(400, f'"{text[:80]}" is not a domain name. Enter one domain such as example.com (an address or range can be added later in Targets).')
-    if target_types.resolves_to_blocked(text):
-        raise WizardError(400, f'{text} points at a loopback, link-local or internal address, which cannot be scanned from here '
-                               '(an operator can allow internal ranges with CVENGINE_ALLOW_PRIVATE_TARGETS=1).')
-    return text
+    return text  # a name is not looked up here: the Sentinel that scans it refuses one that points at an address no Sentinel may scan
 
 
 def _clean_name(value, what):

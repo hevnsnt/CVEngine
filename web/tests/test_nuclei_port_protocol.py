@@ -99,7 +99,6 @@ class DeepBase(DispatchBase):
                 sent.append(task[0])
             return (x for x in ())
         with tempfile.NamedTemporaryFile('w', suffix='.txt') as handle, mock.patch('agentapi.sentinel_dispatch.any_scanner_for', return_value=True), \
-                mock.patch('agentapi.sentinel_dispatch.resolvable_targets', side_effect=lambda chunk, **kw: list(chunk)), \
                 mock.patch('agentapi.sentinel_dispatch.dispatch_many', side_effect=capture), \
                 mock.patch('cveFeed.validation.all_templates_allowed', return_value=False):
             handle.write('\n'.join(targets) + '\n')
@@ -316,7 +315,7 @@ class NoCheckExistsTests(DispatchBase):
             calls.append(chunks)
             return (row for row in [(0, result)])
         with mock.patch.object(dispatch, 'any_scanner_for', return_value=True), mock.patch.object(dispatch, 'dispatch_many', fake_many), \
-                mock.patch.object(dispatch, 'resolvable_targets', lambda chunk, **kw: list(chunk)), mock.patch.object(nuclei_services, 'labels_for', return_value=labels), \
+                mock.patch.object(nuclei_services, 'labels_for', return_value=labels), \
                 mock.patch.object(dispatch, 'signed_in_stream', return_value=None):
             stream = dispatch.wrap_nuclei_stream(self.scan, kind)
             found = list(stream(handle.name, **kwargs))

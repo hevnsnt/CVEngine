@@ -227,15 +227,19 @@ def shown_version(component, ver):
 
 
 def _row(inv, sub, component, ver, cve, product, details, local, fix_lookup):
-    status, fixed = distro_lib.NO_DATA, ''
+    status, fixed, fix = distro_lib.NO_DATA, '', None
     pkg = component.get('package')
     info = _info(inv.os_info or {}, pkg) if pkg else None
     if info and info['package']:
-        status, fixed = distro_lib.judge(info, fix_lookup(info['distro'], info['package'], cve.cve_id))
+        status, fixed, row = distro_lib.judge_row(info, fix_lookup(distro_lib.fix_distro(info['distro']), info['package'], cve.cve_id))
+        fix = correlation.distro_fix_evidence(info, row, fixed)  # Red Hat's fixed build and advisory (None for other distributions)
+    evidence = _evidence(inv, component, ver, details, local)
+    if fix:
+        evidence['distro_fix'] = fix
     return {'cve_entry_id': cve.id, 'subdomain_id': sub.id, 'source': SOURCE, 'matched_product': (product or component['names'][0])[:255],
             'matched_version': shown_version(component, ver), 'version_in_range': True,
             'confidence': _confidence(component, cve, status), 'scan_history_id': sub.scan_history_id,
-            'distro_status': status, 'distro_fixed_version': fixed[:64], 'evidence': _evidence(inv, component, ver, details, local)}
+            'distro_status': status, 'distro_fixed_version': fixed[:64], 'evidence': evidence}
 
 
 def _add_evidence(external, now):

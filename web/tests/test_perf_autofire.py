@@ -43,6 +43,9 @@ class HotCveSelectionTests(TestCase):
 		CVEEntry.objects.create(cve_id='CVE-2099-3', cvss=3.0, affected=[])  # ice
 		done = CVEEntry.objects.create(cve_id='CVE-2099-4', kev=True, affected=[])
 		AutoFireRun.objects.create(cve_entry=done, tier='fire')
+		# the heat policy is a saved setting, read once per cache window rather than per row: read it before measuring, so the count does not depend
+		# on whether an earlier test left its Redis copy behind (the runner now clears it before every test)
+		fire.threat_tier
 		with CaptureQueriesContext(connection) as ctx:
 			found = hot_cves_without_run()
 			tiers = [c.attention_tier for c in found]

@@ -170,8 +170,10 @@ def write_running(now=None):
 
 
 def heartbeat_once(now=None):
-    """Refresh the in-flight record while this worker has a task running. Returns True when it wrote one."""
-    if not _state['running']:
+    """Refresh the lane's liveness record, with or without a task running. Returns True when the worker has a lane to write for.
+    A lane with nothing to do used to write nothing, so the one proof of life the watchdog accepts from a busy lane never existed for an idle one: on 11/13 and 11/14
+    the idle classic lane (queue empty) was the lane named on every one of the 13 restarts. ``in_flight`` reads only the records that list a task; ``alive`` reads any."""
+    if not (_state['lane'] or lane_name()):
         return False
     write_running(now)
     return True
@@ -213,7 +215,7 @@ def _ensure_heartbeat():
 def install():
     from celery.signals import task_postrun, task_prerun, worker_ready, worker_shutdown
 
-    worker_ready.connect(lambda **kw: (record_start(), reset()), weak=False, dispatch_uid='lane-memory-ready')
+    worker_ready.connect(lambda **kw: (record_start(), reset(), _ensure_heartbeat()), weak=False, dispatch_uid='lane-memory-ready')  # the beat starts with the worker, not with its first task
     worker_shutdown.connect(lambda **kw: reset(), weak=False, dispatch_uid='lane-memory-shutdown')
     task_prerun.connect(lambda task_id=None, task=None, **kw: before(task_id, getattr(task, 'name', '?')), weak=False, dispatch_uid='lane-memory-pre')
     task_postrun.connect(lambda task_id=None, task=None, **kw: after(task_id, getattr(task, 'name', '?')), weak=False, dispatch_uid='lane-memory-post')
@@ -309,3 +311,35 @@ def in_flight(now=None, pids=None):
         if ages:
             out[lane] = min(ages)
     return out
+
+
+def beats(now=None):
+    """``{lane: {'age_seconds', 'pid', 'running': [task names]}}`` for every lane that has written a liveness record, whatever its age (``in_flight`` drops a stale
+    one; the watchdog's log wants to say how stale it was). Lanes that never wrote one are absent."""
+    from django.core.cache import cache
+    now = time.time() if now is None else now
+    out = {}
+    for lane in LANES:
+        try:
+            raw = cache.get(RUNNING_PREFIX + lane)
+            data = json.loads(raw) if raw else None
+        except Exception:  # noqa: BLE001
+            data = None
+        if not isinstance(data, dict) or not isinstance(data.get('beat'), (int, float)):
+            continue
+        out[lane] = {'age_seconds': int(max(0, now - data['beat'])), 'pid': data.get('pid'),
+                     'running': [str(t.get('name'))[:60] for t in (data.get('running') or []) if isinstance(t, dict)][:5]}
+    return out
+
+
+ALIVE_SECONDS = 90  # a lane whose liveness record is at most this old is alive: three beats (HEARTBEAT_SECONDS), and well over the 24.6 s the longest garbage collection measured on the scanner host stopped it
+
+
+def alive(now=None, pids=None):
+    """``{lane: age of its last beat in seconds}`` for the lanes whose worker wrote a liveness record at most ``ALIVE_SECONDS`` ago, a task running or not. The beat is a
+    greenlet of the worker's own hub: while the hub runs (between collections, while tasks wait on sockets) it beats, and when the process is dead or stalled for
+    longer than a collection it stops, which is what makes it a better question than a 3 second ping for whether this lane is there. ``pids`` ({lane: {pid, ...}}) limits a record
+    to the process that answers for the lane, as for ``in_flight``."""
+    now = time.time() if now is None else now
+    return {lane: row['age_seconds'] for lane, row in beats(now).items()
+            if row['age_seconds'] <= ALIVE_SECONDS and (not pids or lane not in pids or row['pid'] in pids[lane])}

@@ -390,18 +390,54 @@ def _inside(path, root):
     return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
 
 
+def installed_approval(relative):
+    """``(entry, problem)`` for the installed template at ``relative`` (its path in the pinned release): its entry in the scanner library's template index
+    and why the policy in force refuses it, or ''. This server keeps no copy of the templates: the index records each file's sha256 and the verdicts of the
+    library's rules (``cvengine_scanner.template_index``: the rule ``installed_template_problem`` applies to a text, composed the same way), and the Sentinel
+    runs only a file whose bytes hash to that sha256."""
+    from cvengine_scanner import template_index
+    from cveFeed import nuclei_scan
+    entry = template_index.entry_for(relative)
+    if entry is None:
+        return None, 'template not validated: not a template of the pinned release (the template index does not record it)'
+    read_only, credentials = nuclei_scan.policy_flags()
+    return entry, template_index.policy_problem(entry, read_only, credentials)
+
+
+def template_fingerprint(path):
+    """What identifies the exact template at ``path`` for a coverage key: the sha256 the template index records for an installed one, the sha256 of
+    the file for a generated one, '' when there is none."""
+    from cveFeed import templategen
+    relative = templategen.installed_relative(path)
+    if relative is not None:
+        from cvengine_scanner import template_index
+        return str((template_index.entry_for(relative) or {}).get('sha256') or '')
+    if not path:
+        return ''
+    try:
+        with open(path, 'rb') as source:
+            return hashlib.sha256(source.read(MAX_INSTALLED_TEMPLATE_BYTES + 1)).hexdigest()
+    except OSError:
+        return ''
+
+
 def approved_template(path, cve_id=None):
     """Return approved immutable text and an error, applying policy at every execution.
 
-    Generated files must still match an approved row. Installed files must be read-only
-    and destination-bound. Both are read with a size cap and fail closed outside roots.
+    Generated files must still match an approved row and are read with a size cap, failing closed outside their directory. An installed template
+    (``templategen.INSTALLED_PREFIX``) is judged from the template index (``installed_approval``); its text is not on this server (a Sentinel reads it
+    from its own image), so an approved one returns '' with no problem.
     """
     from cveFeed import templategen
     from cveFeed.models import GeneratedTemplate
+    relative = templategen.installed_relative(path)
+    if relative is not None:
+        _entry, problem = installed_approval(relative)
+        return '', problem
     generated = _inside(path, templategen.GENERATED_DIR)
-    if not generated and not _inside(path, templategen.TEMPLATES_ROOT):
+    if not generated:
         return '', 'template not validated: outside the template directories'
-    limit = templategen.MAX_TEMPLATE_BYTES if generated else MAX_INSTALLED_TEMPLATE_BYTES
+    limit = templategen.MAX_TEMPLATE_BYTES
     try:
         with open(path, 'rb') as handle:
             data = handle.read(limit + 1)
@@ -410,18 +446,15 @@ def approved_template(path, cve_id=None):
         text = data.decode('utf-8')
     except (OSError, UnicodeError):
         return '', 'template not validated: cannot read UTF-8 template'
-    if generated:
-        rows = GeneratedTemplate.objects.filter(path=path, status=GeneratedTemplate.STATUS_VALID,
-                    positive_fixture_verified_at__isnull=False).exclude(positive_fixture_source='')
-        if cve_id:
-            rows = rows.filter(cve_entry__cve_id__iexact=cve_id)
-        row = rows.select_related('cve_entry').first()
-        if row is None or row.yaml != text:
-            return '', 'template not validated: not an unchanged valid generated template with a reviewed positive fixture'
-        ok, why = templategen.static_check(text, expected_cve_id=row.cve_entry.cve_id)
-        problem = '' if ok else f'template not validated: {why}'
-    else:
-        problem = installed_template_problem(text)
+    rows = GeneratedTemplate.objects.filter(path=path, status=GeneratedTemplate.STATUS_VALID,
+                positive_fixture_verified_at__isnull=False).exclude(positive_fixture_source='')
+    if cve_id:
+        rows = rows.filter(cve_entry__cve_id__iexact=cve_id)
+    row = rows.select_related('cve_entry').first()
+    if row is None or row.yaml != text:
+        return '', 'template not validated: not an unchanged valid generated template with a reviewed positive fixture'
+    ok, why = templategen.static_check(text, expected_cve_id=row.cve_entry.cve_id)
+    problem = '' if ok else f'template not validated: {why}'
     return ('', problem) if problem else (text, '')
 
 
@@ -464,17 +497,15 @@ def local_component_only(cve):
 def _check(kind, label, argv, display, target, asset, signature, timeout, **params):
     revision = hashlib.sha256(('validation-policy-2:' + repr(argv)).encode()).hexdigest()[:10]
     if kind == 'nuclei_template':
-        try:
-            with open(params['template'], 'rb') as source:
-                revision = hashlib.sha256(revision.encode() + source.read(MAX_INSTALLED_TEMPLATE_BYTES + 1)).hexdigest()[:10]
-        except OSError:
-            pass
+        fingerprint = template_fingerprint(params['template'])
+        if fingerprint:
+            revision = hashlib.sha256(revision.encode() + fingerprint.encode()).hexdigest()[:10]
     return {'kind': kind, 'label': label, 'argv': argv, 'display': display, 'target': target, 'asset': asset,
             'service': f'validate:{kind}:{signature[:16]}:{revision}', 'timeout': timeout, 'params': params}
 
 
 def _template_check(path, host, cve_id, signature, **params):
-    """The ``nuclei_template`` check of one CVE's template against one host: it runs on the built-in scanner (``templategen.run_template``), so it has no
+    """The ``nuclei_template`` check of one CVE's template against one host: it runs on a scanner (``templategen.run_template``), so it has no
     argv; ``display`` names the template file and the host, for a person reading the step."""
     from cveFeed import templategen
     display = f'template check {os.path.basename(path)} against {host}'
@@ -668,9 +699,10 @@ def _trim(value, limit=EVIDENCE_CAP):
 def run_nuclei_template(check):
     """Run the planned template against the one host, on the built-in scanner (see ``templategen.run_template``)."""
     from cveFeed import templategen
-    outcome = templategen._test_chunk(check['params']['template'], [check['target']], project=check['params'].get('project_id'))[0]
-    if outcome.get('vulnerable') and not outcome.get('error'):
-        outcome = {**outcome, 'template_evidence': templategen.evidence_of_template(check['params']['template'])}
+    # what a hit shows (``template_evidence``: the template alone for the shapes it lists, the hit itself for any other) is read by ``run_template``
+    # from the text that ran
+    outcome = templategen.with_evidence(check['params']['template'],
+                                        templategen._test_chunk(check['params']['template'], [check['target']], project=check['params'].get('project_id')))[0]
     return _result_from_outcome(outcome)
 
 
@@ -761,7 +793,7 @@ def run_fact_probe(check):
     entry = {'probe': params['probe'], 'target': params['probe_target']}
     try:
         if probes.BY_ID[entry['probe']]['family'] == 'nmap':
-            found = probes.run_one(params['project_id'], params['domain_id'], sub, entry, fresh=True)  # a service-version scan: the nmap_verify kind, never here
+            found = probes.run_one(params['project_id'], params['domain_id'], sub, entry)  # a service-version scan: the nmap_verify kind, never here (run_one always scans: it has no freshness ledger to skip)
         else:
             project = Project.objects.get(pk=params['project_id'])
             asset = probes.asset_key(sub.name, entry)
@@ -792,7 +824,7 @@ def run_db_probe(check):
     from cveFeed import db_exposure
     from dashboard.models import Project
     params = check['params']
-    label, _fn = db_exposure.CHECKS[params['db']]
+    label = db_exposure.CHECKS[params['db']]
     project = Project.objects.get(pk=params['project_id'])
     result = sentinel_dispatch.dispatch_or_none(project, 'db_probe', {'address': params['ip'], 'port': params['port'], 'db': db_exposure.DB_KEYS[label]},
                                                 host=f'{label} on {params["ip"]}:{params["port"]}', ips=[params['ip']])  # ScannerUnavailable: no scanner can take it
@@ -1050,7 +1082,7 @@ def library_outcome(params, reading):
     if not pages:
         return result('failed', 'the host has no web page to read')
     held = [p for p in pages if p.get('outcome') == 'held']
-    if held:  # not run from this server (cveFeed.local_egress): nothing was sent, nothing is concluded, it is tried again later
+    if held:  # the port was held back, so nothing was sent: nothing is concluded, it is tried again later
         return result('failed', f"not run from this server: {held[0].get('error') or 'the port is held'}")
     read = [p for p in pages if p.get('outcome') == 'read']
     if not read:
@@ -1216,7 +1248,7 @@ def interpret(subject, check, result):
     Returns the result, with its status refined. Pure."""
     if result.get('status') != 'observed':
         return result
-    from cveFeed.correlation import PRODUCT_ALIASES, _norm, name_matches_token, parse_version, version_in_range
+    from cveFeed.correlation import PRODUCT_ALIASES, _norm, name_matches_token, range_holds
     out = dict(result)
     if subject['kind'] == 'cve_match':
         observed = (result.get('observed') or {})
@@ -1227,7 +1259,7 @@ def interpret(subject, check, result):
                         or product in PRODUCT_ALIASES.get(observed_product, ())
                         or observed_product in PRODUCT_ALIASES.get(product, ()))
         if observed.get('version') and same_product:
-            inside = version_in_range(parse_version(observed['version']), subject.get('range') or {})
+            inside = range_holds(observed['version'], subject.get('range') or {})
             if inside is True:
                 out.update(status='reaffirmed', summary=result['summary'] + '; that version is inside the affected range')
             elif inside is False:
@@ -1289,6 +1321,8 @@ def apply_validation(row, check, result, now=None, save=True):
     triaged finding to likely (or to the ceiling, when the match rests on its version string alone), a check that did not reproduce the finding changes nothing but the confidence (so a template that missed
     can never clear a finding with hard evidence), and a failure schedules a retry and is never treated as clean."""
     now = now or timezone.now()
+    if check['kind'] == 'nuclei_template' and result.get('status') in ('hit', 'reaffirmed'):
+        result = _unless_retired(row, check, result)
     close_reason = result.get('close_reason') if check['kind'] == 'script_read' and result.get('status') == 'version_changed' else ''
     if close_reason and save and row.match_id:
         refusal = _closure_refusal(row)
@@ -1353,6 +1387,9 @@ def apply_validation(row, check, result, now=None, save=True):
             scoring.evidence_arrived([row.match_id], confirmed=[row.match_id] if was_version_only else ())
         elif status == 'reaffirmed' and row.match_id and check['kind'] == 'nuclei_template':
             _record_version_hit(row, check, result)
+            # a version hit of the same check that confirmed the match before resets the row (templategen.record_outcomes): the caller goes
+            # on with this object, so it is read again rather than saved back over the reset
+            row.refresh_from_db()
         if close_reason:
             _close_on_script_read(row, close_reason)
     return row
@@ -1482,6 +1519,21 @@ def resync(row):
             row.status, row.verdict = 'pending', None  # the classification stays; the impact text is asked for the new evidence
 
 
+def _unless_retired(row, check, result):
+    """``result`` of a template check, or a ``failed`` one when the AI-written template it ran was retired or superseded while it ran
+    (``templategen.stale_generated_template``): a retired check's hit confirms nothing and files no finding. ``failed`` is never read as
+    clean, and the retry resolves the template again. Installed upstream templates are never touched."""
+    from cveFeed import templategen
+    from cveFeed.models import CVEEntry
+    stale = templategen.stale_generated_template(path=check['params'].get('template') or '')
+    if stale is None:
+        return result
+    cve = CVEEntry.objects.filter(cve_id__iexact=check['params'].get('cve_id') or '').first() or stale.cve_entry
+    templategen.discarded_result(cve, stale, project=getattr(row, 'project_id', None) or check['params'].get('project_id'))
+    why = 'the AI-written check was retired or superseded while it ran; its result was discarded'
+    return {'status': 'failed', 'error': why, 'summary': why}
+
+
 def record_template_outcomes(cve, outcomes, project, template_path):
     """Feed the template tests auto-fire runs (templategen.run_cve_tests) into the same record: each tested host's Triage rows for this
     CVE get the outcome as a validation step. ``record_outcomes`` has already written the Vulnerability and template_result.
@@ -1493,6 +1545,8 @@ def record_template_outcomes(cve, outcomes, project, template_path):
     from cveFeed.models import Triage
     if project is None or not outcomes:
         return 0
+    if templategen.stale_generated_template(path=template_path) is not None:
+        return 0  # retired while it ran: record_outcomes discarded it and said so
     by_host = {templategen._host_key(o['host']): o for o in outcomes}
     done = 0
     rows = (Triage.objects.filter(project_id=project, kind='cve_match', match__cve_entry=cve, host__in=list(by_host))
@@ -1812,8 +1866,7 @@ def run_validation(project_id, triage_ids, scan_id=None, runners=None, template_
                                     if s.get('result') != 'failed' or (s.get('kind'), s.get('target')) in planned]
             put_library_step(row, library)
             for check in checks:
-                # a stopped scan or a global pause ends the run before its next check (a check already running under heavy_job is
-                # stopped by its watchdog)
+                # a stopped scan or a global pause ends the run before its next check
                 if (scan_id is not None and resources.abort_requested(scan_id)) or resources.global_pause_requested(fail_closed=True):
                     stats['stopped'] = True
                     break

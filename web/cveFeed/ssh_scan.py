@@ -309,11 +309,41 @@ def store_row(project_id, scan, subs, address, port, row, fp=''):
                           'confidence': 1.0 if obs['verified'] else 0.0, 'source': 'sshamble', 'evidence': evidence, 'observed_at': now})
         if row['reached']:  # a complete picture of the endpoint: a fact it no longer reports (or an earlier "could not be inspected") is gone
             ProbeObservation.objects.filter(project_id=project_id, host=host, probe=PROBE, port=port, kind=OBS_KIND).exclude(product__in=seen).delete()
+            _store_banner(sub, port, row)
         if compromised(row):
             filed += _file_finding(scan, sub, address, port, row)
         elif key_checked(row):
             _close_finding(scan, sub, address, port)
+    _store_features(project_id, subs, address, row)
     return bool(row['reached'] and verdict), filed
+
+
+def _store_features(project_id, subs, address, row):
+    """The service feature readings of the endpoint (Terrapin, CBC and AES-GCM from the KEXINIT lists, the authentication methods: the result's
+    ``service_features``, kept with the row by ``probe_dispatch.try_ssh_probe``), stored for every name in ``subs`` (``cveFeed.address_features``).
+    Never fatal."""
+    items = row.get('service_features') or []
+    if not items or not row.get('reached'):
+        return
+    try:
+        from cveFeed import address_features
+        names = [sub.name.lower().rstrip('.') for sub in subs]
+        address_features.store(project_id, [{**i, 'host': str(address).lower()} for i in items], KIND, {str(address).lower(): names},
+                               address_features.SSH_PROBE_FEATURES)
+    except Exception:  # noqa: BLE001 - the inspection's own observations stand without the readings
+        logger.exception('could not store the service feature readings of an SSH inspection')
+
+
+def _store_banner(sub, port, row):
+    """The products and versions the verified SSH banner states, as first-party readings (``source_versions.store_ssh``, probe ``vsrc:ssh``):
+    searched and matched like the port scan's, never over what the port row states. Never fatal."""
+    banner = next((o['evidence'] for o in row['observations'] if o['id'] == BANNER_ID and o['verified']), '')
+    try:
+        from cveFeed import probes, source_versions
+        if source_versions.store_ssh(sub, port, banner):
+            probes.recorrelate(sub)
+    except Exception:  # noqa: BLE001 - the inspection's own observations and finding stand without the readings
+        logger.exception('could not store the SSH banner readings of %s:%s', getattr(sub, 'name', ''), port)
 
 
 def _file_finding(scan, sub, address, port, row):
@@ -336,8 +366,9 @@ def _file_finding(scan, sub, address, port, row):
 
 
 def _close_finding(scan, sub, address, port):
-    """A complete inspection that read the key as not on the blocklist: the finding of an earlier inspection is gone. A finding a person already dealt with
-    keeps its status."""
+    """A complete inspection that read the key as not on the blocklist: the finding of an earlier inspection is gone, whatever its remediation status
+    (one a person is working on is gone too once the key is replaced). Only the liveness field changes, as ``openvas_scan.resolve_missing`` does: the
+    status a person set is theirs and is kept."""
     from startScan.models import Vulnerability
     Vulnerability.objects.filter(target_domain__project_id=scan.domain.project_id, subdomain__name=sub.name, source=SOURCE, template_id=TEMPLATE_ID,
-                                 http_url=f'ssh://{address}:{port}', open_status=True, remediation_status='open').update(open_status=False)
+                                 http_url=f'ssh://{address}:{port}', open_status=True).update(open_status=False)

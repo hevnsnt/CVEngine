@@ -226,6 +226,61 @@ class AgentApiTests(TestCase):
 		self.assertEqual(host['wordpress']['status']['state'], 'blocked')
 		self.assertNotIn('9.9.9', json.dumps(host))
 
+	def test_the_host_record_carries_its_java_runtimes_over_rest_and_mcp(self):
+		from cveFeed.models import JavaRuntime
+		JavaRuntime.objects.create(project=self.pa, domain=self.da, host='www.a.example', key='actuator:/actuator/info', version='17.0.9', major=17,
+			vendor='Eclipse Temurin', source='actuator', confidence='exact', url='/actuator/info', evidence='java.version=17.0.9')
+		JavaRuntime.objects.create(project=self.pa, domain=self.da, host='www.a.example', key='bundled:confluence', version='17.0.8.1', major=17,
+			vendor='Eclipse Temurin', source='bundled_inference', confidence='inferred', detail={'basis': 'installer', 'source': 'https://confluence.atlassian.com/x'})
+		JavaRuntime.objects.create(project=self.pb, domain=self.db, host='www.a.example', key='jdwp:5005', version='11.0.2', major=11, source='jdwp')
+		host = call(self.t_alice, 'GET', '/api/v1/projects/proj-a/hosts')[1]['results'][0]
+		self.assertEqual([(j['version'], j['source'], j['confidence']) for j in host['java_runtimes']],
+			[('17.0.9', 'actuator', 'exact'), ('17.0.8.1', 'bundled_inference', 'inferred')])  # exact first; never another project's
+		self.assertEqual(host['java_runtimes'][1]['citation'], 'https://confluence.atlassian.com/x')
+		is_error, data = tool_call(self.t_alice, 'list_hosts', {'project': 'proj-a'})
+		self.assertFalse(is_error)
+		self.assertEqual(data['results'][0]['java_runtimes'][0]['version'], '17.0.9')
+		self.assertNotIn('11.0.2', json.dumps(data))
+		found = call(self.t_alice, 'GET', '/api/v1/projects/proj-a/search?q=java:17')[1]
+		self.assertEqual([h['host'] for h in found['results']], ['www.a.example'])
+		self.assertIn('Java runtime 17', found['results'][0]['matched'])
+		for q, n in (('java:17.0.9', 1), ('java:17.0', 1), ('java:21', 0), ('java:temurin', 1), ('java:jdwp', 0), ('java:any', 1), ('-java:17', 0)):
+			self.assertEqual(call(self.t_alice, 'GET', f'/api/v1/projects/proj-a/search?q={q}')[1]['count'], n, q)
+		status, body = call(self.t_alice, 'GET', '/api/v1/projects/proj-a/search?q=java:banana')
+		self.assertEqual(status, 400)
+
+	def test_java_any_finds_every_host_that_runs_java_and_java_unknown_those_with_no_version_read(self):
+		from cveFeed.models import JavaRuntime
+		from startScan.models import Technology
+		base = '/api/v1/projects/proj-a/search?q='
+		self.assertEqual(call(self.t_alice, 'GET', base + 'java:any')[1]['count'], 0)  # nginx alone runs no Java
+		tomcat = Subdomain.objects.create(name='tomcat.a.example', target_domain=self.da)
+		tomcat.technologies.add(Technology.objects.create(name='Tomcat:10.1.48'))
+		spring = Subdomain.objects.create(name='spring.a.example', target_domain=self.da)
+		ip = IpAddress.objects.create(address='203.0.113.9')
+		spring.ip_addresses.add(ip)
+		ip.ports.add(Port.objects.create(number=8080, product='Apache Tomcat', version='', service_name='http'))
+		JavaRuntime.objects.create(project=self.pa, domain=self.da, host='www.a.example', key='jdwp:5005', version='17.0.9', major=17,
+			source='jdwp', confidence='exact')  # a host whose runtime was read, with no Java product
+		other = Subdomain.objects.create(name='tomcat.b.example', target_domain=self.db)
+		other.technologies.add(Technology.objects.create(name='Apache Tomcat:11.0.25'))  # another project's: never in proj-a's results
+		found = call(self.t_alice, 'GET', base + 'java:any')[1]
+		self.assertEqual(sorted(h['host'] for h in found['results']), ['spring.a.example', 'tomcat.a.example', 'www.a.example'])
+		why = {h['host']: h['matched'] for h in found['results']}
+		self.assertEqual(why['tomcat.a.example'], ['runs Java (Tomcat 10.1.48)', 'Java version not known'])
+		self.assertEqual(why['spring.a.example'], ['runs Java (Apache Tomcat)', 'Java version not known'])
+		self.assertEqual(why['www.a.example'], ['Java runtime 17.0.9 (jdwp)'])
+		unknown = call(self.t_alice, 'GET', base + 'java:unknown')[1]
+		self.assertEqual(sorted(h['host'] for h in unknown['results']), ['spring.a.example', 'tomcat.a.example'])  # a read runtime is known
+		self.assertEqual(call(self.t_alice, 'GET', base + 'java:17')[1]['count'], 1)  # a line still means a read runtime
+		self.assertEqual(call(self.t_alice, 'GET', base + '-java:any')[1]['count'], 0)
+		self.assertEqual(call(self.t_alice, 'GET', base + 'tech:java')[1]['count'], 3)  # java:any is tech:java
+		self.assertEqual(call(self.t_alice, 'GET', base + 'tech:java@unknown')[1]['count'], 2)
+		self.assertEqual(call(self.t_alice, 'GET', '/api/v1/projects/_all/search?q=java:any')[1]['count'], 3)  # alice cannot see project B
+		is_error, data = tool_call(self.t_alice, 'search_hosts', {'project': 'proj-a', 'q': 'java:unknown', 'facets': 'none'})
+		self.assertFalse(is_error)
+		self.assertEqual(data['count'], 2)
+
 	def test_remediation_workflow(self):
 		base = '/api/v1/projects/proj-a'
 		status, data = call(self.t_alice, 'GET', f'{base}/work')
@@ -478,11 +533,16 @@ class AgentApiTests(TestCase):
 		path = f'/api/v1/projects/proj-a/matches/{self.match.id}/validate'
 		with mock.patch('cveFeed.tasks.validate_match_on_demand.apply_async'):
 			job_id = call(self.t_alice, 'POST', path)[1]['id']
+		ai_queue.configure()
 		with mock.patch('targetApp.target_types.scannable_hosts', return_value=['www.a.example']), \
 				mock.patch('cveFeed.validation.resolve_template', return_value=('', 'no template covers this CVE')), \
-				mock.patch('reNgine.ai_settings.get_configured_provider', return_value=provider), \
 				mock.patch('cveFeed.validation.run_validation', return_value={'ran': 1, 'reused': 0}) as checks, \
-				mock.patch('cveFeed.triage.run_triage', return_value={'not_triaged': 1}):
+				mock.patch('cveFeed.triage.run_triage', return_value={'not_triaged': 1}), \
+				mock.patch('cveFeed.tasks.validate_match_on_demand.apply_async') as resumed:
+			self.assertEqual(validate_match_on_demand(job_id)['waiting'], 'validation_plan')  # parked: the reviewer container asks the model
+			checks.assert_not_called()
+			ai_queue.serve(provider)
+			resumed.assert_called_once_with(args=[job_id], priority=3)  # the answer sends the request on
 			validate_match_on_demand(job_id)
 		# the model's choice, plus the identity probes (nginx next to ingress-nginx or nginx-ui) that always accompany a plan when one applies
 		self.assertEqual(checks.call_args.kwargs['selected_kinds'], {'nmap_sv', 'fact_probe'})
@@ -528,15 +588,18 @@ class AgentApiTests(TestCase):
 		path = f'/api/v1/projects/proj-a/matches/{self.match.id}/validate'
 		with mock.patch('cveFeed.tasks.validate_match_on_demand.apply_async'):
 			job_id = call(self.t_alice, 'POST', path)[1]['id']
+		ai_queue.configure()
 		with mock.patch('targetApp.target_types.scannable_hosts', return_value=['www.a.example']), \
 				mock.patch('cveFeed.validation.resolve_template', return_value=('', 'no template covers this CVE')), \
-				mock.patch('reNgine.ai_settings.get_configured_provider', return_value=provider), \
 				mock.patch('cveFeed.validation_plan.generate_candidate', return_value={'id': 7, 'status': 'draft'}) as draft, \
 				mock.patch('cveFeed.validation.run_validation', return_value={'ran': 0, 'no_check': 1}) as checks, \
-				mock.patch('cveFeed.triage.run_triage', return_value={'not_triaged': 1}):
+				mock.patch('cveFeed.triage.run_triage', return_value={'not_triaged': 1}), \
+				mock.patch('cveFeed.tasks.validate_match_on_demand.apply_async'):
+			validate_match_on_demand(job_id)
+			ai_queue.serve(provider)
 			validate_match_on_demand(job_id)
 		self.assertEqual(checks.call_args.kwargs['selected_kinds'], set())
-		draft.assert_called_once_with(self.pa.id, self.cve, provider)
+		draft.assert_called_once_with(self.pa.id, self.cve, True)  # True: AI is on (the draft is the reviewer container's job too)
 		job = OnDemandValidation.objects.get(pk=job_id)
 		self.assertEqual(job.result['template_candidate']['status'], 'draft')
 		self.assertEqual(job.result['check_state'], 'no_check')

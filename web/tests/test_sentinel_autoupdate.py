@@ -204,6 +204,64 @@ class MatrixTests(Base):
         self.assertTrue(shown['flagged'])
         self.assertIn('Press Update now', shown['text'])
 
+    def _report(self, agent, at, status='waiting', phase='drain', to=None):
+        """What scripts/update.sh tells cvENGINE through the heartbeat (info.update), as the update run on vmi2645654 did on Nov 15."""
+        held = au.stored(agent)
+        info = dict(agent.info or {})
+        info['update'] = {'status': status, 'phase': phase, 'to': (to or held['target'])[:12], 'from': str(info.get('version') or '')[:12],
+                          'at': at.isoformat(), 'detail': f'update {(to or held["target"])[:12]} is built; a task is still running, will retry'}
+        Agent.objects.filter(pk=agent.pk).update(info=info)
+        agent.refresh_from_db()
+
+    def test_a_sentinel_whose_updater_reports_progress_is_not_flagged(self):
+        # vmi2645654: the image was built, a deep nuclei scan outlasted the drain, and the updater said "will retry"; 90 minutes after the
+        # request cvENGINE flagged it, stopped asking, and named its own older pin, so the Sentinel never updated.
+        agent = self.sentinel()
+        self.refresh()
+        au.consider(agent, self.now)
+        agent.refresh_from_db()
+        self._report(agent, self.now + timedelta(minutes=62))
+        late = self.now + timedelta(minutes=au.grace_minutes() + 1)
+        au.consider(agent, late)
+        agent.refresh_from_db()
+        self.assertEqual(au.stored(agent)['status'], 'requested')
+        self.assertIsNotNone(agent.update_requested_at)  # still told to update
+        self.assertEqual(au.sweep(late), 0)
+        shown = au.view(agent, late)
+        self.assertFalse(shown['flagged'])
+        self.assertIn('working on it', shown['text'])
+        self.assertEqual(self.audits('sentinel.update_flagged'), [])
+
+    def test_progress_that_goes_quiet_or_never_ends_is_still_flagged(self):
+        agent = self.sentinel()
+        self.refresh()
+        au.consider(agent, self.now)
+        agent.refresh_from_db()
+        self._report(agent, self.now + timedelta(minutes=30))
+        quiet = self.now + timedelta(minutes=30) + au.PROGRESS_FRESH + timedelta(minutes=1)  # the updater stopped reporting
+        self.assertEqual(au.settle(agent, quiet)['status'], 'failed')
+
+        other = self.sentinel()
+        au.consider(other, self.now)
+        other.refresh_from_db()
+        forever = self.now + au.MAX_PATIENCE + timedelta(minutes=1)
+        self._report(other, forever - timedelta(minutes=5))  # still "working" after twelve hours
+        self.assertEqual(au.settle(other, forever)['status'], 'failed')
+
+    def test_a_report_about_another_target_or_before_the_request_is_no_progress(self):
+        agent = self.sentinel()
+        self.refresh()
+        au.consider(agent, self.now)
+        agent.refresh_from_db()
+        late = self.now + timedelta(minutes=au.grace_minutes() + 1)
+        self._report(agent, late - timedelta(minutes=5), to='0123456789ab')
+        self.assertFalse(au.working_on(agent, au.stored(agent), late))
+        self._report(agent, self.now - timedelta(minutes=5))  # left over from an earlier run
+        self.assertFalse(au.working_on(agent, au.stored(agent), late))
+        self._report(agent, late - timedelta(minutes=5), status='waiting', phase='available')  # accepted nothing yet
+        self.assertFalse(au.working_on(agent, au.stored(agent), late))
+        self.assertEqual(au.settle(agent, late)['status'], 'failed')
+
     def test_a_sentinel_that_never_came_back_is_flagged_by_the_sweep_and_shown_flagged_before_it(self):
         agent = self.sentinel()
         self.refresh()
@@ -368,6 +426,26 @@ class PinnedTargetTests(Base):
         self.sentinel(self.pin()[:12])
         SentinelDefaults.objects.update_or_create(pk=1, defaults={'keep_newest': False, 'self_update': 'automatic'})
         self.assertNotIn('target', self.beat({'info': {'version': self.pin()[:12]}})['update'])
+
+    def test_a_build_not_yet_compared_is_never_told_the_older_pin(self):
+        # vmi2645654, Nov 20: it ran 663ed8d, the check knew the newest build but had not compared 663ed8d with it yet, and every heartbeat named the pin
+        # 0e8a792, older than what it ran: its updater refused "no downgrade" and the page said Update failed. Nothing is named until the check knows.
+        agent = self.sentinel()
+        not_compared = {'status': 'unknown', 'latest_full': HEAD, 'latest_contract': {'version': sentinel_contract.version(), 'min_supported': 1}}
+        with mock.patch.object(sv, 'state', return_value=not_compared):
+            self.assertNotIn('target', ss.update_reply(agent))
+            self.assertEqual(au.fallback_target(agent), (None, None))
+            self.assertEqual(au.fallback_target(agent, keep=False), (self.pin(), 'pinned'))  # newest-version keeping off: the pin, as before
+
+    def test_update_now_pressed_before_the_check_knew_names_the_newest_once_it_does(self):
+        from agentapi import sentinel_contract
+        agent = self.sentinel()
+        self.assertEqual(call(self.tokens['root'], 'PATCH', f'/api/v1/agents/{agent.pk}', {'update': 'now'})[0], 200)  # no verdict yet: the request names no commit
+        self.refresh()  # the check now knows it is behind HEAD
+        agent.refresh_from_db()
+        agent.info = {**(agent.info or {}), 'contract_version': sentinel_contract.version()}
+        out = ss.update_reply(agent)
+        self.assertEqual((out['requested'], out['target'], out['reason']), (True, HEAD, 'newest'))
 
     def test_manual_and_off_get_a_target_only_when_asked(self):
         agent = self.sentinel()

@@ -8,8 +8,8 @@ export const STORAGE_KEY = "cve.settings.configmaxxing.open";
 export const WARNING_TEXT =
   "configMaxxing is for advanced performance settings that cvENGINE tunes itself, so change them only if you like to tune things. The defaults are safe, and auto-tuning (on by default) adjusts the throughput numbers for you. Changing these can make scans slower, use more memory or send more traffic to your targets.";
 export const EXPLANATION_TEXT =
-  "More at once scans faster but needs more CPU and memory. The memory gate still holds work back when the container is short on memory. " +
-  "Scanning on a second machine (a Sentinel) is the best way to scale. Auto-tuning (the first card) moves the numbers nobody saved here; a number you save is pinned.";
+  "These numbers set how much the server itself does at once (assessments, the work conductor, the worker lanes). Every scan runs on a Sentinel, " +
+  "so another Sentinel (a second machine) is the best way to scale. Auto-tuning (the first card) moves the numbers nobody saved here; a number you save is pinned.";
 
 // --- whether the section is open: remembered per viewer, never required ---------------------------------------
 export function readOpen(storage) {
@@ -119,38 +119,6 @@ export function groupFields(fields, groups) {
   return groups.map((g) => ({ ...g, fields: fields.filter((f) => f.group === g.id) })).filter((g) => g.fields.length);
 }
 
-// --- memory ----------------------------------------------------------------------------------------------------
-export function formatMb(mb) {
-  if (mb == null) return "unknown";
-  return mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${mb} MB`;
-}
-
-// Mirrors cveFeed.scan_concurrency.memory_plan, so the warning follows the boxes while they are typed in. `caps` {kind: limit}. The worst case
-// (every kind at its limit at once) may be OVERCOMMIT times the budget before it warns, because the kinds rarely peak together.
-export const OVERCOMMIT = 2;
-export function memoryPlan(caps, costs, budget, defaults, labels = {}) {
-  const kinds = Object.keys(caps);
-  const cost = (k) => costs[k] ?? 500;
-  const total = kinds.reduce((sum, k) => sum + cost(k) * caps[k], 0);
-  const defaultTotal = kinds.reduce((sum, k) => sum + cost(k) * (defaults[k] ?? caps[k]), 0);
-  const warnings = [];
-  if (budget) {
-    kinds.forEach((k) => {
-      const alone = cost(k) * caps[k];
-      if (caps[k] > (defaults[k] ?? caps[k]) && alone > budget) {
-        warnings.push(`${labels[k] || k} at ${caps[k]} could want ${alone} MB by itself, more than the ${budget} MB budget of the scanning container: the extra runs will only wait for memory.`);
-      }
-    });
-    if (total > budget * OVERCOMMIT && total > defaultTotal) {
-      warnings.push(
-        `With every scanner at its limit at the same time, up to ${total} MB could be wanted, more than ${OVERCOMMIT} times the ${budget} MB budget of the scanning container. ` +
-          "The memory gate will hold runs back, so raising these further will not scan faster until the scanning container is given more memory (the server's administrator sets that) or you scan on a second machine.",
-      );
-    }
-  }
-  return { total, defaultTotal, budget, warnings };
-}
-
 // The discovery pool is the one number a running process cannot simply re-read. Say exactly what is known.
 export function discoveryNotice(field, status) {
   if (!field) return "";
@@ -181,8 +149,8 @@ export const AGENT_POLICY_HELP =
   "its proposals are only suggestions unless this is Automatic (and auto-tuning is in Auto mode).";
 export const AUTOTUNE_INTRO =
   "Auto-tuning is on by default. It aims high: about ten minutes after each restart or update it sets the throughput settings below to the most this machine sensibly " +
-  "carries (sized from its CPU cores, memory budget, database connections and Sentinel slots), backs off at once when it sees trouble (memory kills, " +
-  "time-outs, a busy database, a silent worker, Sentinel waits that ran locally), then probes upward again one step at a time after two healthy hours. " +
+  "carries (sized from its CPU cores, database connections and Sentinel slots), backs off at once when it sees trouble (memory pressure, " +
+  "time-outs, a busy database, a silent worker or broker, Sentinel tasks that time out or expire unclaimed), then probes upward again one step at a time after two healthy hours. Each Sentinel is tuned too: its tasks at once and its per-kind slots follow its own CPU, memory and load, never above its machine's own setting. " +
   "It never changes AI spend caps, never changes anything while scanning is paused or an update is applied, and every change is listed here with its reason and a Revert button.";
 export const AUTOTUNE_OFF_HELP =
   "To tune by hand, choose Off. To keep one number as it is, type it in its box and save it (even the number shown): a saved number is pinned and the tuner leaves it alone, " +
@@ -260,4 +228,46 @@ export function lastRunText(last, formatDate = (x) => x) {
   if (last.held) return `Last run ${when}: ${last.held}.`;
   const n = (last.changes || []).length;
   return `Last run ${when}: ${n ? `${n} change(s)` : "no change"}.`;
+}
+
+// --- each Sentinel (cveFeed/autotune_sentinels.py, agentapi/sentinel_machine.py) -------------------------------------
+// "4 CPUs, load 0.2 per CPU, 75% of 7.8 GB memory available, 1 run killed for memory in the last hour", from ``machine`` (get_sentinel, list_sentinels,
+// get_tuning_status); "" when the Sentinel reports no machine (an older client).
+export function machineText(m) {
+  if (!m || typeof m !== "object") return "";
+  const parts = [];
+  if (Number.isInteger(m.cpus)) parts.push(`${m.cpus} CPU${m.cpus === 1 ? "" : "s"}${Number.isInteger(m.host_cpus) && m.host_cpus !== m.cpus ? ` (host ${m.host_cpus})` : ""}`);
+  if (Array.isArray(m.load_per_cpu) && m.load_per_cpu[0] != null) parts.push(`load ${m.load_per_cpu[0]} per CPU`);
+  if (m.available_share != null && m.total_mb) parts.push(`${Math.round(m.available_share * 100)}% of ${mbText(m.total_mb)} memory available`);
+  const kills = Object.values(m.oom_kills_1h || {}).reduce((a, b) => a + (Number(b) || 0), 0);
+  if (kills) parts.push(`${kills} run${kills === 1 ? "" : "s"} killed for memory in the last hour`);
+  const text = parts.join(", ");
+  if (!text) return "";
+  return m.stale ? `${text} (last reported ${Math.round((m.age_seconds || 0) / 60)} min ago)` : text;
+}
+
+// A Sentinel's memory in words: 512 MB, 7.8 GB.
+const mbText = (mb) => (mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${mb} MB`);
+
+const KIND_WORD = (k) => String(k).replace(/_/g, " ");
+// "Auto-tuned to 6 of its machine's 8 tasks at once; nuclei deep 4 at once", "Pinned by ...", "Runs its machine's own 8 tasks at once", or "" with nothing to say.
+export function sentinelTuningText(t) {
+  if (!t || typeof t !== "object" || t.killed) return "";
+  if (t.pinned) return `Tasks at once pinned by ${t.pinned}: auto-tuning leaves it alone`;
+  const kinds = Object.entries(t.kinds || {}).map(([k, n]) => `${KIND_WORD(k)} ${n} at once`);
+  const head = t.max_concurrent != null && t.ceiling != null
+    ? `Auto-tuned to ${t.max_concurrent} of its machine's ${t.ceiling} tasks at once`
+    : t.ceiling != null ? `Runs its machine's own ${t.ceiling} tasks at once` : "";
+  if (!head && !kinds.length) return "";
+  return [head, ...kinds].filter(Boolean).join("; ");
+}
+
+// One line of the Auto-tuning card per Sentinel (``status.sentinels``): its name, what it runs and why it was not moved.
+export function sentinelStatusLine(s) {
+  if (!s) return "";
+  const run = s.last_run || {};
+  const tuning = sentinelTuningText(s.tuning);
+  const machine = machineText(s.machine);
+  const reason = run.held || Object.values(run.settings || {}).map((x) => x.why_not_raised).filter(Boolean)[0] || "";
+  return [`${s.name}: ${tuning || "not tuned yet"}`, machine, reason ? `now: ${reason}` : ""].filter(Boolean).join(" · ");
 }

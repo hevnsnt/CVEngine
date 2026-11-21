@@ -24,38 +24,34 @@ class ScannerOverlayTests(unittest.TestCase):
 	"""The overlays that take address translation out of the scanner's path (docs/DEPLOYMENT.md, "Operating system detection and the scan path").
 	They were run for real against Docker; this keeps their key settings from drifting."""
 
-	def test_host_network_overlay_moves_only_the_celery_container(self):
+	def test_host_network_overlay_moves_only_the_built_in_scanner(self):
 		overlay = load('docker-compose.hostnet.yml')
-		# web is published on loopback only, for the built-in scanner that shares celery's (here the host's) network namespace
-		self.assertEqual(set(overlay['services']), {'celery', 'redis', 'web'})
+		# the scanner is where every scan runs; celery only learns the address it writes into the scanner's enrollment, and web is published on loopback
+		self.assertEqual(set(overlay['services']), {'scanner', 'celery', 'web'})
 		self.assertEqual(overlay['services']['web']['ports'], ['127.0.0.1:${CVENGINE_WEB_HOST_PORT:-8000}:8000'])
-		celery = overlay['services']['celery']
-		self.assertEqual(celery['network_mode'], 'host')
+		scanner = overlay['services']['scanner']
+		self.assertEqual(scanner['network_mode'], 'host')
 		# a container on the host network cannot also join a Docker network
-		self.assertEqual(celery['networks'], [])
-		env = ' '.join(celery['environment'])
-		for name in ('CELERY_BROKER', 'CELERY_BACKEND', 'POSTGRES_HOST'):
-			self.assertIn(name, env)
-		self.assertNotIn('redis:6379', env, 'Docker DNS names do not resolve from the host network')
+		self.assertEqual(scanner['networks'], [])
+		celery = overlay['services']['celery']
+		self.assertNotIn('network_mode', celery)
+		self.assertNotIn('networks', celery)
+		self.assertEqual(celery['environment'], ['CVENGINE_SCANNER_SERVER_URL=http://127.0.0.1:${CVENGINE_WEB_HOST_PORT:-8000}'])
 
-	def test_host_network_overlay_publishes_redis_on_loopback_only(self):
-		ports = load('docker-compose.hostnet.yml')['services']['redis']['ports']
-		self.assertTrue(all(str(p).startswith('127.0.0.1:') for p in ports), ports)
+	def test_host_network_overlay_no_longer_publishes_redis(self):
+		# celery stays on the compose network and reaches Redis by name: nothing needs the broker on the host's loopback
+		self.assertNotIn('redis', load('docker-compose.hostnet.yml')['services'])
+		self.assertNotIn('REDIS', (ROOT / 'docker-compose.hostnet.yml').read_text())
 
-	def test_host_network_overlay_uses_the_broker_password(self):
-		# published on the host's loopback, an open broker lets any local user queue work the workers run as root: the clients carry the
-		# password, which make up and every update generate when it is empty (scripts/redis-password.sh, tests/test_host_scripts.py)
-		env = ' '.join(load('docker-compose.hostnet.yml')['services']['celery']['environment'])
-		self.assertEqual(env.count('redis://:${REDIS_PASSWORD:-}@127.0.0.1'), 2, env)
-
-	def test_macvlan_overlay_gives_celery_its_own_lan_address(self):
+	def test_macvlan_overlay_gives_the_scanner_its_own_lan_address(self):
 		overlay = load('docker-compose.macvlan.yml')
+		self.assertEqual(set(overlay['services']), {'scanner'})
 		self.assertEqual(overlay['networks']['lan']['driver'], 'macvlan')
-		lan = overlay['services']['celery']['networks']['lan']
+		lan = overlay['services']['scanner']['networks']['lan']
 		self.assertIn('CVENGINE_SCANNER_IP', lan['ipv4_address'])
-		# the LAN is the default route, so scans leave on it; Redis and PostgreSQL stay on the bridge
+		# the LAN is the default route, so scans leave on it; the scanner keeps its bridge to reach the server (http://web:8000)
 		self.assertEqual(lan['gw_priority'], 1)
-		self.assertIn('rengine_network', overlay['services']['celery']['networks'])
+		self.assertIn('scanner_network', overlay['services']['scanner']['networks'])
 
 	def test_overlays_are_valid_beside_the_real_file_and_keep_the_secret_defaults(self):
 		base = load('docker-compose.yml')

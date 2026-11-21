@@ -42,6 +42,76 @@ REASON_VERSION_UNKNOWN = ('Version of the CVE is not known: review when the affe
                           'low priority and is re-evaluated automatically when a range is published; until then only a person '
                           'can decide it.')
 
+# a CVE in the Java runtime on a host where Java is clear and its version could not be read from outside (cveFeed.java_runtime: evidence.java_unknown)
+REASON_JAVA_UNKNOWN = ('Java runtime of unknown version: an outside check could not read which Java this host runs. The application on it runs on '
+                       'Java (its technology, a Java product, or the runtime the vendor bundles), but no part of it that answers from outside states '
+                       'the runtime\'s version, so whether this advisory\'s Java release applies is not known. It is kept for review at very low '
+                       'priority and never fires on its own; it is decided at once when a version is read (a debug port, a status page, a header), and '
+                       'a host owner can settle it in a minute: run jcmd <PID> VM.version, or readlink /proc/<PID>/exe and that java with -version, or '
+                       'read the release file of the JDK it runs.')
+
+
+# a CVE in a language runtime (Python, Go, Node.js, PHP, Ruby, .NET Framework, Erlang/OTP) on a host where the runtime is clear and its version
+# could not be read from outside (cveFeed.version_sources: evidence.runtime_unknown)
+REASON_RUNTIME_UNKNOWN = ('Language runtime of unknown version: an outside check could not read which release of the runtime this host runs. '
+                          'The application on it runs on that runtime (its server header, a line its error page or headers state), but '
+                          'nothing that answers from outside states the exact release, so whether this advisory applies is not known. It is kept '
+                          'for review at very low priority and never fires on its own; it is decided at once when a version is read, and a host '
+                          'owner can settle it in a minute with the runtime\'s own version command (python3 -VV, ruby -v, the .NET Framework '
+                          'Release registry value, erl\'s otp_release).')
+# a CVE in an edge appliance whose build was read only as a RANGE from outside (cveFeed.edge_builds: evidence.range_read): PAN-OS releases of one
+# build date, FortiOS before 7.2.6, a Pulse Connect Secure release without its service release
+REASON_RANGE_READ = ('Build read only as a range: an outside check placed this appliance\'s software in a range of releases (the build date its '
+                     'static files carry, or a release without its service release), and a release of that range is affected, but which release '
+                     'it runs was not read. It is kept for review at very low priority and never fires on its own; it is decided at once when the '
+                     'exact build is read, and the appliance\'s owner can settle it in a minute from its administration page or CLI (show version, '
+                     'get system status, the About page).')
+# a component a vendor bundles with a product release the host states, inferred inside an affected range (cveFeed.version_sources:
+# evidence.bundled_inferred): the host runs it only if its owner kept the bundled one
+REASON_BUNDLED = ('Bundled component, version inferred: the host states a product release, and the vendor ships that release with this '
+                  'component at a version inside the affected range. It applies only if the bundled component was not replaced (an archive '
+                  'install on the system\'s own copy, a jar swapped after an advisory, an external service), which nothing outside the host can '
+                  'tell. It is kept for review at very low priority and never fires on its own; the host owner settles it by reading the version '
+                  'of the component the application actually runs.')
+# a Windows CVE on a host whose NTLM challenge states the release (10.0.20348: Windows Server 2022) but never its update revision (cveFeed.windows_builds:
+# evidence.windows_patch_unknown): the release is known, the patch level is not
+REASON_WINDOWS_PATCH = ('Windows release known, patch level unknown: the host\'s NTLM challenge (or its SMB answer) states which Windows release it '
+                        'runs, for example 10.0.20348 (Windows Server 2022), but never its update revision (the UBR, the .2762 of 10.0.20348.2762), '
+                        'so whether this advisory\'s update is installed is not known. It is kept for review at very low priority and never fires '
+                        'on its own; a host owner settles it in a minute: run ver, or reg query "HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion" '
+                        '/v UBR, and compare the revision with the advisory\'s fixed build.')
+UNKNOWN_FLAGS = ('java_unknown', 'runtime_unknown', 'bundled_inferred', 'range_read', 'windows_patch_unknown')  # a version not read, only inferred, or read only as a range or a release: treated as an advisory with no range
+
+
+def unknown_reason(evidence):
+    """The reason a version-unknown match (``is_version_unknown``) shows: the Java runtime's own when the runtime's version was not read
+    (``evidence.java_unknown``), a language runtime's (``evidence.runtime_unknown``), else the advisory's missing range."""
+    if evidence_flag(evidence, 'java_unknown'):
+        return REASON_JAVA_UNKNOWN
+    if evidence_flag(evidence, 'range_read'):
+        return REASON_RANGE_READ
+    if evidence_flag(evidence, 'windows_patch_unknown'):
+        return REASON_WINDOWS_PATCH
+    if evidence_flag(evidence, 'bundled_inferred'):
+        return REASON_BUNDLED
+    return REASON_RUNTIME_UNKNOWN if evidence_flag(evidence, 'runtime_unknown') else REASON_VERSION_UNKNOWN
+
+
+def unknown_why(facts):
+    """The short reason (a triage note) of a version-unknown match from its triage ``facts`` (``java_unknown``, ``runtime_unknown``)."""
+    if facts.get('java_unknown'):
+        return 'the Java runtime\'s version could not be read from outside'
+    if facts.get('runtime_unknown'):
+        return 'the language runtime\'s version could not be read from outside'
+    if facts.get('range_read'):
+        return 'only a range of the appliance\'s builds could be read from outside'
+    if facts.get('windows_patch_unknown'):
+        return 'the Windows release is known, but its update revision (the patch level) cannot be read from outside'
+    if facts.get('bundled_inferred'):
+        return 'the bundled component\'s version is only inferred from the product release'
+    return 'the advisory gives no affected version range'
+
+
 # an operating system named by a scanner, as a technology or an nmap product: never a CVE match by name
 _OS_NAME = re.compile(
     r'^(?:(?:microsoft|canonical|gnu)\s+)?(?:windows(?:\s+(?:server|nt|\d[\w.]*|xp|vista|rt|ce|embedded)\b.*)?'
@@ -90,11 +160,12 @@ def evidence_flag_q(key, prefix=''):
 
 
 def is_version_unknown(evidence, version_in_range, template_result='', distro_status=''):
-    """Whether a match stands only on a name and an actively exploited advisory with no version bound (``evidence.unbounded``): kept
+    """Whether a match stands only on a name and an actively exploited advisory with no version bound (``evidence.unbounded``), or on a Java runtime
+    whose version was not read (``evidence.java_unknown``): kept
     for review, never a verdict. Hard evidence that does not depend on a version (a template hit, a distribution tracker, a runZero
     report) is not "unknown": that match is judged on it. A version inside a range cannot be unknown either."""
-    return evidence_flag(evidence, 'unbounded') and version_in_range is None and template_result != 'vulnerable' \
-        and distro_status != 'vulnerable' and not evidence_flag(evidence, 'runzero')
+    return (evidence_flag(evidence, 'unbounded') or any(evidence_flag(evidence, f) for f in UNKNOWN_FLAGS)) and version_in_range is None \
+        and template_result != 'vulnerable' and distro_status != 'vulnerable' and not evidence_flag(evidence, 'runzero')
 
 
 # ----------------------------------------------------------------------------- hard evidence: the one definition
@@ -243,8 +314,10 @@ def version_read_from_component(evidence, distro_status='', template_result=''):
     ``version_proven`` (the first, "vulnerability confirmed", is ``has_hard_evidence``). It proves the version is there, not that the flaw is,
     so it never lifts triage, creates a finding or counts as a validation hit; and since 1.3.5 it no longer makes a match fire either. Three readings qualify:
 
-      * a version-class template hit on this host (``template_result`` version_only): a template that only reads a static page or a banner
-        read the version from the service or the file itself and found it inside the range;
+      * a version-class template hit on this host (``template_result`` version_only) and NO distribution packaging read from the banner
+        (``evidence.distro``): a template that only reads a static page or a banner read the version from the service or the file itself and
+        found it inside the range. On a distribution's build that version proves nothing, for the same reason as the service banner below:
+        the distribution backports fixes without changing the version it prints;
       * a JavaScript library whose OWN FILE states the version: ``evidence.source`` tech, ``version_source`` body (the file's comment banner
         or a code signature only the library's file has, ``cveFeed.js_libraries``), ``version_confidence`` at least
         ``PROVEN_LIBRARY_CONFIDENCE`` (0.8), and the copy that runs on the page (``copy_state`` effective, ``copies_unresolved`` not set),
@@ -266,7 +339,7 @@ def version_read_from_component(evidence, distro_status='', template_result=''):
     the heat, lists, counts, scores, alerts and API all follow."""
     if distro_status == 'patched':
         return False
-    if template_result == VERSION_TEMPLATE_RESULT:
+    if template_result == VERSION_TEMPLATE_RESULT and not evidence_flag(evidence, 'distro'):
         return True
     if not isinstance(evidence, dict):
         return False
@@ -318,13 +391,14 @@ def library_read_q(prefix=''):
 
 def version_read_from_component_q(prefix=''):
     """The database form of ``version_read_from_component``. The confidence must be a JSON number (``jsonb_typeof``), as Python's
-    ``isinstance`` test requires: JSONB orders true, arrays and objects above every number."""
+    ``isinstance`` test requires: JSONB orders true, arrays and objects above every number. A version-class template hit counts only off a
+    distribution's build (no ``evidence.distro``), as the service banner does."""
     from django.db.models import Q
     p = prefix
     library = library_read_q(p)
     service = (Q(**{p + 'evidence__source': 'port', p + 'evidence__method': 'probed'}) & evidence_flag_q('vendor_banner', p)
                & ~evidence_flag_q('distro', p))
-    template = Q(**{p + 'template_result': VERSION_TEMPLATE_RESULT})
+    template = Q(**{p + 'template_result': VERSION_TEMPLATE_RESULT}) & ~evidence_flag_q('distro', p)
     return (template | library | service) & ~Q(**{p + 'distro_status': 'patched'})
 
 
@@ -367,7 +441,8 @@ def proof_of(match):
         return 'version proven: runZero reports it'
     if _validation_status(match) == 'hit':
         return 'version proven: a validation check reproduced it'
-    if (getattr(match, 'template_result', '') or '') == VERSION_TEMPLATE_RESULT and getattr(match, 'distro_status', '') != 'patched':
+    if ((getattr(match, 'template_result', '') or '') == VERSION_TEMPLATE_RESULT and getattr(match, 'distro_status', '') != 'patched'
+            and not evidence_flag(evidence, 'distro')):
         return 'version proven: a version check read it on the host'
     if version_read_from_component(evidence, getattr(match, 'distro_status', '') or ''):
         return ('version proven: read from the library file itself' if evidence.get('source') == 'tech'
@@ -393,7 +468,10 @@ def version_unknown(match):
 def version_unknown_q(prefix=''):
     """The database form of ``is_version_unknown`` over CVEMatch rows (``prefix`` reaches the match from another model)."""
     from django.db.models import Q
-    return (evidence_flag_q('unbounded', prefix) & Q(**{prefix + 'version_in_range__isnull': True})
+    return ((evidence_flag_q('unbounded', prefix) | evidence_flag_q('java_unknown', prefix) | evidence_flag_q('runtime_unknown', prefix)
+             | evidence_flag_q('bundled_inferred', prefix) | evidence_flag_q('range_read', prefix)
+             | evidence_flag_q('windows_patch_unknown', prefix))
+            & Q(**{prefix + 'version_in_range__isnull': True})
             & ~Q(**{prefix + 'template_result': 'vulnerable'}) & ~Q(**{prefix + 'distro_status': 'vulnerable'})
             & ~evidence_flag_q('runzero', prefix))
 
@@ -431,8 +509,25 @@ def has_standing(match):
     if (match.remediation_status != 'open' or match.assignee_id or match.ai_verdict == 'affected' or match.source == 'host'
             or _has_other_evidence(match)):
         return True
+    primed = getattr(match, '_worked_on', None)  # ``prime_standing`` read it for many matches at once
+    if primed is not None:
+        return primed
     return (FindingComment.objects.filter(finding_kind='match', finding_id=match.pk).exists()
             or OnDemandValidation.objects.filter(match=match, source='manual').exclude(status='running').exists())
+
+
+def prime_standing(matches):
+    """Read for many matches at once what ``has_standing`` would ask the database for each (a comment, a manual validation request that is not
+    the one running now), and keep the answer on each match object. Two queries, whatever the number of matches."""
+    from cveFeed.models import FindingComment, OnDemandValidation
+    ids = {m.pk for m in matches if m.pk}
+    if not ids:
+        return
+    worked = set(FindingComment.objects.filter(finding_kind='match', finding_id__in=ids).values_list('finding_id', flat=True).distinct())
+    worked |= set(OnDemandValidation.objects.filter(match_id__in=ids, source='manual').exclude(status='running').values_list('match_id', flat=True).distinct())
+    for match in matches:
+        if match.pk:
+            match._worked_on = match.pk in worked
 
 
 def unworked(qs):
@@ -516,14 +611,14 @@ def unversioned_leads(technologies, ports):
     ``(id, stored name)``) and ``ports`` (pairs of ``(ip address, Port)``). One lead per product, and none for a product some other
     sighting on the same host did give a version, an operating system, or a generic label. Pure, so it is unit tested without a database."""
     from cveFeed.correlation import (_MIN_TOKEN, GENERIC_PRODUCT_TOKENS, _norm, name_matches_token, parse_cpe, parse_version,
-                                     split_name_version)
+                                     split_name_version, split_port_product, stated_version)
     candidates = []
     for source_id, stored in technologies:
         name, version = split_name_version(stored or '')
         candidates.append((name or (stored or '').strip(), parse_version(version) is not None, _lead(name or stored, 'tech', source_id)))
     for ip, port in ports:
-        name = (port.product or '').strip()
-        version = (port.version or '').strip() or (parse_cpe(port.cpe or '') or ('', '', ''))[2]
+        name, version, _rest = split_port_product(port.product, port.version)  # "nginx/1.28.3" is nginx at 1.28.3
+        version = version or stated_version(name, (parse_cpe(port.cpe or '') or ('', '', ''))[2])
         candidates.append((name, parse_version(version) is not None,
                            _lead(name, 'port', port.id, ip=ip, port=port.number, protocol=port.protocol, cpe=(port.cpe or '')[:255],
                                  service=port.service_name or '')))

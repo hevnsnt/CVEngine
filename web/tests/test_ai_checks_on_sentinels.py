@@ -473,21 +473,19 @@ class ApprovalBindingTests(Base):
         task = self.queued(ai_checks.target('validate', TEMPLATE))
         self.assertIn('not for a target of the project', ai_checks.task_problem(task, builtin=False))
 
-    def test_an_installed_template_file_is_an_approval_of_exactly_its_text(self):
-        import os
-        import tempfile
+    def test_an_installed_template_is_approved_by_its_index_entry_never_by_its_text(self):
+        """An installed template's text is not on this server (contract 11): its text sent as a check is never approved, and a test of it names
+        its path and the index's hash, which the server approves from the index's verdicts."""
+        from cvengine_scanner import template_index
         installed = TEMPLATE.replace('cve-2024-0001-example', 'CVE-2024-0002')
-        with tempfile.TemporaryDirectory() as root:
-            path = os.path.join(root, 'CVE-2024-0002.yaml')
-            with open(path, 'w', encoding='utf-8') as handle:
-                handle.write(installed)
-            with mock.patch.object(templategen, 'find_existing_template', return_value=[path]), \
-                    mock.patch.object(templategen, 'TEMPLATES_ROOT', root), mock.patch.object(validation, 'all_templates_allowed', return_value=False):
-                self.assertEqual(ai_checks.binding_problem('test', installed, self.project.id, HOSTS), '')
-                self.assertIn('no approval', ai_checks.binding_problem('test', installed + '# edited\n', self.project.id, HOSTS))
-                os.unlink(path)  # removed from the template directory: withdrawn
-                self.assertIn('no approval', ai_checks.binding_problem('test', installed, self.project.id, HOSTS))
-
+        self.assertIn('no approval', ai_checks.binding_problem('test', installed, self.project.id, HOSTS))
+        path = next(p for p, e in sorted(template_index.load()['templates'].items()) if p.startswith('http/cves/') and not template_index.policy_problem(e)
+                    and not template_index.reason(e, 'cred'))
+        sha = template_index.entry_for(path)['sha256']
+        with mock.patch.object(validation, 'all_templates_allowed', return_value=False):
+            self.assertEqual(ai_checks.installed_problem(path, sha, builtin=False, project=self.project.id, targets=HOSTS), '')
+            self.assertIn('another hash', ai_checks.installed_problem(path, 'f' * 64, builtin=False, project=self.project.id, targets=HOSTS))
+            self.assertTrue(ai_checks.installed_problem(path, sha, builtin=False, project=self.project.id, targets=['elsewhere.test']))
 
 class TenantRoutingTests(Base):
     """D7, D8: a draft goes only to a Sentinel of a project that owns a target of its CVE, never to another tenant's (the oldest project's Sentinel

@@ -14,6 +14,7 @@ import shlex
 
 TARGET = '<TARGET>'
 PORT = '<PORT>'
+_CVE_ID = re.compile(r'^CVE-\d{4}-\d{4,12}\Z')
 
 
 def _ps(text):
@@ -167,7 +168,15 @@ def _language_commands(eco, package, below):
     return [_command(APP, 'sh', command.format(**values), below, explain.format(**values)) for command, explain in _LANGUAGE_COMMANDS.get(eco, ())]
 
 
-def _package_commands(p):
+def _rpm_names():
+    from cveFeed.detection_classes import OS_PACKAGE_NAMES
+    return {names['dpkg']: names['rpm'] for names in OS_PACKAGE_NAMES.values() if names.get('dpkg') and names.get('rpm')}
+
+
+_RPM_NAMES = _rpm_names()  # Debian package name -> the Red Hat one, where they differ (apache2 -> httpd, bind9 -> bind)
+
+
+def _package_commands(p, cve_id=''):
     from cveFeed.detection_classes import LANGUAGE, language_ecosystem_of
     eco = p['ecosystem']
     bound = p.get('affected_below') or p.get('fixed_version')
@@ -194,9 +203,22 @@ def _package_commands(p):
                             'ignored), and UNKNOWN when no package of that name is installed: check the binary package name '
                             '(for example openssh-server for openssh).' if bound else 'Prints the installed version.'))
     if eco in ('any', 'rpm'):
-        out.append(_command('rhel', 'sh', f"rpm -q --qf '%{{VERSION}}-%{{RELEASE}}\\n' {package}", below,
-                            'Prints the installed version-release; compare it with the fixed release in the vendor advisory '
-                            '(a vendor backports fixes without raising the upstream version).'))
+        # a package check for every distribution names the Debian package (apache2): Red Hat ships it under its own name (httpd)
+        if eco == 'any':
+            name = _RPM_NAMES.get(name, name)
+            package = shlex.quote(name)
+        # Red Hat backports a fix without raising the upstream version, so the version is no verdict there: the build is printed to compare
+        # with the advisory's fixed build, and the changelog (which names every CVE fixed in the build) is the check that decides
+        if _CVE_ID.match(cve_id or ''):
+            out.append(_command('rhel', 'sh', f'rpm -q --changelog {package} | grep -F -e {cve_id}', {'kind': 'output_names', 'value': cve_id},
+                                f'Prints the changelog lines of the installed {name} package that name {cve_id}: a line means this build '
+                                'carries the fix (Red Hat backports fixes without raising the upstream version); no line means it does '
+                                'not mention it, so compare the build below with the fixed build in Red Hat\'s advisory.'))
+        out.append(_command('rhel', 'sh', f"rpm -q --qf '%{{NAME}}-%{{VERSION}}-%{{RELEASE}}\\n' {package}",
+                            {'kind': 'output_lists', 'what': 'the installed build'},
+                            'Prints the installed build. It is not a verdict on its own: a vendor backports fixes without raising the '
+                            'upstream version, so compare the whole build with the fixed build in the vendor advisory, or read the '
+                            'changelog check.'))
     if eco in ('any', 'apk'):
         out.append(_command('alpine', 'sh', f'apk info -v {package}', below, 'Prints the installed package and version.'))
     return out
@@ -216,11 +238,12 @@ def _bundled_commands(p):
                      'document root if it is elsewhere); a version inside the affected range is a vulnerable bundled copy.')]
 
 
-def render_local(check):
-    """The list of commands for one local check, one per platform; empty for a kind with no rendering."""
+def render_local(check, cve_id=''):
+    """The list of commands for one local check, one per platform; empty for a kind with no rendering. ``cve_id`` (the record's CVE, validated
+    here) adds the Red Hat changelog check to an OS package check."""
     kind, p = check['kind'], check['params']
     if kind == 'package_version':
-        return _package_commands(p)
+        return _package_commands(p, cve_id)
     if kind == 'bundled_copy':
         return _bundled_commands(p)
     if kind == 'file_version':

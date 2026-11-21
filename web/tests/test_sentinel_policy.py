@@ -42,9 +42,6 @@ class LightNucleiPolicyTests(DispatchBase):
 
     def setUp(self):
         super().setUp()
-        patcher = mock.patch('agentapi.sentinel_dispatch._resolves', return_value=True)
-        patcher.start()
-        self.addCleanup(patcher.stop)
 
     def dispatched(self, kind, **kwargs):
         self.make_sentinel([kind])
@@ -79,7 +76,7 @@ class LightNucleiPolicyTests(DispatchBase):
             for kind in ('nuclei_light', 'nuclei_targeted'):
                 target = self.dispatched(kind)
                 self.assertEqual(target['etags'], ['dos', 'default-login', 'bruteforce'], kind)  # the tags no run runs: dos always, the credential tags unless a person allowed them
-                self.assertEqual(target['template_policy'], {'rev': nuclei_scan.TEMPLATE_POLICY_REV, 'read_only': True, 'bundle_sha256': None}, kind)  # no snapshot is cached here, so no bundle yet
+                self.assertEqual(target['template_policy'], {'rev': nuclei_scan.TEMPLATE_POLICY_REV, 'read_only': True, 'source': 'index'}, kind)  # the Sentinel builds the set from the template index
 
     def test_a_task_carries_allow_credential_checks_only_when_a_person_turned_it_on(self):
         from dashboard.models import ScanPolicy
@@ -111,29 +108,13 @@ class LightNucleiPolicyTests(DispatchBase):
     def test_a_policy_that_allows_every_template_is_said_so(self):
         with mock.patch('cveFeed.validation.all_templates_allowed', return_value=True):
             target = dispatch._nuclei_target('nuclei_targeted', ['www.example.test'], {})
-        self.assertEqual(target['template_policy'], {'rev': nuclei_scan.ALL_TEMPLATES_REV, 'read_only': False, 'bundle_sha256': None})
+        self.assertEqual(target['template_policy'], {'rev': nuclei_scan.ALL_TEMPLATES_REV, 'read_only': False, 'source': 'index'})
 
     def test_the_internal_light_pass_is_the_quick_one_too(self):
         self.make_sentinel(['nuclei_light'])
         with mock.patch('agentapi.sentinel_dispatch.dispatch_or_none', return_value={'outcome': 'done', 'findings': []}) as sent:
             list(dispatch.wrap_nuclei_stream(self.scan, 'nuclei_light', internal=True)(_targets_file('10.0.0.5')))
         self.assertEqual((sent.call_args.args[2]['tags'], sent.call_args.args[2]['severities']), (['tech'], ['info']))
-
-
-class ResolveBoundTests(SimpleTestCase):
-    def test_a_resolver_that_never_answers_does_not_hold_the_stage(self):
-        release = threading.Event()  # the slow lookup waits on this until the test is over
-        self.addCleanup(release.set)
-
-        def slow(host, timeout):
-            if host == 'slow.example.test':
-                release.wait(60)
-            return True
-        started = time.monotonic()
-        with mock.patch('agentapi.sentinel_dispatch._resolves', side_effect=slow):
-            kept = dispatch.resolvable_targets(['fast.example.test', 'slow.example.test'], workers=2, timeout=0.3)
-        self.assertLess(time.monotonic() - started, 30)  # the 0.3 s bound ends the wait, not the lookup
-        self.assertEqual(kept, ['fast.example.test'])
 
 
 class LongPollTests(SentinelBase):
@@ -612,7 +593,7 @@ class CredentialFilterGateTests(DispatchBase):
     def sentinel(self, name, features=None, kinds=('nuclei_light', 'nuclei_targeted', 'nuclei_deep', 'nuclei_validate', 'nmap')):
         user = User.objects.create_user(f'gate-{name}', password='x', is_superuser=True)
         token, _raw = create_token(user, f'gate-{name}')
-        info = {'features': features} if features is not None else {}
+        info = {'features': features, 'contract_version': 11} if features is not None else {'contract_version': 11}  # new enough for the template index: the gate under test is the credential filter
         return Agent.objects.create(token=token, name=name, kind='scanner', status='active', scope={'orgs': [], 'projects': [self.project.slug], 'hosts': []},
                                     capabilities=list(kinds), last_seen=timezone.now(), info=info)
 
@@ -714,7 +695,7 @@ class CredentialFilterGateTests(DispatchBase):
     def test_an_older_built_in_scanner_image_is_the_same_case(self):
         builtin = self.sentinel('builtin-old', ['secret_read', 'vantage'])
         self.assertIn('too old to leave out', self.refusal(builtin)[1])
-        builtin.info = {'features': ['secret_read', 'vantage', 'credential_filter']}
+        builtin.info = {'features': ['secret_read', 'vantage', 'credential_filter'], 'contract_version': 11}
         builtin.save()
         self.assertIsNone(self.refusal(builtin))
 

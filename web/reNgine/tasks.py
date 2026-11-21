@@ -1,7 +1,6 @@
 import json
 import os
 import re
-import subprocess
 import validators
 
 from urllib.parse import urlparse
@@ -16,14 +15,15 @@ from reNgine.common_func import *
 from reNgine.definitions import *
 from reNgine.settings import *
 from reNgine.utilities import *
-from scanEngine.models import (EngineType, InstalledExternalTool, Notification)
+from scanEngine.models import (EngineType, Notification)
 from startScan.models import *
 from startScan.ip_rows import get_or_create_first, get_or_create_ip, org_id_of_project, org_id_of_subdomain
 from startScan.models import EndPoint, Subdomain, Vulnerability
 from targetApp.models import Domain
 from cvengine_scanner import versions
 
-from cveFeed import js_libraries
+from cveFeed import js_libraries, source_versions
+from cveFeed.correlation import stored_technology_name
 
 """
 Celery tasks.
@@ -80,6 +80,9 @@ def persist_bbot_result(result, ctx):
 		port.last_seen = timezone.now()
 		port.save()
 		ip.ports.add(port)
+	from cveFeed import tech_links, tech_rows
+	tech_seen = {}  # {(host row id, technology id): ''}: written once for the batch, source bbot (cveFeed.tech_links)
+	tech_hosts = []
 	for host, tech_name in result.technologies:
 		if not tech_name:
 			continue
@@ -88,13 +91,25 @@ def persist_bbot_result(result, ctx):
 			subdomain = Subdomain.objects.filter(scan_history_id=ctx['scan_history_id'], name=host).first()
 		if not subdomain:
 			continue
-		tech_name = versions.normalize_technology(tech_name)  # a CPE or a "v3.3.7" would otherwise store a name no advisory matches
+		if source_versions.is_cpe(tech_name):
+			# a CPE is what Shodan's InternetDB told bbot (passive, of unknown age): versioned or not, an application or an operating system, a
+			# third-party reading of the host labelled "vendor product" with its CPE (cveFeed.source_versions.shodan_reading), matched only while
+			# nothing first-party names the product, never a technology that outlives a fresher scan
+			reported = source_versions.reported_cpe(tech_name)
+			if reported:
+				source_versions.store_bbot_reported(subdomain, [reported])
+			continue
+		tech_name = versions.normalize_technology(tech_name)  # a "v3.3.7" would otherwise store a name no advisory matches
+		tech_name = stored_technology_name(tech_name)  # a Server-header token ("nginx/1.28.3") is the product and its version
 		# a JavaScript library's version is read from its own file (cveFeed.js_libraries), never taken from another tool's guess
 		tech_name = js_libraries.unversioned(tech_name)
 		if not tech_name:
 			continue
-		tech, _ = get_or_create_first(Technology, name=tech_name[:500])
-		subdomain.technologies.add(tech)
+		tech_seen[(subdomain.pk, tech_rows.technology(tech_name).pk)] = ''  # one row per spelling: "Caddy" and "caddy" are one (cveFeed.tech_rows)
+		tech_hosts.append(subdomain)
+	if tech_seen:
+		tech_links.link(tech_seen, tech_links.BBOT)
+		tech_links.forget(*tech_hosts)
 	_persist_bbot_findings(result, ctx, subdomains)
 	_persist_bbot_urls(result, ctx, subdomains)
 	_persist_bbot_http(result, ctx, subdomains)
@@ -409,118 +424,6 @@ def parse_nuclei_result(line):
 	}
 
 
-@app.task(name='geo_localize', bind=False, queue='geo_localize_queue')
-def geo_localize(host, ip_id=None):
-	"""Uses geoiplookup to find location associated with host.
-
-	Args:
-		host (str): Hostname.
-		ip_id (int): IpAddress object id.
-
-	Returns:
-		startScan.models.CountryISO: CountryISO object from DB or None.
-	"""
-	if validators.ipv6(host):
-		logger.info(f'Ipv6 "{host}" is not supported by geoiplookup. Skipping.')
-		return None
-	cmd = f'geoiplookup {host}'
-	_, out = run_command(cmd)
-	if 'IP Address not found' not in out and "can't resolve hostname" not in out:
-		country_iso = out.split(':')[1].strip().split(',')[0]
-		country_name = out.split(':')[1].strip().split(',')[1].strip()
-		geo_object, _ = CountryISO.objects.get_or_create(
-			iso=country_iso,
-			name=country_name
-		)
-		geo_json = {
-			'iso': country_iso,
-			'name': country_name
-		}
-		if ip_id:
-			ip = IpAddress.objects.get(pk=ip_id)
-			ip.geo_iso = geo_object
-			ip.save()
-		return geo_json
-	logger.info(f'Geo IP lookup failed for host "{host}"')
-	return None
-
-
-@app.task(name='run_command', bind=False, queue='run_command_queue')
-def run_command(
-		cmd, 
-		cwd=None, 
-		shell=False, 
-		history_file=None, 
-		scan_id=None, 
-		activity_id=None,
-		remove_ansi_sequence=False,
-		redact=()
-	):
-	"""Run a given command using subprocess module.
-
-	Args:
-		cmd (str): Command to run.
-		cwd (str): Current working directory.
-		echo (bool): Log command.
-		shell (bool): Run within separate shell if True.
-		history_file (str): Write command + output to history file.
-		remove_ansi_sequence (bool): Used to remove ANSI escape sequences from output such as color coding
-		redact (tuple): Secrets (API keys) on the command line; they run, but the log, the Command row and the history file show ***.
-	Returns:
-		tuple: Tuple with return_code, output.
-	"""
-	shown = cmd
-	for secret in redact:
-		if secret:
-			shown = shown.replace(secret, '***')
-	logger.info(shown)
-	logger.warning(activity_id)
-
-	# Create a command record in the database
-	command_obj = Command.objects.create(
-		command=shown,
-		time=timezone.now(),
-		scan_history_id=scan_id,
-		activity_id=activity_id)
-	from reNgine.resources import ScanAborted, global_pause_requested
-	if global_pause_requested(fail_closed=True):
-		raise ScanAborted('global scanning pause is active')
-
-	# Run the command using subprocess
-	popen = subprocess.Popen(
-		cmd if shell else cmd.split(),
-		shell=shell,
-		stdout=subprocess.PIPE,
-		stderr=subprocess.STDOUT,
-		cwd=cwd,
-		universal_newlines=True,
-		start_new_session=True)
-	from reNgine.resources import LegacyProcessMonitor
-	monitor = LegacyProcessMonitor(popen, scan_id)
-	output = ''
-	for stdout_line in iter(popen.stdout.readline, ""):
-		item = stdout_line.strip()
-		output += '\n' + item
-		logger.debug(item)
-	popen.stdout.close()
-	popen.wait()
-	monitor.close()
-	return_code = popen.returncode
-	command_obj.output = output
-	command_obj.return_code = return_code
-	command_obj.save()
-	if history_file:
-		mode = 'a'
-		if not os.path.exists(history_file):
-			mode = 'w'
-		with open(history_file, mode) as f:
-			f.write(f'\n{shown}\n{return_code}\n{output}\n------------------\n')
-	if remove_ansi_sequence:
-		output = remove_ansi_escape_sequences(output)
-	monitor.raise_if_aborted()
-	return return_code, output
-
-
 #-------------#
 # Other utils #
 #-------------#
@@ -733,9 +636,5 @@ def save_ip_address(ip_address, subdomain=None, subscan=None, org_id=None, proje
 	# Add subscan to IP
 	if subscan:
 		ip.ip_subscan_ids.add(subscan)
-
-	# Geo-localize IP asynchronously
-	if created:
-		geo_localize.delay(ip_address, ip.id)
 
 	return ip, created

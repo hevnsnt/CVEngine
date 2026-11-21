@@ -617,10 +617,16 @@ class TriagePromptTests(unittest.TestCase):
 		head, _, rest = prompt.partition('\n')
 		self.assertEqual(head, 'Finding kind: cve_match')
 		self.assertTrue(rest.startswith('<<<FINDING '))
-		self.assertTrue(rest.rstrip().endswith('>>>'))
+		# the fenced block, then the note that the bounds shortened it (50 items of 5000 characters: both bounds cut)
+		opener, _, body = rest.partition('\n')
+		data, _, after = body.partition('\n<<<FINDING ')
+		closer, _, note = after.partition('\n')
+		self.assertEqual(closer, opener.split()[1] + ' END>>>')  # the block closes with its own nonce
+		self.assertIn('lists longer than 20 items', note)
+		self.assertIn('text longer than 3000 characters', note)
 		self.assertNotIn('\x00', prompt)
 		import json
-		cleaned = json.loads(rest.split('\n', 1)[1].rsplit('\n', 1)[0])
+		cleaned = json.loads(data)
 		self.assertEqual(len(cleaned['list']), 20)
 		self.assertTrue(all(len(s) <= 3000 for s in cleaned['list']))
 		self.assertNotIn('\n', cleaned['banner'])

@@ -7,16 +7,8 @@ import { API, autoTuneRow, registerCard } from "/staticfiles/cve/config-maxxing.
 import { canPin, canReset, changesFrom, originLines, rangeText, runningText, serverSetting, softWarning, sourceLabel, usageText } from "/staticfiles/cve/config-maxxing-logic.js";
 
 const PATH = `${API}/tunables`;
-// A small addition under one card's intro: the Outbound connections card links the connection log (every local connection to the logged
-// ports, 25, 465 and 587 by default) as a CSV a person can hand to a hosting provider.
-const EXTRAS = {
-  egress: () => {
-    const p = el("p", "note", "", { style: "margin:0 0 12px" });
-    p.append(el("a", "", "Download the connection log (CSV)", { href: `${API}/egress/connections.csv`, download: "cvengine-egress-connections.csv" }),
-      el("span", "", " · every connection this server's own scanners opened, paced or skipped to ports 25, 465 and 587, exact or estimated (kept 14 days by default)"));
-    return p;
-  },
-};
+// A small addition under one card's intro, by group id (none at the moment).
+const EXTRAS = {};
 const inputId = (key) => `tn-${key.replace(/[^a-z0-9]/gi, "-")}`;
 
 function row(field, onInput, save, mode, reload) {
@@ -123,7 +115,6 @@ registerTunableGroup("ai_spend", "AI spend");
 registerTunableGroup("throughput", "Scan pacing");
 registerTunableGroup("autotune_pace", "Auto-tuning pace");
 registerTunableGroup("retention", "Data retention");
-registerTunableGroup("egress", "Outbound connections");
 registerTunableGroup("planner", "Work planner");
 registerTunableGroup("heat", "Heat policy");
 registerTunableGroup("discovery_keys", "Discovery API keys");

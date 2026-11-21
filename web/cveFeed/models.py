@@ -22,6 +22,22 @@ def _clean_affected(value):
     return clean_affected(value)
 
 
+def _clean_references(value):
+    """The references as every reader takes them (the explorer, the advisory panel, the AI context and detection prompts): cve.now states each
+    as ``{url, type, role}`` since 2026-11 (a bare URL before, kept as it is). Only http(s) links are kept, each dict with text fields only,
+    at most 200."""
+    out = []
+    for ref in value if isinstance(value, list) else []:
+        url = ref if isinstance(ref, str) else ref.get("url") if isinstance(ref, dict) else None
+        if not isinstance(url, str) or len(url) > 2000 or not url.lower().startswith(("http://", "https://")):
+            continue
+        out.append(url if isinstance(ref, str) else
+                   {"url": url, **{k: ref[k][:64] for k in ("type", "role") if isinstance(ref.get(k), str) and ref.get(k)}})
+        if len(out) >= 200:
+            break
+    return out
+
+
 def _feed_time(value):
     """A feed timestamp, or None when it is missing or not a real date: one malformed entry must not stop the sync."""
     try:
@@ -110,27 +126,32 @@ class CVEEntry(models.Model):
     def from_api(cls, entry):
         """Upsert a CVEEntry from a full cve.now entry dict. Returns (obj, created)."""
         summary = entry.get("summary") or {}
+        if isinstance(summary, str):
+            summary = {"text": summary}
         if not isinstance(summary, dict):
             summary = {}
         severity = entry.get("severity")
         severity = severity if isinstance(severity, dict) else {}
-        exploitation = entry.get("exploitation")
-        exploitation = exploitation if isinstance(exploitation, dict) else {}
-        exploit_db = exploitation.get("exploitDb")
+        # cve.now states each exploitation signal as an object ({"dateAdded": ...}, {"date": ...}, {"ids": [...]}) or null since 2026-11:
+        # the columns hold whether it is there (cve_now.exploitation_flags), never the object (a BooleanField refuses it and the entry is lost)
+        from cveFeed.cve_now import exploitation_flags
+        exploitation = exploitation_flags(entry.get("exploitation"))
+        stated = entry.get("statedSeverity")
+        stated = stated.get("value") if isinstance(stated, dict) else stated  # {value, source} since 2026-11, a word before
         defaults = {
             "title": entry.get("title") or "",
             "summary": summary.get("text") or "",
             "summary_model": summary.get("model") or "",
             "original_description": entry.get("originalDescription") or "",
-            "cvss": severity.get("cvss"),
-            "cvss_vector": severity.get("vector") or "",
-            "severity_source": severity.get("source") or "",
-            "stated_severity": entry.get("statedSeverity") or "",
-            "kev": exploitation.get("kev"),
-            "epss_reached": exploitation.get("epssReached"),
-            "exploit_db": None if exploit_db is None else bool(exploit_db),
+            "cvss": severity.get("cvss") if isinstance(severity.get("cvss"), (int, float)) and not isinstance(severity.get("cvss"), bool) else None,
+            "cvss_vector": severity.get("vector") if isinstance(severity.get("vector"), str) else "",
+            "severity_source": severity.get("source") if isinstance(severity.get("source"), str) else "",
+            "stated_severity": stated if isinstance(stated, str) else "",
+            "kev": exploitation["kev"],
+            "epss_reached": exploitation["epssReached"],
+            "exploit_db": exploitation["exploitDb"],
             "affected": _clean_affected(entry.get("affected")),
-            "references": entry.get("references") if isinstance(entry.get("references"), list) else [],
+            "references": _clean_references(entry.get("references")),
             "sources": entry.get("sources") if isinstance(entry.get("sources"), list) else [],
             "status": entry.get("status") or "",
             "published_at": _feed_time(entry.get("publishedAt")),
@@ -138,7 +159,7 @@ class CVEEntry(models.Model):
         }
         # the CVE List's own forms the feed passes on ("unspecified" bounds, a branch in two ranges, Junos' "21.1*" and comma lists of fixes) are
         # made ranges correlation can read, and a block the feed states no range for keeps the ranges the CVE List record gave (issues 205, 210)
-        from cveFeed.intel import keep_published_ranges, normalize_feed_ranges, overlay_branch_ranges
+        from cveFeed.intel import keep_published_ranges, normalize_feed_ranges, overlay_branch_ranges, overlay_exact_versions
         defaults["affected"] = normalize_feed_ranges(defaults["affected"])
         stored = cls.objects.filter(cve_id=str(entry["id"])[:64]).values_list("affected", "sources").first()
         if stored and "CVE List V5" in (stored[1] or []):
@@ -147,6 +168,15 @@ class CVEEntry(models.Model):
                 defaults["sources"] = [*defaults["sources"], "CVE List V5"]
         # a branch-by-branch fix list the feed gave with no lower bounds takes the CNA's own bounds from the CVE List record (issue 205)
         defaults["affected"], overlaid = overlay_branch_ranges(str(entry["id"])[:64], defaults["affected"])
+        # a block the feed passes on as a bare ``versions`` list (Cisco's builds, Oracle's supported versions, the kernel CNA's releases, VulDB's
+        # exact versions) takes the ranges the CVE List record states for it, when every one of them can be read (intel.record_ranges_for)
+        defaults["affected"], exact = overlay_exact_versions(str(entry["id"])[:64], defaults["affected"])
+        overlaid = overlaid or exact
+        # an open range cve.now made from an upper bound the record writes as text ("Apache HTTP Server 2.4*", issue 696) is left out, as an
+        # earlier reading found or as the record says now (intel.close_open_ranges); one the record means open is kept
+        from cveFeed.intel import keep_open_checks, overlay_open_ranges
+        defaults["affected"] = keep_open_checks(defaults["affected"], stored[0] if stored else [])
+        defaults["affected"], _opened = overlay_open_ranges(str(entry["id"])[:64], defaults["affected"])
         if overlaid and "CVE List V5" not in defaults["sources"]:
             defaults["sources"] = [*defaults["sources"], "CVE List V5"]
         # a bound the structured record states narrower than public sources show (cveFeed.range_corrections, each with its sources)
@@ -214,7 +244,8 @@ class CVEMatch(models.Model):
     template_id = models.CharField(max_length=128, blank=True, default="")
     template_tested_at = models.DateTimeField(null=True, blank=True)
 
-    # What the distribution says about this host's package release (cveFeed.distro): patched | vulnerable | unknown | no_data.
+    # What the distribution says about this host's package release (cveFeed.distro): patched | vulnerable | unknown | no_data, or backport
+    # (Red Hat ships a fixed build for the host's release, and the installed build is not known: it needs validation, never proof).
     # A patched match is kept (the upstream version is in range, which is a fact) but is not auto-fired and reads as ice.
     distro_status = models.CharField(max_length=12, blank=True, default="no_data")
     distro_fixed_version = models.CharField(max_length=64, blank=True, default="")
@@ -278,9 +309,12 @@ class OnDemandValidation(models.Model):
     finished_at = models.DateTimeField(null=True, blank=True)
     attempts = models.PositiveSmallIntegerField(default=1)  # this try for the same evidence (hot_validation.MAX_ATTEMPTS)
     next_attempt_at = models.DateTimeField(null=True, blank=True)  # a failed job: when it may run again; None once exhausted
+    # the AIJob of the triage question this validation queued (result ai_state deferred): its answer updates the result (triage.settle_validations)
+    ai_job_id = models.PositiveBigIntegerField(null=True, blank=True)
 
     class Meta:
-        indexes = [models.Index(fields=['project', 'created_at'], name='ondemand_project_created_idx')]
+        indexes = [models.Index(fields=['project', 'created_at'], name='ondemand_project_created_idx'),
+                   models.Index(fields=['ai_job_id'], name='ondemand_ai_job_idx')]
         constraints = [models.UniqueConstraint(fields=['match'], condition=models.Q(status__in=['queued', 'running']),
                                            name='one_active_validation_per_match')]
 
@@ -339,9 +373,12 @@ class AutomaticValidation(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     started_at = models.DateTimeField(null=True, blank=True)
     finished_at = models.DateTimeField(null=True, blank=True)
+    # the AIJob of the triage question this validation queued (result ai_state queued or deferred): its answer updates the result
+    ai_job_id = models.PositiveBigIntegerField(null=True, blank=True)
 
     class Meta:
-        indexes = [models.Index(fields=['project', 'status', 'created_at'], name='autoval_project_status_idx')]
+        indexes = [models.Index(fields=['project', 'status', 'created_at'], name='autoval_project_status_idx'),
+                   models.Index(fields=['ai_job_id'], name='autoval_ai_job_idx')]
         constraints = [models.UniqueConstraint(fields=['triage'], condition=models.Q(status__in=['queued', 'running']),
                                            name='one_active_autoval_per_finding')]
 
@@ -427,6 +464,13 @@ class GeneratedTemplate(models.Model):
     validation_reason = models.TextField(blank=True, db_default='', default='')  # the plain-language reason of a rejection, an expiry or a wait
     validated_at = models.DateTimeField(null=True, blank=True)  # when it became valid, invalid or expired
     fixture = models.JSONField(null=True, blank=True)  # {vulnerable, not_affected}: the AI-written responses the matchers were tested on
+    # A revision (cveFeed.template_review.revise): a new row, never an edit in place, because one template_id must always mean one text (the
+    # same-check replacement of templategen.record_outcomes relies on it). It goes through the same automatic lifecycle as an AI draft, and
+    # when it becomes valid the row it supersedes is retired.
+    supersedes = models.ForeignKey("self", null=True, blank=True, on_delete=models.SET_NULL, related_name="revisions")
+    revised_by = models.ForeignKey("auth.User", null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
+    revision_reason = models.TextField(blank=True, db_default='', default='')
+    submitted_fixture = models.JSONField(null=True, blank=True)  # {vulnerable, not_affected} the reviser gave: an extra offline gate
 
     class Meta:
         ordering = ["-created_at"]
@@ -435,12 +479,36 @@ class GeneratedTemplate(models.Model):
         return f"{self.template_id} [{self.status}]"
 
 
+class GeneratedTemplateReview(models.Model):
+    """A person's or agent's review of an AI-written template (``cveFeed.template_review``): keep it, retire it (status invalid, never run
+    again, its confirmations read again), or revise it (a new draft row that supersedes it). The system's own retirement of a row a valid
+    revision superseded is recorded here too, with no reviewer."""
+
+    VERDICTS = ("keep", "retire", "revise")
+
+    template = models.ForeignKey(GeneratedTemplate, on_delete=models.CASCADE, related_name="reviews")
+    reviewer = models.ForeignKey("auth.User", null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
+    reviewer_name = models.CharField(max_length=150, blank=True, default="")  # kept when the account is removed; "" for the system
+    verdict = models.CharField(max_length=16)
+    reason = models.TextField(blank=True, default="")
+    outcome = models.JSONField(default=dict, blank=True)  # what the verdict did: matches read again, findings closed, the revision's id
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+
+    def __str__(self):
+        return f"{self.template_id} {self.verdict}"
+
+
 class DistroFix(models.Model):
     """What a distribution says fixes a CVE in one of its packages: the fixed package version per release.
 
-    Filled by ``cveFeed.distro_sync`` (Debian security tracker, OSV for Ubuntu and Debian); read by correlation to tell a
-    host running a patched backport from a vulnerable one. ``status``: fixed (``fixed_version`` is the first fixed package
-    release; "0" means the release was never affected), vulnerable (affected, no fix yet), not_affected, undetermined."""
+    Filled by ``cveFeed.distro_sync`` (Debian security tracker, OSV for Ubuntu and Debian, Red Hat's security data for RHEL); read by
+    correlation to tell a host running a patched backport from a vulnerable one. ``status``: fixed (``fixed_version`` is the first fixed
+    package release; "0" means the release was never affected), vulnerable (affected, no fix yet), not_affected, undetermined.
+    A Red Hat module stream is stored with its stream in ``package`` ("httpd:2.4"), and ``advisory`` names the advisory that shipped
+    the fix (RHSA-2024:4720). A row with no release and no package only records that the CVE was looked up."""
 
     distro = models.CharField(max_length=16)  # ubuntu | debian | rhel | alpine ...
     release = models.CharField(max_length=16)  # 22.04, 12
@@ -448,6 +516,7 @@ class DistroFix(models.Model):
     cve_id = models.CharField(max_length=32)  # CVE-2024-6387
     fixed_version = models.CharField(max_length=128, blank=True, default="")
     status = models.CharField(max_length=16, default="fixed")
+    advisory = models.CharField(max_length=32, blank=True, default="", db_default="")  # RHSA-2024:4720 (Red Hat rows)
     synced_at = models.DateTimeField(default=timezone.now)
 
     class Meta:
@@ -578,6 +647,30 @@ class TlsCertificate(models.Model):
         return f"{self.host}:{self.port}"
 
 
+class ServiceFeature(models.Model):
+    """What a Sentinel read about one feature of the service on a host and port (``cveFeed.service_features``): whether it offers HTTP/2, and
+    later SSH algorithms, RDP NLA, SMTP extensions ... The vocabulary of features and of values per feature is the Sentinel library's
+    (``cvengine_scanner.features``). A feature no reading covers has no row: unknown. Read by correlation and triage for the CVEs whose advisory
+    needs the feature."""
+
+    domain = models.ForeignKey("targetApp.Domain", on_delete=models.CASCADE, related_name="+")
+    host = models.CharField(max_length=500)  # lowercase, as TlsCertificate.host
+    port = models.IntegerField()
+    transport = models.CharField(max_length=8, default="tcp")  # tcp | udp
+    feature = models.CharField(max_length=32)  # a cvengine_scanner.features.FEATURES key, e.g. http2
+    value = models.CharField(max_length=64)  # one of that feature's tokens, or several joined by commas, e.g. yes | no
+    detail = models.CharField(max_length=200, blank=True, default="")  # the reading in words, e.g. "ALPN http/1.1"
+    source = models.CharField(max_length=24)  # the task kind that read it, e.g. hygiene_check
+    observed_at = models.DateTimeField()
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["domain", "host", "port", "feature"], name="servicefeature_unique")]
+        indexes = [models.Index(fields=["host", "feature"], name="servicefeature_host_idx")]
+
+    def __str__(self):
+        return f"{self.host}:{self.port} {self.feature}={self.value}"
+
+
 class HygieneFinding(models.Model):
     """A configuration-hygiene finding for a domain or host: TLS, certificates, SPF, DKIM, DMARC, CAA, cleartext services."""
 
@@ -668,6 +761,45 @@ class ProbeObservation(models.Model):
 
     def __str__(self):
         return f"{self.host}: {self.probe} {self.product} {self.version}".strip()
+
+
+class JavaRuntime(models.Model):
+    """One reading of the Java runtime a host runs, made from outside (cveFeed.java_runtime): the version (normalised: ``17.0.9``, ``8u392``, a line
+    alone such as ``17``), its major line, the vendor, where it came from (``source``) and how far it can be trusted (``confidence``: ``exact`` when
+    the runtime itself or a page of the product stated it, ``inferred`` when it is what the vendor bundles with the product's version, ``weak`` for a
+    vendor's supported line or a minimum). One row per (project, host, key): ``key`` names the source and where (``jdwp:5005``,
+    ``actuator:/actuator/info``, ``bundled:confluence``); a repeat updates it. ``evidence`` is what the host said, clipped: untrusted text, shown escaped.
+    Correlation matches runtime CVEs against these rows (``java_runtime.collect_matches``); the host payload shows them as ``java_runtimes``."""
+
+    SOURCES = ("jdwp", "actuator", "jolokia", "status_page", "header", "error_page", "bundled_inference", "jenkins_minimum", "tls_fingerprint",
+               "metrics")  # metrics: a jvm_info sample a version source read (cveFeed.version_sources)
+    CONFIDENCES = ("exact", "inferred", "weak")
+    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
+    domain = models.ForeignKey("targetApp.Domain", on_delete=models.CASCADE, related_name="+")
+    host = models.CharField(max_length=500)  # lowercase
+    key = models.CharField(max_length=200)
+    version = models.CharField(max_length=40, blank=True, default="")
+    major = models.IntegerField(default=0)
+    vendor = models.CharField(max_length=40, blank=True, default="unknown")
+    runtime = models.CharField(max_length=200, blank=True, default="")
+    build = models.CharField(max_length=60, blank=True, default="")
+    line_only = models.BooleanField(default=False)  # only the major line is known (a header's "Java/17", a vendor's supported line)
+    source = models.CharField(max_length=24)
+    confidence = models.CharField(max_length=12, default="exact")
+    port = models.IntegerField(default=0)
+    url = models.CharField(max_length=300, blank=True, default="")
+    evidence = models.TextField(blank=True, default="")
+    detail = models.JSONField(default=dict, blank=True)  # the inference's basis and citation, the possible lines, a minimum
+    first_seen = models.DateTimeField(default=timezone.now)
+    last_seen = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["project", "host", "key"], name="uniq_javaruntime_project_host_key")]
+        indexes = [models.Index(fields=["project", "host"], name="javaruntime_proj_host_idx"),
+                   models.Index(fields=["project", "major"], name="javaruntime_proj_major_idx")]
+
+    def __str__(self):
+        return f"{self.host}: Java {self.version or self.major} ({self.source}, {self.confidence})"
 
 
 class HostProfile(models.Model):
@@ -1304,6 +1436,9 @@ class Triage(models.Model):
             models.Index(fields=["kind", "signature"], name="triage_kind_sig_idx"),
             models.Index(fields=["project", "host"], name="triage_proj_host_idx"),
             models.Index(fields=["project", "kind", "evidence_key"], name="triage_proj_kind_evkey_idx"),  # the reviewer's prior: the same evidence on other hosts (reviewer.same_evidence_prior)
+            models.Index(fields=["status", "updated_at"], name="triage_status_updated_idx"),  # the sweep's oldest-first read and the triage backlog signal
+            # list_triage's page (?status=, newest first): read in index order and stopped at the page, instead of joining and sorting every row of the status
+            models.Index(fields=["project", "status", "last_seen", "id"], name="triage_proj_status_seen_idx"),
         ]
         constraints = [
             models.CheckConstraint(
@@ -1995,10 +2130,10 @@ class OpenvasSettings(models.Model):
 
 
 class ScanConcurrency(models.Model):
-    """Single-row scan concurrency chosen on Settings, configMaxxing (see cveFeed.scan_concurrency): ``values`` maps a setting key (``heavy.nmap``,
-    ``discovery_concurrency``, ``work_depth``) to the whole number an App Admin chose, and ``meta`` to who chose it and when. A key that is
+    """Single-row scan concurrency chosen on Settings, configMaxxing (see cveFeed.scan_concurrency): ``values`` maps a setting key (``discovery_concurrency``,
+    ``work_depth``, ``lane.classic`` ...) to the whole number an App Admin chose, and ``meta`` to who chose it and when. A key that is
     absent was never set (or was reset), so the environment variable, then the built-in default, applies. The row is the durable truth; the
-    workers read a copy published to Redis (a few seconds old at most) so that admission never waits on the database."""
+    workers read a copy published to Redis (a few seconds old at most) so that they never wait on the database."""
 
     values = models.JSONField(default=dict, blank=True)
     meta = models.JSONField(default=dict, blank=True)  # {key: {"by": username, "at": iso time}}

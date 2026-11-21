@@ -4,14 +4,16 @@ or any text from a scanned host, so the same dictionary can be shown on the page
 Every probe is wrapped: one that fails leaves its numbers out (None), and a rule that needs a number it does not have never raises the setting
 (``cveFeed.autotune_policy``). What is read:
 
-* memory: per scanning container, the share of memory free (the lowest over the interval, from the 30 second history ``reNgine.resources``
-  keeps), the memory budget, memory kills (by scanner kind), how often each scanner kind had a run waiting for its turn and the most that ran
-  at once, and what one run of each kind costs (the learned peak with its margin, or the estimate);
+* memory: per worker container, the share of memory free (the lowest over the interval, from the 30 second history ``reNgine.resources``
+  keeps) and the smallest container's total (no scanner runs on the server, so nothing per scanner kind);
 * the database: client connections in use and ``max_connections``;
 * the CPU: the share of the container's CPU limit (cgroup v2 ``cpu.max`` or v1 CFS quota) it used since the last measurement, from the
   cgroup's own accounting (the load average per core of that limit where the cgroup cannot be read);
 * the discovery worker: whether it answers (the 30 second tick's record), its ceiling, the tasks it runs now and the messages waiting;
-* Sentinels: live ones, their slots and the slots in use, queued work and its age, and the waits that timed out and ran locally instead;
+* Sentinels: live ones, their slots and the slots in use, queued work and its age, the tasks that timed out or expired unclaimed, and one row per
+  Sentinel (``machines``: its machine's CPU, load and memory as it reports them, and what it did: ``cveFeed.autotune_sentinels.collect``), which
+  the per-Sentinel tuning reads;
+* the Celery broker: whether it answers, how long a ping takes, and the messages waiting in the queues the control tasks and the planner use;
 * assessments: queued and running, and the age of the oldest queued one;
 * the work conductor: whether its last round was held back by its depth while targets were due, or had nothing to do;
 * scanner failures that point at load (a timeout, out of memory, a kill) by scanner kind;
@@ -39,51 +41,31 @@ def _probe(name, fn, default=None):
 
 
 def memory(now, interval=INTERVAL_SECONDS):
+    """The worker containers' memory: the lowest share free over the interval (the 30 second history ``reNgine.resources.report_state`` keeps),
+    the smallest container's total, and the budget the sizing rules read (three quarters of it). Nothing per scanner kind: no scanner runs here."""
     from reNgine import resources
-    out = {'reported': False, 'free_frac': None, 'budget_mb': None, 'kills': 0, 'kills_by_kind': {}, 'waiting': {}, 'running': {}, 'cost_mb': {}}
+    out = {'reported': False, 'free_frac': None, 'budget_mb': None, 'total_mb': None}
     store = resources.get_store()
     if not isinstance(store, resources.RedisStore):
         return out
-    since = now - interval
-    free, budgets, totals, counted = [], [], [], 0
-    waits, running = {}, {}
-    for key in store.r.scan_iter(match='cvengine:heavy:*:state', count=1000):
+    free, totals = [], []
+    for key in store.r.scan_iter(match=f'{resources.STATE_PREFIX}*:state', count=1000):
         try:
             state = json.loads(store.r.get(key) or '{}')
         except ValueError:
             continue
         if now - float(state.get('t', 0)) > 180:
             continue  # a container that stopped reporting
-        namespace = key[:-len(':state')]
-        other = resources.RedisStore(store.r, namespace)
         mem = state.get('memory') or {}
         if mem.get('total_mb'):
             free.append(mem.get('available_mb', 0) / mem['total_mb'])
             totals.append(int(mem['total_mb']))
-        if state.get('budget_mb'):
-            budgets.append(int(state['budget_mb']))
-        for event in other.events():
-            if float(event.get('t', 0)) >= since:
-                out['kills'] += 1
-                kind = str(event.get('kind') or '')
-                out['kills_by_kind'][kind] = out['kills_by_kind'].get(kind, 0) + 1
-        for kind in resources.BASE_COSTS_MB:
-            cost = resources.effective_cost(kind, other)
-            out['cost_mb'][kind] = max(out['cost_mb'].get(kind, 0), cost)
-    for item in resources.adaptive_history(since):
+    for item in resources.adaptive_history(now - interval):
         mem = item.get('memory') or {}
         if mem.get('total_mb'):
             free.append(mem.get('available_mb', 0) / mem['total_mb'])
-        counted += 1
-        for kind, n in (item.get('waiting_by_kind') or {}).items():
-            if n:
-                waits[kind] = waits.get(kind, 0) + 1
-        for kind, n in (item.get('running_by_kind') or {}).items():
-            running[kind] = max(running.get(kind, 0), int(n or 0))
-    if free and budgets:
-        out.update(reported=True, free_frac=round(max(0.0, min(1.0, min(free))), 3), budget_mb=min(budgets), total_mb=min(totals) if totals else None)
-    out['waiting'] = {kind: round(n / counted, 2) for kind, n in waits.items()} if counted else {}
-    out['running'] = running
+    if free and totals:
+        out.update(reported=True, free_frac=round(max(0.0, min(1.0, min(free))), 3), total_mb=min(totals), budget_mb=int(min(totals) * 0.75))
     return out
 
 
@@ -236,12 +218,38 @@ def sentinels(now, interval=INTERVAL_SECONDS):
     expired = SentinelTask.objects.filter(status='expired', finished_at__gte=since)
     unclaimed = expired.filter(error__icontains='in time').count()
     outage = claim_outage(now, unclaimed, slots, in_use)
-    return {'live': len(live), 'slots': slots, 'in_use': in_use, 'queued': queued.count(),
-            'oldest_queued_s': int((at - oldest).total_seconds()) if oldest else None,
-            'timeouts': expired.filter(error__icontains='timed out').count(),
-            # AM-5: tasks that expired unclaimed while the slots were free, or while the server's limiter refused the Sentinels' claims, say the claims did not
-            # reach the server, not that the Sentinels are too small: they are not counted as waits that ran locally (the policy backs off on those)
-            'fallbacks': 0 if outage else unclaimed, 'unclaimed': unclaimed, 'claims_outage': outage}
+    waiting = queued.count()
+    out = {'live': len(live), 'slots': slots, 'in_use': in_use, 'queued': waiting,
+           'oldest_queued_s': int((at - oldest).total_seconds()) if oldest else None,
+           'timeouts': expired.filter(error__icontains='timed out').count(),
+           # AM-5: tasks that expired unclaimed while the slots were free, or while the server's limiter refused the Sentinels' claims, say the claims did not
+           # reach the server, not that the Sentinels are too small: they are not counted as Sentinel capacity trouble (the policy backs off on those)
+           'expired_unclaimed': 0 if outage else unclaimed, 'unclaimed': unclaimed, 'claims_outage': outage}
+    from cveFeed import autotune_sentinels
+    out['machines'] = _probe('sentinel machines', lambda: autotune_sentinels.collect(at, interval, queued=waiting), {})
+    return out
+
+
+BROKER_QUEUES = ('cve_feed_queue', 'planner_queue', 'api_queue', 'celery')  # besides the discovery queue (``discovery``): the control tasks, the planner, the API's own tasks
+
+
+def broker():
+    """``{'ok', 'latency_ms', 'queued': {queue: messages waiting}}`` of the Celery broker; ``ok`` False when it does not answer a ping."""
+    from agentapi.system_status import PRIORITY_SUFFIXES, _broker_client
+    started = time.monotonic()
+    try:
+        client = _broker_client()
+        client.ping()
+    except Exception:  # noqa: BLE001 - not answering is the measurement
+        return {'ok': False, 'latency_ms': None, 'queued': {}}
+    latency = int((time.monotonic() - started) * 1000)
+    pipe = client.pipeline(transaction=False)
+    for name in BROKER_QUEUES:
+        for suffix in PRIORITY_SUFFIXES:
+            pipe.llen(name + suffix)
+    lengths = pipe.execute()
+    step = len(PRIORITY_SUFFIXES)
+    return {'ok': True, 'latency_ms': latency, 'queued': {name: sum(lengths[i * step:(i + 1) * step]) for i, name in enumerate(BROKER_QUEUES)}}
 
 
 def claim_outage(now, unclaimed, slots, in_use):
@@ -368,6 +376,7 @@ def collect(now=None, boot=''):
         'maint': _probe('maintainer signals', lambda: maintainer(now), {}),
         'starve': _probe('queued scans', lambda: starve(now), {}),
         'lanes': _probe('lane memory', lambda: lane_memory(now), {}),
+        'broker': _probe('broker', broker, {}),
     }
     measured = _probe('load', lambda: load(now))
     if measured:
@@ -395,13 +404,10 @@ def summarise(samples):
         return {'min': round(min(values), digits), 'max': round(max(values), digits), 'mean': round(sum(values) / len(values), digits)} if values else None
 
     db = [s['db']['used'] / s['db']['max'] for s in samples if (s.get('db') or {}).get('max') and (s['db'].get('used') is not None)]
-    kinds = sorted({k for s in samples for k in ((s.get('memory') or {}).get('waiting') or {})} |
-                   {k for s in samples for k in ((s.get('memory') or {}).get('running') or {})})
     last = samples[-1]
     return {
         'measurements': len(samples), 'minutes': int((samples[-1]['t'] - samples[0]['t']) // 60),
         'memory_free_share': span('memory', 'free_frac'), 'memory_budget_mb': (last.get('memory') or {}).get('budget_mb'),
-        'memory_kills': sum(nums('memory', 'kills')),
         'database_connection_share': {'max': round(max(db), 2), 'mean': round(sum(db) / len(db), 2)} if db else None,
         'cpu_load_per_core': span('load'),
         'discovery': {'ceiling': (last.get('discovery') or {}).get('ceiling'), 'busy': span('discovery', 'active', digits=1),
@@ -409,13 +415,13 @@ def summarise(samples):
                       'not_answering': sum(1 for s in samples if (s.get('discovery') or {}).get('replying') is False)},
         'sentinel': {'live': (last.get('sentinel') or {}).get('live'), 'slots': (last.get('sentinel') or {}).get('slots'),
                      'slots_in_use': span('sentinel', 'in_use', digits=1), 'queued': span('sentinel', 'queued', digits=1),
-                     'timeouts': sum(nums('sentinel', 'timeouts')), 'ran_locally': sum(nums('sentinel', 'fallbacks'))},
+                     'timeouts': sum(nums('sentinel', 'timeouts')), 'expired_unclaimed': sum(nums('sentinel', 'expired_unclaimed')),
+                     'oldest_queued_minutes': (max(nums('sentinel', 'oldest_queued_s')) // 60) if nums('sentinel', 'oldest_queued_s') else None},
+        'broker': {'not_answering': sum(1 for s in samples if (s.get('broker') or {}).get('ok') is False),
+                   'latency_ms': span('broker', 'latency_ms', digits=0),
+                   'queued': {q: span('broker', 'queued', q, digits=0) for q in BROKER_QUEUES}},
         'assessments': {'queued': span('assess', 'queued', digits=1), 'oldest_queued_minutes': (max(nums('assess', 'oldest_s')) // 60) if nums('assess', 'oldest_s') else None},
         'conductor': {state: sum(1 for s in samples if (s.get('conductor') or {}).get('state') == state)
                       for state in ('saturated', 'full', 'filling', 'idle', 'off', 'paused')},
-        'scanners': {kind: {'waiting_share': round(sum(nums('memory', 'waiting', kind)) / len(samples), 2),
-                            'most_running': max(nums('memory', 'running', kind), default=0),
-                            'mb_per_run': (last.get('memory') or {}).get('cost_mb', {}).get(kind),
-                            'capacity_failures': sum(nums('failures', kind))} for kind in kinds},
         'paused_measurements': sum(1 for s in samples if s.get('paused') or s.get('updating')),
     }

@@ -1,5 +1,5 @@
 """Auto-tuning of the throughput settings of Settings, configMaxxing: the numbers that say how much this instance does at once and how eagerly it
-starts work (scanner kinds at once, hosts assessed at once, hosts per assessment batch, discovery scans kept running, chunks of one stage at
+starts work (hosts assessed at once, hosts per assessment batch, discovery scans kept running, chunks of one stage at
 once, the hours between rescans and between Sentinel refreshes) are moved from what this instance measured, instead of being guessed once.
 
 **Modes** (one for the instance, ``AutoTuneSettings``): ``auto`` (the default: the tuner applies bounded changes itself), ``suggest`` (it works
@@ -38,6 +38,7 @@ import time
 from collections import namedtuple
 from datetime import datetime, timedelta, timezone as dt_timezone
 
+from cveFeed import autotune_sentinels
 from reNgine import ai_prompts, resources
 
 logger = logging.getLogger(__name__)
@@ -64,7 +65,9 @@ ADVISOR_SYSTEM = ai_prompts.compose('autotune_advisor',
     'back off quickly on evidence of trouble, then probe upward slowly. You get measured numbers from the last hours and, for each setting it may '
     'change now, the number in effect, the target sized for this machine, and the lowest and highest number you may choose. Be ambitious: choose '
     'the highest allowed number unless the measurements show trouble (memory kills or little memory free, timeouts, the database near its '
-    'connection limit, a worker not answering, Sentinel waits that ran locally); then choose a lower allowed number. Never name a setting you '
+    'connection limit, a worker or the broker not answering, Sentinel tasks that time out or expire unclaimed); then choose a lower allowed number. '
+    'Settings sentinel:<id>:max_concurrent and sentinel:<id>:kind:<kind> are one Sentinel\'s tasks at once; measurements.sentinels.<id> is its '
+    'machine: choose lower when memory_available_share < 0.2, load_per_cpu_1m > 1.5 or a run was killed for memory. Never name a setting you '
     'were not given. Reply with ONLY {"recommendations": [{"setting": "<name>", "value": <whole number>, "reason": "<one short sentence citing the '
     'numbers>"}]}.')
 
@@ -72,13 +75,6 @@ Managed = namedtuple('Managed', 'key registry label setting env_name')
 
 
 # --- the registry of tunable settings ----------------------------------------------------------------------------------
-
-def _env_int(name):
-    try:
-        return int(float(os.environ[name]))
-    except (KeyError, ValueError):
-        return None
-
 
 DISCOVERY_PIN_BELOW = 4  # scripts/update-deploy.sh warn_discovery_pin says the same at the same number
 
@@ -89,9 +85,7 @@ def _scan():
 
 
 def managed():
-    """Every setting that opts in to auto-tuning, from both registries, with its auto-tuning range (``cveFeed.autotune_policy.Setting``). For a
-    scanner kind, HEAVY_TUNE_MIN_<KIND> / HEAVY_TUNE_MAX_<KIND> in the environment narrow or widen the range (never outside what the page
-    allows)."""
+    """Every setting that opts in to auto-tuning, from both registries, with its auto-tuning range (``cveFeed.autotune_policy.Setting``)."""
     from cveFeed import scan_concurrency, tunables
     from cveFeed.autotune_policy import Setting
     out = []
@@ -99,17 +93,8 @@ def managed():
         if not f.auto_tunable:
             continue
         low, high = f.auto_min, f.auto_max
-        if f.group == 'heavy':
-            kind = f.key.split('.', 1)[1]
-            suffix = kind.upper().replace('-', '_')
-            env_low, env_high = _env_int('HEAVY_TUNE_MIN_' + suffix), _env_int('HEAVY_TUNE_MAX_' + suffix)
-            low = max(f.low, min(f.high, env_low)) if env_low else low
-            high = max(f.low, min(f.high, env_high)) if env_high else high
-            high = max(low, high)
-            what = f'heavy:{kind}'
-        else:
-            what = {'discovery_concurrency': 'discovery', 'assess_batch': 'batch', 'work_depth': 'depth', 'assess_share_percent': 'assess_share',
-                    'lane.cve_feed': 'lane:cve_feed', 'lane.classic': 'lane:classic'}[f.key]
+        what = {'discovery_concurrency': 'discovery', 'assess_batch': 'batch', 'work_depth': 'depth', 'assess_share_percent': 'assess_share',
+                'lane.cve_feed': 'lane:cve_feed', 'lane.classic': 'lane:classic'}[f.key]
         optimistic = max(low, min(high, f.auto_optimistic))
         out.append(Managed(f.key, 'scan_concurrency', f.label, Setting(f.key, what, f.label, low, high, f.auto_step, 'more', optimistic,
                                                                                f.default), f.env))
@@ -414,6 +399,8 @@ def apply_decision(user, decision_id):
     decision = _decision(decision_id)
     if decision.applied or decision.resolution:
         raise TuningError(409, 'this recommendation was already applied or replaced')
+    if autotune_sentinels.is_key(decision.setting):  # one Sentinel's concurrency or per-kind slots
+        return serialize(autotune_sentinels.apply_decision(user, decision))
     m = by_key().get(decision.setting)
     if m is None:
         raise TuningError(409, 'this setting is no longer auto-tuned')
@@ -452,6 +439,8 @@ def revert(user, decision_id):
         raise TuningError(409, 'only an applied change can be reverted')
     if decision.action == 'release':
         raise TuningError(409, 'handing a setting to auto-tuning cannot be reverted: save a value for it to pin it again')
+    if autotune_sentinels.is_key(decision.setting):
+        return serialize(autotune_sentinels.revert(user, decision))
     latest = _latest_applied(decision.setting)
     if latest is None or latest.pk != decision.pk:
         raise TuningError(409, 'a later change of this setting exists: revert that one first')
@@ -500,6 +489,8 @@ def release(user, key):
 
     from cveFeed.models import AutoTuneSettings
     _need_admin(user)
+    if autotune_sentinels.is_key(key):
+        return serialize(autotune_sentinels.release(user, key))
     m = by_key().get(key)
     if m is None:
         raise TuningError(400, 'this setting is not auto-tuned')
@@ -566,11 +557,12 @@ def set_mode(user, mode=None, advisor=None, policy=None):
         row = AutoTuneSettings.objects.select_for_update().get(pk=settings_row().pk)
         before = {'mode': row.mode, 'advisor': row.advisor}
         policy_before = agent_policy(row)
-        dropped = []
+        dropped, sentinels_dropped = [], 0
         if mode is not None and mode != row.mode:
             if row.mode == 'auto':
                 dropped = sorted(row.values or {})
                 row.values, row.meta = {}, {}
+                sentinels_dropped = autotune_sentinels.drop_all()  # every Sentinel back to its own numbers
             row.mode = mode
         if advisor is not None:
             row.advisor = advisor
@@ -579,6 +571,8 @@ def set_mode(user, mode=None, advisor=None, policy=None):
         row.changed_by, row.changed_at = user, _now()
         row.save()
     publish(row)
+    if sentinels_dropped:
+        dropped.append(f'{sentinels_dropped} Sentinel(s)')
     after = {'mode': row.mode, 'advisor': row.advisor}
     policy_after = agent_policy(row)
     if after != before or policy_after != policy_before:
@@ -600,6 +594,8 @@ def reset(user):
     changed = row.mode != DEFAULT_MODE or not row.advisor or cleared
     AutoTuneSettings.objects.filter(pk=row.pk).update(mode=DEFAULT_MODE, advisor=True, values={}, meta={}, changed_by=user, changed_at=_now(),
                                                       updated_at=_now())
+    if autotune_sentinels.drop_all():
+        cleared.append('sentinels')
     publish()
     if changed:
         _audit(user, 'autotune.reset', 'auto-tuning', before={'mode': row.mode, 'advisor': row.advisor}, cleared=cleared)
@@ -941,8 +937,7 @@ def _agent_result(m, raw, status, value, text, **extra):
 
 def _agent_limit(m, current, number, samples, history, now_dt):
     """What the controller would let this setting do, for a number that asks for more work than ``current``: ``(highest number allowed, why it is
-    not higher)``. The controller's own ceiling (the target for this machine, the level that caused trouble in the last day) and a scanner kind's
-    memory budget, so that the next round does not simply lower the number again."""
+    not higher)``. The controller's own ceiling (the target for this machine, the level that caused trouble in the last day), so that the next round does not simply lower the number again."""
     from cveFeed import autotune_policy as policy
     setting, now = m.setting, now_dt.timestamp()
     if setting.sense == 'gap':  # a wait between runs: more work is a SHORTER wait, so the ceiling for more work starts at the shortest the range allows
@@ -954,10 +949,6 @@ def _agent_limit(m, current, number, samples, history, now_dt):
         target, reason, known = policy.size_for(setting, facts, current=current)
         if known and policy._beyond(setting, limit, target):
             limit, why = target, f'the target for this machine is {target} ({reason or "sized"})'
-        if setting.kind.startswith('heavy:'):
-            cap = policy.memory_cap(setting.kind.split(':', 1)[1], samples[-1])
-            if cap is not None and setting.sense == 'more' and max(setting.low, cap) < limit:
-                limit, why = max(setting.low, cap), f'the memory budget holds {cap} at their real peak'
     held, text = policy.remembered_ceiling(setting, limit, history, now=now)
     if text:
         limit, why = held, text
@@ -1062,7 +1053,7 @@ def _ai_held(key, now_dt):
 
 
 # The alerts whose resource a setting uses: a lowering of the AI needs trouble for that setting, or one of these alerts open (and cited). ``None``: every setting.
-ALERT_RESOURCES = {'memory': None, 'workers_down': ('discovery', 'batch', 'depth', 'stage'), 'scan_errors': ('heavy:',), 'sentinel_errors': ('stage',),
+ALERT_RESOURCES = {'memory': None, 'workers_down': ('discovery', 'batch', 'depth', 'stage'), 'sentinel_errors': ('stage',),
                    'sentinel_waiting': ('stage',), 'queue_starvation': ('assess_share',)}
 
 
@@ -1094,8 +1085,8 @@ def _lowering_block(m, samples, history, now_dt, unverified, cited, open_codes):
 def ai_offer(now_dt=None):
     """What the health-check AI may propose NOW. Returns ``{'gate': why it may not, or '', 'left_today': proposals still allowed today, 'offered': {key: {'setting',
     'label', 'value', 'range': (lowest, highest), 'higher': text}}, 'not_offered': {key: why}}``. For each setting that is not pinned and not held from the AI: the
-    auto-tuning range, but a number that asks for more work stops at the controller's own ceiling (the target for this machine, the level that caused trouble,
-    a scanner kind's memory budget) and at the current number while a raise is not allowed (trouble for the setting, a hold, the raise cooldown, another calm
+    auto-tuning range, but a number that asks for more work stops at the controller's own ceiling (the target for this machine, the level that caused trouble)
+    and at the current number while a raise is not allowed (trouble for the setting, a hold, the raise cooldown, another calm
     change not yet verified); a lower number is always allowed. A setting with no number left to choose is listed in ``not_offered`` with the reason."""
     from cveFeed import autotune_policy as policy
     now_dt = now_dt or _now()
@@ -1261,7 +1252,7 @@ def agent_change(user, values, who='an agent'):
     * ``off`` (the policy), or auto-tuning off (the mode or the kill switch): refused, nothing is recorded;
     * ``suggest`` (the policy, or the mode): recorded as a recommendation a person applies with one click (``apply_decision``);
     * ``auto``: the number is clamped to the auto-tuning range and to what the controller itself would allow now (the target for this machine, the
-      level that caused trouble in the last day, a scanner kind's memory budget), refused while trouble shows for the setting, while another calm
+      level that caused trouble in the last day), refused while trouble shows for the setting, while another calm
       change is unverified, after a revert's hold and inside the raise cooldown (a LOWER number is never held back by those), and applied through
       ``apply_tuned`` with ``verify=``: judged after 30 minutes and taken back if it made things worse.
 
@@ -1468,6 +1459,10 @@ def run(now_dt=None):
     in_window = [s for s in samples if s['t'] >= now - window]
     if mode == 'auto':
         summary['verified'] = verify_pending(now_dt, samples)
+        try:
+            summary['verified'] += autotune_sentinels.verify_pending(now_dt, samples)
+        except Exception:  # noqa: BLE001 - a Sentinel's verification that could not run never stops the round
+            logger.warning('auto-tune: the per-Sentinel verification could not run', exc_info=True)
         row = settings_row()  # a revert just wrote the tuned numbers
         try:
             summary['paused_kinds'] = pause_failing_kinds(mode, now_dt)
@@ -1497,10 +1492,9 @@ def run(now_dt=None):
             summary['settings'][m.key] = info
             continue
         target, target_reason, target_known = policy.size_for(m.setting, facts, current=value)
-        hard_cap = policy.memory_cap(m.setting.kind.split(':', 1)[1], samples[-1]) if m.setting.kind.startswith('heavy:') and samples else None
         plan = policy.decide(m.setting, value, baseline, samples, _history(m.key, now_dt), now=now, boot_at=float(boot['at']),
                              target=target, target_reason=target_reason, cooldown=cooldown, probe_cooldown=probe_cooldown,
-                             hold_until=_hold_until(row, m.key), hard_cap=hard_cap, target_known=target_known, ready=ready)
+                             hold_until=_hold_until(row, m.key), target_known=target_known, ready=ready)
         plans[m.key] = (m, value, baseline, plan)
         info.update(state='managed', value=value, starting_value=baseline, target=target, target_reason=target_reason, ceiling=plan['ceiling'],
                     why_not_raised=plan['why_not_raised'] if plan['direction'] != 'more' else '', controller=plan['reason'])
@@ -1508,6 +1502,12 @@ def run(now_dt=None):
         if plan['ai_range'] and plan['ai_range'][0] != plan['ai_range'][1]:  # the advisor is asked only about a setting the controller lets move
             offered[m.key] = {'setting': m.setting, 'value': value, 'baseline': baseline, 'range': plan['ai_range'], 'target': plan['ceiling'],
                               'controller': plan['reason'] or 'hold'}
+    try:  # every live Sentinel with a fresh machine report: its concurrency and per-kind slots (cveFeed.autotune_sentinels)
+        sentinel_plans, sentinel_offered, summary['sentinels'] = autotune_sentinels.plan(mode, now_dt, samples)
+        offered.update(sentinel_offered)
+    except Exception:  # noqa: BLE001 - the per-Sentinel tuning never stops the round
+        logger.warning('auto-tune: the per-Sentinel plans could not be made', exc_info=True)
+        sentinel_plans, summary['sentinels'] = [], {}
     advice = {}
     state = advisor_state(row)
     reply = take_advice(now) if offered else None
@@ -1519,10 +1519,14 @@ def run(now_dt=None):
         summary['advisor'] = {'answered': True, 'accepted': len(accepted), 'refused': [f'{k}: {why}' for k, why in refused][:20],
                               'error': error or None}
     elif offered and _advisor_due(state, now):
-        error = ask_advisor(offered, signals.summarise(in_window), now)
+        error = ask_advisor(offered, {**signals.summarise(in_window), 'sentinels': autotune_sentinels.advisor_numbers(samples)}, now)
         summary['advisor'] = {'asked': True, 'queued': not error, 'error': error or None}
     compact = signals.summarise(in_window[-6:])
     gate_closed = mode == 'auto' and calm_change_unverified()
+    try:
+        summary['changes'] += autotune_sentinels.act(mode, sentinel_plans, advice, now_dt, summary['sentinels'])
+    except Exception:  # noqa: BLE001
+        logger.warning('auto-tune: the per-Sentinel changes could not be made', exc_info=True)
     for key, (m, value, baseline, plan) in plans.items():
         source, new, reason, pressured, phase = 'controller', plan['new'], plan['reason'], plan['pressure'], plan['phase']
         if not pressured and key in advice:
@@ -1701,7 +1705,10 @@ def record_emergency(now_dt):
 
 def serialize(d):
     marks = d.signals if isinstance(d.signals, dict) else {}
-    return {'id': d.pk, 'at': _iso(d.created_at), 'setting': d.setting, 'label': getattr(by_key().get(d.setting), 'label', None) or (f"{(d.signals or {}).get('kind')} on {(d.signals or {}).get('sentinel')}" if d.action == 'pause' else d.setting),
+    label = getattr(by_key().get(d.setting), 'label', None) or (f"{marks.get('kind')} on {marks.get('sentinel')}" if d.action == 'pause' else None)
+    if label is None and autotune_sentinels.is_key(d.setting) and isinstance(marks.get('label'), str):
+        label = marks['label']  # one Sentinel's number: "Tasks at once on <name>"
+    return {'id': d.pk, 'at': _iso(d.created_at), 'setting': d.setting, 'label': label or d.setting,
             'old_value': d.old_value, 'new_value': d.new_value, 'mode': d.mode, 'source': d.source, 'action': d.action, 'layer': d.layer,
             'applied': d.applied, 'pressure': d.pressure, 'phase': d.phase or None, 'reason': d.reason, 'actor': d.actor.username if d.actor_id else None,
             'resolution': d.resolution or None, 'resolved_at': _iso(d.resolved_at), 'resolved_by': d.resolved_by or None,
@@ -1790,7 +1797,16 @@ def status():
                      'higher_means': 'more work at once' if m.setting.sense == 'more' else 'a longer wait between runs'} for m in managed()],
         'last_run': last or None, 'sized_for': last.get('sized_for'), 'facts': last.get('facts'), 'recent_decisions': recent,
         'run_every_minutes': 10, 'retention_days': RETENTION_DAYS,
+        'sentinels': _sentinel_status(),
     }
+
+
+def _sentinel_status():
+    try:
+        return autotune_sentinels.status()
+    except Exception:  # noqa: BLE001 - the status of the per-Sentinel tuning never fails the whole status
+        logger.warning('auto-tune: the per-Sentinel status could not be read', exc_info=True)
+        return []
 
 
 def annotate(fields):

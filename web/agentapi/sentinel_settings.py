@@ -19,6 +19,7 @@ import json
 import logging
 import re
 from datetime import datetime
+from datetime import timezone as dt_timezone
 
 from django.utils import timezone
 
@@ -355,11 +356,15 @@ def set_managed(agent, raw, actor, now=None):
 
 
 def reply(agent):
-    """What a Sentinel is told about its settings: the effective values and their fingerprint. The built-in scanner is also told ``vantage``
+    """What a Sentinel is told about its settings: the effective values and their fingerprint. ``max_concurrent`` is the number auto-tuning chose for it
+    when one applies (``sentinel_machine.tuned_slots``); the Sentinel keeps reporting its own local number, which stays the ceiling. The built-in scanner is also told ``vantage``
     (``builtin_vantage``): this server's egress proxy and the private networks its own scans may reach, so it scans from where the server did. Derived
     at every reply and stored nowhere, sent to the built-in scanner alone (its token and its enrollment make it that, never what it reports)."""
     values = effective(agent)
-    from agentapi import sentinel_broker
+    from agentapi import sentinel_broker, sentinel_machine
+    tuned = sentinel_machine.tuned_slots(agent) if agent.kind == 'scanner' else None
+    if tuned:  # auto-tuning's concurrency for this Sentinel: never above its machine's own setting, never over an administrator's
+        values['max_concurrent'] = tuned
     if agent.kind == 'scanner' and sentinel_broker.is_builtin(agent):
         vantage = builtin_vantage()
         if vantage:
@@ -379,8 +384,8 @@ def builtin_vantage():
       (``CVENGINE_PROXY_PRIVATE``). The URLs can carry a login: this goes to the built-in scanner only, over the compose network, and is never stored
       or logged.
     - ``private_ranges``: the private networks it may scan although it is not internal, as this server's own scans may: all of private space with
-      ``CVENGINE_ALLOW_PRIVATE_TARGETS``, the tailnet when the Tailscale sidecar is on (the scanner shares celery's network namespace, where the
-      sidecar's route lives). The server still decides which addresses are in scope; this only lifts the scanner's own floor to match.
+      ``CVENGINE_ALLOW_PRIVATE_TARGETS``, the tailnet when the Tailscale sidecar is on (the sidecar runs in the scanner's own network namespace, where
+      its route lives). The server still decides which addresses are in scope; this only lifts the scanner's own floor to match.
 
     Empty when none of these is set."""
     import os
@@ -417,7 +422,7 @@ FEATURES = ('secret_read', 'vantage', 'bbot_keys', 'credential_filter')
 
 
 def clean_info(raw):
-    """What a Sentinel reports about itself, validated: its client ``version``, the ``contract_version`` it speaks (cvengine_scanner/contract/sentinel_contract.json), its updater's ``update`` state, whether its own GVM stack can scan (``openvas``), for the built-in scanner image ``builtin`` and its ``features``, and ``waiting`` (kinds held back for memory, tasks still stopping: ``clean_waiting``), and optionally ``spool`` (results held on disk for cvENGINE: ``clean_spool``). Anything else is dropped."""
+    """What a Sentinel reports about itself, validated: its client ``version``, the ``contract_version`` it speaks (cvengine_scanner/contract/sentinel_contract.json), its updater's ``update`` state, whether its own GVM stack can scan (``openvas``), for the built-in scanner image ``builtin`` and its ``features``, and ``waiting`` (kinds held back for memory, tasks still stopping: ``clean_waiting``), and optionally ``spool`` (results held on disk for cvENGINE: ``clean_spool``) and ``machine`` (its CPU, load, memory and out-of-memory kills: ``sentinel_machine.clean_machine``). Anything else is dropped."""
     if not isinstance(raw, dict):
         raise ApiError(400, 'info must be an object')
     out = {}
@@ -485,6 +490,10 @@ def clean_info(raw):
     watchdog = clean_watchdog(raw.get('watchdog'))
     if watchdog is not None:
         out['watchdog'] = watchdog
+    from agentapi import sentinel_machine
+    machine = sentinel_machine.clean_machine(raw.get('machine'))  # optional, never refused: dropped when it is not the shape (sentinel_machine)
+    if machine is not None:
+        out['machine'] = machine
     return out
 
 
@@ -641,6 +650,24 @@ def clean_waiting(raw):
     return out
 
 
+def _failed_since(requested_at, before, update):
+    """Whether ``update`` (the updater state just reported) is a failed attempt made after the administrator's Update now at ``requested_at``. The
+    updater keeps reporting its last ``failed`` on every heartbeat until it runs again, so a failure from before the request does not answer it (it
+    used to clear the request at the next heartbeat). ``at`` is when the updater wrote the state (the Sentinel's clock); without one, only a change
+    into ``failed`` counts as a new attempt."""
+    if not requested_at or (update or {}).get('status') != 'failed':
+        return False
+    try:
+        at = datetime.fromisoformat(str(update.get('at') or '').replace('Z', '+00:00'))
+    except ValueError:
+        at = None
+    if at is not None:
+        if at.tzinfo is None:
+            at = at.replace(tzinfo=dt_timezone.utc)
+        return at > requested_at
+    return (before or {}).get('status') != 'failed'
+
+
 def record_info(agent, raw, now=None):
     """Store what the Sentinel reports. An administrator's pending "update now" is answered, and so cleared, by a different version or a failed attempt."""
     info = clean_info(raw)
@@ -651,6 +678,11 @@ def record_info(agent, raw, now=None):
         merged.pop('spool', None)  # a full report that says nothing about a spool says it holds none now
     if 'contract_version' in info and 'tool_versions' not in info:
         merged.pop('tool_versions', None)  # a full report without tool versions (a client that cannot read them now): the old ones are not kept as if current
+    if 'machine' in info:
+        from django.utils import timezone
+        merged['machine'] = {**info['machine'], 'at': (now or timezone.now()).isoformat()}  # the server's own time: how old the numbers are is never the Sentinel's say
+    elif 'contract_version' in info:
+        merged.pop('machine', None)  # a full report without the machine: the old numbers are not kept as if current
     # when the Sentinel last changed the version it runs (or first reported one): "last updated" on the Sentinels page. Only the server writes it.
     if 'version' in info and (agent.info or {}).get('version') != info['version']:
         from django.utils import timezone
@@ -659,7 +691,7 @@ def record_info(agent, raw, now=None):
         sentinel_version.version_changed((agent.info or {}).get('version'), info['version'])  # the old verdict goes at once; the new one is made in the background
     fields = {'info': merged}
     version_changed = 'version' in info and (agent.info or {}).get('version') not in (None, info['version'])
-    failed = (info.get('update') or {}).get('status') == 'failed'
+    failed = _failed_since(agent.update_requested_at, (agent.info or {}).get('update'), info.get('update'))
     if agent.update_requested_at and (version_changed or failed):
         fields['update_requested_at'] = None
     before = (agent.info or {}).get('tool_versions')
@@ -702,9 +734,9 @@ def update_reply(agent):
         # A Sentinel on Automatic (or one an administrator asked) is always told where to go. With nothing newer to name (the instance keeps Sentinels on the newest
         # version off, or GitHub cannot be read) that is the commit this server pins: no GitHub access needed, and never anything newer than what it was tested with.
         from agentapi import sentinel_autoupdate
-        pinned = sentinel_autoupdate.pinned_target(agent)
-        if pinned:
-            out['target'], out['reason'] = pinned, 'pinned'
+        target, reason = sentinel_autoupdate.fallback_target(agent)
+        if target:
+            out['target'], out['reason'] = target, reason
     return out
 
 

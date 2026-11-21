@@ -277,8 +277,7 @@ class Fixture:
         self.org = org
         self.project = Project.objects.create(name='BP', slug='bp', insert_date=timezone.now(), org=org)
         self.domain = Domain.objects.create(name='example.test', project=self.project, insert_date=timezone.now())
-        for patch in (mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False), mock.patch('reNgine.tasks.geo_localize.delay'),
-                      mock.patch('cveFeed.tasks.run_hygiene_task.delay'), mock.patch.dict(os.environ, {'CVENGINE_BUCKETS_GUESS': '0'})):
+        for patch in (mock.patch('cveFeed.tasks.run_hygiene_task.delay'), mock.patch.dict(os.environ, {'CVENGINE_BUCKETS_GUESS': '0'})):
             patch.start()
         self.addCleanup(mock.patch.stopall)
         self.dns = lambda host: True

@@ -280,13 +280,21 @@ def set_secret_rules(ctx, body):
         raise ApiError(400, str(exc))
 
 
+def _etag_matches(header, sha256):
+    """Whether an ``If-None-Match`` value names this sha256 (a list, ``*``, weak and quoted forms all accepted)."""
+    for item in (header or '').split(','):
+        item = item.strip()
+        if item == '*' or item.removeprefix('W/').strip('"') == sha256:
+            return True
+    return False
+
+
 def rules_bundle_response(ctx, if_none_match=None):
     """``GET sentinel/secret-rules/bundle``: the custom rules as YAML, for a Sentinel's own token only; 404 when there are none, 304 when
     ``If-None-Match`` names the current sha256."""
     from django.http import HttpResponse, HttpResponseNotModified
 
     from agentapi import sentinel_broker
-    from agentapi.template_bundle import matches
     from cveFeed import secret_rules as rules
     if ctx.token is None or ctx.token.scope != sentinel_broker.SCOPE_SENTINEL:
         raise ApiError(403, 'the secret rules are for a Sentinel token only')
@@ -294,7 +302,7 @@ def rules_bundle_response(ctx, if_none_match=None):
     data, sha = rules.bundle()
     if data is None:
         raise ApiError(404, 'there are no custom secret rules')
-    answer = HttpResponseNotModified() if matches(if_none_match, sha) else HttpResponse(data, content_type='application/yaml')
+    answer = HttpResponseNotModified() if _etag_matches(if_none_match, sha) else HttpResponse(data, content_type='application/yaml')
     answer['ETag'] = f'"{sha}"'
     answer['Cache-Control'] = 'private, no-cache'
     return answer

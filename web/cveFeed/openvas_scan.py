@@ -9,7 +9,8 @@ How it works. This server never talks to gvmd and never runs a scan: the Sentine
 the target and the task). A beat entry calls ``tick`` every 15 minutes, and a tick does one small step, so a worker restart loses nothing:
 
 * nothing is running: pick the next opted-in project with hosts that are due (once a week each, ``ledger`` service ``openvas``), vet every host
-  (``scannable_hosts``, exclusions, ``pinned_transport.resolve``: only the vetted numeric address is ever put in a task, never a name), and hand one
+  (``scannable_hosts``, exclusions, ``_address``: only a stored numeric address a scanner may touch is ever put in a task, never a name, and this
+  server looks no name up), and hand one
   batch to a Sentinel that declares ``openvas`` for the project (``dispatch_to_sentinel``). With no such Sentinel the hosts stay due;
 * a task is running: ask the ``SentinelTask``'s status; when it is done import the reported results (``poll_sentinel``), when it failed, expired or was
   lost say so. At most one task runs at a time (a unique constraint on ``OpenvasRun``).
@@ -183,11 +184,16 @@ def refuse_reason(ip):
 
 
 def _address(host, project_id):
-    """The one vetted numeric address of ``host`` (IPv4 first); raises ``ValueError`` when it resolves somewhere prohibited."""
-    from cveFeed import pinned_transport
-    addresses = pinned_transport.resolve(host, 443, project=project_id)
-    ordered = sorted(addresses, key=lambda item: item[0] != 2)  # AF_INET is 2
-    return ordered[0][1][0]
+    """The one numeric address of ``host`` a task names (IPv4 first): its newest stored address that a scanner may touch (what a Sentinel's passes
+    recorded). This server looks no name up; the Sentinel judges the address again before OpenVAS is given it (``check_hosts``). Raises ``ValueError``
+    when there is none."""
+    from targetApp.target_types import is_scannable_ip
+    sub = _latest_row(project_id, host, scoped=True)
+    addresses = [ip.address for ip in sub.ip_addresses.all() if ip.address] if sub is not None else []
+    usable = sorted((a for a in addresses if is_scannable_ip(a, project=project_id)), key=lambda a: ':' in a)
+    if not usable:
+        raise ValueError('no stored address of this host is one a scanner may use')
+    return usable[0]
 
 
 def _latest_row(project_id, host, scoped=False):
@@ -275,8 +281,8 @@ def assess(project_id, candidates, forced=(), gate=True, resolve=None, blocked=N
     ``forced`` names it; it is on a CDN or a platform other tenants share, or at an address that is not the project's to test (documentation
     ranges, this server, the tailnet), or the same address as a host already chosen; it was scanned within a week or failed within three days.
     ``forced`` lifts only the heat gate, never the ownership refusals. Order: Fire before Smoke, then the most fire reasons, then the most smoke
-    reasons, then the longest-waiting; a forced host with no heat comes last. ``resolve=None`` reads the stored address (no DNS): the explanation
-    shown to people. The real selection passes ``_address``. ``internal`` selects the project's declared internal networks, whose names are their
+    reasons, then the longest-waiting; a forced host with no heat comes last. ``resolve=None`` reads the stored address: the explanation
+    shown to people. The real selection passes ``_address`` (the stored address a scanner may touch; no name is looked up). ``internal`` selects the project's declared internal networks, whose names are their
     own address and which only a Sentinel inside can reach."""
     from cveFeed import exclusions, ledger
     from targetApp.target_types import internal_networks, scannable_hosts, sentinel_only_target
@@ -337,13 +343,13 @@ def assess(project_id, candidates, forced=(), gate=True, resolve=None, blocked=N
         if internal:
             ip = host
         elif not scannable_hosts([host], resolver=blocked, project=project_id):
-            refuse(host, heat, 'a scanner may not be pointed at it (a prohibited address range, or it does not resolve to a public address)')
+            refuse(host, heat, 'a scanner may not be pointed at it (a prohibited address range)')
             continue
         else:
             try:
                 ip = resolve(host, project_id) if resolve else _stored_address(sub)
             except (ValueError, OSError):
-                refuse(host, heat, 'the name does not resolve to an address a scanner may use', retry=True)
+                refuse(host, heat, 'no stored address of the host is one a scanner may use', retry=True)
                 continue
             if not ip:
                 refuse(host, heat, 'no address is recorded for the host yet')
@@ -387,7 +393,7 @@ def _shared_address(ip):
 
 def due(project_id, hosts, resolve=None, blocked=None):
     """``[(host, ip, domain_id)]`` of ``hosts`` that are due, whatever their heat: vetted (the same gate as every other scanner,
-    ``scannable_hosts`` and ``pinned_transport.resolve``, plus ``assess``'s ownership refusals), not excluded or archived, not scanned within a
+    ``scannable_hosts`` and the stored address (``_address``), plus ``assess``'s ownership refusals), not excluded or archived, not scanned within a
     week and not failed within three days, never-scanned first, one host per address. ``next_batch`` adds the heat gate."""
     return assess(project_id, hosts, gate=False, resolve=resolve or _address, blocked=blocked)[0]
 
@@ -434,7 +440,7 @@ QUEUE_REASONS = (
     ('bug_bounty', lambda r: r.startswith('bug bounty:'), 'held back by bug bounty scope'),
     ('manual_only', lambda r: r.startswith('the target is set to manual only'), 'on manual only targets'),
     ('single_host_target', lambda r: r.startswith('its target is set to this host only'), 'under a single host target'),
-    ('no_usable_address', lambda r: r.startswith(('a scanner may not be pointed', 'the name does not resolve', 'no address is recorded'))
+    ('no_usable_address', lambda r: r.startswith(('a scanner may not be pointed', 'the name does not resolve', 'no stored address', 'no address is recorded'))
      or r.endswith("not the project's to test"), 'with no address a scanner may use'),
     ('same_address', lambda r: r.startswith('the same address as'), 'sharing an address with another host'),
     ('not_in_project', lambda r: r == 'not a host of this project', 'not hosts of this project'),
@@ -757,6 +763,66 @@ def identified(ev):
     return {'product': product, 'cpe': cpe, 'installed_version': installed, 'fixed_version': _version_from(ev.get('result'), 'fixed')}
 
 
+UNNAMED = ('', 'n/a', 'na', '*', '-', 'unknown', 'none', 'unspecified')  # what a CVE record writes when it names no vendor or product
+
+
+def _named(value):
+    value = str(value or '').strip().lower()
+    return '' if value in UNNAMED else value
+
+
+def generic_check(seen, cves):
+    """Whether an NVT checks a behaviour rather than one product's flaw, so its QoD cannot confirm the CVEs it lists: it identified no product and
+    no version (``identified``), and its CVEs either name more than one vendor or include one whose record names no vendor and no product.
+    "HTTP Debugging Methods (TRACE/TRACK) Enabled" (1.3.6.1.4.1.25623.1.0.11213) is the case: its result is only "TRACE is enabled", and it lists
+    Solaris, IIS and HP UCMDB advisories and CVE-2005-3398, whose CVE List record says ``vendor: n/a, product: n/a`` (an old record names nobody,
+    so nothing ties it to what the NVT saw; it used to pass as one vendor and was confirmed on every host with TRACE on). Its QoD says how reliably
+    it saw the behaviour, never whether a CVE about a particular product applies to this host, so those CVE links are not confirmed by it (the
+    scanner finding itself stands either way, and the AI triage judges the match). A check that names what it tested (a product or a version)
+    and one whose CVEs all name the same single vendor are unaffected, whatever the result text says."""
+    if seen.get('product') or seen.get('installed_version'):
+        return False
+    vendors = set()
+    for cve in cves:
+        items = [item for item in getattr(cve, 'affected', None) or [] if isinstance(item, dict)]
+        named = False
+        for item in items:
+            vendor, product = _named(item.get('vendor')), _named(item.get('product'))
+            if vendor:
+                vendors.add(vendor)
+            named = named or bool(vendor or product)
+        if items and not named:
+            return True  # a record that says n/a for every vendor and product: nothing ties it to this host's software (no record at all decides nothing)
+    return len(vendors) > 1
+
+
+# What a Greenbone policy check is named: it reports a protocol, a cipher or key exchange setting, or an end-of-life release, and lists the
+# CVEs of that weakness as references ("SSL/TLS: Deprecated TLSv1.0 and TLSv1.1 Protocol Detection" lists BEAST and FREAK, "SSL/TLS: Report
+# Weak Cipher Suites", "OpenSSH End of Life (EOL) Detection")
+_REFERENCE_NAME = re.compile(
+    r'\bProtocols?\b[^()]*\bDetection\b|\bEnd[- ]of[- ]Life\b|\(EOL\)|\bEOL\b[^()]*\bDetection\b'
+    r'|\b(?:Deprecated|Weak|Insecure|Report)\b[^()]*\b(?:Protocols?|Ciphers?|Cipher Suites?|Algorithms?|MACs?|Key Exchange|Host Keys?|Encryption)\b',
+    re.I)
+PROTOCOL_VENDORS = ('ietf',)  # a CPE of a protocol (cpe:/a:ietf:transport_layer_security:1.0), not of a product a CVE could be about
+
+
+def reference_check(nvt, seen):
+    """Whether an NVT is a policy check that lists its CVEs as references rather than testing them (issue 414): its name says it reports a
+    protocol, a cipher or key exchange setting or an end-of-life release, or the CPE it detected is a protocol's (IETF), not a product's.
+    "SSL/TLS: Deprecated TLSv1.0 and TLSv1.1 Protocol Detection" (QoD 98) lists CVE-2011-3389 (BEAST) and CVE-2015-0204 (FREAK): its QoD is
+    the quality of "TLS 1.0 is offered", not of either CVE (FREAK needs RSA export ciphers, BEAST CBC ciphers the result does not name), and
+    its "version" 1.0 is the protocol's. Like a behaviour check (``generic_check``) it does not confirm those CVEs; the scanner finding itself
+    stands, and the AI triage judges each match with the check's result in front of it."""
+    return protocol_cpe(seen) or bool(_REFERENCE_NAME.search(str(nvt or '')[:300]))
+
+
+def protocol_cpe(seen):
+    """Whether the CPE an NVT detected is a protocol's (IETF): its version (TLS "1.0") is the protocol's, never a product release."""
+    cpe = str((seen or {}).get('cpe') or '')
+    parts = cpe.replace('cpe:2.3:', 'cpe:/', 1).split(':') if cpe else []
+    return len(parts) > 2 and parts[2].lower() in PROTOCOL_VENDORS
+
+
 def severity_level(score):
     """The Vulnerability severity (0 info .. 4 critical) of a CVSS base score."""
     return 4 if score >= 9.0 else 3 if score >= 7.0 else 2 if score >= 4.0 else 1 if score > 0 else 0
@@ -842,7 +908,7 @@ def apply_observations(sub):
     gone = [o for o in observations if o.outcome == 'absent']
     keep, matches, rows = set(), set(), []
     known = {c.cve_id: c for c in CVEEntry.objects.filter(cve_id__in={c for o in live for c in o.evidence.get('cves', [])})
-             .exclude(status__icontains='reject').exclude(local_only=True).only('id', 'cve_id')}
+             .exclude(status__icontains='reject').exclude(local_only=True).only('id', 'cve_id', 'affected')}
     for obs in live:
         ev = obs.evidence
         where = f'{sub.name}:{ev["port"]}'
@@ -860,22 +926,26 @@ def apply_observations(sub):
         # and the product is not a guess (correlation.invalid_identity_reason never compares an OpenVAS match's name: the NVT tested it).
         product = f'OpenVAS NVT {ev["oid"]} on {ev["port"]}'[:255]
         seen = identified(ev)
+        reference = hard and reference_check(ev.get('name'), seen)
+        generic = hard and (reference or generic_check(seen, [known[c] for c in ev['cves'] if c in known]))
+        linked = hard and not generic  # what this NVT's QoD may confirm: the CVEs of the product it tested, never a vendor list it only shares a behaviour with
         for cve_id in ev['cves']:
             cve = known.get(cve_id)
             if cve is None:
                 continue
             matches.add((cve.id, product))
             rows.append({'cve_entry_id': cve.id, 'subdomain_id': sub.id, 'source': SOURCE, 'matched_product': product,
-                         'matched_version': seen['installed_version'][:100],
-                         'version_in_range': True if hard else None, 'confidence': 0.95 if hard else min(0.5, ev['qod'] / 100),
+                         'matched_version': '' if protocol_cpe(seen) else seen['installed_version'][:100],
+                         'version_in_range': True if linked else None, 'confidence': 0.95 if linked else min(0.5, ev['qod'] / 100),
                          'scan_history_id': sub.scan_history_id, 'distro_status': 'no_data', 'distro_fixed_version': '',
                          'evidence': {'source': 'openvas', 'oid': ev['oid'], 'nvt': ev['name'], 'port': ev['port'], 'qod': ev['qod'], 'qod_type': ev['qod_type'],
                                       'severity': ev['severity'], 'result': ev['result'][:RESULT_EVIDENCE], 'tested_at': obs.observed_at.isoformat(),
+                                      **({'generic_check': True} if generic else {}), **({'reference_check': True} if reference else {}),
                                       **{k: v for k, v in seen.items() if v}}})
     correlation.save_matches(rows)
     now = timezone.now()
     for row in rows:
-        hard = confirmed(row['evidence'])
+        hard = confirmed(row['evidence']) and not row['evidence'].get('generic_check')
         mine = CVEMatch.objects.filter(subdomain_id=sub.id, cve_entry_id=row['cve_entry_id'], source=SOURCE, matched_product=row['matched_product'])
         if hard:
             mine.update(template_result='vulnerable', template_id=('openvas:' + row['evidence']['oid'])[:128], template_tested_at=now)

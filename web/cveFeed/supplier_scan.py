@@ -18,7 +18,7 @@ port than 443 and 80):
 
 Safety, the same as the other slow sweeps (cloud storage, virtual hosts, UDP): every name is resolved once and every address must be public
 (loopback, private, link-local and cloud metadata addresses refuse the whole name, whatever ``CVENGINE_ALLOW_PRIVATE_TARGETS`` says), and
-every connection goes to those vetted numeric addresses (``pinned_transport``); the sweep stops while scanning is paused; a global request
+every connection goes to those vetted numeric addresses (on the Sentinel, which resolves and judges them); the sweep stops while scanning is paused; a global request
 pace is shared with the other slow web sweeps; each supplier is checked at most once a week (``ledger`` kind ``supplier``) and a supplier that
 answered nothing is asked again tomorrow (``supplier-failed``); one sweep runs at a time; a project whose bug bounty engagement has not
 confirmed automated testing is skipped; an organization's excluded names are never contacted; an edge that challenges a request is
@@ -241,9 +241,13 @@ def store_card(supplier, res, now):
 
 
 def store_results(supplier, results, now=None):
-    """Upsert the findings of ``results`` (``DomainResult``s of one supplier), and resolve the open or accepted ones that a check which could
-    decide them no longer finds. A resolved finding that is found again reopens. One a person closed as a false positive is left as it is
-    (its evidence refreshed, never resolved, so never reopened). Returns ``{'new', 'reopened', 'resolved', 'open'}``."""
+    """Upsert the findings of ``results`` (``DomainResult``s of one supplier), and resolve the open ones that a check which could decide them
+    no longer finds. A resolved finding that is found again reopens. One a person decided is left as they set it (its evidence refreshed while
+    it is found): a false positive is never resolved, and neither is a finding a person accepted, so their decision is not lost when the issue
+    goes away and comes back. An accepted row that names nobody (set before who decided was kept) still resolves.
+
+    Each write is a conditional UPDATE of the fields it changes, never a full save of a row read earlier: a person who changes a status while
+    the sweep runs keeps it. Returns ``{'new', 'reopened', 'resolved', 'open'}``."""
     from cveFeed.models import SupplierFinding
     now = now or timezone.now()
     counts = {'new': 0, 'reopened': 0, 'resolved': 0}
@@ -259,20 +263,22 @@ def store_results(supplier, results, now=None):
                     SupplierFinding.objects.create(supplier=supplier, domain=p.domain, check_name=p.check, first_seen=now, **values)
                     counts['new'] += 1
                     continue
-                for key, value in values.items():
-                    setattr(row, key, value)
-                if row.status == 'resolved':
-                    row.status, row.resolved_at, row.status_note = 'open', None, 'Reopened: a later check found this again.'
+                same = SupplierFinding.objects.filter(pk=row.pk)
+                if row.status == 'resolved' and same.filter(status='resolved').update(
+                        status='open', resolved_at=None, status_note='Reopened: a later check found this again.', **values):
                     counts['reopened'] += 1
-                row.save()
+                else:
+                    same.update(**values)  # the check's facts only: the status stays whatever a person set
             store_card(supplier, res, now)
             for category, prefixes in res.resolvable.items():
-                stale =SupplierFinding.objects.filter(supplier=supplier, domain=res.domain, category=category, status__in=('open', 'accepted'))
+                stale = (SupplierFinding.objects.filter(supplier=supplier, domain=res.domain, category=category, status__in=('open', 'accepted'))
+                         .exclude(status='accepted', status_by__isnull=False))
                 for row in stale:
                     if row.check_name not in found and any(row.check_name.startswith(prefix) for prefix in prefixes):
-                        row.status, row.resolved_at = 'resolved', now
-                        row.save(update_fields=['status', 'resolved_at'])
-                        counts['resolved'] += 1
+                        # only from the status read here: a person who accepted it since then keeps it
+                        if SupplierFinding.objects.filter(pk=row.pk, status=row.status, status_by=row.status_by_id).update(
+                                status='resolved', resolved_at=now):
+                            counts['resolved'] += 1
     counts['open'] = SupplierFinding.objects.filter(supplier=supplier, status='open').count()
     return counts
 

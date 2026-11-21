@@ -1,0 +1,69 @@
+{
+  "outcome": "done",
+  "reads": [
+    {
+      "id": "vpn.example.com|vsrc|netscaler-gzip|https://vpn.example.com",
+      "answers": [
+        {
+          "path": "/vpn/js/rdx/core/lang/rdx_en.json.gz",
+          "status": 200,
+          "content_type": "application/x-gzip",
+          "bytes": 49,
+          "truncated": false,
+          "headers": {
+            "content-type": "application/x-gzip",
+            "last-modified": "Wed, 21 Jun 2023 12:00:00 GMT"
+          },
+          "digest": {
+            "sha256": "0c9f1b6f0a5c3a4f9e2d8b7c6a5f4e3d2c1b0a9f8e7d6c5b4a3f2e1d0c9b8a7f",
+            "head": "1f8b080856ed7a6400037264785f656e"
+          }
+        },
+        {
+          "path": "/vpn/js/rdx/core/lang/cvengine-control-1a2b3c4d5e6f",
+          "status": 302,
+          "content_type": "text/html",
+          "bytes": 0,
+          "truncated": false,
+          "headers": {},
+          "redirected": true
+        }
+      ]
+    },
+    {
+      "id": "gp.example.com|vsrc|panos-globalprotect|https://gp.example.com",
+      "answers": [
+        {
+          "path": "/global-protect/portal/css/login.css",
+          "status": 200,
+          "content_type": "text/css",
+          "bytes": 5123,
+          "truncated": false,
+          "headers": {
+            "etag": "\"6e185d5daf9a\"",
+            "last-modified": "Wed, 21 Aug 2019 20:54:50 GMT",
+            "content-type": "text/css"
+          }
+        },
+        {
+          "path": "/global-protect/portal/images/favicon.ico",
+          "status": 0,
+          "error": "TimeoutError"
+        },
+        {
+          "path": "/global-protect/portal/css/cvengine-control-0f1e2d3c4b5a",
+          "status": 404,
+          "content_type": "text/html",
+          "bytes": 120,
+          "truncated": false,
+          "headers": {}
+        }
+      ]
+    }
+  ],
+  "touched": [
+    "vpn.example.com",
+    "gp.example.com"
+  ],
+  "refused": []
+}

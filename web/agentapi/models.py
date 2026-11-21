@@ -144,6 +144,12 @@ class SentinelTask(models.Model):
     # A streamed kind (``sentinel_contract.STREAMED``: bbot_discovery) posts numbered batches while it runs (``SentinelPartial``): the seq of the last
     # batch the server took. A batch at or below it is a retry of one already stored; the next must be exactly one more.
     partial_seq = models.PositiveIntegerField(default=0, db_default=0)
+    # Who held it last (an Agent id, kept when ``agent`` is cleared by an expiry or a cancel; set by the claim) and when a late report of it was
+    # recorded (``sentinel_broker._record_late``, once per task). Both used to be answered by a JSON lookup in the audit log inside the task's row lock.
+    last_holder = models.IntegerField(null=True, blank=True)
+    late_reported_at = models.DateTimeField(null=True, blank=True)
+    # A confirming lookup (``agentapi.dns_crosscheck``): the Sentinel (an Agent id) whose answer it checks, which is never offered it. Null for every other task.
+    avoid_agent = models.IntegerField(null=True, blank=True)
     created_by = models.ForeignKey('auth.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -151,6 +157,9 @@ class SentinelTask(models.Model):
     class Meta:
         ordering = ['-priority', 'created_at', 'id']
         indexes = [models.Index(fields=['status', 'lease_expires_at'], name='sentineltask_lease_idx'),
+                   # the reaper's queue-age select (``sentinel_broker.reap_expired``: queued tasks older than ``queued_ttl``), which runs every few seconds;
+                   # it holds only the queued rows, a small part of a table that keeps 30 days of work
+                   models.Index(fields=['created_at'], name='sentineltask_queued_age_idx', condition=models.Q(status='queued')),
                    models.Index(fields=['project', 'status'], name='sentineltask_project_idx'),
                    models.Index(fields=['scan', 'kind'], name='sentineltask_scan_kind_idx'),
                    # the Sentinels page's polls (live_overview, activity_metrics): the last five finished tasks of each Sentinel, the day's counts, the hour's
@@ -288,3 +297,32 @@ class SentinelDefaults(models.Model):
 
     def __str__(self):
         return f'sentinel defaults (self-update: {self.self_update or "follows the instance"})'
+
+
+class DnsReading(models.Model):
+    """What Sentinels said one name of a project resolves to (``agentapi.dns_crosscheck``): one row per (project, name, address), from ``dns_resolve``
+    answers and the resolutions a discovery run reported. The server never resolves a name itself, so a Sentinel's answer is checked against a second
+    source before it changes a host: an address that is new for a host that already has addresses, or that would move a host into or out of the
+    do-not-scan list, is ``held`` (kept here, shown as unconfirmed, not stored on the host) until a second Sentinel gives the same answer or the same
+    Sentinel gave it consistently (``CONFIRM_RUNS`` runs over at least ``CONFIRM_SPAN``); it is then ``confirmed`` and added to the host."""
+    project = models.ForeignKey('dashboard.Project', on_delete=models.CASCADE, related_name='+')
+    name = models.CharField(max_length=255)
+    address = models.CharField(max_length=64)
+    sources = models.JSONField(default=dict, blank=True)  # {agent id: last time it gave this answer (ISO)}: the Sentinels that said so
+    via = models.JSONField(default=list, blank=True)  # 'dns_resolve' and/or 'discovery' (a discovery run's resolutions)
+    runs = models.PositiveIntegerField(default=0)  # how many runs (tasks) gave this answer
+    tasks = models.JSONField(default=list, blank=True)  # the last task ids counted, so a task is counted once however often it is read
+    first_seen = models.DateTimeField()
+    last_seen = models.DateTimeField()
+    status = models.CharField(max_length=10, default='seen')  # seen (nothing to confirm), held (unconfirmed, single source), confirmed
+    reason = models.CharField(max_length=20, blank=True, default='')  # why it was held: adds, replaces, into_list, out_of_list
+    confirmed_how = models.CharField(max_length=20, blank=True, default='')  # second_sentinel or repeated
+    confirmed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['project', 'name', 'address'], name='dnsreading_one_per_answer')]
+        indexes = [models.Index(fields=['project', 'name'], name='dnsreading_name_idx'),
+                   models.Index(fields=['project', 'status'], name='dnsreading_held_idx', condition=models.Q(status='held'))]
+
+    def __str__(self):
+        return f'{self.name} -> {self.address} ({self.status})'

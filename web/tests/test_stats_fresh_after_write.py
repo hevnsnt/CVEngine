@@ -154,12 +154,12 @@ class ScanTests(FreshWorld):
     def test_a_finished_scan_moves_the_host_counts_at_once(self):
         """A discovery that ends makes its hosts the target's current inventory: the headline and ticker read them on the next poll."""
         domain = Domain.objects.create(name='example.test', project=self.project, insert_date=timezone.now())
-        with mock.patch('cveFeed.tasks.run_bbot_discovery.delay'), mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False):
+        with mock.patch('cveFeed.tasks.run_bbot_discovery.delay'):
             from cveFeed import discovery
             scan = discovery.start_discovery(domain)
 
         def finish():
-            with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.correlate_cves.delay'), sentinel_discovery(EVENTS):
+            with mock.patch('cveFeed.tasks.correlate_cves.delay'), sentinel_discovery(EVENTS):
                 discovery.run_discovery(scan.id)
         stats, ticker = self.written(finish)
         self.assertEqual(stats['hosts'], 4 + 2)

@@ -31,17 +31,3 @@ class FeedDecompressionTests(SimpleTestCase):
 		bomb = gzip.compress(b'0' * (3 * 1024 * 1024))
 		with self.assertRaises(intel.SourceError):
 			intel._gunzip(bomb, 1024 * 1024)
-
-
-class RunCommandRedactionTests(TestCase):
-	def test_a_redacted_secret_is_not_logged_or_stored_but_the_command_still_runs(self):
-		from startScan.models import Command
-
-		from reNgine.tasks import run_command
-		with self.assertLogs('reNgine.tasks', level='INFO') as logs:
-			code, output = run_command('echo -a key-abc-123456', redact=('key-abc-123456',))
-		self.assertEqual(code, 0)
-		self.assertIn('key-abc-123456', output)  # the process really received it
-		stored = Command.objects.latest('id').command
-		self.assertEqual(stored, 'echo -a ***')
-		self.assertNotIn('key-abc-123456', '\n'.join(logs.output))

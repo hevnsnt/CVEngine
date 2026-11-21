@@ -1,0 +1,52 @@
+{
+ "schema": 1,
+ "updated": "2026-11-18",
+ "description": "Which platform a product runs on, for the host search (cveFeed.tech_search): a host that shows one of a platform's products runs that platform, whatever version, so tech:php finds a WordPress host and tech:java a Tomcat host. 'names' are what a search for the platform may be typed as (tech:php, tech:dotnet); 'runtime' is the language runtime reading of cveFeed.version_sources that states the platform's own version ('java_runtime' for cveFeed.java_runtime's readings); 'products' are the products that imply it, each with 'why': the product's own documentation that says it is written in, or needs, the platform. A product is matched as a whole word of a technology name, an open port's product, a version source reading or a live route's Server, X-Powered-By or fingerprint; 'pattern' replaces the names when a bare name is ambiguous. Java's products are not listed here: they are java_runtime.JAVA_PRODUCT_RE, the same rule that makes a host a candidate for a Java runtime CVE ('products_from'). A product shown never says which version of the platform it runs: @unknown means no reading of the platform itself.",
+ "platforms": [
+  {"key": "java", "label": "Java", "names": ["Java", "JDK", "JRE", "OpenJDK", "JVM"], "runtime": "java_runtime",
+   "products_from": "cveFeed.java_runtime.JAVA_PRODUCT_RE",
+   "why": "Each product of JAVA_PRODUCT_RE (Tomcat, Jetty, Jenkins, the Atlassian products, Spring, WebLogic, WildFly, Elasticsearch, Kafka ...) runs on a JVM; the list and its reasons are docs/PIPELINE.md#java-runtime"},
+  {"key": "php", "label": "PHP", "names": ["PHP"], "runtime": "php",
+   "products": [
+    {"names": ["WordPress"], "why": "WordPress is written in PHP: https://wordpress.org/about/requirements/ names the PHP release it needs"},
+    {"names": ["Drupal"], "why": "Drupal is written in PHP: https://www.drupal.org/docs/getting-started/system-requirements/php-requirements"},
+    {"names": ["Joomla"], "why": "Joomla is written in PHP: https://manual.joomla.org/docs/next/get-started/technical-requirements/"},
+    {"names": ["Magento", "Adobe Commerce"], "why": "Magento Open Source and Adobe Commerce are PHP applications: https://experienceleague.adobe.com/en/docs/commerce-operations/installation-guide/system-requirements"},
+    {"names": ["Laravel"], "why": "Laravel is a PHP framework: https://laravel.com/docs/deployment#server-requirements"},
+    {"names": ["phpMyAdmin"], "why": "phpMyAdmin is written in PHP: https://docs.phpmyadmin.net/en/latest/require.html"},
+    {"names": ["MediaWiki"], "why": "MediaWiki is written in PHP: https://www.mediawiki.org/wiki/Manual:Installation_requirements"},
+    {"names": ["Nextcloud"], "why": "Nextcloud Server is a PHP application: https://docs.nextcloud.com/server/latest/admin_manual/installation/system_requirements.html"}
+   ]},
+  {"key": "dotnet", "label": ".NET", "names": [".NET", "dotnet", "ASP.NET", "aspnet", ".NET Framework", ".NET Core", "aspgeneric"], "runtime": "dotnet-framework",
+   "note": "IIS alone is not counted: it also serves static files, PHP and classic ASP. IIS with ASP.NET counts through ASP.NET's own signal (X-Powered-By: ASP.NET, X-AspNet-Version, the ASP.NET session cookie, nuclei's aspgeneric), which names the platform itself.",
+   "products": [
+    {"names": ["SharePoint"], "why": "SharePoint Server is an ASP.NET application on IIS: https://learn.microsoft.com/en-us/sharepoint/install/hardware-and-software-requirements-2019"},
+    {"names": ["Microsoft Exchange", "Exchange Server", "Outlook Web App", "Outlook Web Access", "OWA"], "why": "Exchange Server's web services (OWA, ECP, EWS) are ASP.NET applications and it requires the .NET Framework: https://learn.microsoft.com/en-us/exchange/plan-and-deploy/prerequisites"},
+    {"names": ["Umbraco"], "why": "Umbraco is an ASP.NET CMS: https://docs.umbraco.com/umbraco-cms/fundamentals/setup/requirements"},
+    {"names": ["DotNetNuke", "DNN"], "why": "DNN (DotNetNuke) is an ASP.NET CMS: https://docs.dnncommunity.org/content/getting-started/setup/installation/requirements/index.html"}
+   ]},
+  {"key": "nodejs", "label": "Node.js", "names": ["Node.js", "nodejs", "node"], "runtime": "nodejs",
+   "products": [
+    {"names": ["Express.js", "expressjs", "Node.js Express"], "pattern": "^express(?![a-z0-9])", "why": "Express is a Node.js web framework: https://expressjs.com/en/starter/installing.html. A bare 'Express' is matched only as the whole name, never inside another (SQL Server Express, UniFi Express)"},
+    {"names": ["Next.js"], "why": "Next.js is a React framework that runs on Node.js: https://nextjs.org/docs/app/getting-started/installation (system requirements)"},
+    {"names": ["Nuxt", "Nuxt.js"], "why": "Nuxt runs on Node.js: https://nuxt.com/docs/getting-started/installation#prerequisites"},
+    {"names": ["Ghost"], "pattern": "^ghost(?![a-z0-9])", "why": "Ghost is a Node.js CMS: https://ghost.org/docs/faq/node-versions/. Only the whole name: 'ghost' is a common word"},
+    {"names": ["Strapi"], "why": "Strapi is a Node.js headless CMS: https://docs.strapi.io/cms/installation/cli (prerequisites)"}
+   ]},
+  {"key": "python", "label": "Python", "names": ["Python", "CPython"], "runtime": "python",
+   "products": [
+    {"names": ["Django"], "why": "Django is a Python web framework: https://docs.djangoproject.com/en/stable/faq/install/"},
+    {"names": ["Flask", "Werkzeug"], "why": "Flask and the Werkzeug server it ships with are Python: https://flask.palletsprojects.com/en/stable/installation/"},
+    {"names": ["Plone"], "why": "Plone runs on Python (Zope): https://6.docs.plone.org/install/create-project-cookieplone.html (prerequisites)"},
+    {"names": ["Odoo"], "why": "Odoo is written in Python: https://www.odoo.com/documentation/master/administration/on_premise/source.html"},
+    {"names": ["Gunicorn"], "why": "Gunicorn is a Python WSGI server: https://docs.gunicorn.org/en/stable/install.html"}
+   ]},
+  {"key": "ruby", "label": "Ruby", "names": ["Ruby"], "runtime": "ruby",
+   "products": [
+    {"names": ["Ruby on Rails", "Rails"], "why": "Rails is a Ruby framework: https://guides.rubyonrails.org/install_ruby_on_rails.html"},
+    {"names": ["GitLab"], "why": "GitLab is a Rails application: https://docs.gitlab.com/install/requirements/ (it bundles its Ruby)"},
+    {"names": ["Discourse"], "why": "Discourse is a Rails application: https://github.com/discourse/discourse/blob/main/docs/DEVELOPER-ADVANCED.md"},
+    {"names": ["Redmine"], "why": "Redmine is a Rails application: https://www.redmine.org/projects/redmine/wiki/RedmineInstall#Requirements"}
+   ]}
+ ]
+}

@@ -12,7 +12,9 @@ test('each platform gets one command with the server and the project, and no tok
   const s = snippets(base);
   assert.equal(
     s.linux,
-    '(umask 077; cat > cvengine-inventory.token) && curl -fsS --cacert ca.crt https://cvengine.example.test/staticfiles/cve/inventory/cvengine-inventory.sh -o cvengine-inventory.sh && ' +
+    "(umask 077; printf 'Paste the cvENGINE inventory token and press Enter: ' >&2; stty -echo 2>/dev/null; IFS= read -r t; stty echo 2>/dev/null; echo >&2; " +
+      "printf '%s\\n' \"$t\" > cvengine-inventory.token) && " +
+      'curl -fsS --cacert ca.crt https://cvengine.example.test/staticfiles/cve/inventory/cvengine-inventory.sh -o cvengine-inventory.sh && ' +
       'sh cvengine-inventory.sh --server https://cvengine.example.test --project proj-a --token-file cvengine-inventory.token --ca-file ca.crt',
   );
   assert.match(s.python, /python3 cvengine-inventory\.py --server https:\/\/cvengine\.example\.test --project proj-a --token-file cvengine-inventory\.token --ca-file ca\.crt$/);
@@ -21,6 +23,15 @@ test('each platform gets one command with the server and the project, and no tok
   assert.match(snippets({...base, privateCa: false}).windows, /Invoke-WebRequest https:\/\/cvengine\.example\.test\/staticfiles\/cve\/inventory\/cvengine-inventory\.ps1 -OutFile/);
   assert.match(s.windows, /-Server https:\/\/cvengine\.example\.test -Project proj-a -CaFile \.\\ca\.crt$/);
   assert.equal(SCRIPT_PATH, '/staticfiles/cve/inventory/');
+});
+
+test('the Linux and macOS command asks for the token with a prompt and does not wait silently for Ctrl-D', () => {
+  // vmi2645654, Nov 20: a bare `cat > cvengine-inventory.token` waited for the token with no prompt, and the pasted command looked hung
+  for (const command of [snippets(base).linux, snippets(base).python]) {
+    assert.ok(command.startsWith("(umask 077; printf 'Paste the cvENGINE inventory token and press Enter: '"), command);
+    assert.ok(command.includes('stty -echo') && command.includes('IFS= read -r t'), command);
+    assert.ok(!/\bcat >/.test(command), command);
+  }
 });
 
 test('a token is never part of a command: not as an argument, not as an assignment that shell history would keep', () => {

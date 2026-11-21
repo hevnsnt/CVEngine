@@ -333,10 +333,19 @@ def per_run_for(daily):
     return max(1, min(100, -(-daily // 48))) if daily else 0
 
 
-def ai_budget_left(now=None):
+def ai_used_last_day(now=None):
+    """The authoring questions asked in the last 24 hours, counted from the AI jobs themselves (``AIJob`` kind ``cve_detection``, purpose author;
+    a job is one question and at most two calls, its one retry included), queued ones included and expired ones (never asked) not. It was counted
+    from ``CVEDetection.ai_attempted_at``, which ``mark_changed_for_revision`` clears to queue a revision: every revision handed the day's spend
+    back and the budget was overspent. An administrator's guidance revision is not counted (``revise_with_guidance``)."""
+    from cveFeed.models import AIJob
     now = now or timezone.now()
-    used = CVEDetection.objects.filter(ai_attempted_at__gte=now - datetime.timedelta(days=1)).count()
-    return max(0, daily_limit() - used)
+    return (AIJob.objects.filter(kind='cve_detection', dedupe__endswith=':author', created_at__gte=now - datetime.timedelta(days=1))
+            .exclude(status='expired').count())
+
+
+def ai_budget_left(now=None):
+    return max(0, daily_limit() - ai_used_last_day(now))
 
 
 def progress():
@@ -351,7 +360,7 @@ def progress():
     pending = waiting.count() + CVEEntry.objects.filter(detection__isnull=True).count()
     return {'cves': totals['total'], 'local_only': totals['local'], 'rules': by_source.get('rules', 0), 'ai': by_source.get('ai', 0),
             'manual': by_source.get('manual', 0), 'ai_pending': pending,
-            'ai_last_day': CVEDetection.objects.filter(ai_attempted_at__gte=now - datetime.timedelta(days=1)).count(),
+            'ai_last_day': ai_used_last_day(now),
             'daily_budget': daily, 'days_left': (-(-pending // daily) if daily else None)}
 
 
@@ -389,15 +398,18 @@ def _without_ai_checks(strategy):
 
 def _apply_answer(row, strategy, problems, model, hash_):
     """Store a validated model answer on the record: merged over the rules' checks, the CVE's scope applied, the input remembered."""
-    from cveFeed import locality
+    from cveFeed import locality, triage
     cve = row.cve_entry
+    before = triage.strategy_key(row.strategy, row.source)
     base = _without_ai_checks(row.strategy or None)
     merged = detection.finalize(detection.merge_strategies(base if base and (base['remote_checks'] or base['local_checks']
                                                                              or base.get('summary')) else None, _prefix_ids(strategy)), cve.cvss_vector)
-    CVEDetection.objects.filter(pk=row.pk).exclude(source='manual').update(
+    written = CVEDetection.objects.filter(pk=row.pk).exclude(source='manual').update(
         strategy=merged, source='ai', ai_model=model[:128], ai_problems=problems[:10], ai_failures=0, ai_retry_at=None,
         ai_input_hash=hash_, schema_version=detection.SCHEMA_VERSION, updated_at=timezone.now())
     locality.apply_scope(cve, merged.get('scope', ''), source='ai')
+    if written:  # a new remote ceiling or new guidance: the CVE's matches already answered are asked again (triage.strategy_changed)
+        triage.strategy_changed_after_commit(cve.pk, before, triage.strategy_key(merged, 'ai'))
     return merged
 
 
@@ -439,10 +451,14 @@ def job_answer(job, text):
         return None
     strategy, problems = detection.parse_ai_strategy(text)
     if strategy is None:
-        update = {'ai_problems': problems[:10]}
-        if job.context.get('purpose') == 'author':
-            update['ai_model'] = _job_model(job)[:128]
-        CVEDetection.objects.filter(pk=row.pk).update(**update)
+        if job.attempt == 1:
+            # sent back once with why the validator refused it (as a triage answer is); the second answer is the one that counts
+            from cveFeed import ai_jobs
+            from reNgine.ai_providers import repair_parts
+            return ai_jobs.Retry('cve_detection', repair_parts(job.packet.get('parts') or [], text, '; '.join(problems[:5]) or 'not a usable detection record'))
+        # an answer outside the schema is a failed ask, not an answer: counted, backed off and asked again later (``_record_failure``). It used to
+        # set ``ai_model``, which ``due_q`` reads as "answered": the record was never asked again and counted as written.
+        _record_failure(row, 'schema_invalid', problems)
         return None
     if job.context.get('purpose') == 'guidance':
         CVEDetection.objects.filter(pk=row.pk).update(ai_attempted_at=timezone.now())
@@ -457,6 +473,12 @@ def job_failure(job, category, detail):
     row = CVEDetection.objects.filter(pk=job.context.get('record')).first()
     if row is None:
         return
+    _record_failure(row, category)
+
+
+def _record_failure(row, category, problems=()):
+    """One failed ask of ``row``: a failed call (``job_failure``) or an answer that failed validation twice (``job_answer``). ``problems`` are the
+    validator's reasons, kept after the note."""
     failures = row.ai_failures + 1
     now = timezone.now()
     if failures >= AI_MAX_FAILURES:
@@ -465,7 +487,7 @@ def job_failure(job, category, detail):
     else:
         wait = AI_BACKOFF[failures - 1]
         retry_at, note = now + wait, f'the model call failed ({category}); will retry after {int(wait.total_seconds() // 3600)} hours (attempt {failures} of {AI_MAX_FAILURES - 1})'
-    CVEDetection.objects.filter(pk=row.pk).update(ai_problems=[note], ai_failures=failures, ai_retry_at=retry_at)
+    CVEDetection.objects.filter(pk=row.pk).update(ai_problems=[note, *list(problems)[:9]], ai_failures=failures, ai_retry_at=retry_at)
 
 
 def author_with_ai(ai=True, per_run=None, within_budget=True):
@@ -515,31 +537,3 @@ def author_pending(ai=False):
     return out
 
 
-REFRESH_LOCK_SECONDS = 3 * 3600
-
-
-def hot_cves_without_template(days=2, cap=40):
-    """Hot CVEs (known exploited, public exploit, exploit probability, critical score) that arrived lately and have no installed
-    nuclei template yet. The newest templates for new CVEs are published within hours, so these are worth a refresh now."""
-    from cveFeed.templategen import find_existing_template
-    since = timezone.now() - datetime.timedelta(days=days)
-    missing = []
-    for cve in CVEEntry.objects.filter(hot_q(), created_at__gte=since).order_by('-created_at').only('cve_id')[:cap]:
-        if not find_existing_template(cve.cve_id):
-            missing.append(cve.cve_id)
-    return missing
-
-
-def refresh_templates_for_new_hot_cves(dispatch):
-    """Ask for a template refresh outside the schedule when hot new CVEs have no template; at most once per REFRESH_LOCK_SECONDS.
-    ``dispatch`` starts the refresh task. Returns the CVE ids that triggered it (empty when nothing was dispatched)."""
-    from django.core.cache import cache
-    try:
-        missing = hot_cves_without_template()
-    except Exception:  # noqa: BLE001 - coverage is a hint; a missing templates directory must not fail authoring
-        logger.warning('could not check template coverage of new CVEs', exc_info=True)
-        return []
-    if not missing or not cache.add('cvengine:nuclei-refresh-for-new-cves', 1, REFRESH_LOCK_SECONDS):
-        return []
-    dispatch()
-    return missing

@@ -90,12 +90,23 @@ def nginx_runner():
     return 'docker' if shutil.which('docker') and docker_ok() else None
 
 
+def free_ports(count):
+    """``count`` distinct free ports: every socket stays bound until all are picked, so the kernel cannot hand the same port out twice (two
+    calls of a bind-and-close helper could, and nginx then refused the config with "a duplicate listen")."""
+    socks = []
+    try:
+        for _ in range(count):
+            sock = socket.socket()
+            sock.bind(('127.0.0.1', 0))
+            socks.append(sock)
+        return [sock.getsockname()[1] for sock in socks]
+    finally:
+        for sock in socks:
+            sock.close()
+
+
 def free_port():
-    sock = socket.socket()
-    sock.bind(('127.0.0.1', 0))
-    port = sock.getsockname()[1]
-    sock.close()
-    return port
+    return free_ports(1)[0]
 
 
 class BundledProxyTests(SimpleTestCase):
@@ -122,7 +133,7 @@ class BundledProxyTests(SimpleTestCase):
         FakeUpstream.seen = []
         threading.Thread(target=upstream.serve_forever, daemon=True).start()
         self.addCleanup(upstream.shutdown)
-        plain, tunnel = free_port(), free_port()
+        plain, tunnel = free_ports(2)
         etc = f'{tmp}' if self.runner == 'local' else '/t'
         head = CONF[:CONF.index('\nserver {')].replace('/etc/nginx/trusted-upstreams.conf', f'{etc}/trusted-upstreams.conf')
         self.assertIn('"~^8443:1:.+"', head)

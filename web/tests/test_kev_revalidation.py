@@ -497,9 +497,10 @@ class ManualJobKeyTests(Base):
         match, job = self.run_manual_job(lambda rows: {})
         (row,) = self.track(match)
         self.assertEqual(row.signature, job.evidence_signature)
-        # not 'fresh' (the job is of this evidence) is what the signature gives; the gap is what is asked when it is not
-        Triage.objects.filter(pk=row.pk).update(signature='moved')
-        outcome, dispatch = self.enqueue(Triage.objects.get(pk=row.pk))
+        # not 'fresh' (the job is of this evidence) is what the signature gives; the gap is what is asked when it is not (enqueue describes the
+        # finding afresh, hot_validation.current_signature: a signature that moved is given through it)
+        with mock.patch('cveFeed.hot_validation.current_signature', return_value='moved'):
+            outcome, dispatch = self.enqueue(Triage.objects.get(pk=row.pk))
         self.assertEqual(outcome, 'min_gap')
         dispatch.assert_not_called()
         self.assertEqual(OnDemandValidation.objects.filter(match=match).count(), 1)

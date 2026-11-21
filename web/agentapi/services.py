@@ -10,7 +10,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone as dt_timezone
+from datetime import datetime, timedelta, timezone as dt_timezone
 from typing import Optional
 
 from django.contrib.postgres.expressions import ArraySubquery
@@ -20,6 +20,7 @@ from django.utils import timezone
 from cveFeed import match_policy, result_cuts
 from cveFeed.counts import running_window
 from cveFeed.discovery import NUCLEI_SCAN_ACTIVITY_NAMES
+from reNgine.state_machines import SCAN
 from tenancy import roles
 
 logger = logging.getLogger(__name__)
@@ -177,6 +178,24 @@ def paginate(queryset, params, serialize):
             'results': [serialize(o) for o in queryset[start:start + size]] if size else []}
 
 
+def page_slice(queryset, start, stop):
+    """``queryset[start:stop]`` as model rows, in its order, ordered and cut on the ids alone: the ids of the slice are read first (the ordering
+    columns and the filters, none of the wide related rows), then only those rows are loaded with everything ``queryset`` selects and prefetches.
+    Slicing the full queryset made Postgres join every related row of every match (120,000 scanner findings, 7 KB each) before sorting them for
+    the first 50."""
+    ids = list(queryset.values_list('pk', flat=True)[start:stop])
+    rows = {row.pk: row for row in queryset.filter(pk__in=ids)} if ids else {}
+    return [rows[i] for i in ids if i in rows]
+
+
+def paginate_narrow(queryset, params, serialize):
+    """``paginate`` with the page cut on ids first (``page_slice``): the same count, page and rows."""
+    page, size = page_args(params, zero_ok=True)
+    total = queryset.count()
+    start = (page - 1) * size
+    return {'count': total, 'page': page, 'page_size': size, 'results': [serialize(o) for o in page_slice(queryset, start, start + size)] if size else []}
+
+
 def paginate_by_ids(queryset, params, load):
     """The same page ``paginate`` gives, with the heavy query run once. ``queryset`` is the ordered set of rows; its ids are read in one query, the
     count is their number and the page is a slice of them, and only that slice is loaded (``load(ids)``, rows in the order given). ``paginate``
@@ -261,6 +280,12 @@ def list_projects(ctx, params=None):
     return {'results': _project_roles(ctx)}
 
 
+def describe_states(ctx, params=None):
+    """Every explicit lifecycle (reNgine.state_machines): states, labels, meanings and allowed moves. The same table the server enforces."""
+    from reNgine import lifecycle
+    return {'results': lifecycle.legends()}
+
+
 def list_engines(ctx, params=None):
     from scanEngine.models import EngineType
     return {'results': [{'id': e.id, 'name': e.engine_name, 'default': bool(e.default_engine)}
@@ -312,7 +337,7 @@ def _count_target_hosts(rows):
     ids = [r['id'] for r in rows]
     if not ids:
         return
-    reps = counts.host_reps(domain_ids=ids)
+    reps = counts.reps_of(counts.rep_ids(domain_ids=ids))  # the collapse once: both counts read its ids (it ran twice, once per count)
     hosts = dict(reps.order_by().values('target_domain_id').annotate(n=Count('pk')).values_list('target_domain_id', 'n'))
     projects = set(Domain.objects.filter(pk__in=ids).values_list('project_id', flat=True))
     exposed = dict(counts.exposed_among(reps, project_ids=projects).order_by().values('target_domain_id').annotate(n=Count('pk'))
@@ -573,6 +598,9 @@ SCAN_STATUS_FILTER = {'queued': -1, '-1': -1, 'failed': 0, '0': 0, 'running': 1,
                       'aborted': 3, '3': 3}
 
 
+SCAN_ACTIVITY_SLACK = timedelta(hours=1)  # a scan's activity is read from this long before its start (a queued scan's start moves to when it ran)
+
+
 def _scan(s, detail=False, queued=None, stalled_before=None):
     """``queued`` is a callable returning the queued scan ids, so a page of scans looks the queue up at most once. ``stalled_before`` is the
     moment a running scan counts as stalled when it started earlier (``now - running_window()``): a list computes it once for the whole page,
@@ -580,7 +608,8 @@ def _scan(s, detail=False, queued=None, stalled_before=None):
     if stalled_before is None:
         stalled_before = timezone.now() - running_window()
     out = {'id': s.id, 'target': s.domain.name, 'target_id': s.domain_id, 'engine': s.scan_type.engine_name,
-           'status': s.scan_status, 'started': _iso(s.start_scan_date), 'finished': _iso(s.stop_scan_date),
+           'status': s.scan_status, 'state': SCAN.key(s.scan_status),  # status: the stored code (kept); state: its name (reNgine.state_machines.SCAN)
+           'started': _iso(s.start_scan_date), 'finished': _iso(s.stop_scan_date),
            'error': s.error_message,
            'stalled': s.scan_status == 1 and s.start_scan_date < stalled_before,  # marked running, but older than any scan can run
            'kind': 'retest' if 'retest' in (s.tasks or []) else 'hosts' if 'host_pipeline' in (s.tasks or []) else 'discovery'}
@@ -591,16 +620,22 @@ def _scan(s, detail=False, queued=None, stalled_before=None):
         out['hosts'], out['findings'] = s.n_hosts, s.n_vulns
         out['top_severity'] = SEVERITY_NAMES.get(s.top_sev) if s.n_vulns else None
     if detail:
+        from django.db.models import Count, Q
+
         from startScan.models import Subdomain, Vulnerability
         out['subdomains'] = Subdomain.objects.filter(scan_history=s).count()
-        out['vulnerabilities'] = Vulnerability.objects.filter(scan_history=s).count()
+        # the total and the five severities in one pass over the scan's findings (it was six counts)
+        found = Vulnerability.objects.filter(scan_history=s).order_by().aggregate(total=Count('id'), **{f'sev{k}': Count('id', filter=Q(severity=k)) for k in (4, 3, 2, 1, 0)})
+        out['vulnerabilities'] = found['total']
         from startScan.models import EndPoint
         out['endpoints'] = EndPoint.objects.filter(scan_history=s).count()
-        out['severity_counts'] = {SEVERITY_NAMES[k]: Vulnerability.objects.filter(scan_history=s, severity=k).count()
-                                  for k in (4, 3, 2, 1, 0)}
+        out['severity_counts'] = {SEVERITY_NAMES[k]: found[f'sev{k}'] for k in (4, 3, 2, 1, 0)}
         from cveFeed.models import AgentActivity  # the hosts this scan did not touch because of the organization's do-not-scan list, and why
+        # the lines are written while the scan runs: only the activity since it started is read (the created_at index), not the whole 30-day feed by JSON key
+        since = s.start_scan_date - SCAN_ACTIVITY_SLACK if s.start_scan_date else None
+        lines = AgentActivity.objects.filter(detail__scan_id=s.id, detail__address_excluded=True)
         out['not_scanned'] = [{'message': a.message, 'hosts': (a.detail or {}).get('hosts', [])} for a in
-                              AgentActivity.objects.filter(detail__scan_id=s.id, detail__address_excluded=True).order_by('id')[:20]]
+                              (lines.filter(created_at__gte=since) if since else lines).order_by('id')[:20]]
     return out
 
 
@@ -1467,7 +1502,8 @@ def _heat_reasons(sub, capped=True):
         reasons.append({'kind': 'cve', 'label': c.cve_id, 'description': _cve_description(c, 180),
                         'detail': (f'CVSS {c.cvss}' if c.cvss is not None else 'no score') +
                         (', listed as exploited' if c.kev else '') + (', AI confirmed' if m.ai_verdict == 'affected' else '') +
-                        (f', {label_for(m.distro_status, m.distro_fixed_version)}' if m.distro_status in ('patched', 'vulnerable') else '') +
+                        (f', {label_for(m.distro_status, m.distro_fixed_version, (m.evidence or {}).get("distro_fix"))}'
+                         if m.distro_status in ('patched', 'vulnerable', 'backport') else '') +
                         (f': {why}' if why else ''),
                         'temp': temp, 'kev': bool(c.kev), 'heat_capped': held, 'heat_reason': why,
                         'finding': 'match', 'id': m.id, 'classification': _classification_of(m)})
@@ -1587,7 +1623,12 @@ def _host(sub, others=(), labels=(), profile=None, excluded=False, root=None, sh
     if not ips:
         score_detail = [line for line in score_detail if not str(line.get('label', '')).startswith(('Reachable on a public IP', 'Public IP observed'))]
     display_score = min(100, sum(int(line.get('points') or 0) for line in score_detail)) if score_detail else 0
-    http, hosting_info, details = _host_record(sub, ips, techs, root)
+    links = {}  # where each technology came from: the other rows' first, so this row's own link speaks last
+    other_links = _technology_links([o.pk for o in others]) if others else {}
+    for other in others:
+        links.update(other_links.get(other.pk) or {})
+    links.update((shared['links'] if shared and 'links' in shared else _technology_links([sub.pk])).get(sub.pk) or {})
+    http, hosting_info, details = _host_record(sub, ips, techs, root, links)
     on_ip = (shared or {}).get('names_on_ip', {})
     countries = (shared or {}).get('countries', {})
     archived = ((shared or {}).get('archive') or {}).get((sub.target_domain.project_id if sub.target_domain else None, sub.name.lower())) or {}
@@ -1608,6 +1649,12 @@ def _host(sub, others=(), labels=(), profile=None, excluded=False, root=None, sh
             'served_from': [{'address': r.product, 'status': (r.evidence or {}).get('answer', {}).get('status'), 'title': (r.evidence or {}).get('answer', {}).get('title', '')}
                             for r in probe_rows if r.kind == 'vhost' and r.outcome == 'found'][:10],
             'subdirectory_apps': subdir_apps.applications_from_rows(probe_rows),
+            # the Java runtime the host was read to run (cveFeed.java_runtime): version, line, vendor, source, confidence; exact readings first
+            'java_runtimes': ((shared or {}).get('java') or {}).get(host_key) or [],
+            # what the host's version sources state (cveFeed.version_sources): products and language runtimes, with source and confidence
+            'version_sources': ((shared or {}).get('versions') or {}).get(host_key) or [],
+            # what Sentinels read about the features of the host's services (cveFeed.service_features): HTTP/2 per TLS port, with when and how
+            'service_features': ((shared or {}).get('features') or {}).get(host_key) or [],
             'wordpress': host_context.wordpress_summary(probe_rows), 'heat': _host_heat_merged(sub, others, reasons), 'heat_reasons': reasons[:12], 'host': sub.name,
             'target': sub.target_domain.name if sub.target_domain else None, 'target_id': sub.target_domain_id,
             'http_status': http['status'], 'title': http['title'], 'score': display_score, 'score_detail': score_detail, 'zombie': False,
@@ -1624,6 +1671,8 @@ def _host(sub, others=(), labels=(), profile=None, excluded=False, root=None, sh
             'names': _host_names(sub),
             # the other names that point at this host's addresses: one host, several domain names
             'aliases': sorted({o.name for o in others if o.name.lower() != sub.name.lower()}, key=str.lower),
+            # what a Sentinel said the name resolves to that a second source has not confirmed yet (agentapi.dns_crosscheck): shown, never stored on the host
+            'unconfirmed_addresses': ((shared or {}).get('unconfirmed') or {}).get(host_key) or [],
             'ips': [{'address': addr, 'os': e['ip'].os_guess,
                      'reverse': e['ip'].reverse_pointer or '', 'country': countries.get(e['ip'].geo_iso_id, ''),
                      'names_on_ip': on_ip.get(addr, 0), 'is_cdn': bool(e['ip'].is_cdn),
@@ -1640,6 +1689,8 @@ def _host(sub, others=(), labels=(), profile=None, excluded=False, root=None, sh
                  'version': p.version, 'cpe': p.cpe, 'os': p.os_guess, 'banner': (p.banner or '')[:500], 'tunnel': (p.extra or {}).get('tunnel') or '',
                  'info': p.service_extra or '', 'scripts': {k: str(v)[:800] for k, v in list(((p.extra or {}).get('scripts') or {}).items())[:12]},
                  'db': (p.extra or {}).get('db') or None,
+                 # the distribution package build the banner names (cveFeed.distro): the release, the source package and its exact build
+                 'distro': _port_distro_field(p),
                  'http': p.http or None, 'tls': p.tls or None,
                  'rdp_screenshot': _rdp_screenshot_field(sub, rdp_shots_by_port.get(p.number), static_rdp.get(p.number))} for p in e['ports']]} for addr, e in ips.items()],
             'vulns': [{'id': v.id, 'name': v.name, 'severity': SEVERITY_NAMES.get(v.severity, str(v.severity)), 'url': v.http_url,
@@ -1652,12 +1703,48 @@ def _host(sub, others=(), labels=(), profile=None, excluded=False, root=None, sh
             'profile': profile or dict(NO_PROFILE), 'excluded': bool(excluded),
             # what a person calls the host and wrote about it (display only; ``aliases`` above are the other DNS names on its addresses)
             **alias_and_note(sub, others, (shared or {}).get('tags') or {}),
-            'inventory': _host_inventory(sub, others, shared)}
+            'inventory': _host_inventory(sub, others, shared),
+            'validate_plan': _validate_plan(sub, others, ips, techs, reasons)}
     row['scan_blocked'] = _scan_blocked(sub, host_key[0], list(ips), shared)
     if (shared or {}).get('coverage') is not None:
         row['check_coverage'] = _check_coverage(shared['coverage'], sub, others, host_key[0], excluded, hosting_info, reasons, unverified,
                                                  probe_rows, root, shared.get('coverage_rich', False))
     return row
+
+
+def _port_distro_field(port):
+    """``{distro, name, release, codename, package, build, release_basis, reading, third_party, tracker}`` of the distribution reading a Port row
+    keeps (written at ingest and by the upgrade backfill: ``cveFeed.port_inventory.store_distro``), or None. ``reading`` is ``package`` when the
+    exact build is known and ``marker`` when only the distribution is (a hint: never judged fixed); ``tracker`` ``not_synced`` says no fix data
+    is kept for that distribution."""
+    if not port.distro:
+        return None
+    from cveFeed.distro import NAMES
+    stored = (port.extra or {}).get('distro') or {}
+    out = {'distro': port.distro, 'name': NAMES.get(port.distro, port.distro), 'release': port.distro_release or '',
+           'package': str(stored.get('package') or ''), 'build': port.package_release or ''}
+    for key in ('codename', 'release_basis', 'reading', 'third_party', 'tracker'):
+        if stored.get(key):
+            out[key] = str(stored[key])
+    return out
+
+
+def _validate_plan(sub, others, ips, techs, reasons):
+    """The commands for the host's owner that settle the most of its open CVE matches, one group per package that decides them, exploited
+    first (cveFeed.match_explain.validate_plan). Read from what the host row already loaded; [] when it cannot be built, which never costs the
+    host its row."""
+    from cveFeed import match_explain
+    try:
+        parts = [str(row.webserver or '') for row in [sub, *others]] + sorted(techs)
+        for entry in ips.values():
+            parts.append(str(entry['ip'].os_guess or ''))
+            parts += [' '.join(str(x or '') for x in (p.distro, p.product, p.version, p.service_extra, p.cpe)) for p in entry['ports']]
+        heat = {r['id']: r['temp'] for r in reasons if r.get('finding') == 'match' and r.get('id')}
+        return match_explain.validate_plan([m for row in [sub, *others] for m in row.cve_matches.all()], ' '.join(p for p in parts if p), heat)
+    except Exception:  # noqa: BLE001 - help on top of the record
+        import logging
+        logging.getLogger(__name__).warning('could not build the validate plan of host %s', sub.pk, exc_info=True)
+        return []
 
 
 def _scan_blocked(sub, project_id, addresses, shared):
@@ -1769,13 +1856,15 @@ def _rdp_screenshot_field(sub, shot, static=None):
             'captured_at': shot.captured_at.isoformat() if shot.captured_at else None}
 
 
-def _host_record(sub, ips, techs, root):
+def _host_record(sub, ips, techs, root, links=None):
     """``(http, hosting, technology_details)`` for one host: the Shodan-style part of the record. What the host row stores wins; what
     the web route check saw on the root page (its status, title, Server and X-Powered-By headers) fills what the row lacks, so a host
-    the route check reached is never shown as unprobed."""
+    the route check reached is never shown as unprobed. ``links`` (``_technology_links`` of the host's rows) says where each technology came
+    from: a technology's ``source`` is the front-page header that showed it, else its link's source (``cveFeed.tech_links.SOURCES``), else
+    ``scan`` (a link stored before sources were recorded); ``cpe``, ``cpe_derived`` and ``observed_at`` are its link's."""
     from cvengine_scanner import cms, fingerprint
 
-    from cveFeed import cms_evidence, hosting, js_libraries
+    from cveFeed import cms_evidence, hosting, js_libraries, tech_links
     from cveFeed.correlation import split_name_version
     evidence = dict((root.evidence or {}) if root else {})
     http = {'url': sub.http_url or (root.url if root else None),
@@ -1796,8 +1885,15 @@ def _host_record(sub, ips, techs, root):
     details = []
     for name in sorted(techs | set(from_page)):
         base, version = split_name_version(name)
+        link = (links or {}).get(name) or {}
         row = {'name': base or name, 'version': version, 'category': fingerprint.categorize(name),
-               'source': from_page.get(name, 'scan'), **({'superseded': True} if (cms.key(base), version) in wrong else {})}
+               'source': from_page.get(name) or link.get('source') or 'scan', **({'superseded': True} if (cms.key(base), version) in wrong else {})}
+        if link.get('cpe'):
+            row['cpe'] = link['cpe']
+            if tech_links.is_derived(link.get('source')):
+                row['cpe_derived'] = True  # derived from the name by the server, not stated by a template
+        if link.get('observed_at'):
+            row['observed_at'] = link['observed_at'].isoformat()
         record = libraries.get((base or '').lower()) if js_libraries.is_library(name) else None
         if record:  # every copy of the library on the front page and the one that runs (cveFeed.js_libraries)
             row.update(library_details(record, version))
@@ -1869,8 +1965,34 @@ def _shared_for(project, subs):
     for row in ProbeObservation.objects.filter(project_id__in=_pids_of(project, subs), probe='vhost-probe', kind='vhost', outcome='found',
                                                product__in=list(addresses)).order_by('host'):
         vhosts.setdefault((row.project_id, row.product), []).append(row)
+    from cveFeed import java_runtime
+    java = java_runtime.runtimes_for(_pids_of(project, subs), {s.name.lower() for s in subs})  # what the host was read to run on (one query)
+    from cveFeed import version_sources
+    versions = version_sources.readings_for(_pids_of(project, subs), {s.name.lower() for s in subs})  # what its version sources state (one query)
+    from agentapi import dns_crosscheck
+    unconfirmed = dns_crosscheck.held_for(_pids_of(project, subs), {s.name for s in subs})  # DNS answers one source gave that are not on the host yet (one query)
+    from cveFeed import service_features
+    features = service_features.readings_for(_pids_of(project, subs), {s.name.lower() for s in subs})  # HTTP/2 and later features per port (one query)
+    link_cpes, links = {}, _technology_links([s.pk for s in subs])  # where each technology came from (cveFeed.tech_links), one query
+    for sub_id, by_name in links.items():
+        for name, info in by_name.items():
+            if info['cpe']:  # the CPE a template named for a host's technology (cveFeed.nuclei_scan.tech_cpe_from), or one derived from its name
+                link_cpes.setdefault(sub_id, []).append((name, info['version'], info['cpe']))
     return {'names_on_ip': names, 'countries': countries, 'archive': archive, 'rdp_shots': rdp_shots, 'shots': shots, 'legacy_shots': legacy_shots,
-            'probes': probe_rows, 'vhosts': vhosts}
+            'probes': probe_rows, 'vhosts': vhosts, 'java': java, 'versions': versions, 'unconfirmed': unconfirmed, 'link_cpes': link_cpes,
+            'links': links, 'features': features}
+
+
+def _technology_links(sub_ids):
+    """``{host row id: {technology name: {source, cpe, observed_at, version}}}``: what the technology links of these rows record (one query)."""
+    from startScan.models import SubdomainTechnology
+    out = {}
+    if not sub_ids:
+        return out
+    for sub_id, name, version, source, cpe, seen in SubdomainTechnology.objects.filter(subdomain_id__in=list(sub_ids)) \
+            .values_list('subdomain_id', 'technology__name', 'technology__version', 'source', 'cpe', 'observed_at').order_by('id'):
+        out.setdefault(sub_id, {})[name or ''] = {'source': source or '', 'cpe': cpe or '', 'observed_at': seen, 'version': version or ''}
+    return out
 
 
 NO_PROFILE = {'owner': '', 'purpose': '', 'criticality': 'unknown'}
@@ -1978,33 +2100,72 @@ def _one_per_host(qs, per_project=False):
     """Collapse a Subdomain queryset to one row per host. First one row per hostname: the one with the most open ports, then the most
     IPs, then the newest scan (a scan-less row last). Then names that resolve to exactly the same addresses (``example.com`` and
     ``www.example.com``) become one host: the project's own target name first, else the shortest name (see
-    ``cveFeed.counts.with_host_key``; a name behind a CDN, or without an address, stays alone). Two Postgres DISTINCT ON passes over
-    the filtered ids, then a plain ``id__in`` so ordering and paging stay ordinary. Richness comes from subqueries on a fresh
-    queryset, so search joins cannot inflate the counts. ``per_project`` (the all-projects view) keeps one row per (project,
-    hostname): the same name in two projects is two hosts."""
-    from django.db.models import Case, Count, F, IntegerField, OuterRef, Subquery, Value, Window, When
-    from django.db.models.functions import Coalesce, Collate, Length, RowNumber
-    from cveFeed.counts import with_host_key
-    from startScan.models import OPEN_PORT_STATES, Port, Subdomain
-    ports = Port.objects.filter(state__in=OPEN_PORT_STATES, ports__ip_addresses=OuterRef('pk')).order_by() \
-        .values('ports__ip_addresses').annotate(c=Count('id', distinct=True)).values('c')
-    ips = Subdomain.ip_addresses.through.objects.filter(subdomain_id=OuterRef('pk')).order_by() \
-        .values('subdomain_id').annotate(c=Count('id')).values('c')
-    keys = ('target_domain__project_id', 'name') if per_project else ('name',)
-    by_name = Subdomain.objects.filter(id__in=qs.order_by().values('id')).order_by(
-        *keys, Coalesce(Subquery(ports), Value(0)).desc(), Coalesce(Subquery(ips), Value(0)).desc(),
-        F('scan_history_id').desc(nulls_last=True), '-id').distinct(*keys).values('id')
-    own_target = Case(When(name=F('target_domain__name'), then=Value(0)), default=Value(1), output_field=IntegerField())
-    # names that tie on length are ordered by their bytes (COLLATE "C"), not by the database's locale: the same order on every database, and the one
-    # ``cveFeed.inventory_counts`` takes in Python, so the host that stands for a group does not depend on how the database sorts text
-    # a window rather than DISTINCT ON: the key is an annotation, which DISTINCT ON cannot keep once the query is cut to ids
-    rep = with_host_key(Subdomain.objects.filter(id__in=by_name)).annotate(_rank=Window(
-        RowNumber(), partition_by=[F('host_key')],
-        order_by=[own_target.asc(), Length('name').asc(), Collate('name', 'C').asc(), Coalesce(Subquery(ports), Value(0)).desc(), F('id').desc()])
-    ).filter(_rank=1).values('id')
-    # the ids are gathered into an array once and looked up in it (``id = ANY(ARRAY(...))``). ``id IN (subquery)`` let Postgres guess one row for the
-    # window query and rescan its 8,000 rows for each of 10,000 hosts: 4.8 s at that size, 0.1 s with the array
-    return Subdomain.objects.filter(id__in_array=ArraySubquery(rep))
+    ``cveFeed.counts.with_host_key``; a name behind a CDN, or without an address, stays alone). Richness comes from the address links
+    and open ports of the candidates, so search joins cannot inflate the counts. ``per_project`` (the all-projects view) keeps one row
+    per (project, hostname): the same name in two projects is two hosts.
+
+    One statement (``_collapse_sql``): the candidates' open-port counts, address counts, address sets and CDN flags are each read ONCE, as
+    grouped reads over the candidates' links joined to them, then the two passes (DISTINCT ON the name, a window over the host key) run over
+    those columns. The correlated form evaluated the open-port count twice and the address set twice for every candidate (1.9 s for the
+    Hosts page at 20,000 hosts). The ids are gathered into an array and looked up in it (``id = ANY(ARRAY(...))``), so ordering and paging
+    stay ordinary and Postgres never rescans the collapse per row."""
+    from django.contrib.postgres.fields import ArrayField
+    from django.core.exceptions import EmptyResultSet
+    from django.db.models import IntegerField
+    from django.db.models.expressions import RawSQL
+    from startScan.models import Subdomain
+    try:
+        sql, params = _collapse_sql(qs, per_project)
+    except EmptyResultSet:
+        return Subdomain.objects.none()
+    return Subdomain.objects.filter(id__in_array=RawSQL(f'ARRAY({sql})', params, output_field=ArrayField(IntegerField())))
+
+
+def _id_array(ids):
+    """``ids`` as one array parameter for ``id__in_array``: a list of ids already read (``id = ANY(%s::integer[])``), not one placeholder per id."""
+    from django.contrib.postgres.fields import ArrayField
+    from django.db.models import IntegerField
+    from django.db.models.expressions import RawSQL
+    return RawSQL('%s::integer[]', (list(ids),), output_field=ArrayField(IntegerField()))
+
+
+def _collapse_sql(qs, per_project=False):
+    """``(sql, params)`` of the ids ``_one_per_host`` keeps (see there). The same rules as the window and DISTINCT ON passes it replaces, column for
+    column: ``cveFeed.counts.with_host_key`` for the key (the project, then ``:n:`` and the name for a row behind a CDN or with no address, else
+    ``:i:`` and its sorted address ids), names that tie on length ordered by their bytes (``COLLATE "C"``)."""
+    from startScan.models import OPEN_PORT_STATES, IpAddress, Port, Subdomain
+    from targetApp.models import Domain
+    candidates, params = qs.order_by().values('id').query.sql_with_params()
+    sub, domain = Subdomain._meta.db_table, Domain._meta.db_table
+    links, ports_link = Subdomain.ip_addresses.through._meta.db_table, IpAddress.ports.through._meta.db_table
+    ip, port = IpAddress._meta.db_table, Port._meta.db_table
+    states = ', '.join(['%s'] * len(OPEN_PORT_STATES))
+    keys = 'f.project_id, f.name' if per_project else 'f.name'
+    sql = f'''
+        WITH cand AS MATERIALIZED ({candidates}),
+        addr AS MATERIALIZED (
+            SELECT l.subdomain_id, COUNT(*) AS n, BOOL_OR(a.is_cdn) AS cdn, STRING_AGG(l.ipaddress_id::text, ',' ORDER BY l.ipaddress_id) AS ipset
+            FROM "{links}" l INNER JOIN "{ip}" a ON a.id = l.ipaddress_id
+            WHERE l.subdomain_id IN (SELECT id FROM cand) GROUP BY l.subdomain_id),
+        open_ports AS MATERIALIZED (
+            SELECT l.subdomain_id, COUNT(DISTINCT x.port_id) AS n
+            FROM "{links}" l INNER JOIN "{ports_link}" x ON x.ipaddress_id = l.ipaddress_id INNER JOIN "{port}" p ON p.id = x.port_id
+            WHERE l.subdomain_id IN (SELECT id FROM cand) AND p.state IN ({states}) GROUP BY l.subdomain_id),
+        facts AS MATERIALIZED (
+            SELECT s.id, s.name, s.scan_history_id, d.project_id, d.name AS domain_name, COALESCE(o.n, 0) AS open_ports, COALESCE(a.n, 0) AS ips,
+                   COALESCE(d.project_id::varchar, '') || CASE WHEN a.cdn OR a.ipset IS NULL THEN ':n:' || COALESCE(s.name, '') ELSE ':i:' || a.ipset END AS host_key
+            FROM "{sub}" s LEFT OUTER JOIN "{domain}" d ON d.id = s.target_domain_id
+            LEFT OUTER JOIN addr a ON a.subdomain_id = s.id LEFT OUTER JOIN open_ports o ON o.subdomain_id = s.id
+            WHERE s.id IN (SELECT id FROM cand)),
+        by_name AS (
+            SELECT DISTINCT ON ({keys}) f.* FROM facts f
+            ORDER BY {keys}, f.open_ports DESC, f.ips DESC, f.scan_history_id DESC NULLS LAST, f.id DESC)
+        SELECT r.id FROM (
+            SELECT b.id, ROW_NUMBER() OVER (PARTITION BY b.host_key ORDER BY CASE WHEN b.name = b.domain_name THEN 0 ELSE 1 END ASC, LENGTH(b.name) ASC,
+                                            b.name COLLATE "C" ASC, b.open_ports DESC, b.id DESC) AS rank
+            FROM by_name b) r
+        WHERE r.rank = 1'''
+    return sql, (*params, *OPEN_PORT_STATES)
 
 
 def _hosts_page(project, qs, params, extra=None, coverage=True, load=None, page_extra=None):
@@ -2143,7 +2304,7 @@ def list_hosts(ctx, slug, params):
 
 
 SEARCH_FIELDS = ('tech', 'banner', 'port', 'proto', 'product', 'service', 'os', 'cve', 'ip', 'host', 'vuln', 'sev', 'auth',
-                  'sensitive', 'zombie', 'country', 'alias', 'note', 'secret')
+                  'sensitive', 'zombie', 'country', 'alias', 'note', 'secret', 'java', 'component', 'runtime', 'vsource', 'distro', 'pkg')
 MAX_SEARCH_QUERY, MAX_SEARCH_TERMS, MAX_SEARCH_VALUE, MAX_SEARCH_VALUES = 1000, 15, 200, 40
 MAX_NEGATED_TERMS = 3  # every negated term is a pass over the whole project's hosts (review 2 F1): three is a real query, fifteen is an abuse
 _SEARCH_TERM = re.compile(r'(-)?(?:([A-Za-z]+):)?(?:"([^"]*)"|(\S+))')
@@ -2271,7 +2432,7 @@ def _hosts_named_in(rows, project):
 # The JSON keys inside the evidence stores that say what a host runs. Searched by key, never as raw JSON text, so a word like
 # "source" or "markers" does not match every row that happens to have that key.
 _ROUTE_EVIDENCE_KEYS = ('server', 'powered_by', 'fingerprint_names', 'cookies')  # RouteAuth.evidence: headers, fingerprint names, cookie names
-_PORT_TEXT = ('banner', 'service_extra', 'extra__script_text', 'http__webserver', 'http__title')  # Port: raw service text, NSE output, HTTP
+_PORT_TEXT = ('banner', 'service_extra', 'extra__script_text', 'extra__servicefp', 'extra__version_script_text', 'http__webserver', 'http__title')  # Port: raw service text, NSE output, HTTP
 
 
 def _running_q(value, project):
@@ -2295,13 +2456,167 @@ def _running_q(value, project):
     return q | _hosts_named_in(routes.filter(route_hit), project) | _hosts_named_in(HostArchive.objects.filter(tech_text__icontains=value), project)
 
 
+def _tech_spec(value):
+    """The ``cveFeed.tech_search.Spec`` of a ``tech:`` value, or a 400 naming what it takes."""
+    from cveFeed import tech_search
+    spec = tech_search.parse(value)
+    if spec is None:
+        raise ApiError(400, 'tech: takes a name (tech:php, tech:"apache http server"), optionally a version state after @: tech:php@unknown '
+                            '(or @none), tech:php@known, or a release such as tech:wordpress@7.1')
+    return spec
+
+
+def _techver_value(value):
+    """``wordpress 7.1`` (a bare word and a dotted version) as the ``tech:`` value it means: ``wordpress@7.1``."""
+    product, version = value.rsplit(' ', 1)
+    return f'{product}@{version}'
+
+
+def _java_tech_value(text):
+    """``java:any`` is ``tech:java``, ``java:unknown`` ``tech:java@unknown``."""
+    from cveFeed import java_runtime
+    return 'java@unknown' if text in java_runtime.UNKNOWN_VALUES else 'java'
+
+
+def _tech_hosts(through, column, rows):
+    """A Q matching the Subdomain ids an M2M ``through`` table pairs with ``rows`` (a values('id') subquery): one uncorrelated subquery the
+    database reads once, with no join on the outer query (``java_runtime.java_host_ids``' pattern)."""
+    from django.db.models import Q
+    return Q(id__in=through.objects.filter(**{f'{column}__in': rows}).values('subdomain_id'))
+
+
+def _tech_technology_q(cond):
+    from startScan.models import Subdomain, Technology
+    return _tech_hosts(Subdomain.technologies.through, 'technology_id', Technology.objects.filter(cond).values('id'))
+
+
+def _tech_link_q(cond):
+    """The hosts with a technology link that satisfies ``cond`` (a Q over ``SubdomainTechnology``: the CPE a technology template named for it)."""
+    from django.db.models import Q
+
+    from startScan.models import SubdomainTechnology
+    return Q(id__in=SubdomainTechnology.objects.filter(cond).values('subdomain_id'))
+
+
+def _tech_port_q(cond):
+    """The hosts with an open port that satisfies ``cond`` (a Q over Port: every condition on the same port row)."""
+    from startScan.models import OPEN_PORT_STATES, IpAddress, Port, Subdomain
+    ports = Port.objects.filter(state__in=OPEN_PORT_STATES).filter(cond).values('id')
+    return _tech_hosts(Subdomain.ip_addresses.through, 'ipaddress_id', IpAddress.ports.through.objects.filter(port_id__in=ports).values('ipaddress_id'))
+
+
+def _iregex(lookup, pattern):
+    """``Q(lookup__iregex=pattern)``, or None when the spec has no such pattern (a name too short to compare whole): ``_any`` leaves it out."""
+    from django.db.models import Q
+    return Q(**{f'{lookup}__iregex': pattern}) if pattern else None
+
+
+def _any(*qs):
+    """The OR of the Qs that are not None, or None when none is left."""
+    out = None
+    for q in qs:
+        if q is not None:
+            out = q if out is None else out | q
+    return out
+
+
+def _tech_components(spec):
+    """The version source components a spec names by slug: what was typed (``grafana``, ``dotnet-framework``) and its platform's runtime."""
+    comps = {spec.raw}
+    if spec.platform and spec.platform.runtime and spec.platform.runtime != 'java_runtime':
+        comps.add(spec.platform.runtime)
+    return sorted(comps)
+
+
+def _tech_known_q(spec, named):
+    """The hosts where a source states this product's version (any version, or the spec's release): a technology row, an open port (its version
+    column, a ``product/version`` product, a versioned CPE), the stored Server header, a live route's headers and fingerprints, a version source
+    reading and, for Java, a Java runtime reading. A spelling whose version is a protocol's ("Apache Tomcat/Coyote JSP engine 1.1") states none."""
+    from django.db.models import Q
+
+    from cveFeed import tech_search, version_sources
+    from cveFeed.models import JavaRuntime, RouteAuth
+    release, stating = spec.release_re(), spec.name_re(stating=True)
+    named_tech = _any(_iregex('name', stating), _iregex('name', spec.cpe_re()))
+    port = _any((Q(product__iregex=stating) & Q(version__iregex=release)) if stating else None, _iregex('product', spec.name_re(True)),
+                _iregex('cpe', spec.cpe_re(True)))
+    route = _any(_iregex('evidence__server', spec.header_re(True)), _iregex('evidence__powered_by', spec.header_re(True)),
+                 _iregex('evidence__fingerprint_names', spec.fingerprint_re(True)))
+    reading = _any(_iregex('product', stating), Q(evidence__component__in=_tech_components(spec)))
+    java = None
+    if spec.platform is not None and spec.platform.runtime == 'java_runtime':
+        java = named(JavaRuntime.objects.filter(version__iregex=release) if spec.state == tech_search.RELEASE else JavaRuntime.objects.all())
+    readings = version_sources.readings_qs().filter(reading).filter(version__iregex=release)
+    if spec.state != tech_search.RELEASE:
+        # a Windows release an NTLM challenge states (cveFeed.windows_builds: ``release_only``) knows the release, never its update revision: the
+        # version is not known (@unknown finds the host, @known does not); a release asked for (@10.0.20348) is stated by it
+        readings = readings.exclude(evidence__has_key='release_only')
+    link = _iregex('cpe', spec.cpe_re())  # a technology a template named by its CPE, at the version its name states
+    return _any(_tech_technology_q(named_tech & Q(version__iregex=release)) if named_tech else None,
+                _tech_link_q(link & Q(technology__version__iregex=release)) if link else None, _tech_port_q(port) if port else None,
+                _iregex('webserver', spec.header_re(True)), named(RouteAuth.objects.filter(retired_at__isnull=True).filter(route)) if route else None,
+                named(readings), java)
+
+
+def _tech_q(spec, project):
+    """The hosts a ``tech:`` spec selects (``cveFeed.tech_search``). Every source a host's software is recorded in counts: technology rows, open
+    ports (product, version, CPE, banner, NSE output, HTTP header and title), the Server header the web check stored, live routes' headers,
+    fingerprints and cookies, the web archive, version source readings (first- and third-party, products and runtimes) and, for Java, the Java
+    runtime readings. A name matches as text (what tech: always did), as the same product through the name normalisation correlation uses
+    (``spec.name_re``: its aliases, a vendor in front, an edition behind) and, for a platform, through a product that runs on it. A state after
+    @ keeps the hosts where a source states the product's version (KNOWN, or that release: ``_tech_known_q``), or where none does (UNKNOWN).
+    Each source is one uncorrelated subquery (no join on the outer query and no per-host work), so a 10,000-host project costs a handful of
+    scans, whatever its size."""
+    from django.db.models import Q
+
+    from cveFeed import tech_search, version_sources
+    from cveFeed.models import HostArchive, JavaRuntime, RouteAuth
+    v, platform = spec.raw, spec.platform
+    named = lambda rows: _hosts_named_in(rows, project)  # noqa: E731 - by (project, name), as component:, java: and auth: are
+    if spec.state in (tech_search.KNOWN, tech_search.RELEASE):
+        return _tech_known_q(spec, named)
+    text = Q()
+    for lookup in ('product', 'version', 'cpe', *_PORT_TEXT):
+        text |= Q(**{f'{lookup}__icontains': v})
+    port = _any(text, _iregex('product', spec.name_re()), _iregex('cpe', spec.cpe_re()))
+    tech = _any(Q(name__icontains=v), _iregex('name', spec.name_re()), _iregex('name', spec.cpe_re()))
+    web = _any(Q(webserver__icontains=v), _iregex('webserver', spec.header_re()))
+    route = _any(*(Q(**{f'evidence__{key}__icontains': v}) for key in _ROUTE_EVIDENCE_KEYS), _iregex('evidence__server', spec.header_re()),
+                 _iregex('evidence__powered_by', spec.header_re()), _iregex('evidence__fingerprint_names', spec.fingerprint_re()))
+    reading = _any(Q(product__icontains=v), _iregex('product', spec.name_re()), Q(evidence__component__in=_tech_components(spec)))
+    if platform is not None:  # a product that runs on it: WordPress for PHP, Tomcat for Java (data/runs_on.json)
+        pattern = platform.pg_pattern
+        port, tech, web, reading = port | Q(product__iregex=pattern), tech | Q(name__iregex=pattern), web | Q(webserver__iregex=pattern), \
+            reading | Q(product__iregex=pattern)
+        route = _any(route, *(Q(**{f'evidence__{key}__iregex': pattern}) for key in ('server', 'powered_by', 'fingerprint_names')))
+    link = _iregex('cpe', spec.cpe_re())  # the CPE the technology template that named it states (cveFeed.nuclei_scan.tech_cpe_from)
+    runs = _any(web, _tech_technology_q(tech), _tech_link_q(link) if link else None, _tech_port_q(port),
+                named(RouteAuth.objects.filter(retired_at__isnull=True).filter(route)),
+                named(HostArchive.objects.filter(tech_text__icontains=v)), named(version_sources.readings_qs().filter(reading)))
+    if platform is not None and platform.runtime == 'java_runtime':
+        runs |= named(JavaRuntime.objects.all())
+    return runs & ~_tech_known_q(spec, named) if spec.state == tech_search.UNKNOWN else runs
+
+
+def _os_q(value, project):
+    """The hosts whose operating system ``value`` names: the port scan's OS guess and its runners-up (``fingerprint.os_matches``), an
+    operating system CPE a port carries, and the operating system readings the version sources store (``cveFeed.source_versions.os_rows``:
+    the Windows release an NTLM challenge states, runZero's operating system, a network operating system's identity, Shodan's OS CPEs)."""
+    from django.db.models import Q
+
+    from cveFeed import source_versions
+    q = Q(ip_addresses__os_guess__icontains=value) | Q(ip_addresses__fingerprint__os_matches__icontains=value)
+    q |= _tech_port_q(Q(cpe__istartswith='cpe:/o:', cpe__icontains=value) | Q(extra__cpes__iregex=f'cpe:/o:[^"]*{re.escape(value)}'))
+    return q | _hosts_named_in(source_versions.os_rows(value), project)
+
+
 def _banner_q(value):
     """A Q matching hosts with ``value`` in a service banner, an NSE script's output (ssh-hostkey, ssl-cert, ftp-anon,
     rdp-ntlm-info, smb-os-discovery ...) or the extra info nmap printed, on an open port."""
     from django.db.models import Q
     ports = 'ip_addresses__ports__'
     q = Q()
-    for lookup in ('banner', 'extra__script_text', 'service_extra'):
+    for lookup in ('banner', 'extra__script_text', 'extra__servicefp', 'extra__version_script_text', 'service_extra'):  # extra.servicefp: nmap's fingerprint decoded
         q |= Q(**{f'{ports}{lookup}__icontains': value})
     return q & Q(**{ports + 'state__in': ('', 'open')})
 
@@ -2318,13 +2633,10 @@ def _term_filter(field, value, project=None):
             q |= Q(**{f'{lookup}__icontains': value})
         q |= Q(**{ports + 'service_name__icontains': value}) & open_port
         return q | _alias_note_q(value, project)
-    if field == 'tech':
-        return _running_q(value, project)
-    if field == 'techver':  # "wordpress 7.1": the product at that release (7.1, 7.1.4), on a technology row or an open port, on the same row
-        product, version = value.rsplit(' ', 1)
-        at_release = lambda prefix: Q(**{prefix + 'version': version}) | Q(**{prefix + 'version__startswith': version + '.'})  # noqa: E731
-        return (Q(technologies__name__icontains=product) & at_release('technologies__')) | \
-            (Q(**{ports + 'product__icontains': product}) & at_release(ports) & open_port)
+    if field == 'tech':  # everything a host runs, by any name of the product, what it runs on, and its version state (cveFeed.tech_search)
+        return _tech_q(_tech_spec(value), project)
+    if field == 'techver':  # "wordpress 7.1": the product at that release (7.1, 7.1.4): tech:wordpress@7.1
+        return _tech_q(_tech_spec(_techver_value(value)), project)
     if field == 'banner':
         return _banner_q(value)
     if field == 'port':
@@ -2341,7 +2653,7 @@ def _term_filter(field, value, project=None):
     if field == 'service':
         return Q(**{ports + 'service_name__icontains': value}) & open_port
     if field == 'os':
-        return Q(ip_addresses__os_guess__icontains=value)
+        return _os_q(value, project)
     if field == 'country':
         return Q(ip_addresses__geo_iso__iso__iexact=value) | Q(ip_addresses__geo_iso__name__icontains=value)
     if field == 'cve':
@@ -2364,6 +2676,35 @@ def _term_filter(field, value, project=None):
         if value.lower() not in RouteAuth.STATES:
             raise ApiError(400, f'auth: takes one of {", ".join(RouteAuth.STATES)}')
         return _hosts_named_in(RouteAuth.objects.filter(auth_state=value.lower()), project)
+    if field == 'java':  # the Java runtime the host was read to run (cveFeed.java_runtime): a line, a version, any, a vendor or a source
+        from cveFeed import java_runtime
+        text = value.strip().lower()
+        if text in java_runtime.ANY_VALUES or text in java_runtime.UNKNOWN_VALUES:  # tech:java and tech:java@unknown
+            return _tech_q(_tech_spec(_java_tech_value(text)), project)
+        rows = java_runtime.search_rows(value)
+        if rows is None:
+            raise ApiError(400, 'java: takes a line (java:17), a version (java:17.0.9, java:8u392), any, unknown, a vendor (java:temurin) '
+                                'or a source (java:jdwp)')
+        return _hosts_named_in(rows, project)
+    if field in ('component', 'runtime', 'vsource'):  # what the host's version sources state (cveFeed.version_sources)
+        from cveFeed import version_sources
+        rows = version_sources.search_rows(field, value)
+        if rows is None:
+            raise ApiError(400, {'component': 'component: takes a product read from a version source (component:grafana, component:docker@24), or any',
+                                 'runtime': 'runtime: takes a language runtime (runtime:python, runtime:go@1.21, runtime:dotnet, runtime:nodejs, '
+                                            'runtime:php, runtime:ruby, runtime:erlang), or any',
+                                 'vsource': 'vsource: takes a version source of the catalogue (vsource:grafana, vsource:prometheus-metrics), header or any'}[field])
+        return _hosts_named_in(rows, project)
+    if field in ('distro', 'pkg'):  # the distribution and package build a service banner names (cveFeed.distro_releases)
+        from cveFeed import distro_releases
+        q = distro_releases.search_q(field, value)
+        if q is None:
+            raise ApiError(400, {'distro': 'distro: takes a distribution (distro:ubuntu, distro:debian, distro:rhel, distro:amzn, distro:suse, '
+                                           'distro:freebsd), a codename (distro:jammy, distro:bookworm), a release after @ (distro:ubuntu@22.04, '
+                                           'distro:debian@12, distro:rhel@9), or any',
+                                 'pkg': 'pkg: takes a source package (pkg:openssh, pkg:apache2, pkg:php8.1), optionally with its build after @ '
+                                        '(pkg:openssh@1:8.9p1-3ubuntu0.6, pkg:openssh@8.9p1-3ubuntu0)'}[field])
+        return q
     if field == 'zombie':
         from cveFeed.models import HostState
         if value.lower() not in ('yes', 'no'):
@@ -2396,7 +2737,8 @@ def _term_filter(field, value, project=None):
 def _port_evidence(p, v, field):
     """Which stored text of an open port holds ``v`` (lowercase), as a short label, or '' when none does. ``banner:`` looks only at
     raw service text; ``tech:`` and bare words also look at product, version, CPE and the port's HTTP server and title."""
-    texts = [('banner', p.banner), ('info', p.service_extra)]
+    texts = [('banner', p.banner), ('info', p.service_extra), ('nmap fingerprint', (p.extra or {}).get('servicefp')),
+             ('version script', (p.extra or {}).get('version_script_text'))]
     texts += [(sid, out) for sid, out in ((p.extra or {}).get('scripts') or {}).items()]
     if field != 'banner':
         http = p.http or {}
@@ -2452,19 +2794,120 @@ def _archive_reasons(sub, v, archive=None):
 
 def _matched_for_page(subs, shared, terms):
     """The per-host ``matched`` function of a search page, with the route rows read once for the page when a term can match them."""
-    routes = _routes_for(subs) if any(not neg and field in (None, 'tech') for neg, field, _value, _quoted in terms) and subs else {}
-    return lambda sub: {'matched': _why_matched(sub, terms, routes, shared['archive'])}
+    routes = _routes_for(subs) if any(not neg and field in (None, 'tech', 'techver', 'java') for neg, field, _value, _quoted in terms) and subs else {}
+    return lambda sub: {'matched': _why_matched(sub, terms, routes, shared['archive'], shared)}
 
 
-def _why_matched(sub, terms, routes=None, archive=None):
-    """What each positive term matched on this host, for the results list (read from the page's prefetched rows; ``routes`` and ``archive`` are the
-    page's lookups, see ``_routes_for`` and ``_shared_for``)."""
+def _tech_reasons(sub, spec, routes=None, archive=None, shared=None):
+    """What showed the product of a ``tech:`` spec on this host, and its version, for the results list: each source that names it (a technology,
+    an open port, the Server header, a route's headers and fingerprints, a version source reading, a Java runtime reading) and, for a platform,
+    the product that runs on it (``runs PHP (WordPress 6.4.2)``); ``<name> version not known`` when no source states one. For KNOWN or a release
+    only the sources that state it. Read from the page's prefetched rows and lookups (``shared``: ``_shared_for``), so no query per host."""
+    from cveFeed import tech_search
+    from cveFeed.correlation import split_name_version, split_port_product
+    from startScan.models import open_services
+    v, wants = spec.raw, spec.state in (tech_search.KNOWN, tech_search.RELEASE)
+    shown, stated, runs_on = [], False, []
+
+    def add(text, states):
+        nonlocal stated
+        stated = stated or states
+        if states or not wants:
+            shown.append(text)
+
+    for t in sub.technologies.all():
+        name = t.name or ''
+        same = spec.matches('name', name) or spec.matches('cpe', name)
+        if same or v in name.lower():
+            add(f'technology {name}', (spec.matches('stating', name) or spec.matches('cpe', name)) and spec.version_ok(t.version))
+        if spec.matches('platform', name):
+            runs_on.append(' '.join(x for x in split_name_version(name) if x))
+    for name, version, cpe in ((shared or {}).get('link_cpes') or {}).get(sub.pk, []):
+        if spec.matches('cpe', cpe) and f'technology {name}' not in shown:  # named by its template's CPE, not by its own name
+            from cveFeed import tech_links
+            derived = tech_links.is_derived((((shared or {}).get('links') or {}).get(sub.pk, {}).get(name) or {}).get('source'))
+            add(f'technology {name} ({cpe}{", derived from its name" if derived else ""})', spec.version_ok(version))
+    if sub.webserver and (v in sub.webserver.lower() or spec.matches('header', sub.webserver)):
+        add(f'web server {sub.webserver}', spec.matches('header_v', sub.webserver))
+    if sub.webserver and spec.matches('platform', sub.webserver):
+        runs_on.append(sub.webserver)
+    for ip in sub.ip_addresses.all():
+        for p in open_services(ip):
+            label = f'port {p.number}{"/udp" if p.protocol == "udp" else ""} {" ".join(x for x in (p.product, p.version) if x) or p.service_name or ""}'.strip()
+            states = (spec.matches('stating', p.product) and spec.version_ok(p.version)) or spec.matches('name_v', p.product) or spec.matches('cpe_v', p.cpe)
+            if spec.matches('name', p.product) or spec.matches('cpe', p.cpe):
+                add(label, states)
+            elif hit := _port_evidence(p, v, 'tech'):
+                add(f'{label} ({hit})', False)
+            if spec.matches('platform', p.product):
+                runs_on.append(' '.join(x for x in split_port_product(p.product, p.version)[:2] if x))
+    key = (sub.target_domain.project_id, sub.name)
+    rows = (routes or {}).get(key, [])
+    for text in _route_reasons(sub, v, routes):
+        add(text, False)
+    for route in rows:
+        evidence = route.evidence or {}
+        for field, label in (('server', 'Server header'), ('powered_by', 'X-Powered-By')):
+            said = str(evidence.get(field) or '')
+            if spec.matches('header', said):
+                add(f'{label} {said}', spec.matches('header_v', said))
+            if spec.matches('platform', said):
+                runs_on.append(said)
+        for found in evidence.get('fingerprints') or []:
+            name = str(found.get('name', ''))
+            quoted = f'"{name}"'
+            if spec.matches('fingerprint', quoted):
+                add(f'{name} ({found.get("source", "route")})', spec.matches('fingerprint_v', quoted))
+            if spec.matches('platform', name):
+                runs_on.append(' '.join(x for x in split_name_version(name) if x))
+    if not wants:
+        for text in _archive_reasons(sub, v, archive):
+            add(text, False)
+    host_key = (sub.target_domain.project_id, sub.name.lower())
+    comps = set(_tech_components(spec))
+    for r in ((shared or {}).get('versions') or {}).get(host_key, []):
+        product = r.get('product') or ''
+        same = spec.matches('name', product) or r.get('component') in comps
+        what = f'{"runtime" if r.get("kind") == "runtime" else "version source"} {product} {r.get("version") or ""}'.strip()
+        release_only = bool(r.get('release_only'))  # a Windows release with no update revision (cveFeed.windows_builds): states a release, no patch level
+        if same or v in product.lower():
+            add(f'{what} ({r.get("source")}{", patch level unknown" if release_only else ""})',
+                (spec.matches('stating', product) or r.get('component') in comps) and spec.version_ok(r.get('version'))
+                and (not release_only or spec.state == tech_search.RELEASE))
+        if spec.matches('platform', product):
+            runs_on.append(' '.join(x for x in (product, r.get('version')) if x))
+    if spec.platform is not None and spec.platform.runtime == 'java_runtime':
+        for j in ((shared or {}).get('java') or {}).get(host_key, []):
+            add(f'Java runtime {j["version"]} ({j["source"]})', spec.version_ok(j['version']) or spec.state != tech_search.RELEASE)
+    reasons = list(dict.fromkeys(shown))
+    if spec.platform is not None and not wants:
+        reasons += [f'runs {spec.platform.label} ({product})' for product in list(dict.fromkeys(p for p in runs_on if p))[:2]]
+    if reasons and not wants and (spec.state == tech_search.UNKNOWN or not stated):  # nothing shown: another item of a comma list matched
+        reasons.append(f'{spec.label} version not known')
+    return reasons
+
+
+def _why_matched(sub, terms, routes=None, archive=None, shared=None):
+    """What each positive term matched on this host, for the results list (read from the page's prefetched rows; ``routes``, ``archive`` and
+    ``shared`` are the page's lookups, see ``_routes_for`` and ``_shared_for``)."""
     from startScan.models import open_services
     reasons = []
     for neg, field, value, _quoted in terms:
         if neg:
             continue
         v = value.lower()
+        if field in ('tech', 'techver', 'java'):
+            from cveFeed import java_runtime, tech_search
+            if field == 'java' and v not in java_runtime.ANY_VALUES and v not in java_runtime.UNKNOWN_VALUES:
+                reasons.append(f'Java runtime {v}')
+                continue
+            parts = [p.strip() for p in value.split(',') if p.strip()][:MAX_SEARCH_TERMS] if field == 'tech' and not _quoted else [value]
+            for part in parts:  # a comma list is OR: each item says what it found on this host
+                text = {'techver': _techver_value, 'java': _java_tech_value}.get(field, lambda x: x)(part if field != 'java' else v)
+                spec = tech_search.parse(text)
+                if spec is not None:
+                    reasons += _tech_reasons(sub, spec, routes, archive, shared)
+            continue
         has = lambda text: v in (text or '').lower()  # noqa: E731
         if field in (None, 'host') and has(sub.name):
             reasons.append(f'host {sub.name}')
@@ -2479,15 +2922,7 @@ def _why_matched(sub, terms, routes=None, archive=None):
                         hit = False
                     if hit:
                         reasons.append(f'IP {ip.address}')
-        if field == 'techver':
-            product, version = v.rsplit(' ', 1)
-            reasons += [f'technology {t.name}' for t in sub.technologies.all()
-                        if product in (t.name or '').lower() and (t.version == version or (t.version or '').startswith(version + '.'))]
-            for ip in sub.ip_addresses.all():
-                for p in open_services(ip):
-                    if product in (p.product or '').lower() and (p.version == version or (p.version or '').startswith(version + '.')):
-                        reasons.append(f'port {p.number} {p.product} {p.version}')
-        if field in (None, 'tech'):
+        if field is None:
             reasons += [f'technology {t.name}' for t in sub.technologies.all() if has(t.name)]
             if has(sub.webserver):
                 reasons.append(f'web server {sub.webserver}')
@@ -2496,6 +2931,11 @@ def _why_matched(sub, terms, routes=None, archive=None):
         for ip in sub.ip_addresses.all():
             if field in (None, 'os') and has(ip.os_guess):
                 reasons.append(f'OS {ip.os_guess}')
+            elif field == 'os':
+                matches = (ip.fingerprint or {}).get('os_matches') if isinstance(ip.fingerprint, dict) else None
+                named = [m.get('name') for m in matches if isinstance(m, dict) and has(m.get('name'))] if isinstance(matches, list) else []
+                if named:
+                    reasons.append(f'OS guess {named[0]}')
             if field == 'country' and ip.geo_iso and (has(ip.geo_iso.iso) or has(ip.geo_iso.name)):
                 reasons.append(f'country {ip.geo_iso.name or ip.geo_iso.iso}')
             for p in open_services(ip):
@@ -2510,7 +2950,9 @@ def _why_matched(sub, terms, routes=None, archive=None):
                     reasons.append(label)
                 elif field is None and (has(p.version) or has(p.cpe) or str(p.number) == value):
                     reasons.append(label)
-                elif field in (None, 'tech', 'banner') and (hit := _port_evidence(p, v, field)):
+                elif field in (None, 'banner') and (hit := _port_evidence(p, v, field)):
+                    reasons.append(f'{label} ({hit})')
+                elif field in ('distro', 'pkg') and (hit := _distro_reason(p, field, value)):
                     reasons.append(f'{label} ({hit})')
         if field in (None, 'vuln', 'sev'):
             for x in sub.vulnerability_set.all():
@@ -2528,7 +2970,16 @@ def _why_matched(sub, terms, routes=None, archive=None):
             reasons.append(f'secret {v}')
         if field == 'zombie' and v == 'yes':
             reasons.append('zombie: DNS gone, still answering')
+        if field in ('component', 'runtime', 'vsource'):
+            reasons.append(f'{ {"component": "component", "runtime": "runtime", "vsource": "version source"}[field]} {v}')
+        if field == 'os' and not any(r.startswith('OS') for r in reasons):
+            reasons.append(f'operating system {v}')  # a port's OS CPE or an operating system reading (cveFeed.source_versions.os_rows)
     return list(dict.fromkeys(reasons))[:8]
+
+
+def _distro_reason(port, field, value):
+    from cveFeed import distro_releases
+    return distro_releases.search_reason(port, field, value)
 
 
 def _alias_reasons(row, terms):
@@ -2779,7 +3230,12 @@ def check_search(query):
 def search_hosts(ctx, slug, params):
     """Shodan-style host search. ``q`` is a space-separated list of ANDed terms: a bare word matches hostname, IP, technology,
     port product / service / version / CPE / banner, Server and X-Powered-By headers, cookie names, OS, finding name, CVE id and
-    page title; ``tech:`` (everything a host runs, from any of that), ``banner:`` (service banners and NSE output), ``port:``, ``product:``,
+    page title; ``tech:`` (which hosts run a product, from every source, under any of its names, a platform through what runs on it, and after
+    ``@`` its version state: ``tech:php@unknown``, ``tech:java@known``, ``tech:wordpress@7.1``: ``_tech_q``), ``java:`` (the Java runtime it was read
+    to run: ``java:17``, ``java:17.0.9``, ``java:8u392``, a vendor such as ``temurin`` or a source such as ``jdwp``; ``any`` and ``unknown`` are
+    ``tech:java`` and ``tech:java@unknown``), ``component:``, ``runtime:`` and ``vsource:`` (what the
+    host's version sources state: ``component:grafana``, ``runtime:python@3.8``, ``vsource:prometheus-metrics``), ``banner:`` (service banners and
+    NSE output), ``port:``, ``product:``,
     ``service:``, ``os:``, ``cve:``, ``ip:`` (an address or CIDR), ``host:``, ``vuln:``, ``sev:`` and ``auth:`` (open, login,
     session_required, sso ...) and ``sensitive:`` (any, credentials, pii, internal), ``secret:`` (any, p, s, i, live or a provider such as
     google: hosts that serve an exposed secret the inventory counts), ``zombie:`` (yes, no) and ``country:`` (ISO code
@@ -2807,11 +3263,14 @@ def search_hosts(ctx, slug, params):
         raise ApiError(400, 'facet_size must be an integer')
     terms = parse_search(params.get('q'))
     qs = _internal_filter(search_host_rows(project, terms), params)
+    counts_only = page_args(params, zero_ok=True)[1] == 0
+    if not (counts_only and not heat):
+        # the collapse once: the facets' walk, the exposed filter and the page all read its ids (it ran once for the facets and again for the page)
+        qs = Subdomain.objects.filter(id__in_array=_id_array(qs.values_list('pk', flat=True)))
     if str(params.get('exposed') or '').lower() in ('1', 'true', 'yes'):  # the hosts the dashboard's Exposed tile counts (cveFeed.counts.exposed_among)
         from cveFeed.counts import exposed_among
         qs = qs.filter(pk__in=exposed_among(qs, project_ids=None if _is_all(project) else [project.id]).values('pk'))
     # facets=none and page_size=0 are the cheap modes: no walk over the match for heat counts (a poll, a palette, an export page need none)
-    counts_only = page_args(params, zero_ok=True)[1] == 0
     no_facets = counts_only or str(params.get('facets') or '').strip().lower() == 'none'
     if no_facets:
         facet_names = []
@@ -2903,14 +3362,17 @@ def list_vulnerabilities(ctx, slug, params):
     if params.get('classification'):
         qs = qs.filter(triage__classification=params['classification'])
     qs = _internal_filter(qs, params, 'subdomain__')
-    return paginate(qs, params, _tagged(_vuln, lambda v: v.target_domain.project) if everywhere else _vuln)
+    return paginate_narrow(qs, params, _tagged(_vuln, lambda v: v.target_domain.project) if everywhere else _vuln)
 
 
 def _cert(c):
     return {'id': c.id, 'host': c.host, 'port': c.port, 'subject': c.subject, 'issuer': c.issuer, 'sans': c.sans[:10],
             'not_before': _iso(c.not_before), 'not_after': _iso(c.not_after), 'days_left': c.days_left,
             'signature_algorithm': c.signature_algorithm, 'key': c.key_description, 'protocol': c.protocol,
-            'chain_error': c.chain_error, 'legacy_tls': c.legacy_tls, 'checked': _iso(c.checked_at)}
+            'chain_error': c.chain_error, 'legacy_tls': c.legacy_tls, 'checked': _iso(c.checked_at),
+            # whether the service offers HTTP/2: the ALPN protocol it chose in the hygiene check's handshake (cveFeed.service_features), or null
+            'http2': ({'offered': c.http2_value == 'yes', 'reading': c.http2_detail or '', 'observed_at': _iso(c.http2_at)}
+                      if getattr(c, 'http2_value', None) else None)}
 
 
 def list_certificates(ctx, slug, params):
@@ -2919,6 +3381,11 @@ def list_certificates(ctx, slug, params):
     project, _ = get_project(ctx, slug)
     everywhere = _is_all(project)
     qs = _scoped(TlsCertificate.objects.all(), project, 'domain__project').order_by('not_after', 'id')
+    from django.db.models import OuterRef, Subquery
+    from cveFeed.models import ServiceFeature
+    http2 = ServiceFeature.objects.filter(domain_id=OuterRef('domain_id'), host=OuterRef('host'), port=OuterRef('port'), feature='http2')
+    qs = qs.annotate(http2_value=Subquery(http2.values('value')[:1]), http2_detail=Subquery(http2.values('detail')[:1]),
+                     http2_at=Subquery(http2.values('observed_at')[:1]))
     if everywhere:
         qs = qs.select_related('domain__project')
     if _digits(params.get('expiring_within'), 6):
@@ -3447,7 +3914,7 @@ def _detection(c):
         # check of an npm packaging, or an nmap step for a JavaScript file, is never shown), whoever wrote the record
         from cveFeed import detection
         clean, _ = detection.validate_strategy(strategy)
-        strategy = detection.finalize(clean, c.cvss_vector) if clean else strategy
+        strategy = detection.finalize(clean, c.cvss_vector, c.cve_id) if clean else strategy
     return {'source': row.source, 'schema_version': row.schema_version, 'strategy': strategy,
             'ai_model': row.ai_model or None, 'updated': _iso(row.updated_at)}
 
@@ -3489,11 +3956,13 @@ def update_cve_detection(ctx, cve_id, guidance=None, strategy=None):
         clean, problems = detection.validate_strategy(strategy)
         if clean is None:
             raise ApiError(400, 'the strategy is not usable: ' + '; '.join(problems[:5]))
-        from cveFeed import locality
+        from cveFeed import locality, triage as triage_lib
         final = detection.finalize(clean, cve.cvss_vector)
+        before = triage_lib.strategy_key(row.strategy, row.source) if row.pk else triage_lib.strategy_key({}, '')
         CVEDetection.objects.update_or_create(cve_entry=cve, defaults={
             'strategy': final, 'source': 'manual', 'schema_version': detection.SCHEMA_VERSION, 'ai_problems': problems[:10]})
         locality.apply_scope(cve, final.get('scope', ''))
+        triage_lib.strategy_changed_after_commit(cve.pk, before, triage_lib.strategy_key(final, 'manual'))  # its matches are asked again
     else:
         if not isinstance(guidance, str) or not 10 <= len(guidance.strip()) <= 3000:
             raise ApiError(400, 'guidance must be text of 10 to 3000 characters')
@@ -3537,7 +4006,7 @@ def _match(m):
                                   (m.ai_reason or '').startswith('Closed automatically:')
                                   else 'candidate'),
             'distro_status': m.distro_status, 'distro_fixed_version': m.distro_fixed_version,
-            'distro_label': label_for(m.distro_status, m.distro_fixed_version),
+            'distro_label': label_for(m.distro_status, m.distro_fixed_version, (m.evidence or {}).get('distro_fix')),
             'evidence': m.evidence or {}, 'template_result': m.template_result, 'template_id': m.template_id,
             'template_tested': _iso(m.template_tested_at),
             'remediation_status': m.remediation_status, 'remediation_note': m.remediation_note,
@@ -3547,7 +4016,20 @@ def _match(m):
             **_closure_fields('match', m),
             'first_seen': _iso(_seen(m, 'first_seen', m.created_at)), 'last_seen': _iso(_seen(m, 'last_seen', m.updated_at)),
             'triage': _triage_brief(_triage_of(m)),
-            'retest': _retest_of(m)}
+            'retest': _retest_of(m),
+            'explain': _explain(m)}
+
+
+def _explain(m, hint=None):
+    """What the match means in plain words and how the host's owner settles it (cveFeed.match_explain), or None when it cannot be built; it
+    never fails the row. ``hint`` is what the rest of the host says about its distribution (read from the host's records when not given)."""
+    from cveFeed import match_explain
+    try:
+        return match_explain.explain(m, match_explain.host_hint(m.subdomain) if hint is None else hint)
+    except Exception:  # noqa: BLE001 - help on top of the evidence: a gap in it must not cost the match its row
+        import logging
+        logging.getLogger(__name__).warning('could not explain match %s', m.pk, exc_info=True)
+        return None
 
 
 def _agent_task_of(m):
@@ -3609,7 +4091,9 @@ def list_matches(ctx, slug, params):
         qs = qs.filter(cve_entry__cve_id__iexact=params['cve'].strip()[:40])
     if _kev_only(params):
         qs = qs.filter(cve_entry__kev=True)
-    return paginate(qs, params, _tagged(_match, lambda m: m.subdomain.target_domain.project) if _is_all(project) else _match)
+    # what each row's explanation reads about its host's distribution (match_explain.host_hint): a few queries for the page, none per row
+    qs = qs.prefetch_related('subdomain__technologies', 'subdomain__ip_addresses__ports')
+    return paginate_narrow(qs, params, _tagged(_match, lambda m: m.subdomain.target_domain.project) if _is_all(project) else _match)
 
 
 # --- the unified Findings list: CVE matches, scanner findings and hygiene findings as one population ------------------
@@ -3858,12 +4342,18 @@ def list_findings(ctx, slug, params):
     start, stop = (page - 1) * size, min(page * size, MAX_FINDINGS)
     merged = []
     for key, qs in sources.items():  # the top ``stop`` of each source holds the top ``stop`` of the merged order
-        merged += [(key, obj) for obj in (qs[:stop] if stop > start else [])]
+        # the order is cut on the ordering columns alone, and only the page's rows are loaded whole (``page_slice``): the wide related rows of the top
+        # ``stop`` of every source were joined and sorted before
+        merged += [(key, *row) for row in (qs.values_list('pk', 'heat_rank', 'sev', 'when')[:stop] if stop > start else [])]
     epoch = datetime(1970, 1, 1, tzinfo=dt_timezone.utc)  # not now().replace(year=1970): that raises on 29 February
-    merged.sort(key=lambda pair: (pair[1].heat_rank, pair[1].sev, pair[1].when or epoch, pair[1].id), reverse=True)
+    merged.sort(key=lambda row: (row[2], row[3], row[4] or epoch, row[1]), reverse=True)
+    wanted = merged[start:stop]
+    loaded = {key: {obj.pk: obj for obj in sources[key].filter(pk__in=[row[1] for row in wanted if row[0] == key])} for key in {row[0] for row in wanted}}
     everywhere = _is_all(project)
     results = []
-    for key, obj in merged[start:stop]:
+    for key, obj in ((row[0], loaded[row[0]].get(row[1])) for row in wanted):
+        if obj is None:
+            continue
         row = _finding_row(key, obj)
         if everywhere:
             owner = _finding_project(key, obj)
@@ -3989,24 +4479,34 @@ def _clean_note(note):
         raise ApiError(400, str(exc))
 
 
-def _apply_remediation(obj, status, note, user, rescore=True):
+def _apply_remediation(obj, status, note, user, rescore=True, only_from=None):
     """Set and save the remediation fields shared by CVEMatch, Vulnerability and HygieneFinding (the same tuple of
     statuses, cveFeed.closure.STATUSES, enforced here once). ``note`` is a true PATCH field: ``None`` (the default, meaning the caller's
     body left it out) leaves whatever note is already stored; an explicit value, including '', replaces it. Closing with fixed,
     accepted_risk or false_positive makes it the closure note, with who (remediation_by) and when (remediation_updated_at). The note is
     cleaned and cut to 2000 characters here (the request paths refuse a longer one with a 400 first, via _clean_note; an agent's own
     report is cut, as before). Raises on an unrecognized status; never touches whatever auto-managed liveness field (open_status,
-    HygieneFinding.status, ai_verdict) the model also carries, which stays under the scan/check pipeline."""
+    HygieneFinding.status, ai_verdict) the model also carries, which stays under the scan/check pipeline.
+
+    ``only_from`` is for an automatic actor (an agent's report): the change is made only while the stored status is one of those
+    (``REMEDIATION.move``), so a person's decision made since the actor read the finding stands. Returns whether the status was written;
+    when it was not, ``obj`` is left as stored and nothing else happens."""
     from cveFeed import closure
     _check_status(status)
     note = closure.clip_note(note)
-    fields = ['remediation_status', 'remediation_updated_at', 'remediation_by']
+    now = timezone.now()
+    values = {'remediation_updated_at': now, 'remediation_by': user, **({'remediation_note': note} if note is not None else {})}
+    if only_from is not None:
+        from reNgine.state_machines import REMEDIATION
+        if not REMEDIATION.move(type(obj)._base_manager.filter(pk=obj.pk), status, only_from=only_from, **values):
+            obj.refresh_from_db(fields=['remediation_status', 'remediation_updated_at', 'remediation_by', 'remediation_note'])
+            return False
     before = obj.remediation_status
-    obj.remediation_status, obj.remediation_updated_at, obj.remediation_by = status, timezone.now(), user
-    if note is not None:
-        obj.remediation_note = note
-        fields.append('remediation_note')
-    obj.save(update_fields=fields)
+    obj.remediation_status = status
+    for field, value in values.items():
+        setattr(obj, field, value)
+    if only_from is None:
+        obj.save(update_fields=['remediation_status', *values])
     from cveFeed import fix_retest
     fix_retest.status_changed(obj, before, status)  # marked fixed (by a person, the API or an agent): the check that proved it is run again on a Sentinel
     from django.db import transaction
@@ -4016,6 +4516,7 @@ def _apply_remediation(obj, status, note, user, rescore=True):
     host = _host_of(obj) if rescore else None
     if host:
         _rescore_hosts([host])
+    return True
 
 
 UNSET = object()  # a PATCH field the caller's body left out entirely, as opposed to an explicit null/empty value
@@ -4220,6 +4721,8 @@ def _bulk_status_batched(ctx, project, items, status, note):
             ids = [n for k, n in wanted if k == kind]
             if ids:
                 found.update({(kind, o.pk): o for o in _finding_qs(project, kind).filter(pk__in=ids)})
+        # what each finding said when it was read: the write below is made only where it still says so
+        read = {key: (o.remediation_status, o.remediation_updated_at, o.remediation_by_id) for key, o in found.items()}
         now = timezone.now()
         clipped = closure.clip_note(note)  # as ``_apply_remediation`` stores it
         changes, events, written = [], [], {}
@@ -4234,21 +4737,39 @@ def _bulk_status_batched(ctx, project, items, status, note):
                 obj.remediation_status, obj.remediation_updated_at, obj.remediation_by = status, now, ctx.user
                 if note is not None:
                     obj.remediation_note = clipped
-                changes.append((obj, before, position))
+                changes.append((kind, obj, before, position))
                 written.setdefault(kind, {})[obj.pk] = obj
-                events.append(FindingAuditEvent(project=project, finding_kind=kind, finding_id=obj.pk, event='status', actor=ctx.user, before={'status': before},
-                                                after={'status': status, **({'note': note} if note is not None else {})}))
+                events.append((kind, obj.pk, FindingAuditEvent(project=project, finding_kind=kind, finding_id=obj.pk, event='status', actor=ctx.user,
+                                                               before={'status': before},
+                                                               after={'status': status, **({'note': note} if note is not None else {})})))
         fields = ['remediation_status', 'remediation_updated_at', 'remediation_by'] + (['remediation_note'] if note is not None else [])
         with transaction.atomic():
+            # Lock the rows and compare them with what was read: a finding someone else changed in between (another person, a retest
+            # reopening it, an agent's report) keeps that change and is reported as failed, never overwritten from a stale read. One query a kind.
+            moved = set()
+            for kind, objs in written.items():
+                model = type(next(iter(objs.values())))
+                for pk, *now_says in model._base_manager.select_for_update().filter(pk__in=list(objs)).values_list(
+                        'pk', 'remediation_status', 'remediation_updated_at', 'remediation_by_id'):
+                    if tuple(now_says) != read[(kind, pk)]:
+                        moved.add((kind, pk))
+            for kind, pk in moved:
+                del written[kind][pk]
+            for kind, obj, _before, position in changes:
+                if (kind, obj.pk) in moved:
+                    failed[position] = {'kind': items[position]['kind'], 'id': items[position]['id'],
+                                        'error': 'changed by someone else meanwhile; reload it and try again'}
+            changes = [c for c in changes if (c[0], c[1].pk) not in moved]
             for objs in written.values():
-                type(next(iter(objs.values()))).objects.bulk_update(list(objs.values()), fields)
-            FindingAuditEvent.objects.bulk_create(events)
+                if objs:
+                    type(next(iter(objs.values()))).objects.bulk_update(list(objs.values()), fields)
+            FindingAuditEvent.objects.bulk_create([event for kind, pk, event in events if (kind, pk) not in moved])
     except Exception:  # noqa: BLE001 - whatever stopped the batch, the findings are then changed one at a time, each failing on its own
         logger.warning('bulk remediation update could not be written in one go', exc_info=True)
         return None
-    fix_retest.status_changed_many([(o, before) for o, before, _ in changes], status, now)  # marked fixed: the check that proved it is run again on a Sentinel (never raises)
+    fix_retest.status_changed_many([(o, before) for _k, o, before, _ in changes], status, now)  # marked fixed: the check that proved it is run again on a Sentinel (never raises)
     transaction.on_commit(bump_stats_revision)  # the dashboards read a snapshot: whoever closed the findings sees the numbers move now (review 1 F11)
-    hosts = {h for h in (_host_of(o) for o, _, _ in changes) if h}
+    hosts = {h for h in (_host_of(o) for _k, o, _, _ in changes) if h}
     return len(changes), [failed[p] for p in sorted(failed)], hosts
 
 
@@ -4517,7 +5038,7 @@ def work_items(ctx, slug, params):
     qs = _matches_qs(project).exclude(ai_verdict='not_affected') \
         .exclude(version_in_range=False) \
         .exclude(remediation_status__in=CLOSED) \
-        .prefetch_related('subdomain__ip_addresses')
+        .prefetch_related('subdomain__ip_addresses__ports', 'subdomain__technologies')  # the ports and technologies: each row's explain reads them
     if params.get('include_fp') == '0':
         qs = qs.exclude(triage__classification__in=FALSE_POSITIVES)
     tier = params.get('tier')
@@ -4773,8 +5294,8 @@ def _how_found_match(m):
         steps.append(_kv('Advisory range', ', '.join(f'{k} {v}' for k, v in rng.items() if v) or 'no usable bound'))
     inside = {True: 'inside the affected range', False: 'outside the affected range', None: 'unknown (no version, or no usable bound to compare)'}
     steps.append(_kv('Version check', inside[m.version_in_range]))
-    if m.distro_status in ('patched', 'vulnerable') or ev.get('distro'):
-        steps.append(_kv('Distribution', label_for(m.distro_status, m.distro_fixed_version)
+    if m.distro_status in ('patched', 'vulnerable', 'backport') or ev.get('distro'):
+        steps.append(_kv('Distribution', label_for(m.distro_status, m.distro_fixed_version, ev.get('distro_fix'))
                          or ', '.join(f'{k} {v}' for k, v in (ev.get('distro') or {}).items() if v)))
     if m.template_result:
         steps.append(_kv('Template check', f'{m.template_result.replace("_", " ")}' + (f' ({m.template_id})' if m.template_id else '')
@@ -4929,6 +5450,7 @@ def finding_detail(ctx, slug, kind, finding_id):
         'secrets': _tracked_secrets(obj) if kind == 'vulnerability' else [],  # "Tracked in Secrets": the inventory rows a token finding fed
         'cve': {**_cve_context(obj.cve_entry), 'detection': _detection(obj.cve_entry)} if kind == 'match' else None,
         'confirm': _confirm_guide(obj) if kind == 'match' else None,
+        'explain': _explain(obj) if kind == 'match' else None,
         'validation': {'status': _triage_brief(t)['validation_status'] if t else 'none', 'steps': steps, 'evidence': evidence,
                        'validated': _iso(t.validated_at) if t else None, 'next_attempt': _iso(t.next_attempt_at) if t else None,
                        'confidence_adjust': t.confidence_adjust if t else 0.0},
@@ -5091,7 +5613,10 @@ def _triage_item(t):
 
 def list_triage(ctx, slug, params):
     """Triage of every finding: ?status= (pending, triaged, not_triaged, error), ?classification=, ?validation= (hit, clean, failed,
-    pending, no_check, skipped_blocked, none) and ?kind=. Findings classified as likely false positives are listed like any other."""
+    pending, no_check, skipped_blocked, none) and ?kind=. ``?current=true`` keeps the findings of the current inventory only (``triage.current_q``:
+    a match a later scan replaced, or a finding closed since, may stay pending for good and is not waiting for anything). Findings classified as
+    likely false positives are listed like any other. Newest first, a page at a time, read in the order of ``triage_proj_status_seen_idx``."""
+    from cveFeed import triage as triage_lib
     from cveFeed.models import Triage
     project, _ = get_one_project(ctx, slug)
     qs = Triage.objects.filter(project=project).select_related('verdict', 'match__cve_entry', 'vulnerability', 'route', 'hygiene')
@@ -5101,6 +5626,8 @@ def list_triage(ctx, slug, params):
             if allowed and params[param] not in allowed:
                 raise ApiError(400, f'{param} must be one of: {", ".join(allowed)}')
             qs = qs.filter(**{field: params[param]})
+    if str(params.get('current') or '').strip().lower() in ('1', 'true', 'yes', 'on'):
+        qs = qs.filter(triage_lib.current_q())
     return paginate(qs.order_by('-last_seen', '-id'), params, _triage_item)
 
 
@@ -5186,8 +5713,9 @@ def validate_match_now(ctx, slug, match_id):
     with transaction.atomic():
         Project.objects.select_for_update().get(pk=project.pk)
         now = timezone.now()
-        OnDemandValidation.objects.filter(project=project, status='queued', created_at__lt=now - timedelta(minutes=10)).update(
-            status='failed', error='queue request expired before a worker accepted it', finished_at=now)
+        # a request parked on its AI plan (cveFeed.validation_plan.park) is queued on purpose: its own wait ends it (PLAN_WAIT and the nudge)
+        OnDemandValidation.objects.filter(project=project, status='queued', created_at__lt=now - timedelta(minutes=10)).exclude(
+            result__has_key='waiting').update(status='failed', error='queue request expired before a worker accepted it', finished_at=now)
         OnDemandValidation.objects.filter(project=project, status='running', started_at__lt=now - timedelta(minutes=30)).update(
             status='failed', error='worker lease expired; request may be retried', finished_at=now)
         active = OnDemandValidation.objects.filter(match=match, status__in=('queued', 'running')).order_by('-id').first()

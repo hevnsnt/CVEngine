@@ -16,7 +16,7 @@ from django.utils import timezone
 logger = logging.getLogger(__name__)
 
 NAME = 'CVEngine Scanner'
-BLOB_TTL = timedelta(hours=24)  # a person's enrollment lives 30 minutes; this one waits for a container that may still be starting
+BLOB_TTL = timedelta(hours=24)  # like a person's enrollment, this one waits for a container that may still be starting
 RENEW_BELOW = timedelta(hours=2)  # an unredeemed blob this close to expiry is replaced, so a slow start never meets an expired one
 
 

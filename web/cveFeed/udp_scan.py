@@ -26,7 +26,9 @@ What it records: the open UDP ports and their service, product and version (the 
 TCP services, keyed by number and protocol, so UDP 161 and TCP 161 are two rows); product and version a script proved when ``-sV``
 named none (SNMP sysDescr, SSDP server string, NTP readvar); and findings for the services that should not answer the internet
 (memcached, SNMP with the public community, NTP control queries, SSDP, IPMI). Findings are derived from the stored ports of each
-host, never from one run, so a host with two addresses keeps what the other address showed.
+host, never from one run, so a host with two addresses keeps what the other address showed. What an SNMP agent's sysDescr states (a
+Cisco, Juniper, Aruba or Ubiquiti release, an APC card's firmware, a Windows build, a Linux kernel) is also stored as a version reading of
+each host on the address (``cveFeed.version_sources.refresh_snmp``, probe ``vsrc:snmp``), and dropped when a later sweep no longer reads it.
 """
 import json
 import logging
@@ -247,23 +249,41 @@ def normalize_address(value):
         return text
 
 
-_HOSTS = re.compile(r'<hosts\b[^>]*>')
-_FINISHED = re.compile(r'<finished\b[^>]*\bexit="success"')
+MAX_TAG = 2000  # the most of a start tag read after its name: nmap's <finished .../> and <hosts .../> are a few hundred characters
+_COUNT = {k: re.compile(rf'(?:^|\s){k}="(\d{{1,9}})"') for k in ('up', 'down', 'total')}
+
+
+def _tags(text, name):
+    """The attributes of each start tag ``<name ...>`` of ``text`` (the text up to its ``>``, or ``MAX_TAG`` characters when there is none), in order.
+    Linear: a tag name is found with ``str.find``, only a bounded slice after it is looked at, and the next search starts where that slice ended, so no
+    character is read more than twice. A report of a million ``<hosts`` with no ``>`` costs one pass, never one pass per position (the regexes this
+    replaced, ``<hosts\\b[^>]*>`` and ``<finished\\b[^>]*\\bexit="success"``, took 27 seconds on 200 KB a Sentinel could send)."""
+    opening = f'<{name}'
+    at = text.find(opening)
+    while at != -1:
+        start = end = at + len(opening)
+        if start == len(text) or text[start] in ' \t\r\n/>':  # the whole name, not <hostsx
+            close = text.find('>', start, start + MAX_TAG)
+            end = close if close != -1 else start + MAX_TAG
+            yield text[start:end]
+        at = text.find(opening, end)
 
 
 def report_counts(xml_text):
     """``(up, down, total)`` hosts nmap says it scanned, or None when the report has no ``finished ... exit="success"`` marker (cut short or
-    not nmap's)."""
+    not nmap's). Read with ``_tags``, in time linear in the report's length whatever a Sentinel sends."""
     xml_text = xml_text or ''
-    if not _FINISHED.search(xml_text):
+    if not any(re.search(r'(?:^|\s)exit="success"', tag) for tag in _tags(xml_text, 'finished')):
         return None
-    found = _HOSTS.search(xml_text)
-    if not found:
+    found = next(_tags(xml_text, 'hosts'), None)
+    if found is None:
         return None
-    try:
-        values = {k: int(re.search(rf'\b{k}="(\d+)"', found.group(0)).group(1)) for k in ('up', 'down', 'total')}
-    except (AttributeError, ValueError):
-        return None
+    values = {}
+    for key, pattern in _COUNT.items():
+        match = pattern.search(found)
+        if not match:
+            return None
+        values[key] = int(match.group(1))
     return values['up'], values['down'], values['total']
 
 
@@ -764,12 +784,14 @@ def scan_ip(ip, pipeline=None):
         activity.settle(running, 'done', message=f'Background UDP scan of {address}: the host did not answer, so no open UDP ports; asked again next week')
         return {'ip': address, 'ok': True, **outcome, 'findings': 0}
     findings = store_findings(ip)
+    from cveFeed import version_sources
+    snmp = version_sources.refresh_snmp(ip)  # the release an SNMP agent's sysDescr states, as a version reading of each host on the address
     activity.settle(running, 'done', message=(
         f'Background UDP scan of {address}: {len(outcome["open"])} port(s) answered'
         + (f' ({", ".join(map(str, outcome["open"]))})' if outcome['open'] else '')
         + (f', {len(outcome["unanswered"])} silent (open or filtered)' if outcome['unanswered'] else '')
         + (f', {findings} finding(s)' if findings else '')), open_ports=len(outcome['open']), findings=findings)
-    result = {'ip': address, 'ok': True, **outcome, 'findings': findings}
+    result = {'ip': address, 'ok': True, **outcome, 'findings': findings, 'snmp_readings': snmp}
     if outcome['changed']:
         try:
             result['retested'] = queue_retests(ip, outcome['changed'], project, pipeline)

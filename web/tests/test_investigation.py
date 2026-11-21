@@ -153,8 +153,10 @@ class PromptTests(ContextFixture, TestCase):
     def test_the_planning_prompt_carries_host_metadata_and_the_edge_rule(self):
         provider = self.provider('{"check_kinds":[],"generate_template":false,"reason":"The version is hidden behind the edge."}')
         host = host_context.clipped(host_context.host_context(self.fresh()))
-        decision, _ = validation_plan.plan(self.project.id, mock.Mock(signature='s1'), self.cve, {'source': 'port'},
-                                           [{'kind': 'fact_probe', 'label': 'x'}], ('', 'no template'), provider=provider, host=host)
+        args = (self.project.id, mock.Mock(signature='s1'), self.cve, {'source': 'port'}, [{'kind': 'fact_probe', 'label': 'x'}], ('', 'no template'))
+        pending, _ = ai_queue.asking(validation_plan.plan, provider, *args, host=host)  # queued, then answered by the reviewer container
+        self.assertEqual(pending['source'], 'pending')
+        decision, _ = validation_plan.plan(*args, host=host, waiting={'job': pending['job']})
         system, user = provider.complete.call_args.args
         self.assertIn('host_metadata', user)
         self.assertIn('fact_probe', user)
@@ -318,6 +320,18 @@ class ValidationIntegrationTests(ContextFixture, TestCase):
         self.assertEqual((fake.served_kinds(), guard.calls), (['http_probe'], []))
         self.assertEqual((result['status'], result['observed']), ('observed', {'product': 'nginx', 'version': '1.24.0'}))
         self.assertTrue(ProbeObservation.objects.filter(host='www.rt.test', product='nginx', version='1.24.0').exists())
+
+    def test_an_nmap_probe_check_calls_run_one_with_the_arguments_it_takes(self):
+        """The nmap family of a fact probe went through ``probes.run_one(..., fresh=True)``, a keyword run_one never had: every check of it
+        failed with a TypeError. The autospec'd stand-in refuses any argument the real function does not take."""
+        plan = [{'probe': 'nmap-version-all', 'label': 'z', 'family': 'nmap', 'target': {'ip': '192.0.2.10', 'port': 8443, 'service': 'http'}, 'for': ['nginx']}]
+        check = next(c for c in validation.plan_checks(self.subject(probe_plan=plan), 'sig', ('', 'x'))[0] if c['kind'] == 'fact_probe')
+        found = [{'kind': 'version', 'product': 'nginx', 'version': '1.24.0', 'variant': '', 'outcome': 'found', 'confidence': 0.9, 'source': 'nmap',
+                  'port': 8443, 'url': '', 'evidence': {}}]
+        with mock.patch('cveFeed.probes.run_one', autospec=True, return_value=found) as run_one:
+            result = validation.run_fact_probe(check)
+        self.assertEqual(run_one.call_count, 1)
+        self.assertEqual((result['status'], result['observed']), ('observed', {'product': 'nginx', 'version': '1.24.0'}))
 
     def test_a_host_that_left_the_inventory_fails_the_check_instead_of_probing_something_else(self):
         check = next(c for c in validation.plan_checks(self.subject(), 'sig', ('', 'x'))[0] if c['kind'] == 'fact_probe')

@@ -53,8 +53,8 @@ HEALTH = {'workers_state': 'responding', 'worker_note': 'ok', 'scheduler_note': 
 		  'workers': [{'worker': 'discovery_worker', 'queue': 'discovery_queue', 'responding': True, 'consuming': True, 'active': 1}],
 		  'schedules': [{'name': 'cve-feed', 'next_due_state': 'estimated'}, {'name': 'late-task', 'next_due_state': 'past_due_unconfirmed'}],
 		  'jobs': {'scans': {'pending': 1, 'running': 1}}, 'last_activity': {'running': None, 'done': None, 'failed': None}}
-CLUSTER = {'store': 'redis', 'containers': [{'host': 'celery-1', 'memory': {'total_mb': 8000, 'used_mb': 3000, 'available_mb': 5000},
-	'budget_mb': 6000, 'headroom_mb': 400, 'critical_mb': 240, 'age_seconds': 20, 'running': [{'label': 'nmap:x'}], 'waiting': [], 'memory_kills': []}]}
+CLUSTER = {'store': 'redis', 'containers': [{'host': 'celery-1', 'memory': {'total_mb': 8000, 'limit_mb': 8000, 'used_mb': 3000, 'available_mb': 5000},
+	'age_seconds': 20}]}  # reNgine.resources.cluster_snapshot: memory only (no scanner runs on the server, so no budget, runs or kills)
 
 
 def patched(broker=None, health=None, cluster=None):
@@ -89,10 +89,6 @@ class SystemStatusTests(TestCase):
 		patch = mock.patch('cveFeed.conductor.last_round', return_value={'at': timezone.now().isoformat(), 'depth': 3, 'started': 0, 'skipped': 'nothing is due'})
 		patch.start()
 		self.addCleanup(patch.stop)
-		# the egress ledger lives in Redis, which a test database does not roll back: Sentinel tasks that fell back to local execution in
-		# earlier tests of this run must not make this instance look unhealthy (tests.test_local_egress covers that problem line)
-		from tests.test_local_egress import _clear
-		_clear()
 		# refusals of the rate limiter live in Redis too (agentapi.claim_refusals): another test's refusals, an action named 'secret' among them, are real numbers in the status
 		from agentapi import claim_refusals
 		client = claim_refusals._client(claim_refusals.KEY)
@@ -156,7 +152,8 @@ class SystemStatusTests(TestCase):
 		self.assertEqual(system['queues']['waiting']['discovery_queue'], 3)
 		self.assertEqual((system['queues']['waiting_total'], system['queues']['unacknowledged']), (3, 2))
 		self.assertEqual(system['workers']['state'], 'responding')
-		self.assertEqual(system['memory']['containers'][0]['available_mb'], 5000)
+		self.assertEqual(system['memory']['containers'], [{'host': 'celery-1', 'total_mb': 8000, 'used_mb': 3000, 'available_mb': 5000, 'limit_mb': 8000,
+			'report_age_seconds': 20}])  # nothing of the removed memory gate: no job budget, headroom, runs, waits or memory kills
 		self.assertGreater(system['disk']['total_mb'], 0)
 		self.assertIn('cve_entries', system['feeds'])
 		self.assertFalse(system['ai']['provider_enabled'])
@@ -182,70 +179,19 @@ class SystemStatusTests(TestCase):
 			_, data = self.run_status(self.t_root, health=healthy)
 		self.assertEqual((data['overall'], data['problems']), ('ok', []))
 
-	def test_stale_nuclei_templates_are_a_problem_and_fresh_ones_report_their_age(self):
-		import os
-		import tempfile
-		with tempfile.TemporaryDirectory() as root, mock.patch.dict(os.environ, {'NUCLEI_TEMPLATES_DIR': root}), \
-				mock.patch.object(system_status, '_tool_version', lambda argv: 'v-test'):
-			marker = os.path.join(root, '.checksum')
-			open(marker, 'w').close()
+	def test_the_templates_are_the_index_of_the_sentinel_library_and_nothing_runs_here(self):
+		"""The server keeps no template set and runs no nuclei: the status names the release and size of the scanner library's template index."""
+		from cvengine_scanner import template_index
+		with mock.patch('subprocess.run', side_effect=AssertionError('a tool was run on the server')):
 			_, data = self.run_status(self.t_root)
-			tools = data['system']['tools']
-			self.assertLess(tools['nuclei_templates']['age_hours'], 1)
-			self.assertEqual(tools['versions']['nuclei'], 'v-test')
-			self.assertFalse(any(p.startswith('nuclei templates') for p in data['problems']))
-			old = timezone.now().timestamp() - 3 * 24 * 3600
-			os.utime(marker, (old, old))
+		tools = data['system']['tools']['nuclei_templates']
+		self.assertEqual(tools['release'], template_index.release())
+		self.assertGreater(tools['templates'], 10_000)
+		self.assertNotIn('versions', data['system']['tools'])
+		self.assertFalse(any(p.startswith('nuclei templates') for p in data['problems']))
+		with mock.patch.object(template_index, 'load', return_value={'nuclei_templates': '', 'templates': {}, 'reasons': [], 'sha256': ''}):
 			_, data = self.run_status(self.t_root)
-			self.assertTrue(any(p.startswith('nuclei templates: not refreshed for') for p in data['problems']))
-
-	def test_template_files_that_have_not_changed_are_not_a_failure_while_the_refresh_keeps_succeeding(self):
-		import os
-		import tempfile
-		recent = {'at': timezone.now().isoformat(), 'ok': True, 'result': 'Your nuclei-templates are up-to-date'}
-		with tempfile.TemporaryDirectory() as root, mock.patch.dict(os.environ, {'NUCLEI_TEMPLATES_DIR': root}), \
-				mock.patch.object(system_status, '_tool_version', lambda argv: 'v-test'):
-			marker = os.path.join(root, '.checksum')
-			open(marker, 'w').close()
-			old = timezone.now().timestamp() - 4 * 24 * 3600  # no release for four days: the files are as old, the refresh is fine
-			os.utime(marker, (old, old))
-			with mock.patch.object(system_status, '_template_refresh', lambda: recent):
-				_, data = self.run_status(self.t_root)
-			self.assertFalse(any(p.startswith('nuclei templates') for p in data['problems']), data['problems'])
-			self.assertEqual(data['system']['tools']['nuclei_templates']['last_refresh']['result'], recent['result'])
-			failed = dict(recent, ok=False, result='could not reach the template repository')
-			with mock.patch.object(system_status, '_template_refresh', lambda: failed):
-				_, data = self.run_status(self.t_root)
-			self.assertTrue(any('the last refresh failed' in p and 'could not reach' in p for p in data['problems']), data['problems'])
-			silent = dict(recent, at=(timezone.now() - timedelta(hours=50)).isoformat())
-			with mock.patch.object(system_status, '_template_refresh', lambda: silent):
-				_, data = self.run_status(self.t_root)
-			self.assertTrue(any('no successful refresh for' in p for p in data['problems']), data['problems'])
-
-	def test_the_version_is_the_version_line_not_a_warning_the_tool_printed_first(self):
-		import subprocess
-		out = ('WARNING: sonic/ast only supports (go1.17~1.26 and amd64 CPU) or (go1.20~1.26 and arm64 CPU), but your environment is not\n'
-			   '[INF] Nuclei Engine Version: v3.11.1\n')
-		system_status._VERSION_CACHE.clear()
-		with mock.patch('subprocess.run', return_value=subprocess.CompletedProcess([], 0, stdout='', stderr=out)):
-			self.assertEqual(system_status._tool_version(('nuclei', '-version')), '[INF] Nuclei Engine Version: v3.11.1')
-		system_status._VERSION_CACHE.clear()
-		with mock.patch('subprocess.run', return_value=subprocess.CompletedProcess([], 0, stdout='WARNING: only a warning\n', stderr='')):
-			self.assertEqual(system_status._tool_version(('x', '-version')), 'WARNING: only a warning')
-		system_status._VERSION_CACHE.clear()
-
-	def test_the_refresh_task_records_what_it_found(self):
-		import subprocess
-		from django.core.cache import cache
-		from cveFeed import tasks
-		done = subprocess.CompletedProcess([], 0, stdout='[INF] Your nuclei-templates are up-to-date: v10.9.9\n', stderr='')
-		with mock.patch('subprocess.run', return_value=done), mock.patch('cveFeed.activity.log'), \
-				mock.patch('cveFeed.templategen.invalidate_template_index'):
-			tasks.update_nuclei_templates()
-		record = cache.get(system_status.TEMPLATE_REFRESH_KEY)
-		self.assertTrue(record['ok'])
-		self.assertIn('up-to-date', record['result'])
-		cache.delete(system_status.TEMPLATE_REFRESH_KEY)
+		self.assertTrue(any(p.startswith('nuclei templates: the installed Sentinel library has no template index') for p in data['problems']))
 
 	def test_members_do_not_see_the_tool_versions(self):
 		_, data = self.get(self.t_member)
@@ -296,8 +242,14 @@ class SystemStatusTests(TestCase):
 													 age_seconds=900)]}
 		_, data = self.run_status(self.t_root, cluster=low, health=dict(HEALTH, schedules=[]))
 		text = ' '.join(data['problems'])
-		self.assertIn('below its critical level', text)
+		self.assertIn('celery-1 has 100 MB free, below its critical level', text)  # 3% of 8000 MB is 240
 		self.assertIn('has not reported', text)
+		enough = {'store': 'redis', 'containers': [dict(CLUSTER['containers'][0], memory={'total_mb': 8000, 'used_mb': 7700, 'available_mb': 300})]}
+		_, data = self.run_status(self.t_root, cluster=enough, health=dict(HEALTH, schedules=[]))
+		self.assertFalse([p for p in data['problems'] if p.startswith('memory:')], data['problems'])
+		small = {'store': 'redis', 'containers': [dict(CLUSTER['containers'][0], memory={'total_mb': 1000, 'used_mb': 860, 'available_mb': 140})]}
+		_, data = self.run_status(self.t_root, cluster=small, health=dict(HEALTH, schedules=[]))
+		self.assertIn('below its critical level', ' '.join(data['problems']))  # never under 150 MB on a small container
 
 	def test_low_disk_is_a_problem(self):
 		usage = mock.Mock(total=100 << 20, used=95 << 20, free=5 << 20)
@@ -309,7 +261,8 @@ class SystemStatusTests(TestCase):
 
 	def test_a_pause_and_a_running_update_are_notes_not_problems(self):
 		ScanControl.objects.update_or_create(pk=1, defaults={'paused': True, 'reason': 'maintenance window', 'actor': 'bill'})
-		with mock.patch('cveFeed.updater.read_phase', lambda: {'phase': 'draining', 'detail': 'waiting', 'scans_running': 2, 'changed_at': 1}):
+		with mock.patch('cveFeed.updater.read_phase', lambda: {'phase': 'draining', 'detail': 'waiting', 'scans_running': 2, 'changed_at': 1}), \
+				mock.patch('cveFeed.updater.approval_pending', lambda: True):  # a drain is in progress only while its approval waits
 			_, data = self.get(self.t_root)
 		self.assertTrue(data['scanning']['paused'])
 		self.assertEqual(data['scanning']['reason'], 'maintenance window')
@@ -320,7 +273,8 @@ class SystemStatusTests(TestCase):
 	def test_a_member_learns_that_scanning_is_paused_but_not_who_or_why_or_instance_counts(self):
 		ScanControl.objects.update_or_create(pk=1, defaults={'paused': True, 'reason': 'maintenance window', 'actor': 'bill',
 														   'last_error': 'boom'})
-		with mock.patch('cveFeed.updater.read_phase', lambda: {'phase': 'draining', 'detail': 'waiting', 'scans_running': 2, 'changed_at': 1}):
+		with mock.patch('cveFeed.updater.read_phase', lambda: {'phase': 'draining', 'detail': 'waiting', 'scans_running': 2, 'changed_at': 1}), \
+				mock.patch('cveFeed.updater.approval_pending', lambda: True):  # a drain is in progress only while its approval waits
 			_, data = self.get(self.t_member)
 		self.assertTrue(data['scanning']['paused'])
 		self.assertEqual(set(data['scanning']), {'paused', 'paused_by_update', 'scanner', 'builtin_scanner'})

@@ -68,18 +68,6 @@ class Proxy(models.Model):
     proxies = EncryptedTextField(blank=True, null=True)  # one proxy URL per line; a line may carry a password, so it is encrypted at rest
 
 
-class Hackerone(models.Model):
-    id = models.AutoField(primary_key=True)
-    # TODO: username and api_key fields will be deprecated in another major release, Instead HackerOneAPIKey model from dasbhboard/models.py will be used
-    username = models.CharField(max_length=100, null=True, blank=True) # unused
-    api_key = models.CharField(max_length=200, null=True, blank=True) # unused
-    send_report = models.BooleanField(default=False, null=True, blank=True)
-    send_critical = models.BooleanField(default=True)
-    send_high = models.BooleanField(default=True)
-    send_medium = models.BooleanField(default=False)
-    report_template = models.TextField(blank=True, null=True)
-
-
 class VulnerabilityReportSetting(models.Model):
     id = models.AutoField(primary_key=True)
     primary_color = models.CharField(max_length=10, null=True, blank=True, default='#FFB74D')
@@ -93,24 +81,3 @@ class VulnerabilityReportSetting(models.Model):
     executive_summary_description = models.TextField(blank=True, null=True)
     show_footer = models.BooleanField(default=False)
     footer_text = models.CharField(max_length=200, null=True, blank=True)
-
-
-class InstalledExternalTool(models.Model):
-    id = models.AutoField(primary_key=True)
-    logo_url = models.CharField(max_length=200, null=True, blank=True)
-    name = models.CharField(max_length=100)
-    description = models.CharField(max_length=2000)
-    github_url = models.CharField(max_length=500)
-    license_url = models.CharField(max_length=500, null=True, blank=True)
-    version_lookup_command = models.CharField(max_length=200, null=True, blank=True)
-    update_command = models.CharField(max_length=200, null=True, blank=True)
-    install_command = models.CharField(max_length=200)
-    version_match_regex = models.CharField(max_length=100, default=r'[vV]*(\d+\.)?(\d+\.)?(\*|\d+)', null=True, blank=True)
-    is_default = models.BooleanField(default=False)
-    is_subdomain_gathering = models.BooleanField(default=False)
-    is_github_cloned = models.BooleanField(default=False)
-    github_clone_path = models.CharField(max_length=1500, null=True, blank=True)
-    subdomain_gathering_command = models.CharField(max_length=300, null=True, blank=True)
-
-    def __str__(self):
-        return self.name

@@ -55,7 +55,10 @@ class NmapRecordTests(TestCase):
 		port_inventory.persist_inventory(port_inventory.parse_xml(xml))
 		ip = IpAddress.objects.get(address='198.51.100.40')
 		ssh, guessed = ip.ports.get(number=22), ip.ports.get(number=8080)
-		self.assertEqual(ssh.extra, {'cpes': ['cpe:/a:openbsd:openssh:8.9p1', 'cpe:/o:canonical:ubuntu_linux:22.04'], 'ostype': 'Linux', 'method': 'probed'})
+		extra = dict(ssh.extra)
+		distro_reading = extra.pop('distro', {})  # the distro reading of the banner (distro.parse_distro), kept beside the nmap fields
+		self.assertEqual(extra, {'cpes': ['cpe:/a:openbsd:openssh:8.9p1', 'cpe:/o:canonical:ubuntu_linux:22.04'], 'ostype': 'Linux', 'method': 'probed'})
+		self.assertEqual((distro_reading.get('package'), distro_reading.get('codename')), ('openssh', 'jammy'))
 		self.assertEqual((ssh.distro, ssh.distro_release, ssh.service_extra), ('ubuntu', '22.04', 'Ubuntu Linux; protocol 2.0'))
 		self.assertEqual(guessed.extra['method'], 'table')  # named from the port number, not probed
 		self.assertEqual(nmap_service.extract_nmap_inventory({'nmaprun': {'host': []}}), [])
@@ -82,29 +85,28 @@ class DbExposureEvidenceTests(TestCase):
 			sub.ip_addresses.add(ip)
 			self.subs.append(sub)
 
+	def check(self, answer):
+		from tests.test_db_exposure import db_probe_dispatch
+		with db_probe_dispatch(answer):
+			return dbx.run_db_exposure_checks(self.scan.id)
+
 	def test_thirty_names_on_one_address_are_probed_once(self):
 		calls = []
 
 		def probe(host, port):
 			calls.append((host, port))
-			dbx._note(host, port, 'PONG (redis 6.2.6)')
-			return True
-		out = dbx.run_db_exposure_checks(self.scan.id, checks={'redis': ('Redis', probe)})
+			return True, 'PONG (redis 6.2.6)'
+		out = self.check(probe)
 		self.assertEqual(calls, [('203.0.113.50', 6379)])
 		self.assertEqual(out, {'checked': 1, 'exposed': 1})
 
 	def test_each_host_keeps_a_finding_with_the_same_reply_as_evidence(self):
-		def probe(host, port):
-			dbx._note(host, port, 'PONG (redis 6.2.6)')
-			return True
-		dbx.run_db_exposure_checks(self.scan.id, checks={'redis': ('Redis', probe)})
+		self.check(lambda host, port: (True, 'PONG (redis 6.2.6)'))
 		self.assertEqual(Vulnerability.objects.filter(source='db_exposure').count(), 30)
 		vuln = Vulnerability.objects.filter(source='db_exposure').first()
 		self.assertEqual(vuln.extracted_results, ['PONG (redis 6.2.6)'])
 		self.assertIn('PONG (redis 6.2.6)', vuln.description)
 
-	def test_a_probe_that_found_nothing_open_makes_no_finding_and_no_stale_reply(self):
-		dbx.EVIDENCE[('203.0.113.50', 6379)] = 'left over'
-		out = dbx.run_db_exposure_checks(self.scan.id, checks={'redis': ('Redis', lambda h, p: False)})
+	def test_a_probe_that_found_nothing_open_makes_no_finding(self):
+		out = self.check(lambda h, p: False)
 		self.assertEqual((out, Vulnerability.objects.count()), ({'checked': 1, 'exposed': 0}, 0))
-		self.assertEqual(dbx.EVIDENCE, {})

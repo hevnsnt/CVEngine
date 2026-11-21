@@ -51,9 +51,7 @@ services:
     # command: watchmedo auto-restart --recursive --pattern="*.py" --directory="/usr/src/app/reNgine/" -- celery -A reNgine.tasks worker --autoscale=10,0 -l INFO
     volumes:
       - ./web:/usr/src/app
-      - github_repos:/usr/src/github
       - scan_results:/usr/src/scan_results
-      - nuclei_templates:/root/nuclei-templates
       - generated_templates:/root/cvengine-generated-templates  # validated AI-written templates survive an update
       - tool_config:/root/.config
     # every variable in .env reaches the container (the explicit entries below win, so the internal
@@ -108,9 +106,7 @@ services:
       - POSTGRES_HOST=${POSTGRES_HOST}
     volumes:
       - ./web:/usr/src/app
-      - github_repos:/usr/src/github
       - scan_results:/usr/src/scan_results
-      - nuclei_templates:/root/nuclei-templates
       - generated_templates:/root/cvengine-generated-templates  # validated AI-written templates survive an update
       - tool_config:/root/.config
     networks:
@@ -145,9 +141,7 @@ services:
       - POSTGRES_HOST=${POSTGRES_HOST}
     volumes:
       - ./web:/usr/src/app
-      - github_repos:/usr/src/github
       - scan_results:/usr/src/scan_results
-      - nuclei_templates:/root/nuclei-templates
       - generated_templates:/root/cvengine-generated-templates  # validated AI-written templates survive an update
       - tool_config:/root/.config
     ports:
@@ -164,7 +158,5 @@ networks:
 volumes:
   tool_config:
   postgres18_data:
-  nuclei_templates:
   generated_templates:
-  github_repos:
   scan_results:

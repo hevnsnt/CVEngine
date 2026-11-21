@@ -1,6 +1,7 @@
 """The pipeline's model calls, made by the AI reviewer container (docs/AI-REVIEWER.md): the server makes none itself.
 
-A stage that needs a model's answer (triage, ...) queues an ``AIJob`` instead of calling a provider, and carries on. The container takes
+A stage that needs a model's answer (triage, validation planning, template tag targeting, ...) queues an ``AIJob`` instead of calling a provider,
+and carries on. The container takes
 jobs over ``/api/v1/reviewer/jobs/next`` (``next_jobs``), calls the model and posts the answer to ``/api/v1/reviewer/jobs/<id>/result``
 (``submit``). A Celery task then continues the stage where it left off (``apply``): the answer is checked with the stage's own validator
 and applied exactly as the stage applied it when it called the model itself, or the stage's one retry is queued, or the failure is handled
@@ -28,6 +29,8 @@ from importlib import import_module
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
+from reNgine.state_machines import AI_ANSWERED, AI_APPLIED, AI_APPLYING, AI_EXPIRED, AI_FAILED, AI_JOB, AI_LEASED, AI_QUEUED
+
 logger = logging.getLogger(__name__)
 
 LEASE_MIN = 900                  # seconds a container holds a job at least
@@ -44,6 +47,7 @@ BATCH_BYTES = 6_000_000          # bytes of jobs handed out in one answer
 BATCH_MAX = 20
 WINDOW = 200                     # queued jobs looked at per hand-out (some may wait for tomorrow's budget)
 WAITING_AFTER = timedelta(minutes=15)  # a queued job older than this means the queue is not being served
+CALLED_RECENTLY = timedelta(minutes=5)  # the container asks every 15 seconds while it has nothing (a minute's resolution on last_seen): a call this recent means it is serving
 MEDIA_TYPES = ('image/png', 'image/jpeg', 'image/webp', 'image/gif')
 MODEL_NAME = re.compile(r'^[A-Za-z0-9._:/@+\-]{0,200}$')
 # What a failure may be called: the categories of the container's request layer (cvengine_reviewer.llm), which are the server's own from
@@ -64,6 +68,8 @@ HANDLERS = {
     'template_generation': 'cveFeed.templategen',
     'template_validation': 'cveFeed.templatevalidate',
     'host_review': 'cveFeed.host_review',
+    'validation_plan': 'cveFeed.validation_plan',
+    'nuclei_targeting': 'cveFeed.nuclei_templates',
 }
 
 
@@ -237,7 +243,7 @@ def _admit(job):
 
 def _expire(job, now, category='expired'):
     from cveFeed.models import AIJob
-    if not AIJob.objects.filter(pk=job.pk, status='queued').update(status='expired', finished_at=now, error_category=category):
+    if not AI_JOB.move(AIJob.objects.filter(pk=job.pk), AI_EXPIRED, only_from=(AI_QUEUED,), finished_at=now, error_category=category):
         return False
     hook = getattr(_handler(job.kind), 'job_expired', None)
     if hook is not None:
@@ -285,11 +291,11 @@ def release_expired(now=None):
     stale = list(AIJob.objects.filter(status='leased', lease_until__lt=now).values_list('pk', 'leases'))
     for pk, leases in stale:
         if leases >= MAX_LEASES:
-            if AIJob.objects.filter(pk=pk, status='leased').update(status='answered', result={'error': 'lease_expired'}, lease='',
-                                                                   error_category='lease_expired', answered_at=now):
+            if AI_JOB.move(AIJob.objects.filter(pk=pk), AI_ANSWERED, only_from=(AI_LEASED,), result={'error': 'lease_expired'}, lease='',
+                           error_category='lease_expired', answered_at=now):
                 _schedule(pk)
         else:
-            AIJob.objects.filter(pk=pk, status='leased', lease_until__lt=now).update(status='queued', lease='', lease_until=None)
+            AI_JOB.move(AIJob.objects.filter(pk=pk, lease_until__lt=now), AI_QUEUED, only_from=(AI_LEASED,), lease='', lease_until=None)
     return len(stale)
 
 
@@ -377,7 +383,9 @@ def submit(job_id, body, now=None):
 def _count_retries(job, rows):
     """A cut-off reply asked again is one more billable request for the stage's own daily budget: a triage's retry is written to the triage
     ledger as a repair is, so ``TRIAGE_MAX_PER_DAY`` counts what was billed. The other stages' budgets (one template draft per CVE per
-    week, ``TEMPLATE_GEN_MAX_PER_DAY`` a day, one detection attempt per CVE per week) count jobs, and a job makes at most two requests."""
+    week, ``TEMPLATE_GEN_MAX_PER_DAY`` a day with a draft's one repair round counted apart, one detection attempt per CVE per week, the
+    planning budgets with their repair rows, the template tag targeting cap from the usage rows themselves) count jobs, and one attempt of a job makes at most
+    two requests."""
     retried = sum(1 for r in rows if r.error_category == 'truncated_retried')
     if not retried or job.kind != 'triage':
         return
@@ -403,11 +411,11 @@ def apply(job_id):
     queues the job again with its new parts; otherwise the raw answer is dropped and the job is finished."""
     from cveFeed.models import AIJob
     now = timezone.now()
-    if not AIJob.objects.filter(pk=job_id, status='answered').update(status='applying', updated_at=now):
+    if not AI_JOB.move(AIJob.objects.filter(pk=job_id), AI_APPLYING, updated_at=now):
         return None
     job = AIJob.objects.get(pk=job_id)
     module = _handler(job.kind)
-    outcome, status = None, 'applied'
+    outcome, status = None, AI_APPLIED
     try:
         if 'text' in job.result:
             from cveFeed.secret_redaction import redact_text
@@ -416,18 +424,24 @@ def apply(job_id):
                 answer = redact_text(answer)
             outcome = module.job_answer(job, answer)
         else:
-            status = 'failed'
+            status = AI_FAILED
             module.job_failure(job, job.result.get('error') or 'unexpected_error', job.result)
     except Exception:  # noqa: BLE001 - a continuation that breaks fails its job, never the worker
         logger.exception('AI job %s (%s): could not apply the answer', job.pk, job.kind)
-        status, job.error_category = 'failed', 'apply_error'
+        status, job.error_category = AI_FAILED, 'apply_error'
+    # Each end is a move from applying only: the housekeeping pass may have given this job up as lost meanwhile (apply_lost, its stage already told),
+    # and a continuation that finishes after that does not overwrite it.
+    mine = AIJob.objects.filter(pk=job.pk)
     if isinstance(outcome, Retry):
-        job.packet = {**job.packet, 'parts': _clean_parts(outcome.parts)}
-        job.status, job.stage, job.attempt, job.result, job.leases = 'queued', str(outcome.stage)[:40], job.attempt + 1, {}, 0
-        job.save(update_fields=['packet', 'status', 'stage', 'attempt', 'result', 'leases', 'updated_at'])
+        if not AI_JOB.move(mine, AI_QUEUED, only_from=(AI_APPLYING,), packet={**job.packet, 'parts': _clean_parts(outcome.parts)},
+                           stage=str(outcome.stage)[:40], attempt=job.attempt + 1, result={}, leases=0, updated_at=timezone.now()):
+            logger.warning('AI job %s: its retry came after the job was given up as lost; it is not asked again', job.pk)
+            return 'lost'
         return 'retry'
-    job.status, job.result, job.packet, job.finished_at = status, {}, {}, timezone.now()  # the question (and any reply in it) goes too
-    job.save(update_fields=['status', 'result', 'packet', 'finished_at', 'error_category', 'updated_at'])
+    now = timezone.now()  # the question (and any reply in it) goes too
+    if not AI_JOB.move(mine, status, only_from=(AI_APPLYING,), result={}, packet={}, finished_at=now, error_category=job.error_category, updated_at=now):
+        logger.warning('AI job %s: it finished (%s) after it was given up as lost; it stays lost', job.pk, status)
+        return 'lost'
     return status
 
 
@@ -440,11 +454,19 @@ def housekeeping(now=None):
     for pk in AIJob.objects.filter(status='answered', answered_at__lt=now - APPLY_GRACE).values_list('pk', flat=True)[:200]:
         apply(pk)
         out['applied'] += 1
-    out['stuck'] = AIJob.objects.filter(status='applying', updated_at__lt=now - APPLY_STUCK).update(
-        status='failed', error_category='apply_lost', result={}, finished_at=now)
+    # A continuation that died (its worker was killed mid-apply): the job fails and its stage is told, as a failed call would be, so a stage that
+    # waits for the answer (a review, a template, a triage claim) does not wait for ever.
+    for job in AIJob.objects.filter(status=AI_APPLYING, updated_at__lt=now - APPLY_STUCK)[:200]:
+        if AI_JOB.move(AIJob.objects.filter(pk=job.pk, updated_at__lt=now - APPLY_STUCK), AI_FAILED, only_from=(AI_APPLYING,),
+                       error_category='apply_lost', result={}, finished_at=now, updated_at=now):
+            out['stuck'] += 1
+            try:
+                _handler(job.kind).job_failure(job, 'apply_lost', {})
+            except Exception:  # noqa: BLE001 - a stage that cannot be told never stops the housekeeping
+                logger.exception('AI job %s: its stage could not be told it was lost', job.pk)
     for job in AIJob.objects.filter(status='queued', created_at__lt=now - TTL)[:500]:
         out['expired'] += _expire(job, now)
-    AIJob.objects.filter(status__in=('applied', 'failed', 'expired'), finished_at__lt=now - KEEP).delete()
+    AIJob.objects.filter(status__in=(AI_APPLIED, AI_FAILED, AI_EXPIRED), finished_at__lt=now - KEEP).delete()
     return out
 
 
@@ -464,8 +486,30 @@ def waiting(now=None):
         if not status.get('token'):
             ok, why = False, 'the server has not handed the reviewer container its token yet'
         elif oldest and now - oldest > WAITING_AFTER:
-            ok, why = False, f"the reviewer container has not taken work for {minutes} minutes (last call: {status.get('last_seen') or 'never'})"
+            seen = _parsed(status.get('last_seen'))
+            if seen is not None and now - seen <= CALLED_RECENTLY:
+                # the container is asking and is handed nothing: the jobs are held back by their own stage (``job_admit``: a daily limit spent, a
+                # review from an earlier day), not left unserved. Said so, and not counted as the container being down.
+                why = (f'{count} AI job(s) queued, the oldest for {minutes} minutes: the reviewer container is taking work (last call: '
+                       f"{status.get('last_seen')}), and these are held back by their stage (a daily AI limit reached, or work not due yet)")
+            else:
+                ok, why = False, f"the reviewer container has not taken work for {minutes} minutes (last call: {status.get('last_seen') or 'never'})"
     return {'queued': count, 'oldest_minutes': minutes, 'serving': ok, 'why': why, 'waiting_for_reviewer': bool(count and not ok)}
+
+
+def _parsed(value):
+    """An ISO timestamp as an aware datetime, or None."""
+    if not value:
+        return None
+    try:
+        from django.utils.dateparse import parse_datetime
+        stamp = parse_datetime(str(value))
+    except (TypeError, ValueError):
+        return None
+    if stamp is not None and timezone.is_naive(stamp):
+        from datetime import timezone as utc_zone
+        stamp = stamp.replace(tzinfo=utc_zone.utc)
+    return stamp
 
 
 def waiting_message(state=None):

@@ -120,6 +120,22 @@ class EnrollmentTests(SentinelBase):
         self.assertEqual(status1, 201)
         self.assertEqual(status2, 403)
 
+    def test_enrollment_secret_outlasts_a_long_first_install(self):
+        """A first install builds the image and pulls the OpenVAS feeds before the Sentinel bootstraps: hours, not minutes. The secret lasts a day,
+        is still redeemable after two hours, and is refused once the day is over."""
+        from agentapi.models import SentinelEnrollment
+        before = timezone.now()
+        _, out = call(self.t['dana'], 'POST', '/api/v1/projects/sen-a/sentinels/enroll')
+        enrollment = SentinelEnrollment.objects.latest('pk')
+        self.assertGreaterEqual(enrollment.expires_at, before + timedelta(hours=24) - timedelta(seconds=5))
+        with mock.patch('django.utils.timezone.now', return_value=before + timedelta(hours=2)):
+            status, _ = call(None, 'POST', '/api/v1/sentinels/bootstrap', {'enrollment_token': out['enrollment_token'], 'name': 'slow-build'})
+        self.assertEqual(status, 201)
+        _, late = call(self.t['dana'], 'POST', '/api/v1/projects/sen-a/sentinels/enroll')
+        SentinelEnrollment.objects.filter(pk=SentinelEnrollment.objects.latest('pk').pk).update(expires_at=timezone.now() - timedelta(seconds=1))
+        status, _ = call(None, 'POST', '/api/v1/sentinels/bootstrap', {'enrollment_token': late['enrollment_token'], 'name': 'too-late'})
+        self.assertEqual(status, 403)
+
     def test_unknown_or_bad_secret_is_refused(self):
         status, _ = call(None, 'POST', '/api/v1/sentinels/bootstrap', {'enrollment_token': 'senr_not-a-real-one', 'name': 'x'})
         self.assertEqual(status, 403)
@@ -641,13 +657,28 @@ class McpToolTests(SentinelBase):
         self.assertIn('CVENGINE_SENTINEL_NETWORK=internal', setup['configure'])
         self.assertIn('COMPOSE_PROFILES=\\n', setup['configure'])  # light: no OpenVAS profile
         self.assertIn('./setup.sh --light --internal --blob', setup['configure_alternative'])
-        # one command a person pastes on the machine: clone, write .env, start
-        self.assertIn('git clone https://github.com/hevnsnt/cvengine-sentinel.git', setup['one_liner'])
-        self.assertIn(f"./setup.sh --light --internal --yes --name \"$(hostname -s)\" --blob '{out['blob']}'", setup['one_liner'])
-        self.assertTrue(setup['one_liner'].endswith('docker compose up -d'))
-        # a finished prompt for an AI agent: the blob and the choices already in it
+        # one command a person pastes on the machine: fetch install.sh to a file and run it (it makes the unprivileged cvengine user, clones into
+        # /opt/cvengine-sentinel as that user, writes .env, starts the stack); the blob goes in on stdin, never on a command line
+        one = setup['one_liner']
+        self.assertIn('curl -fsSL https://raw.githubusercontent.com/hevnsnt/cvengine-sentinel/main/install.sh -o "$f"', one)
+        self.assertIn('bash "$f" --light --internal --yes --name "$(hostname -s)" --blob - <<\'EOF\'\n' + out['blob'] + '\nEOF\n', one)
+        self.assertTrue(one.endswith('rm -f "$f"'))
+        self.assertNotIn('| sh', one)
+        self.assertNotIn('| bash', one)
+        self.assertNotIn(f"--blob '{out['blob']}'", one)  # not on a command line, where the process list shows it
+        self.assertNotIn('git clone', one)
+        self.assertEqual(setup['install_dir'], '/opt/cvengine-sentinel')
+        self.assertEqual(setup['migrate'], 'sudo /root/cvengine-sentinel/scripts/migrate-to-service-user.sh')
+        self.assertIn(setup['migrate'], setup['agent_prompt'])
+        self.assertIn(setup['migrate'], setup['note'])
+        # a finished prompt for an AI agent: the blob and the choices already in it, installing as the service user
         self.assertIn(out['blob'], setup['agent_prompt'])
-        self.assertIn('./setup.sh --light --internal --yes', setup['agent_prompt'])
+        self.assertIn('install.sh" --light --internal --yes --name "$(hostname -s)" --blob - <<\'EOF\'', setup['agent_prompt'])
+        self.assertIn('remote get-url origin', setup['agent_prompt'])
+        self.assertIn('exactly https://github.com/hevnsnt/cvengine-sentinel.git', setup['agent_prompt'])
+        self.assertIn('sudo -u cvengine docker compose ps', setup['agent_prompt'])
+        self.assertIn('equivalent to root', setup['agent_prompt'])
+        self.assertNotIn('cd cvengine-sentinel', setup['agent_prompt'])
         self.assertIn(out['server_url'], setup['agent_prompt'])
         self.assertNotIn('| sh', setup['agent_prompt'])
         self.assertIn('private network', setup['note'])

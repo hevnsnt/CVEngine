@@ -201,4 +201,4 @@ http:
 
     def test_a_malformed_template_never_breaks_the_test_run(self):
         with mock.patch('cveFeed.validation.approved_template', return_value=('http: [{matchers: [{type: word, words: 5}]}]', '')):
-            self.assertEqual(templategen.evidence_of_template('/templates/x.yaml'), B)
+            self.assertEqual(templategen.with_evidence('/templates/x.yaml', [{'host': 'h', 'vulnerable': True}])[0]['template_evidence'], B)

@@ -25,6 +25,8 @@ from agentapi import services as svc
 from agentapi.auth import SCOPE_SENTINEL
 from agentapi.models import ACTIVE_TASK_STATUSES, Agent, AgentTask
 from agentapi.services import ApiError, AssetFilter
+from reNgine.lifecycle import Refused
+from reNgine.state_machines import AGENT
 from tenancy import audit, roles
 
 logger = logging.getLogger(__name__)
@@ -53,7 +55,13 @@ MAX_CHECK_OUTPUT = 2000
 MAX_CHECKS = 20
 MAX_NOTE = 200
 RATES = {'register': (30, 3600), 'heartbeat': (120, 60), 'claim': (60, 60), 'report': (120, 60), 'release': (120, 60), 'queue': (30, 60)}
-ADMIN_STATUSES = ('active', 'suspended', 'revoked')
+ADMIN_STATUSES = ('active', 'suspended', 'revoked')  # what a person may set (reNgine.state_machines.AGENT says from which state)
+# ``code`` in the body of a 403 an agent acts on (beside ``error``, which stays the sentence it always was). ``token_revoked``: an administrator
+# revoked this agent; its token will never work again, so a Sentinel has to be enrolled again. ``agent_blocked``: the agent is fine and its token
+# too, but no work can be assigned now (it is pending or suspended, or its user is disabled, has to set up two-step sign-in, or its token is read
+# only or expired); ``reason`` says which. It waits and asks again; enrolling again would not help.
+TOKEN_REVOKED, AGENT_BLOCKED = 'token_revoked', 'agent_blocked'
+REVOKED_MESSAGE = 'this agent was revoked by an administrator'
 # The note the hold-back rule wrote before it named the agent that caused it: migrations 0008 and 0009 match it on agents already stored.
 INHERITED_SUSPENSION_NOTE = 'another agent of this user is suspended or revoked; an administrator must reinstate this one'
 HOLD_DAYS_DEFAULT = 30  # CVENGINE_AGENT_HOLD_DAYS: how long a suspension or revocation holds a user's new agents back (0: for as long as it stands)
@@ -147,7 +155,7 @@ def _agent_of(ctx, usable=True, write=True):
     if agent is None:
         raise ApiError(404, 'this token has no registered agent: call register_agent first')
     if usable and agent.status == 'revoked':
-        raise ApiError(403, 'this agent was revoked by an administrator')
+        raise ApiError(403, REVOKED_MESSAGE, code=TOKEN_REVOKED)
     if agent.token.user_id == getattr(ctx.user, 'pk', None) and getattr(ctx.user, 'mfa_checked_this_request', False):
         agent.token.user.mfa_checked_this_request = True  # the request's sign-in check already ran for this very user a moment ago: not asked again (``Eff._problem``)
     return agent
@@ -198,7 +206,7 @@ def register(ctx, body):
     _limit(token, 'register')
     agent = Agent.objects.filter(token=token).first()
     if agent and agent.status == 'revoked':
-        raise ApiError(403, 'this agent was revoked by an administrator')
+        raise ApiError(403, REVOKED_MESSAGE, code=TOKEN_REVOKED)
     fields = _parse_registration(body, creating=agent is None)
     if 'scope' in fields:
         _authorise(ctx.user, fields['scope'])
@@ -219,7 +227,10 @@ def register(ctx, body):
         for key in changed:
             setattr(agent, key, fields[key])
         if changed:
-            agent.save()
+            # only what the registration changes: never the status read above, which an administrator's suspend or revoke may have replaced
+            # since (a Sentinel registers again whenever its capabilities change), nor what a heartbeat wrote meanwhile
+            agent.save(update_fields=[*changed, 'updated_at'])
+            agent.refresh_from_db(fields=['status', 'status_note', 'limits'])
     if 'scope' in fields and token.assets != fields['scope']['hosts']:
         token.assets = fields['scope']['hosts']  # the remediation work list narrows to the same hosts, and stops doing so when they are cleared
         token.save(update_fields=['assets'])
@@ -332,7 +343,7 @@ def visible_hold(agent, viewer, decide=None):
 def _warnings(agent):
     scope = agent.scope or {}
     out = []
-    if not scope.get('orgs') and not scope.get('projects'):
+    if not scope.get('orgs') and not scope.get('projects') and not scope.get('instance'):  # an instance-wide scope covers every project
         out.append('the scope names no organization or project, so no work will be assigned; add orgs or projects (hosts narrow it further)')
     if agent.status == 'pending':
         out.append('this agent is waiting for an administrator to approve it: no work is assigned until then')
@@ -707,12 +718,19 @@ def _claimable(eff, kinds, now):
         if satisfiable else AgentTask.objects.none()
 
 
+def blocked(problem):
+    """The 403 for an agent that may not be handed work now (``Eff.problem``): ``code`` tells it apart from a revoked one (see ``AGENT_BLOCKED``)."""
+    return ApiError(403, f'no work can be assigned: {problem}', code=AGENT_BLOCKED, reason=problem)
+
+
 def _try_claim(agent, kinds, now, effs_cache):
     eff = effective(agent, now)
     if eff.problem:
-        raise ApiError(403, f'no work can be assigned: {eff.problem}')
+        raise blocked(eff.problem)
     with transaction.atomic():
-        Agent.objects.select_for_update().get(pk=agent.pk)  # one claim at a time per agent, so the concurrent limit holds
+        status = Agent.objects.select_for_update().values_list('status', flat=True).get(pk=agent.pk)  # one claim at a time per agent, so the concurrent limit holds
+        if status != 'active':  # suspended or revoked after the check above: the lock is what makes the check hold for this claim
+            raise blocked(f'the agent is {status}')
         counts = dict(AgentTask._base_manager.filter(status__in=('assigned', 'running')).values_list('agent_id').annotate(n=Count('id')))
         if counts.get(agent.pk, 0) >= eff.max_concurrent:
             return None, f'at capacity ({counts[agent.pk]} of {eff.max_concurrent} tasks in progress)'
@@ -776,7 +794,7 @@ def next_task(ctx, body=None):
             time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
             agent.refresh_from_db()
             if agent.status != 'active':
-                raise ApiError(403, f'no work can be assigned: the agent is {agent.status}')
+                raise blocked(f'the agent is {agent.status}')
     if not claimed:
         return {'task': None, 'reason': why, 'retry_after_seconds': 5 if wait == 0 else 1}
     task, match = claimed
@@ -872,9 +890,12 @@ def _apply_result(task, agent, user, result):
     summary = result['summary'] or 'no summary'
     _comment(task.project, match, user, f'Agent {agent.name} ({task.kind}, {task.mode}): {result["outcome"]}. {summary}')
     if task.kind == 'remediate' and result['outcome'] == 'fixed':
+        # The task ran for a while: a person may have closed the finding meanwhile (a false positive, an accepted risk). Their decision
+        # stands; the comment above still says what the agent reported.
+        from reNgine.state_machines import AGENT_MAY_FIX
         before = match.remediation_status
-        svc._apply_remediation(match, 'fixed', f'Fixed by agent {agent.name}: {summary}', user)
-        svc._record_status_change(task.project, 'match', match.pk, before, 'fixed', user, match.remediation_note)
+        if svc._apply_remediation(match, 'fixed', f'Fixed by agent {agent.name}: {summary}', user, only_from=AGENT_MAY_FIX):
+            svc._record_status_change(task.project, 'match', match.pk, before, 'fixed', user, match.remediation_note)
 
 
 def report_result(ctx, task_id, body):
@@ -1057,6 +1078,11 @@ def agent_dict(agent, detail=False, counts=None, viewer=None, builtin_id=_UNKNOW
         # slots: its concurrency limit, what it holds now and by kind (stored rows only, so the list stays cheap)
         held = counts.get('_held_by_kind', {})
         limit = min(agent.max_concurrent, (agent.limits or {}).get('max_concurrent') or agent.max_concurrent)
+        from agentapi import sentinel_machine
+        tuned = sentinel_machine.tuned_slots(agent)
+        limit = min(limit, tuned) if tuned else limit  # auto-tuning's number for this Sentinel, as the claim enforces it
+        out['machine'] = sentinel_machine.view(agent)  # its CPU, load and memory as it reports them (None for a client that does not)
+        out['tuning'] = sentinel_machine.tuning_view(agent)  # what auto-tuning set for it, pinned, and the machine's own ceiling
         out['slots'] = {'max': limit, 'in_use': sum(held.values()), 'free': max(0, limit - sum(held.values())), 'by_kind': held}
     if detail:
         if agent.kind == 'scanner':
@@ -1237,12 +1263,18 @@ def update_agent(ctx, agent_id, body):
         if 'settings' in body:
             from agentapi import sentinel_settings
             sentinel_settings.refuse_wider_raw(agent, body['settings'])
+    changes = {}  # only the fields this decision changes: a heartbeat writing info or update_requested_at meanwhile keeps what it wrote
     if 'status' in body:
         if body['status'] not in ADMIN_STATUSES:
             raise ApiError(400, f'status must be one of {", ".join(ADMIN_STATUSES)}')
+        if body['status'] != agent.status:
+            try:
+                AGENT.check(agent.status, body['status'])
+            except Refused as exc:
+                raise ApiError(409, str(exc))
         agent.status = body['status']
     if 'limits' in body:
-        agent.limits = _clean_limits(body['limits'])
+        agent.limits = changes['limits'] = _clean_limits(body['limits'])
     note = _text(body['note'], MAX_NOTE) if 'note' in body else None
     automatic = agent.status_inherited or agent.status_note == INHERITED_SUSPENSION_NOTE
     decided = 'status' in body and (agent.status != before['status'] or agent.status_inherited)
@@ -1250,16 +1282,24 @@ def update_agent(ctx, agent_id, body):
         # Approving or reinstating clears the reason the agent was held back, so an active agent is not shown with it; the automatic note of the
         # hold-back rule goes with any status an administrator sets, the same one included. An administrator's own reason stays when the agent
         # is suspended or revoked. (The admin dialog sends the note field back unchanged with every action, which counts as no new note.)
-        agent.status_note = ''
+        agent.status_note = changes['status_note'] = ''
     elif note is not None:
-        agent.status_note = note
+        agent.status_note = changes['status_note'] = note
     if decided:
         # an administrator's decision now, not the hold-back rule's, even when the status is the one the rule set: it then counts as a
         # suspension of its own (suspension_culprit) and stands when the agent that caused the hold is deleted
-        agent.status_changed_at = timezone.now()
+        agent.status_changed_at = changes['status_changed_at'] = timezone.now()
         agent.status_inherited, agent.held_by = False, None
-    agent.status_by = ctx.user
-    agent.save()
+        changes.update(status_inherited=False, held_by=None)
+    agent.status_by = changes['status_by'] = ctx.user
+    changes['updated_at'] = timezone.now()
+    row = Agent.objects.filter(pk=agent.pk)
+    if decided and AGENT.allowed(before['status'], agent.status):
+        # from the status this decision was made on, in one conditional UPDATE: a decision another administrator made meanwhile is not overwritten
+        if not AGENT.move(row, agent.status, only_from=(before['status'],), **changes):
+            raise ApiError(409, 'the agent changed while you decided (another administrator, or its own registration): reload it and decide again')
+    else:
+        row.update(**changes)
     if 'settings' in body:
         from agentapi import sentinel_settings
         sentinel_settings.set_managed(agent, body['settings'], ctx.user)

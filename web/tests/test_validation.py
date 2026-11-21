@@ -19,6 +19,42 @@ from startScan.models import Subdomain, Vulnerability
 from targetApp.models import Domain
 from tests import ai_queue
 
+
+def index_of(templates):
+	"""A template index (``cvengine_scanner.template_index``) of ``{path: text}``, with the verdicts the Sentinel library's generator records: the server
+	keeps no template files and judges an installed template from these."""
+	import hashlib
+
+	from cvengine_scanner import checks
+	reasons, entries = [], {}
+
+	def number(text):
+		if text and text not in reasons:
+			reasons.append(text)
+		return reasons.index(text) if text else None
+	for path, text in templates.items():
+		doc = yaml.safe_load(text)
+		tags = (doc.get('info') or {}).get('tags') or ''
+		tags = sorted({t.strip() for t in (tags if isinstance(tags, list) else str(tags).split(',')) if t.strip()})
+		entry = {'sha256': hashlib.sha256(text.encode()).hexdigest(), 'id': doc.get('id', ''), 'tags': tags}
+		tagged = sorted(set(tags) & set(scan_flags.NUCLEI_CREDENTIAL_TAGS))
+		for verdict, problem in (('ro', checks.readonly_problem(text, allow_credentials=True)), ('cred', checks.credential_problem(text)),
+								 ('ctag', f'template not validated: it is tagged {tagged[0]}, a check that sends credentials' if tagged else '')):
+			if problem:
+				entry[verdict] = number(problem)
+		entries[path] = entry
+	return {'nuclei_templates': 'test', 'rules': 1, 'reasons': reasons, 'templates': entries, 'sha256': hashlib.sha256(repr(sorted(entries.items())).encode()).hexdigest()}
+
+
+def using_index(templates):
+	from cvengine_scanner import template_index
+	return mock.patch.object(template_index, 'load', return_value=index_of(templates))
+
+
+def approved_paths():
+	from cvengine_scanner import template_index
+	return sorted(template_index.approved(*nuclei_scan.policy_flags()))
+
 GET_TEMPLATE = """
 id: cve-2099-1
 info: {name: x, severity: high, tags: cve-2099-1}
@@ -116,26 +152,17 @@ class CredentialInATemplateTests(TestCase):
 			ScanPolicy.objects.update(allow_credential_checks=True)
 			self.assertEqual(validation.installed_template_problem(login), '', everything)
 
-	def test_the_bundle_leaves_out_a_default_login_template_that_posts_a_body_password_until_the_switch_is_on(self):
-		"""FA-2a: the approved snapshot a Sentinel downloads (an older one has no tag filter of its own)."""
+	def test_the_approved_set_leaves_out_a_default_login_template_that_posts_a_body_password_until_the_switch_is_on(self):
+		"""FA-2a: the approved set a Sentinel builds from the template index (the server keeps no template files)."""
 		from dashboard.models import ScanPolicy
 		ScanPolicy.objects.create(nuclei_all_templates=True)
 		posting = "id: dl\ninfo: {name: x, severity: high, tags: 'default-login,vendor'}\nhttp:\n  - method: POST\n    path: [\"{{BaseURL}}/login\"]\n    body: 'user=admin&password=admin'\n    matchers:\n      - type: word\n        words: [ok]\n"
-		with tempfile.TemporaryDirectory() as root:
-			os.makedirs(os.path.join(root, 'http'))
-			for name, text in (('plain', GET_TEMPLATE), ('login', posting)):
-				with open(os.path.join(root, 'http', f'{name}.yaml'), 'w') as output:
-					output.write(text)
-			with mock.patch.object(templategen, 'TEMPLATES_ROOT', root):
-				nuclei_scan._APPROVED.update(value=None, root=None, rev=None, at=0)
-				directory, off_revision, count = nuclei_scan.approved_templates()
-				self.assertEqual((count, sorted(os.listdir(os.path.join(directory, 'http')))), (1, ['plain.yaml']))
-				ScanPolicy.objects.update(allow_credential_checks=True)
-				nuclei_scan._APPROVED.update(value=None, root=None, rev=None, at=0)
-				directory, on_revision, count = nuclei_scan.approved_templates()
-				self.assertEqual(count, 2)
-				self.assertNotEqual(off_revision, on_revision)  # the bundle hash changes with the switch
-
+		with using_index({'http/plain.yaml': GET_TEMPLATE, 'http/login.yaml': posting}):
+			self.assertEqual(approved_paths(), ['http/plain.yaml'])
+			off = nuclei_scan.approved_revision()
+			ScanPolicy.objects.update(allow_credential_checks=True)
+			self.assertEqual(approved_paths(), ['http/login.yaml', 'http/plain.yaml'])
+			self.assertNotEqual(off, nuclei_scan.approved_revision())  # the set's name changes with the switch
 	def test_an_installed_template_needs_the_switch_under_either_policy(self):
 		from dashboard.models import ScanPolicy
 		hostile = self.HOSTILE['basic']
@@ -147,23 +174,13 @@ class CredentialInATemplateTests(TestCase):
 			ScanPolicy.objects.update(allow_credential_checks=True)
 			self.assertEqual(validation.installed_template_problem(hostile), '', everything)
 
-	def test_the_approved_snapshot_leaves_such_a_template_out_until_the_switch_is_on(self):
+	def test_the_approved_set_leaves_such_a_template_out_until_the_switch_is_on(self):
 		from dashboard.models import ScanPolicy
 		ScanPolicy.objects.create(nuclei_all_templates=True)
-		with tempfile.TemporaryDirectory() as root:
-			os.makedirs(os.path.join(root, 'http'))
-			for name, text in (('plain', GET_TEMPLATE), ('basic', self.HOSTILE['basic'])):
-				with open(os.path.join(root, 'http', f'{name}.yaml'), 'w') as output:
-					output.write(text)
-			with mock.patch.object(templategen, 'TEMPLATES_ROOT', root):
-				nuclei_scan._APPROVED.update(value=None, root=None, rev=None, at=0)
-				directory, _revision, count = nuclei_scan.approved_templates()
-				self.assertEqual((count, sorted(os.listdir(os.path.join(directory, 'http')))), (1, ['plain.yaml']))
-				ScanPolicy.objects.update(allow_credential_checks=True)
-				nuclei_scan._APPROVED.update(value=None, root=None, rev=None, at=0)
-				directory, _revision, count = nuclei_scan.approved_templates()
-				self.assertEqual(count, 2)
-
+		with using_index({'http/plain.yaml': GET_TEMPLATE, 'http/basic.yaml': self.HOSTILE['basic']}):
+			self.assertEqual(approved_paths(), ['http/plain.yaml'])
+			ScanPolicy.objects.update(allow_credential_checks=True)
+			self.assertEqual(approved_paths(), ['http/basic.yaml', 'http/plain.yaml'])
 	def test_an_ai_written_check_never_gets_the_switch(self):
 		from agentapi import ai_checks
 		from dashboard.models import ScanPolicy
@@ -199,95 +216,35 @@ class AllTemplatesSettingTests(TestCase):
 		with open(os.path.join(directory, 'write.yaml'), 'w') as output:
 			output.write(GET_TEMPLATE.replace('method: GET', 'method: POST'))
 
-	def test_the_snapshot_follows_the_setting_without_waiting_for_the_cache(self):
-		import shutil
+	def test_the_approved_set_follows_the_setting_without_waiting_for_a_cache(self):
 		from dashboard.models import ScanPolicy
-		with tempfile.TemporaryDirectory() as directory:
-			self.library(directory)
-			with mock.patch.object(templategen, 'TEMPLATES_ROOT', directory), mock.patch.dict(nuclei_scan._APPROVED,
-				{'root': None, 'at': 0, 'value': None}), mock.patch.object(nuclei_scan, '_report_policy'):
-				snapshots = []
-				try:
-					snapshots.append(nuclei_scan.approved_templates())
-					self.assertEqual(snapshots[0][2], 1)
-					ScanPolicy.objects.update(nuclei_all_templates=True)
-					snapshots.append(nuclei_scan.approved_templates())
-					self.assertEqual(snapshots[1][2], 2)
-					self.assertTrue(os.path.isfile(os.path.join(snapshots[1][0], 'write.yaml')))
-					self.assertNotEqual(snapshots[0][1], snapshots[1][1])
-					ScanPolicy.objects.update(nuclei_all_templates=False)
-					self.assertEqual(nuclei_scan.approved_templates()[2], 1)
-				finally:
-					for snapshot in snapshots:
-						shutil.rmtree(snapshot[0], ignore_errors=True)
-					for path, _ in nuclei_scan._APPROVED.get('retained', []):
-						shutil.rmtree(path, ignore_errors=True)
-
+		with using_index({'safe.yaml': GET_TEMPLATE, 'write.yaml': GET_TEMPLATE.replace('method: GET', 'method: POST')}):
+			first = nuclei_scan.approved_revision()
+			self.assertEqual(approved_paths(), ['safe.yaml'])
+			ScanPolicy.objects.update(nuclei_all_templates=True)
+			self.assertEqual(approved_paths(), ['safe.yaml', 'write.yaml'])
+			self.assertNotEqual(first, nuclei_scan.approved_revision())
+			ScanPolicy.objects.update(nuclei_all_templates=False)
+			self.assertEqual(approved_paths(), ['safe.yaml'])
 	def test_a_template_that_is_not_read_only_runs_for_validation_only_when_allowed(self):
 		from dashboard.models import ScanPolicy
-		with tempfile.TemporaryDirectory() as directory:
-			self.library(directory)
-			path = os.path.join(directory, 'write.yaml')
-			with mock.patch.object(templategen, 'TEMPLATES_ROOT', directory):
-				self.assertIn('not read-only', validation.approved_template(path)[1])
-				ScanPolicy.objects.update(nuclei_all_templates=True)
-				text, problem = validation.approved_template(path)
-				self.assertEqual(problem, '')
-				self.assertIn('POST', text)
-
+		ref = templategen.INSTALLED_PREFIX + 'write.yaml'
+		with using_index({'safe.yaml': GET_TEMPLATE, 'write.yaml': GET_TEMPLATE.replace('method: GET', 'method: POST')}):
+			self.assertIn('not read-only', validation.approved_template(ref)[1])
+			ScanPolicy.objects.update(nuclei_all_templates=True)
+			self.assertEqual(validation.approved_template(ref), ('', ''))  # approved; its text is read by the Sentinel from its own image
 	def test_the_coverage_key_changes_with_the_setting(self):
 		from dashboard.models import ScanPolicy
-		with tempfile.TemporaryDirectory() as directory:
-			self.library(directory)
-			with mock.patch.object(templategen, 'TEMPLATES_ROOT', directory), mock.patch('cveFeed.validation.resolve_template',
-				return_value=(os.path.join(directory, 'safe.yaml'), '')):
-				before = nuclei_scan.cve_service('CVE-2099-1')
-				ScanPolicy.objects.update(nuclei_all_templates=True)
-				self.assertNotEqual(nuclei_scan.cve_service('CVE-2099-1'), before)
-
+		with using_index({'safe.yaml': GET_TEMPLATE}), mock.patch('cveFeed.validation.resolve_template', return_value=(templategen.INSTALLED_PREFIX + 'safe.yaml', '')):
+			before = nuclei_scan.cve_service('CVE-2099-1')
+			ScanPolicy.objects.update(nuclei_all_templates=True)
+			self.assertNotEqual(nuclei_scan.cve_service('CVE-2099-1'), before)
 	def test_a_database_error_leaves_the_read_only_policy_in_force(self):
 		with mock.patch('dashboard.models.ScanPolicy.current', side_effect=RuntimeError('db down')):
 			self.assertFalse(validation.all_templates_allowed())
 
 
 class ReadOnlyTemplateTests(unittest.TestCase):
-	@mock.patch('cveFeed.validation.all_templates_allowed', return_value=False)  # the restricted policy an App Admin can choose
-	def test_broad_pass_uses_snapshot_of_only_approved_templates(self, _restricted):
-		import shutil
-		with tempfile.TemporaryDirectory() as directory:
-			with open(os.path.join(directory, 'safe.yaml'), 'w') as output:
-				output.write(GET_TEMPLATE)
-			with open(os.path.join(directory, 'write.yaml'), 'w') as output:
-				output.write(GET_TEMPLATE.replace('method: GET', 'method: POST'))
-			with mock.patch.object(templategen, 'TEMPLATES_ROOT', directory), mock.patch.dict(nuclei_scan._APPROVED,
-				{'root': None, 'at': 0, 'value': None}), mock.patch.object(nuclei_scan, '_report_policy') as report:
-				approved, revision, count = nuclei_scan.approved_templates()
-				self.assertEqual(report.call_args.args[1:3], (1, {'http method POST is not read-only': 1}))
-				try:
-					self.assertEqual(count, 1)
-					self.assertTrue(os.path.isfile(os.path.join(approved, 'safe.yaml')))
-					self.assertFalse(os.path.exists(os.path.join(approved, 'write.yaml')))
-					self.assertIn('-ni', scan_flags.nuclei_flags(templates_dir=approved))
-				finally:
-					shutil.rmtree(approved, ignore_errors=True)
-
-	def test_policy_report_logs_an_excluded_essential_template_as_failed_once_per_revision(self):
-		from django.core.cache import cache
-		cache.delete('cvengine:nuclei-policy-logged:rev-a')
-		with mock.patch('cveFeed.activity.log') as log, self.assertLogs('cveFeed.nuclei_scan', 'ERROR'):
-			nuclei_scan._report_policy('rev-a', 10, {"forbidden key 'host-redirects'": 4},
-									   {'http/technologies/tech-detect.yaml': "forbidden key 'host-redirects'"})
-			nuclei_scan._report_policy('rev-a', 10, {"forbidden key 'host-redirects'": 4},
-									   {'http/technologies/tech-detect.yaml': "forbidden key 'host-redirects'"})
-		log.assert_called_once()
-		self.assertEqual(log.call_args.kwargs['status'], 'failed')
-		self.assertIn('tech-detect.yaml', log.call_args.args[1])
-		self.assertIn('approved 10 of 14', log.call_args.args[1])
-		cache.delete('cvengine:nuclei-policy-logged:rev-b')
-		with mock.patch('cveFeed.activity.log') as log:
-			nuclei_scan._report_policy('rev-b', 10, {'x': 1}, {})
-		self.assertEqual(log.call_args.kwargs['status'], 'done')
-
 	def test_template_revision_changes_coverage_keys(self):
 		with tempfile.TemporaryDirectory() as directory:
 			path = os.path.join(directory, 'cve.yaml')
@@ -467,8 +424,8 @@ class TemplateResolutionTests(TestCase):
 	def setUp(self):
 		from dashboard.models import ScanPolicy
 		ScanPolicy.objects.create(nuclei_all_templates=False)  # the restricted policy: only read-only templates run
-		self.installed, self.generated = tempfile.mkdtemp(), tempfile.mkdtemp()
-		patches = [mock.patch.object(templategen, 'TEMPLATES_ROOT', self.installed), mock.patch.object(templategen, 'GENERATED_DIR', self.generated)]
+		self.generated = tempfile.mkdtemp()
+		patches = [mock.patch.object(templategen, 'GENERATED_DIR', self.generated)]
 		for p in patches:
 			p.start()
 			self.addCleanup(p.stop)
@@ -484,15 +441,13 @@ class TemplateResolutionTests(TestCase):
 		return path
 
 	def test_an_installed_read_only_template_is_used(self):
-		path = self.write(self.installed, 'CVE-2099-1.yaml', GET_TEMPLATE)
-		self.assertEqual(validation.resolve_template('CVE-2099-1'), (path, ''))
-
+		with using_index({'http/cves/2099/CVE-2099-1.yaml': GET_TEMPLATE}):
+			self.assertEqual(validation.resolve_template('CVE-2099-1'), (templategen.INSTALLED_PREFIX + 'http/cves/2099/CVE-2099-1.yaml', ''))
 	def test_an_installed_post_template_is_refused(self):
-		self.write(self.installed, 'CVE-2099-1.yaml', GET_TEMPLATE.replace('method: GET', 'method: POST'))
-		path, reason = validation.resolve_template('CVE-2099-1')
+		with using_index({'http/cves/2099/CVE-2099-1.yaml': GET_TEMPLATE.replace('method: GET', 'method: POST')}):
+			path, reason = validation.resolve_template('CVE-2099-1')
 		self.assertEqual(path, '')
 		self.assertIn('POST', reason)
-
 	def test_a_generated_template_needs_a_valid_row_and_the_gate(self):
 		path = self.write(self.generated, 'cve-2099-1.yaml', GET_TEMPLATE)
 		self.assertEqual(validation.resolve_template('CVE-2099-1')[0], '')  # no row at all
@@ -531,8 +486,7 @@ class ValidationBase(TestCase):
 		self.domain = Domain.objects.create(name='v.test', project=self.project, insert_date=timezone.now())
 		self.cve = CVEEntry.objects.create(cve_id='CVE-2099-1', kev=True, cvss=9.8, published_at=timezone.now(),
 										   affected=[{'product': 'nginx', 'ranges': [{'introduced': '1.0.0', 'fixed': '1.20.0'}]}])
-		for patched in (mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False),
-						mock.patch('targetApp.target_types.is_scannable_ip', return_value=True),
+		for patched in (mock.patch('targetApp.target_types.is_scannable_ip', return_value=True),
 						mock.patch('cveFeed.activity.log', return_value=None),
 						mock.patch('cveFeed.notify._send', return_value=False)):
 			patched.start()
@@ -825,7 +779,7 @@ class RunValidationTests(ValidationBase):
 		self.match()
 		(row,) = self.rows()
 		runners, calls = self.runners()
-		with mock.patch('targetApp.target_types.resolves_to_blocked', return_value=True):
+		with mock.patch('targetApp.target_types.scannable_hosts', return_value=[]):  # the host filter refuses it (an exclusion, a prohibited address)
 			stats, _ = self.run_validation(runners=(runners, calls))
 		row.refresh_from_db()
 		self.assertEqual(calls, [])

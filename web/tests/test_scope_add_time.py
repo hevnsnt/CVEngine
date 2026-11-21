@@ -223,9 +223,8 @@ class AddTimeScopeTests(TestCase):
 			def dispatch(project, kind, target, scan, on_partial, **kwargs):
 				seen[target['domain']] = target['strict_scope']
 				return {'result': {'outcome': 'done', 'partials': 0, 'mode': 'standard'}, 'consumed': 0}
-			with mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False), \
-					mock.patch('agentapi.sentinel_stream.dispatch_stream', side_effect=dispatch), \
-					mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.correlate_cves.delay'):
+			with mock.patch('agentapi.sentinel_stream.dispatch_stream', side_effect=dispatch), \
+					mock.patch('cveFeed.tasks.correlate_cves.delay'):
 				discovery.run_discovery(scan.id)
 		self.assertEqual(seen, {'strict.example': True, 'loose.example': False})
 
@@ -239,8 +238,7 @@ class EnforcementBase(TestCase):
 		self.engine = EngineType.objects.create(engine_name='e', yaml_configuration='x', default_engine=True)
 		self.exact = Domain.objects.create(name='exact.test', project=self.project, insert_date=NOW(), scope_mode=Domain.SCOPE_HOST)
 		self.wide = Domain.objects.create(name='wide.test', project=self.project, insert_date=NOW())
-		for p in (mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False), mock.patch('reNgine.tasks.geo_localize.delay'),
-				mock.patch('cveFeed.tasks.correlate_cves.delay'), mock.patch('cveFeed.tasks.run_hygiene_task.delay')):
+		for p in (mock.patch('cveFeed.tasks.correlate_cves.delay'), mock.patch('cveFeed.tasks.run_hygiene_task.delay')):
 			p.start()
 		self.addCleanup(mock.patch.stopall)
 

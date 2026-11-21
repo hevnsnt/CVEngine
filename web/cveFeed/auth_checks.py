@@ -8,8 +8,8 @@ no read returns one, only the header names.
 
 The scope guard is ``AuthScope.credential``: a credential goes to a request only when its destination host is exactly the host it
 was stored for (or, for a target-wide one, the target's own name or one of its subdomains), the destination ``scheme:port`` is one of
-its origins, and it has not expired. Callers run the normal vetting first (``pinned_transport.resolve``,
-``target_types.scannable_hosts``, exclusions); this module never widens what those allow.
+its origins, and it has not expired. Callers run the normal vetting first (``target_types.scannable_hosts``,
+exclusions; the Sentinel judges every address a name resolves to); this module never widens what those allow.
 
 The in-process route check sends a stored sign-in over HTTPS only when its own TLS connection verifies, unless the owner switched on
 ``allow_untrusted_certificate``. Nuclei's HTTP client does not verify TLS on its request, so a separate certificate preflight cannot

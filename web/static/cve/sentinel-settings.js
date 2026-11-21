@@ -16,6 +16,7 @@ import {
   text,
   toast,
 } from "/staticfiles/cve/ui.js";
+import { machineText, sentinelTuningText } from "/staticfiles/cve/config-maxxing-logic.js";
 
 export const SENTINEL_KINDS = [
   "nmap",
@@ -52,6 +53,9 @@ export const SENTINEL_KINDS = [
   "identity_check",
   "web_screenshot",
   "ssh_probe",
+  "java_runtime",
+  "version_read",
+  "version_digest",
   "wpscan_thorough",
 ];
 const KIND_WORDS = {
@@ -89,6 +93,9 @@ const KIND_WORDS = {
   identity_check: "name and certificate reads",
   web_screenshot: "web screenshots",
   ssh_probe: "SSH inspection",
+  java_runtime: "Java runtime reads",
+  version_read: "version source reads",
+  version_digest: "edge appliance build reads",
   wpscan_thorough: "thorough WordPress scan",
 };
 const MAX_CONCURRENT = 10; // agent_broker.MAX_CONCURRENT_CAP; the server says so in its 400 if this changes
@@ -490,6 +497,10 @@ export function versionBlock(d, { onChange, builtin = false }) {
   if (d.credential_filter && d.credential_filter.note) box.append(el("p", "msg err ss-detail", d.credential_filter.note));
   if (d.contract && d.contract.note)
     box.append(el("p", d.contract.state === "unsupported" ? "msg err ss-detail" : "note ss-detail", d.contract.note));
+  const machine = machineText(d.machine);
+  if (machine) box.append(el("p", "note ss-detail", `Machine: ${machine}.`));
+  const tuning = sentinelTuningText(d.tuning);
+  if (tuning) box.append(el("p", "note ss-detail", `${tuning}.`));
   box.append(...waitingLines(d));
   const held = spoolLine(d);
   if (held) box.append(held);
@@ -529,8 +540,8 @@ export function versionBlock(d, { onChange, builtin = false }) {
     "btn sm ghost",
   );
   now.title = MANUAL_NOTE;
-  now.disabled =
-    pending || ["waiting", "draining", "updating"].includes(u.status);
+  // `waiting` is what the updater reports every hour while Manual mode waits for an administrator: exactly when Update now is needed
+  now.disabled = pending || ["draining", "updating"].includes(u.status);
   if (!builtin) actions.append(now);
   if (d.settings)
     actions.append(

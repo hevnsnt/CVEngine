@@ -1,0 +1,37 @@
+{
+  "outcome": "done",
+  "reads": [
+    {
+      "id": "grafana.example.com|vsrc|grafana|https://grafana.example.com",
+      "answers": [
+        {"path": "/api/health", "status": 200, "content_type": "application/json", "bytes": 70, "truncated": false, "headers": {},
+         "json": {"version": "10.2.3", "database": "ok", "commit": "1e84fede543acc892d2a2515187e545eb047f237"}}
+      ]
+    },
+    {
+      "id": "git.example.com|vsrc|gitea|https://git.example.com",
+      "answers": [
+        {"path": "/api/v1/version", "status": 200, "content_type": "application/json", "bytes": 22, "truncated": false, "headers": {},
+         "json": {"version": "1.21.4"}},
+        {"path": "/api/v1/cvengine-control-1a2b3c4d5e6f", "status": 404, "content_type": "application/json", "bytes": 64, "truncated": false,
+         "headers": {}, "json": {}}
+      ]
+    },
+    {
+      "id": "metrics.example.com|vsrc|prometheus-metrics|http://metrics.example.com:9100",
+      "answers": [
+        {"path": "/metrics", "status": 200, "content_type": "text/plain", "bytes": 91234, "truncated": false,
+         "headers": {"content-type": "text/plain; version=0.0.4; charset=utf-8"},
+         "lines": ["go_info{version=\"go1.21.5\"}", "node_exporter_build_info{goversion=\"go1.21.5\",revision=\"7333465abf9efba81876303bb57e6fadb946041b\",version=\"1.7.0\"}"]}
+      ]
+    },
+    {
+      "id": "shop.example.com|vsrc|aspnet-error|https://shop.example.com",
+      "answers": [
+        {"path": "/cvengine-probe-404.aspx", "status": 0, "error": "TimeoutError"}
+      ]
+    }
+  ],
+  "touched": ["grafana.example.com", "git.example.com", "metrics.example.com", "shop.example.com"],
+  "refused": []
+}

@@ -7,9 +7,11 @@ service. The token (an Export API token, ``ET...``; organization and account tok
 Everything the API returns is untrusted data: it is read in bounded chunks, parsed leniently, and every field is typed and clipped
 before it leaves this module, so a malformed or hostile reply degrades to "fewer records", never to an exception or a huge value.
 
-Endpoints used (https://console.runzero.com/api/v1.0): ``GET /export/org/assets.json`` and ``/export/org/vulnerabilities.json``
-with ``search`` (runZero inventory search syntax), ``fields`` (comma separated), ``page_size`` and ``start_key``. With ``page_size``
-the reply is ``{"assets": [...], "next_key": "..."}`` (``"vulnerabilities"`` for the second); without it, a bare array.
+Endpoints used (https://console.runzero.com/api/v1.0): ``GET /export/org/assets.json``, ``/export/org/vulnerabilities.json`` and
+``/export/org/services.json`` with ``search`` (runZero inventory search syntax), ``fields`` (comma separated), ``page_size`` and ``start_key``.
+With ``page_size`` the reply is ``{"assets": [...], "next_key": "..."}`` (``"vulnerabilities"``, ``"services"`` for the others); without it, a
+bare array. A service record's ``service_data`` is runZero's attribute map for that port: its fingerprint keys are Rapid7 Recog's parameter
+names (``service.vendor``, ``service.product``, ``service.version``, ``service.cpe23``), the same ones ``cveFeed.recog`` reads.
 """
 import ipaddress
 import json
@@ -38,6 +40,14 @@ CVE_RE = re.compile(r'\bCVE-\d{4}-\d{4,7}\b', re.I)
 
 ASSET_FIELDS = ('id', 'addresses', 'addresses_extra', 'names', 'os', 'os_version', 'hw', 'type', 'tags', 'site_name', 'alive',
                 'last_seen')
+SERVICE_FIELDS = ('service_asset_id', 'service_address', 'service_port', 'service_transport', 'service_protocol', 'service_data',
+                  'service_updated_at', 'last_seen')
+# only the services runZero read a version on: the rest say nothing a reading could, and every page is a call of the daily quota
+SERVICE_SEARCH = 'has:"service.version"'
+SERVICE_PAGE_SIZE = 250  # a service carries its whole attribute map (banners, headers): smaller pages stay far below MAX_BODY_BYTES
+# the fingerprint attributes of a service kept (Recog's parameter names); everything else in service_data (banners, keys, headers) is dropped
+SERVICE_ATTR_RE = re.compile(r'^(?:service|service\.component)\.(?:vendor|product|version|family|cpe23)$')
+MAX_SERVICE_ATTRS = 12
 VULN_FIELDS = ('vulnerability_cve', 'vulnerability_name', 'vulnerability_severity', 'vulnerability_cvss3_base_score',
                'vulnerability_service_address', 'vulnerability_service_port', 'vulnerability_service_transport', 'addresses',
                'vulnerability_asset_id')
@@ -136,6 +146,32 @@ def parse_asset(raw):
             'os': _text(raw.get('os'), 100), 'os_version': _text(raw.get('os_version'), 100), 'hw': _text(raw.get('hw'), 100),
             'type': _text(raw.get('type'), 60), 'tags': _tags(raw.get('tags')), 'site': _text(raw.get('site_name'), 100),
             'alive': alive if isinstance(alive, bool) else None, 'last_seen': _time(raw.get('last_seen'))}
+
+
+def parse_service(raw):
+    """One versioned service as ``{address, port, transport, protocol, asset_id, attributes, updated}``, or None: a service with no valid
+    address, no TCP or UDP port, or no product named with a version (``attributes`` holds only the fingerprint keys of ``SERVICE_ATTR_RE``,
+    each clipped)."""
+    if not isinstance(raw, dict):
+        return None
+    address = _ips(raw.get('service_address'), 1)
+    port = _port(raw.get('service_port'))
+    transport = _text(raw.get('service_transport'), 10).lower()
+    data = raw.get('service_data')
+    if not address or port is None or transport not in ('tcp', 'udp') or not isinstance(data, dict):
+        return None
+    attributes = {}
+    for key in sorted(k for k in list(data)[:500] if isinstance(k, str) and SERVICE_ATTR_RE.match(k)):
+        value = _text(data[key], 200)
+        if value and '{' not in value:  # a Recog template left unfilled ("{service.version}") is no value
+            attributes[key] = value
+        if len(attributes) >= MAX_SERVICE_ATTRS:
+            break
+    if not any(attributes.get(f'{part}.product') and attributes.get(f'{part}.version') for part in ('service', 'service.component')):
+        return None
+    return {'address': address[0], 'port': port, 'transport': transport, 'protocol': _text(raw.get('service_protocol'), 60),
+            'asset_id': _text(raw.get('service_asset_id'), 64), 'attributes': attributes,
+            'updated': _time(raw.get('service_updated_at')) or _time(raw.get('last_seen'))}
 
 
 def parse_vulnerability(raw):
@@ -266,10 +302,10 @@ class Client:
         except (ValueError, RecursionError):
             raise RunZeroError('bad_response', 'runZero sent a reply that is not valid JSON')
 
-    def _pages(self, path, key, search, fields, limit):
+    def _pages(self, path, key, search, fields, limit, page_size=PAGE_SIZE):
         """Yield raw records across pages, at most ``limit``. A reply that is a bare array is one page; a missing, empty or
         repeated ``next_key`` ends the walk, so a hostile server cannot loop us."""
-        params = {'page_size': PAGE_SIZE}
+        params = {'page_size': page_size}
         if search:
             params['search'] = search
         if fields:
@@ -327,4 +363,14 @@ class Client:
         for record in self._pages('/export/org/vulnerabilities.json', 'vulnerabilities', _text(search, 300), VULN_FIELDS, limit):
             raw += 1
             out.extend(parse_vulnerability(record))
+        return out, raw >= limit
+
+    def fetch_services(self, search=SERVICE_SEARCH, limit=MAX_RECORDS):
+        """``(services, truncated)``: every versioned service runZero lists (``parse_service``), and whether the limit cut the list short."""
+        out, raw = [], 0
+        for record in self._pages('/export/org/services.json', 'services', _text(search, 300), SERVICE_FIELDS, limit, page_size=SERVICE_PAGE_SIZE):
+            raw += 1
+            service = parse_service(record)
+            if service:
+                out.append(service)
         return out, raw >= limit

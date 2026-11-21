@@ -149,8 +149,8 @@ def batch_size_for(project):
 
     * a project a host-narrowed Sentinel covers (``agentapi.sentinel_broker.host_narrowed``): a task naming many hosts can be claimed by a Sentinel
       that only some of them are in the scope of, so those hosts keep one pipeline run, and one task, each;
-    * a project no live Sentinel covers (``project_slots`` is 0): the work runs on this server, where nmap and nuclei are held to a few at once
-      (``heavy_job``), so a big batch only multiplies the wall time of one run and what a kill at the time limit takes with it."""
+    * a project no live Sentinel covers (``project_slots`` is 0): the work waits for a Sentinel, and a big batch would only grow what one late
+      or expired task leaves undone."""
     size = batch_size()
     if size > 1:
         try:

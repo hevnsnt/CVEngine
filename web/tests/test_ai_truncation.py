@@ -24,8 +24,7 @@ CUT = SHAPES['thinking_only_max_tokens']
 OK = SHAPES['text_only']
 
 # Stages that need no answer room of their own, and why. Every other stage of ``ai_prompts.STAGES`` must be in ``STAGE_ANSWER_CAPS``.
-EXEMPT = {'nuclei_tag_selection': 'answered on the default room and asked once more by complete_with_headroom (tests/test_ai_empty_response.py RetryTests)',
-          'nuclei_targeting': 'answered on the default room and asked once more by complete_with_headroom (tests/test_ai_empty_response.py RetryTests)',
+EXEMPT = {'nuclei_tag_selection': 'retired (the scan-wide tags are the static table): the stage names older usage rows only',
           'connection_test': 'a fixed ping with a one-word answer, sent from the Settings page; nothing is retried or stored by it'}
 
 

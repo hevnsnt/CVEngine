@@ -227,7 +227,8 @@ class DispatchBudgetTests(SentinelBase):
 class AdoptionTests(SentinelBase):
     def setUp(self):
         super().setUp()
-        _, self.agent = register_sentinel(self.t['dana'], name='adopt-sentinel', capabilities=['nmap', 'naabu', 'nuclei_light', 'nuclei_targeted', 'testssl'])
+        _, self.agent = register_sentinel(self.t['dana'], name='adopt-sentinel', capabilities=['nmap', 'naabu', 'nuclei_light', 'nuclei_targeted', 'testssl'],
+                                          info={'contract_version': 11})  # new enough for nuclei work (the template index)
         self.agent_row = Agent.objects.get(pk=self.agent['id'])
         self.url = '/api/v1/sentinel/tasks/{}/result'
 
@@ -417,6 +418,28 @@ class AdoptionTests(SentinelBase):
         task.refresh_from_db()
         self.assertEqual(task.status, 'failed')
         self.assertFalse(self.ip().ports.exists())
+
+    def test_a_sentinel_that_releases_a_task_cannot_make_its_late_result_adoptable_by_the_reason_it_gives(self):
+        """Security review LOW 2: the release reason was stored as the task's error as sent, so a Sentinel could give one of the server's own
+        late-servable reasons and have the result it sent afterwards adopted. Its words now always follow ``released by the Sentinel: ``."""
+        for reason in sentinels.LATE_SERVABLE_ERRORS + ('cancelled by a person',):
+            with self.subTest(reason):
+                task = self.held(status='claimed')
+                status, out = call(self.t['dana'], 'POST', f'/api/v1/sentinel/tasks/{task.pk}/release', {'reason': reason})
+                self.assertEqual(status, 200, out)
+                task.refresh_from_db()
+                self.assertEqual((task.status, task.error), ('expired', f'released by the Sentinel: {reason}'))
+                self.assertFalse(sentinels.late_servable(task))
+                self.assertEqual(sentinels.task_outcome(task), 'released by the Sentinel')
+                self.interrupted()
+                status, out = self.report(task)
+                self.assertEqual(status, 200, out)
+                self.assertNotEqual(out.get('adopted'), True)
+                task.refresh_from_db()
+                self.assertEqual(task.status, 'expired')
+        self.assertFalse(self.ip().ports.exists())
+        self.assertEqual(sentinels.release_reason(''), 'released by the Sentinel')
+        self.assertEqual(sentinels.release_reason('  '), 'released by the Sentinel')
 
 
 class DrainQueryTests(TestCase):

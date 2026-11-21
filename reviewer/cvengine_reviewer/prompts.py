@@ -84,13 +84,12 @@ measurements show a problem a listed setting addresses, prefer lowering under tr
 
 Never say no Sentinel is online if live_sentinels > 0, nor to start a built-in one if builtin_scanner is false.
 
-Then choose actions, only from the actions a check offers: feed_sentinels gives idle Sentinels due hosts now, refresh_nuclei_templates \
-fetches the newest nuclei templates. Choose an action only when its check is not ok and the action addresses it. The server runs an \
-action only when its own check still offers it.
+Then choose actions, only from the actions a check offers: feed_sentinels gives idle Sentinels due hosts now. Choose an action only \
+when its check is not ok and the action addresses it. The server runs an action only when its own check still offers it.
 
 Answer with the JSON object the schema describes and nothing else."""
 
-OPS_CODES = ['sentinels_idle', 'sentinels_offline', 'nuclei_templates', 'sentinel_errors', 'scan_errors', 'system', 'generated_templates', 'ai_errors', 'workers_down', 'sentinel_waiting', 'memory', 'queue_starvation', 'sentinel_claims_refused']  # the fallback for a server that sends no list of its own (``codes`` in the snapshot); a test holds it equal to the checks the server can return
+OPS_CODES = ['sentinels_idle', 'sentinels_offline', 'nuclei_templates', 'sentinel_errors', 'scan_errors', 'system', 'generated_templates', 'ai_errors', 'workers_down', 'sentinel_waiting', 'memory', 'queue_starvation', 'sentinel_claims_refused', 'ai_budget', 'triage_backlog']  # the fallback for a server that sends no list of its own (``codes`` in the snapshot); a test holds it equal to the checks the server can return
 
 def _names(values, limit):
     return isinstance(values, list) and 0 < len(values) <= limit and all(isinstance(c, str) and 0 < len(c) <= 64 for c in values)
@@ -122,6 +121,6 @@ OPS_SCHEMA = {
             'properties': {'code': {'type': 'string', 'enum': OPS_CODES},
                            'severity': {'type': 'string', 'enum': ['info', 'warning', 'critical']},
                            'diagnosis': {'type': 'string', 'maxLength': 1200}}}},
-        'actions': {'type': 'array', 'maxItems': 2, 'items': {'type': 'string', 'enum': ['feed_sentinels', 'refresh_nuclei_templates']}},
+        'actions': {'type': 'array', 'maxItems': 2, 'items': {'type': 'string', 'enum': ['feed_sentinels']}},
     },
 }

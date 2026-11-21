@@ -357,13 +357,14 @@ const MAP_SCORE_OVER = 40; // only hosts that score more than this are on the ma
 // Tile tiers, richest first: the minimum size each needs. The layout picks the richest tier that holds every host, then stretches the
 // tiles to fill the card exactly. A tier with room to spare shows more about each host; when even the smallest tier cannot hold them
 // all, the map keeps only whole rows (never a ragged last row) and the tiles grow to fill the freed space.
-// a finger needs 44px: on a touch screen the two smallest tiers are never smaller than that (the card shows fewer hosts, the Hosts page lists them all)
+// Every tier names the host and its project: a tile showing only a score cannot be told apart from its neighbours, so there is no
+// score-only tier. When even the smallest tier cannot hold every host, the card shows the highest-scoring ones in whole rows (its header
+// says "Top N of M") and the Hosts page lists them all. Every tier is taller and wider than the 44px a finger needs.
 const TOUCH = typeof matchMedia === "function" && matchMedia("(pointer:coarse)").matches;
 const MAP_TIERS = [
   { name: "rich", size: "xl", w: 116, h: 92 },
   { name: "card", size: "xl", w: 92, h: 78 }, // room for the name, its domain and its "Org / Project" line
-  { name: "chip", size: "l", w: 50, h: TOUCH ? 44 : 40 },
-  { name: "dot", size: "s", w: TOUCH ? 44 : 34, h: TOUCH ? 44 : 32 },
+  { name: "mini", size: "xl", w: 80, h: 60 }, // the score, the host's name and its project, one line each
 ];
 function fitTier(W, H, n, t) {
   let best = null;

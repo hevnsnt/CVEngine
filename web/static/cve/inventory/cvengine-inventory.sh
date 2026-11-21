@@ -37,6 +37,8 @@ ROOT=${CVENGINE_ROOT:-}   # a test hook: a directory standing in for / when read
 T=$(printf '\t')
 
 say() { printf '%s\n' "$*" >&2; }
+# progress for a person watching: only when stderr is a terminal, so a scheduled run (cron, a systemd timer) stays quiet
+step() { if [ -t 2 ]; then say "cvengine-inventory: $*"; fi; }
 die() { code=$1; shift; say "cvengine-inventory: $*"; exit "$code"; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
@@ -404,7 +406,9 @@ collect_security() {
 REPORT=$WORK/report.json
 build_report() {
 	mid=$(machine_id_hash)
-	pkgs=$(collect_packages)  # first: the newest rpm install time it notes is the operating system's last update
+	step "reading the installed packages (this can take a minute on a large system)..."
+	pkgs=$(collect_packages)
+	step "reading the operating system, addresses, listening services, containers and security settings..."  # first: the newest rpm install time it notes is the operating system's last update
 	{
 		printf '{"schema":"cvengine-inventory/1","script":{"name":"%s","version":"%s"},"collected_at":"%s",' "$SCRIPT_NAME" "$SCRIPT_VERSION" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 		printf '"host":{'
@@ -431,6 +435,8 @@ build_report() {
 	} > "$REPORT"
 }
 
+if [ "$DRY_RUN" = 1 ]; then step "collecting this host's inventory (dry run: nothing will be sent)"
+else step "collecting this host's inventory for project $PROJECT on $SERVER"; fi
 build_report
 [ -s "$REPORT" ] || die 2 "nothing could be collected"
 SIZE=$(wc -c < "$REPORT" | tr -d ' ')
@@ -447,6 +453,7 @@ fi
 
 URL=${SERVER%/}/api/v1/projects/$PROJECT/inventory
 RESPONSE=$WORK/response.txt
+step "sending the report to $URL ..."
 attempt=0
 while :; do
 	# curl reads its configuration from stdin (-K -), so the token is never an argument: printf is a shell builtin, and nothing else

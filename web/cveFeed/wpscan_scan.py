@@ -420,10 +420,8 @@ def vulnerability_data(report, token):
 def persist_report(scan, sub, url, report):
     """Save one site's report; returns ``(new findings, technologies added)``. The open rows of this host that the versions it read are past
     the fix of are closed as fixed (cveFeed.finding_lifecycle.close_fixed_wpscan_rows)."""
-    from cveFeed import finding_lifecycle
+    from cveFeed import finding_lifecycle, tech_rows
     from reNgine.tasks import save_vulnerability
-    from startScan.ip_rows import get_or_create_first
-    from startScan.models import Technology
     new, seen = 0, {}
     for name, severity, description, cves, refs, component in _vuln_rows(report, url):
         vuln, created = save_vulnerability(
@@ -437,12 +435,14 @@ def persist_report(scan, sub, url, report):
         finding_lifecycle.close_fixed_wpscan_rows(scan, sub, report, seen)
     except Exception:  # noqa: BLE001 - closing what a newer version fixed never fails the stage; the next scan tries again
         logger.exception('could not close the fixed WordPress scan findings of %s', getattr(sub, 'name', ''))
-    added = 0
-    for tech_name in _technologies(report):
-        tech, _ = get_or_create_first(Technology, name=tech_name)
-        if not sub.technologies.filter(pk=tech.pk).exists():
-            sub.technologies.add(tech)
-            added += 1
+    from cveFeed import tech_links
+    # one row per spelling (cveFeed.tech_rows); a technology the host already has is confirmed (its link's time)
+    added = tech_links.link_host(sub, [tech_rows.technology(name) for name in _technologies(report)], tech_links.WPSCAN)
+    try:  # the headers the scan read (its "headers" interesting finding: Server, X-Powered-By) as version readings (cveFeed.source_versions)
+        from cveFeed import source_versions
+        source_versions.store_wpscan(sub, url, report)
+    except Exception:  # noqa: BLE001 - the report's own findings and technologies stand without them
+        logger.exception('could not store the WordPress scan headers of %s', getattr(sub, 'name', ''))
     return new, added
 
 
@@ -703,7 +703,7 @@ def detect(scan, subs, candidates, force=False, only=None):
             from cveFeed import wp_core
             wp_core.record_exposure(scan, sub, found[1].get('variant'), found[0].get('version', ''))
         if found[0]['outcome'] == 'found':
-            probes.apply_to_subdomain(sub, found)
+            probes.apply_to_subdomain(sub, found)  # the WordPress probe: source probe
         ledger.record(PROBE_SERVICE, [host], project, scan, 'failed' if found[0]['outcome'] == 'challenged' else 'done')
         results[host] = found[0]
     return results
@@ -765,6 +765,10 @@ def run_wpscan(scan_id, runner=None, force=False, internal=False, only=None, att
     fresh = set() if force else (ledger.fresh(SERVICE, wanted, project) | ledger.fresh(PARTIAL_SERVICE, wanted, project)
                                 | ledger.fresh(REDIRECT_SERVICE, wanted, project) | ledger.fresh(NOT_SCANNABLE_SERVICE, wanted, project))
     summary['reused'] = len([h for h in wanted if h in fresh])
+    if fresh:  # not scanned again inside the window: the core, plugin and theme versions its last run read stay on this scan's rows
+        from cveFeed import tech_carry
+        for service in (SERVICE, PARTIAL_SERVICE):
+            tech_carry.carry(scan, project, {h: h for h in wanted if h in fresh}, service)
     history = ledger.last_run(SERVICE, wanted, project)
     epoch = timezone.now() - timedelta(days=36500)
     # due first (the fresh ones are not due), positive probes first, then the never-scanned and longest-waiting: a cap cuts only what waits

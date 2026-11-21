@@ -31,6 +31,7 @@ MAX_PROJECTS = 100
 DISK_LOW_PERCENT = 10
 FEED_STALE_HOURS = 48
 MEMORY_REPORT_STALE_SECONDS = 180
+MEMORY_CRITICAL_MB, MEMORY_CRITICAL_SHARE = 150, 0.03  # a worker container with less free than this (or 3% of its memory, the larger) is a problem
 CT_BACKLOG_WARN = 5000  # lookups waiting in ctwatch_queue before status says so; the reaper stops recovering orphans past broker_recovery.MAX_QUEUE_SCAN
 
 
@@ -44,8 +45,10 @@ def _version():
 
 def _scanning():
     from cveFeed.models import ScanControl
+    from cveFeed import scan_control
     row = ScanControl.current()
-    return {'paused': bool(row.paused), 'paused_by_update': bool(row.paused_by_update), 'reason': row.reason or None,
+    owner = scan_control.pause_owner(row)  # the watchdog's pause for disk or memory is its own, not the update's
+    return {'paused': bool(row.paused), 'paused_by_update': owner == scan_control.OWNER_UPDATE, 'paused_by': owner, 'reason': row.reason or None,
             'by': row.actor or None, 'changed_at': _iso(row.changed_at), 'last_error': row.last_error or None}
 
 
@@ -88,9 +91,9 @@ def _builtin_scanner(admin, problems):
 
 def _update():
     from cveFeed import updater
-    phase = updater.read_phase()
+    phase = updater.shown_phase()  # a failure whose approval is gone is the last attempt, not a retry that is pending
     return {'phase': phase.get('phase'), 'detail': phase.get('detail') or None,
-            'scans_running': phase.get('scans_running'), 'changed_at': phase.get('changed_at')}
+            'scans_running': phase.get('scans_running'), 'changed_at': phase.get('changed_at'), 'last_attempt': phase.get('last_attempt')}
 
 
 STATUS_CACHE_SECONDS = 60  # CVENGINE_STATUS_CACHE_SECONDS: a project's counts are reused this long (0 turns the cache off)
@@ -525,6 +528,11 @@ def _schedules(health):
             'note': health.get('scheduler_note')}
 
 
+def _critical_mb(total_mb):
+    """The free memory below which a worker container is a problem: what the removed memory gate called its critical level."""
+    return int(max(MEMORY_CRITICAL_MB, total_mb * MEMORY_CRITICAL_SHARE)) if total_mb else None
+
+
 def _memory():
     from reNgine import resources
     snap = resources.cluster_snapshot()
@@ -533,10 +541,7 @@ def _memory():
         mem = c.get('memory') or {}
         containers.append({
             'host': c.get('host'), 'total_mb': mem.get('total_mb'), 'used_mb': mem.get('used_mb'),
-            'available_mb': mem.get('available_mb'), 'job_budget_mb': c.get('budget_mb'),
-            'headroom_mb': c.get('headroom_mb'), 'critical_mb': c.get('critical_mb'),
-            'jobs_running': len(c.get('running', [])), 'jobs_waiting': len(c.get('waiting', [])),
-            'memory_kills_24h': len(c.get('memory_kills', [])), 'report_age_seconds': c.get('age_seconds'),
+            'available_mb': mem.get('available_mb'), 'limit_mb': mem.get('limit_mb'), 'report_age_seconds': c.get('age_seconds'),
         })
     from reNgine import lane_memory
     return {'store': snap.get('store'), 'containers': containers, 'lanes': lane_memory.report()}
@@ -561,24 +566,25 @@ def _certificate():
 
 
 def _feeds():
+    """The CVE feeds: when each last ran and succeeded, the coverage watermark, each threat-intelligence source (cveFeed.feed_health). Only
+    small reads: the detection-guidance progress (a pass over the whole catalog, which ran past the probe's 5 s) is what the authoring task
+    last cached, None before its first run."""
+    from django.core.cache import cache
     from django_celery_beat.models import PeriodicTask
 
+    from cveFeed import feed_health
     from cveFeed.models import CVEEntry
     last = PeriodicTask.objects.filter(task='sync_cve_now_feed').values_list('last_run_at', flat=True).first()
     newest = CVEEntry.objects.order_by('-published_at').values_list('published_at', flat=True).first()
+    guidance = cache.get('cvengine:cve-guidance-progress')
     try:
-        from cveFeed import detection_author
-        guidance = detection_author.progress()
-    except Exception:  # noqa: BLE001 - status must not fail on a counting problem
-        guidance = None
-    try:
-        from cveFeed import feed_watermark
-        watermark = feed_watermark.status()  # the feed is complete through this time; `behind` when it has not been read to its head in a day
-    except Exception:  # noqa: BLE001 - status must not fail on a counting problem
-        watermark = None
-    cve_entries = guidance['cves'] if guidance else CVEEntry.objects.count()  # the guidance progress has just counted them (a second pass over the whole catalogue otherwise)
+        health = feed_health.status()
+    except Exception as exc:  # noqa: BLE001 - status must not fail on a counting problem
+        health = {'feeds': None, 'intel': None, 'watermark': None, 'problems': [f'feeds: health not read ({type(exc).__name__})']}
+    cve_entries = guidance['cves'] if guidance else CVEEntry.objects.count()
     return {'cve_entries': cve_entries, 'newest_cve_published': _iso(newest), 'last_feed_dispatch': _iso(last),
-            'cve_feed_watermark': watermark, 'cve_guidance': guidance}
+            'cve_feed_watermark': health['watermark'], 'cve_guidance': guidance, 'health': health['feeds'], 'intel_sources': health['intel'],
+            'problems': health['problems']}
 
 
 def _os_detection():
@@ -623,83 +629,22 @@ def _autotune():
                                for d in full['recent_decisions'][:5]]}
 
 
-TEMPLATE_STALE_HOURS = 36  # the refresh runs every six hours: a day and a half without a successful one means it is failing
-TEMPLATE_REFRESH_KEY = 'nuclei_templates_refresh'  # written by the cveFeed.tasks.update_nuclei_templates worker task, read here
-_VERSION_CACHE = {}
-_VERSION_LINE = re.compile(r'\d+\.\d+')
-
-
-def _tool_version(argv):
-    """The version line of ``<tool> -version``, cached for ten minutes; None when the tool is missing or slow. A tool may print a
-    warning of its own first (nuclei does, on a Go release its JSON library has not caught up with): the first line that is not a
-    warning and carries a version number, else the first line that is not a warning."""
-    import subprocess
-    now = time.monotonic()
-    cached = _VERSION_CACHE.get(argv)
-    if cached and now - cached[0] < 600:
-        return cached[1]
+def _tools():
+    """What the nuclei templates the Sentinels run are: this server keeps no copy of them and runs no scan tool. The release and size of the template
+    index of the Sentinel library this server installed (``cvengine_scanner.template_index``), which is the release the Sentinel image pins; what a
+    Sentinel runs is in its own ``info.tool_versions`` (the Sentinels page)."""
     try:
-        proc = subprocess.run(list(argv), capture_output=True, text=True, timeout=5, check=False)
-        text = re.sub(r'\x1b\[[0-9;]*m', '', (proc.stdout or '') + (proc.stderr or ''))  # a tool may colour its banner
-        lines = [line.strip() for line in text.splitlines() if line.strip()]
-        lines = [line for line in lines if not line.lower().startswith(('warning', '[wrn]', 'warn'))] or lines
-        value = next((line[:120] for line in lines if _VERSION_LINE.search(line)), lines[0][:120] if lines else None)
-    except (OSError, subprocess.SubprocessError):
-        value = None
-    _VERSION_CACHE[argv] = (now, value)
-    return value
-
-
-def _template_refresh():
-    """What the last ``nuclei -update-templates`` run said, as the worker recorded it: ``{'at', 'ok', 'result'}`` or None."""
-    from django.core.cache import cache
-    try:
-        record = cache.get(TEMPLATE_REFRESH_KEY)
-    except Exception:  # noqa: BLE001 - a cache that is down must not take the status with it
-        return None
-    return record if isinstance(record, dict) and record.get('at') else None
+        from cvengine_scanner import template_index
+        index = template_index.load()
+    except ImportError:
+        index = {'nuclei_templates': '', 'templates': {}}
+    return {'nuclei_templates': {'release': index['nuclei_templates'] or None, 'templates': len(index['templates']),
+                                 'source': 'the template index of the Sentinel library'}}
 
 
 def _template_problem(templates):
-    """The status line for stale nuclei templates, or ''. The template files only change when a new release is published, so their age
-    says nothing about whether the refresh works; it is judged on the refresh's own last run when there is one, and on the files only
-    when no run has been recorded and none has been dispatched for a day and a half either."""
-    refresh = templates.get('last_refresh')
-    if refresh:
-        try:
-            hours = (timezone.now() - datetime.fromisoformat(refresh['at'])).total_seconds() / 3600
-        except (KeyError, TypeError, ValueError):
-            hours = None
-        if hours is not None and not refresh.get('ok'):
-            return f"nuclei templates: the last refresh failed ({str(refresh.get('result') or 'no detail')[:100]})"
-        if hours is not None and hours > TEMPLATE_STALE_HOURS:
-            return f'nuclei templates: no successful refresh for {int(hours)} hours'
-        return ''
-    age, dispatched = templates.get('age_hours'), templates.get('last_refresh_dispatch')
-    if age is None or age <= TEMPLATE_STALE_HOURS:
-        return ''
-    if dispatched and (timezone.now() - datetime.fromisoformat(dispatched)).total_seconds() / 3600 <= TEMPLATE_STALE_HOURS:
-        return ''  # the refresh was dispatched recently and has not reported yet (right after an update): not a failure
-    return f'nuclei templates: not refreshed for {int(age)} hours'
-
-
-def _tools():
-    """How current the detection tools are: the nuclei templates (when they were last refreshed) and the scanner versions."""
-    import os
-    from django_celery_beat.models import PeriodicTask
-    root = os.environ.get('NUCLEI_TEMPLATES_DIR', '/root/nuclei-templates')
-    marker = os.path.join(root, '.checksum')
-    try:
-        updated = datetime.fromtimestamp(os.stat(marker).st_mtime, tz=dt_timezone.utc)
-    except OSError:
-        updated = None
-    last_run = PeriodicTask.objects.filter(task='update_nuclei_templates').values_list('last_run_at', flat=True).first()
-    refresh = _template_refresh()
-    return {'nuclei_templates': {'updated_at': _iso(updated),  # when the template files last changed: nothing changes between releases
-                                 'age_hours': round((timezone.now() - updated).total_seconds() / 3600, 1) if updated else None,
-                                 'last_refresh_dispatch': _iso(last_run),
-                                 'last_refresh': refresh},  # the last run of the refresh itself and what it said
-            'versions': {'nuclei': _tool_version(('nuclei', '-version'))}}
+    """The status line when the installed Sentinel library has no template index (no nuclei work can be planned without it), or ''."""
+    return '' if templates.get('templates') else 'nuclei templates: the installed Sentinel library has no template index'
 
 
 def _runzero(problems):
@@ -798,15 +743,6 @@ def _sentinels(problems):
 STAGE_RUN_OLD_SECONDS = 4 * 3600  # a stage waiting longer than the longest completion budget (an hour) plus its queue wait is a problem worth a line
 
 
-def _egress(problems):
-    """Outbound connections from this server's own scanners (``cveFeed.local_egress``): the last hour, 24 hours and seven days per watched
-    port (25, 465, 587, 23, 3389 by default) and for all ports, the budget of each paced port and its use this hour, ports owed to the paced
-    pass, the top sources (scan kind and project), and how many Sentinel tasks fell back to local execution in the last hour (a problem while it
-    stays high). nmap, naabu and nuclei are counted from their probe plan, an estimate."""
-    from cveFeed import local_egress
-    return local_egress.status(problems)
-
-
 def _work():
     """What the work conductor (cveFeed.conductor) is doing: scans running and queued against the depth it keeps, and its last round."""
     from cveFeed import conductor
@@ -896,7 +832,6 @@ def _system_probes(user):
         Probe('udp_scan', lambda p, n, d: _udp_scan(p)),
         Probe('screenshots', lambda p, n, d: _screenshots(p, n)),
         Probe('sentinels', lambda p, n, d: _sentinels(p)),
-        Probe('egress', lambda p, n, d: _egress(p), db=False),
         Probe('live_cache', lambda p, n, d: _live_cache(n), db=False),
         Probe('tools', lambda p, n, d: _tools()),
     ]
@@ -949,7 +884,8 @@ def _system(user, problems, notes, run=None):
     out['memory'] = take('memory')
     if 'containers' in out['memory']:
         for c in out['memory']['containers']:
-            if c['available_mb'] is not None and c['critical_mb'] is not None and c['available_mb'] < c['critical_mb']:
+            critical = _critical_mb(c.get('total_mb'))
+            if c['available_mb'] is not None and critical is not None and c['available_mb'] < critical:
                 problems.append(f"memory: {c['host']} has {c['available_mb']} MB free, below its critical level")
             if (c['report_age_seconds'] or 0) > MEMORY_REPORT_STALE_SECONDS:
                 problems.append(f"memory: {c['host']} has not reported for {c['report_age_seconds']} seconds")
@@ -960,6 +896,7 @@ def _system(user, problems, notes, run=None):
     if out['disk'].get('free_percent') is not None and out['disk']['free_percent'] < DISK_LOW_PERCENT:
         problems.append(f"disk: only {out['disk']['free_percent']}% free ({out['disk']['free_mb']} MB)")
     out['feeds'] = take('feeds')
+    problems.extend(out['feeds'].pop('problems', None) or [])  # each feed's failures and staleness (cveFeed.feed_health)
     last = out['feeds'].get('last_feed_dispatch')
     if last:
         age = (timezone.now() - datetime.fromisoformat(last)).total_seconds() / 3600
@@ -977,7 +914,6 @@ def _system(user, problems, notes, run=None):
     out['udp_scan'] = take('udp_scan')
     out['screenshots'] = take('screenshots')
     out['sentinels'] = take('sentinels')
-    out['egress'] = take('egress')
     out['live_cache'] = take('live_cache')
     out['tools'] = take('tools')
     out['timings'] = run.timings()
@@ -1013,7 +949,9 @@ def system_status(ctx):
     scanning['scanner'] = scanner
     scanning['builtin_scanner'] = take('built-in scanner')
     update = take('update')
-    if update.get('phase') not in (None, 'idle', 'done'):
+    if update.get('last_attempt'):
+        notes.append('the last update did not finish and is not retried')
+    elif update.get('phase') not in (None, 'idle', 'done'):
         notes.append(f"an update is in progress ({update['phase']})")
     if not admin:  # who paused, why, and what the whole instance is running describe the server, not the caller's projects
         scanning = {k: scanning.get(k) for k in ('paused', 'paused_by_update', 'error', 'scanner', 'builtin_scanner') if k in scanning}

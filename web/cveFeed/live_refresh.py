@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 MAX_BUDGET_SECONDS = 3.0  # a run never holds the worker longer than this between two yields to its other tasks, nor longer than half an interval
 BACKLOG_SKIP = 100  # messages waiting in the queues the classic worker consumes, above which a run is skipped
 OWN_BACKLOG_SKIP = 3  # refreshes already waiting for a slot: the worker is behind, adding to it helps nobody
-CLASSIC_QUEUES = ('send_notif_queue', 'send_task_notif_queue', 'geo_localize_queue', 'run_command_queue', 'api_queue', 'wpscan_queue', 'testssl_queue',
+CLASSIC_QUEUES = ('send_notif_queue', 'send_task_notif_queue', 'api_queue', 'wpscan_queue', 'testssl_queue',
                   'bucketscan_queue', 'vhost_queue', 'udp_queue', 'openvas_queue', 'supplier_queue', 'ctwatch_queue')
 RUN_LOCK = 'cve:snap:refresher:lock'
 

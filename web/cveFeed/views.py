@@ -659,24 +659,37 @@ def host_screenshot(request, slug, subdomain_id):
         if not (thumb and thumb.startswith(media_root + os.sep) and os.path.isfile(thumb)):
             thumb = shots.thumbnail_path(path)
         if thumb:
-            return _cacheable_file(request, thumb, 'image/jpeg')
+            return _cacheable_file(request, thumb)
     return _cacheable_file(request, path)
 
 
-def _cacheable_file(request, path, content_type=None):
-    """A file with an ETag (mtime and size) and a day of private caching, so a gallery grid revisits for a 304, not the bytes."""
-    import mimetypes
+# Every picture this app serves itself (not through nginx's sandboxed /protected_media/) goes out with these: the browser must take it as the picture
+# type its bytes are, never sniff it, never run it as a page, and never offer it as a download named by whoever wrote the file.
+IMAGE_HEADERS = {'X-Content-Type-Options': 'nosniff', 'Content-Disposition': 'inline', 'Content-Security-Policy': "default-src 'none'; sandbox"}
+
+
+def _cacheable_file(request, path):
+    """A stored picture with an ETag (mtime and size) and a day of private caching, so a gallery grid revisits for a 304, not the bytes. Its type is
+    read from its first bytes (``cveFeed.shots.file_image_type``: PNG or JPEG), never from its name, which a scanner or a Sentinel may have chosen; a file
+    that is neither is a 404, so nothing else is ever served from here as if it were a page of this site."""
     import os
 
     from django.http import FileResponse, HttpResponseNotModified
     from django.utils.http import http_date
+
+    from cveFeed import shots
+    kind = shots.file_image_type(path)
+    if kind not in shots.IMAGE_TYPES:
+        raise Http404
     info = os.stat(path)
     etag = f'"{int(info.st_mtime)}-{info.st_size}"'
     if request.META.get('HTTP_IF_NONE_MATCH') == etag:
         response = HttpResponseNotModified()
     else:
-        response = FileResponse(open(path, 'rb'), content_type=content_type or mimetypes.guess_type(path)[0] or 'application/octet-stream')
+        response = FileResponse(open(path, 'rb'), content_type=kind)
         response['Last-Modified'] = http_date(info.st_mtime)
+    for header, value in IMAGE_HEADERS.items():
+        response[header] = value
     response['ETag'] = etag
     response['Cache-Control'] = 'private, max-age=86400'
     return response
@@ -688,7 +701,6 @@ def host_rdp_screenshot(request, slug, subdomain_id, port):
     import os
 
     from django.conf import settings
-    from django.http import FileResponse
 
     from cveFeed.models import RdpScreenshot
     from dashboard.models import Project
@@ -707,7 +719,7 @@ def host_rdp_screenshot(request, slug, subdomain_id, port):
     path = os.path.realpath(os.path.join(media_root, shot.image_path))
     if not (path == media_root or path.startswith(media_root + os.sep)) or not os.path.isfile(path):
         raise Http404
-    return FileResponse(open(path, 'rb'))
+    return _cacheable_file(request, path)  # served as the picture its bytes are, with the same headers as every other screenshot
 
 
 def welcome_page(request):
@@ -733,7 +745,7 @@ def account_page(request):
 
 # The version this page's claims were last checked against. Bump it, after rereading cveFeed/how.html, whenever web/.version moves
 # (tests/test_how_it_works.py fails until it matches, so a release cannot ship a stale page).
-HOW_REVIEWED_VERSION = '1.4.1'
+HOW_REVIEWED_VERSION = '1.4.2'
 
 
 def how_page(request):

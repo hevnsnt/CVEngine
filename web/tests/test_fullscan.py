@@ -63,8 +63,7 @@ class FullScanBase(TestCase):
 		self.domain = Domain.objects.create(name='fs.test', project=self.project, insert_date=now)
 		self.engine = EngineType.objects.create(engine_name='e', yaml_configuration='x', default_engine=True)
 		self.scan = ScanHistory.objects.create(domain=self.domain, scan_type=self.engine, start_scan_date=now, scan_status=2, results_dir='/tmp')
-		patches = [mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False),
-			mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.run_hygiene_task.delay'),
+		patches = [mock.patch('cveFeed.tasks.run_hygiene_task.delay'),
 			mock.patch('cveFeed.fullscan.CLAIM_KEY', 'cvengine:fullscan:test'),
 			# These fixtures do not build full core-stage coverage; the deep-scan coverage gate (see
 			# cveFeed.coverage_topup.backlog_exists, tests/test_coverage_gate.py) is exercised on its own there.
@@ -155,7 +154,7 @@ class SelectionTests(FullScanBase):
 	def test_a_host_that_resolves_somewhere_blocked_is_skipped(self):
 		self.ip('192.0.2.1', name='rebind.fs.test')
 		ok = self.ip('192.0.2.2', name='fine.fs.test', scanned=timezone.now())
-		with mock.patch('targetApp.target_types.resolves_to_blocked', side_effect=lambda name: name == 'rebind.fs.test'):
+		with mock.patch('targetApp.target_types.blocked_address', side_effect=lambda name, project=None: name == 'rebind.fs.test'):
 			self.assertEqual(fullscan.pick().pk, ok.pk)
 
 
@@ -312,11 +311,9 @@ class SweepTests(FullScanBase):
 		ip.refresh_from_db()
 		self.assertIsNone(ip.full_scanned_at)
 
-	def test_the_task_and_heavy_kind_are_registered(self):
+	def test_the_task_is_registered(self):
 		from cveFeed.tasks import background_full_scan
 		self.assertEqual(background_full_scan.name, 'background_full_scan')
-		self.assertEqual(resources.BASE_COSTS_MB['nmap-full-bg'], 500)
-		self.assertEqual(resources.MAX_CONCURRENT['nmap-full-bg'], 1)
 
 	def test_the_schedule_migration_created_the_periodic_task(self):
 		from django_celery_beat.models import PeriodicTask
@@ -352,8 +349,9 @@ class InvestigationTests(FullScanBase):
 			pipeline=pipeline or self.pipeline(checks))
 
 	def test_a_new_port_is_fingerprinted_checked_retested_and_recorded_as_a_change(self):
-		checks = {'redis': ('Redis', lambda host, port: True)}
-		out = self.sweep([(22, 'ssh'), (6379, 'redis')], checks=checks)
+		from tests.test_db_exposure import db_probe_dispatch
+		with db_probe_dispatch(lambda host, port: True):  # the Sentinel's db_probe finds the new Redis open
+			out = self.sweep([(22, 'ssh'), (6379, 'redis')], checks={'redis': 'Redis'})
 		inv = out['swept'][0]['investigation']
 		self.assertEqual(inv['ports'], [6379])
 		self.assertEqual(self.fp[0][0], ['192.0.2.1'])
@@ -432,3 +430,19 @@ class SurfaceTests(FullScanBase):
 		self.assertTrue(entry['full_scanned_at'].startswith(str(timezone.now().year)))
 		self.ip('192.0.2.2', name='b.fs.test')
 		self.assertIsNone(_host(Subdomain.objects.get(name='b.fs.test'))['ips'][0]['full_scanned_at'])
+
+
+class FingerprintIntensityTests(FullScanBase):
+	def test_the_new_ports_are_fingerprinted_at_nmaps_default_intensity_as_the_pipelines_pass(self):
+		self.assertEqual(fullscan.FINGERPRINT_FLAGS[fullscan.FINGERPRINT_FLAGS.index('--version-intensity') + 1], '7')
+		fast = list(scan_flags._FAST_SCAN_FLAGS)
+		self.assertEqual(fast[fast.index('--version-intensity') + 1], '7')  # the scanner library's fingerprint pass: the two agree
+
+	def test_the_sentinel_verify_task_carries_that_intensity(self):
+		from agentapi import sentinel_dispatch
+		ip = self.ip('192.0.2.1', name='www.fs.test')
+		with mock.patch.object(sentinel_dispatch, 'try_nmap_verify', return_value=[]) as verify:
+			fullscan._sentinel_fingerprint(ip, self.project.id, [6379])
+		target = verify.call_args[0][1]
+		self.assertEqual(target['version_intensity'], 7)
+		self.assertNotIn('version_all', target)

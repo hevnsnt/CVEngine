@@ -311,8 +311,9 @@ class WhichHostsTests(NoCache, RouteFixture, TestCase):
             self.assertEqual(self.vet()('https://code.jquery.com/jquery-3.6.0.min.js'), '')  # a public CDN is not the program's asset
 
     def test_a_private_address_is_refused(self):
-        self.blocked.side_effect = lambda host, *a, **k: host == 'static.rt.test'  # the name resolves to an internal address
-        self.assertEqual(self.vet()('https://static.rt.test/js/jquery.js'), 'address not allowed')
+        # the SSRF gate refuses the host (an address no scanner may touch; a name is judged by the Sentinel that reads it, never looked up here)
+        with mock.patch('cveFeed.route_auth.host_allowed', side_effect=lambda host, project=None: host != 'static.rt.test'):
+            self.assertEqual(self.vet()('https://static.rt.test/js/jquery.js'), 'address not allowed')
         self.assertEqual(self.vet()('http://10.0.0.5/js/bootstrap.min.js'), 'third-party')
 
     def test_refused_scripts_are_never_fetched_and_their_names_stay_hints(self):

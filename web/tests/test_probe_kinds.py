@@ -666,8 +666,8 @@ class RouteProbeStageTests(RouteFixture, TestCase):
         mock.patch('time.sleep', side_effect=lambda seconds: self.assertLessEqual(seconds, 0.2, 'a test slept for real')).start()
         self.addCleanup(mock.patch.stopall)
         self.guard = assert_ran_nowhere_locally(self, 'route_probe')
-        # every local request resolves its host first: a route asked here is a call to this (it is the network, which the tests block anyway)
-        self.local = mock.patch('cveFeed.pinned_transport.resolve', side_effect=OSError('asked here, not by the scanner')).start()
+        # a host name looked up here would be a request the server makes about a target: the server makes none (the tests block the network anyway)
+        self.local = mock.patch('socket.getaddrinfo', side_effect=OSError('asked here, not by the scanner')).start()
 
     @staticmethod
     def row(url, state='not_found', status=404, **extra):
@@ -1139,7 +1139,6 @@ class IdentityCheckStageTests(DispatchBase):
     def setUp(self):
         super().setUp()
         LocalFallback('none').apply(self)
-        mock.patch('agentapi.sentinel_dispatch._resolves', return_value=True).start()
         self.addCleanup(mock.patch.stopall)
         self.guard = assert_ran_nowhere_locally(self, 'identity_check')
         self.asked = []
@@ -1268,8 +1267,7 @@ class HygieneCheckStageTests(TestCase):
         ip = IpAddress.objects.create(address='192.0.2.7')
         sub.ip_addresses.add(ip)
         ip.ports.add(Port.objects.create(number=8443))
-        for patch in (mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False), mock.patch('agentapi.sentinel_dispatch._resolves', return_value=True),
-                      mock.patch('time.sleep', side_effect=lambda seconds: self.assertLessEqual(seconds, 0.2, 'a test slept for real'))):
+        for patch in (mock.patch('time.sleep', side_effect=lambda seconds: self.assertLessEqual(seconds, 0.2, 'a test slept for real')),):
             patch.start()
         self.addCleanup(mock.patch.stopall)
         self.guard = assert_ran_nowhere_locally(self, 'hygiene_check')
@@ -1409,7 +1407,7 @@ class DanglingDnsCheckTests(TestCase):
         self.findings = [{'host': 'app.example.test', 'description': self.NX, 'module': 'baddns'},
                          {'host': 'old.example.test', 'description': self.NS, 'module': 'baddns'},
                          {'host': 'x.example.test', 'description': 'No DMARC record found', 'module': 'baddns'}]
-        for patch in (mock.patch('agentapi.sentinel_dispatch._resolves', return_value=True), mock.patch('time.sleep')):
+        for patch in (mock.patch('time.sleep'),):
             patch.start()
         self.addCleanup(mock.patch.stopall)
         self.guard = assert_ran_nowhere_locally(self, 'dangling_dns_check')
