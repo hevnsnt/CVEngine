@@ -2,7 +2,7 @@
 
 The **Situations** page answers one question: *what needs me?* It lists your hosts that have something open on them that needs a person, most urgent first, one host a row, each with a short plain account of what is wrong and what to do first. When nothing needs you, it says so.
 
-It is a tab of the **Overview** (Overview, Situations), so the left rail keeps its eight entries and Overview stays the current one. The same answer, in the same order and words, is available to agents: `GET projects/{slug}/situations` and the MCP tools `list_situations` and `get_situation` ([AGENT-API.md](AGENT-API.md)).
+It is a tab of the **Overview** (Overview, Situations), so the left rail keeps its nine entries and Overview stays the current one. The same answer, in the same order and words, is available to agents: `GET projects/{slug}/situations` and the MCP tools `list_situations` and `get_situation` ([AGENT-API.md](AGENT-API.md)).
 
 Everything here is computed from numbers cvENGINE already has. A situation never defines a second meaning of a number: heat is [fire, smoke and ice](FIRE-SMOKE-ICE.md) (including a heat a person set by hand), proof is the "Proven on this host" card of a finding, and what is closed is what the Findings page calls closed.
 
