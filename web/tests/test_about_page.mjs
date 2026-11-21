@@ -34,10 +34,17 @@ function page(headBox, subBox, text) {
   };
   const subNode = {...subBox, textContent: text};
   const head = {...headBox, querySelector: (s) => (s === '.sub' ? subNode : null), parentElement: {querySelector: () => null},
+    hasAttribute: (k) => k in (headBox.attrs || {}),
     after(...nodes) { made.push(...nodes); }};
   const doc = {querySelector: (s) => (s === 'main .page-head' ? head : null), createElement: (t) => node(t)};
   return {doc, made, subNode};
 }
+
+test('a page whose head says data-no-about (Situations, which has its own "What is this") gets no button', () => {
+  const p = page({...box(1, 1), attrs: {'data-no-about': ''}}, sub('x', 900, 300), 'What this page is for.');
+  assert.equal(mountAbout(p.doc), null);
+  assert.equal(p.made.length, 0);
+});
 
 test('the button is hidden while the sentence fits and shown when it is cut', () => {
   const fits = page(box(800, 40), sub('x', 100, 300), 'What this page is for.');
