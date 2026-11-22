@@ -412,6 +412,9 @@ class OutOfSearchAndCountsTests(Base):
 
     def test_the_hosts_own_record_still_opens(self):
         self.archive()
+        self.assertEqual(svc.search_hosts(self.ctx(self.bob), self.a1.slug, {'names': HOST})['results'], [])  # named, but archived: left out
+        everywhere = svc.search_hosts(self.ctx(self.alice), '_all', {'names': f'{self.a1.slug}/{HOST},{self.a2.slug}/{HOST}'})['results']
+        self.assertEqual([(r['project'], r['host']) for r in everywhere], [(self.a2.slug, HOST)])
         rows = svc.search_hosts(self.ctx(self.bob), self.a1.slug, {'names': HOST, 'archived': '1'})['results']
         self.assertEqual([r['host'] for r in rows], [HOST])
         self.assertTrue(rows[0]['archived'])
