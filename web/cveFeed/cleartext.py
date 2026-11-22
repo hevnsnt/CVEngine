@@ -178,7 +178,8 @@ def evaluate_http_login(name, urls, addresses):
 # ----------------------------------------------------------------------------- from the stored data
 
 def _newest_rows(domain, names, ports_queryset):
-    """One Subdomain row per name (the newest finished scan's, as the host score reads it) with its non-CDN addresses and their ports."""
+    """One Subdomain row per name (the newest finished scan's, as the host score reads it) with its non-CDN addresses and their ports. ``names`` are
+    hosts of the current inventory; among a name's rows the newest usable one is read (``usable_rows``: never a failed or queued scan's partial row)."""
     from django.db.models import Prefetch
 
     from cveFeed.scoring import row_preference, usable_rows
@@ -203,15 +204,19 @@ def _allowed(name, wanted, banned):
 
 
 def service_findings(domain, hosts=None):
-    """Telnet, FTP and r-service findings of the target's hosts, from the open TCP ports stored for their addresses."""
+    """Telnet, FTP and r-service findings of the target's hosts in the current inventory (``host_resolver.current_target_names``), from the open TCP
+    ports stored for their addresses."""
     from django.db.models import Q
+
+    from cveFeed import host_resolver
 
     from startScan.models import OPEN_PORT_STATES, TCP_PROTOCOLS, Port, Subdomain
     wanted, banned = _scope(domain, hosts)
     candidates = Port.objects.filter(state__in=OPEN_PORT_STATES, protocol__in=TCP_PROTOCOLS).filter(
         Q(number__in=SEEN_NUMBERS) | Q(service_name__in=SERVICE_NAMES))
+    current = host_resolver.current_target_names(domain)  # the Hosts page's hosts: a name gone from the latest full scan keeps stale ports
     names = {n for n in Subdomain.objects.filter(target_domain=domain, ip_addresses__ports__in=candidates).order_by().values_list('name', flat=True).distinct()
-             if _allowed(n, wanted, banned)}
+             if _allowed(n, wanted, banned) and host_resolver.normalize(n) in current}
     out = []
     rows = _newest_rows(domain, names, candidates)
     accepts_all = _accepting_everything({ip.pk for sub in rows for ip in sub.ip_addresses.all()})
@@ -243,8 +248,10 @@ def _has_https(sub, routes):
 
 
 def http_login_findings(domain, hosts=None):
-    """A finding for each host whose login page the route check saw over plain HTTP and that has no HTTPS service."""
+    """A finding for each host of the current inventory whose login page the route check saw over plain HTTP and that has no HTTPS service."""
     from django.db.models import Prefetch
+
+    from cveFeed import host_resolver
 
     from cveFeed.models import RouteAuth
     from cveFeed.scoring import row_preference, usable_rows
@@ -252,7 +259,8 @@ def http_login_findings(domain, hosts=None):
     wanted, banned = _scope(domain, hosts)
     rows = [r for r in RouteAuth.objects.filter(project_id=domain.project_id, domain=domain, auth_state='login', retired_at__isnull=True,
                                                 url__startswith='http://')]
-    names = {r.host.lower() for r in rows if _allowed(r.host, wanted, banned)}
+    current = host_resolver.current_target_names(domain)
+    names = {r.host.lower() for r in rows if _allowed(r.host, wanted, banned) and host_resolver.normalize(r.host) in current}
     if not names:
         return []
     routes = {}

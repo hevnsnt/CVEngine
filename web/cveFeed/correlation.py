@@ -1753,7 +1753,9 @@ def _row_strength(row):
 def _carry_remediation(fresh):
     """Give each new match the remediation state of the same finding on the host's earlier scan. Hosts are stored once per scan, so
     the next scan's host row starts with no matches of its own; without this, everything a person marked fixed, in progress or accepted
-    risk would reappear as open after the next scan."""
+    risk would reappear as open after the next scan. A closure that only says the host was archived (``cveFeed.archive_closure``) is not
+    carried: the host is back, so the scan's match starts open and the scan decides."""
+    from cveFeed import archive_closure
     from cveFeed.models import CVEMatch
     from startScan.models import Subdomain
     hosts = {sid: (domain_id, name) for sid, domain_id, name in
@@ -1772,6 +1774,13 @@ def _carry_remediation(fresh):
                for m in base.order_by(*by_host_fields, "-id").distinct(*by_host_fields)}
     if not by_host:
         return
+    archived = set()  # (target, name) of the hosts still archived: their archive closures are carried like any other status
+    if any(archive_closure.is_archive_closed(m) for m in by_host.values()):
+        from cveFeed.counts import archived_keys
+        from targetApp.models import Domain
+        projects = dict(Domain.objects.filter(pk__in=domains).values_list("pk", "project_id"))
+        keys = archived_keys(set(projects.values()))
+        archived = {(d, n) for d, n in hosts.values() if (projects.get(d), (n or "").lower()) in keys}
     # A finding is paged as fire once per heat rule, not once per scan (cveFeed.notify): the new copy carries the page, under the rule in force,
     # of any earlier copy of the same CVE on the same host, whichever product label or source it had.
     from django.db.models import Max
@@ -1787,7 +1796,9 @@ def _carry_remediation(fresh):
         domain_id, name = hosts.get(match.subdomain_id, (None, None))
         key = (match.cve_entry_id, domain_id, name)
         before = by_host.get(key)
-        if before is not None:
+        if before is not None and archive_closure.is_archive_closed(before) and (domain_id, name) not in archived:
+            match.assignee_id = before.assignee_id  # closed only because the host was archived: a scan that sees it again starts it open
+        elif before is not None:
             match.remediation_status, match.remediation_note = before.remediation_status, before.remediation_note
             match.remediation_updated_at, match.remediation_by_id, match.assignee_id = (
                 before.remediation_updated_at, before.remediation_by_id, before.assignee_id)

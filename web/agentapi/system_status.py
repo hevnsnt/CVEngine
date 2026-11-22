@@ -213,12 +213,13 @@ ROW_RENEWAL_SECONDS = 300
 
 def row_fingerprint_tables():
     """The database tables the project rows (``_shared_inputs`` and ``_project_row``) are counted from."""
-    from cveFeed.models import CVEEntry, CVEMatch, HostScreenshot, HygieneFinding, ProbeObservation, Triage, TunableSettings
+    from cveFeed.models import CVEEntry, CVEMatch, HostScreenshot, HostState, HygieneFinding, ProbeObservation, Triage, TunableSettings
     from dashboard.models import Project, SystemTimings
     from startScan.models import IpAddress, Port, ScanHistory, Subdomain, Vulnerability
     from targetApp.models import Domain
-    models = (CVEEntry, CVEMatch, Domain, HostScreenshot, HygieneFinding, IpAddress, IpAddress.ports.through, Port, ProbeObservation, Project, ScanHistory, Subdomain,
-              Subdomain.ip_addresses.through, SystemTimings, Triage, TunableSettings, Vulnerability)
+    # HostState: an archived host is not counted (cveFeed.counts.archived_host_q)
+    models = (CVEEntry, CVEMatch, Domain, HostScreenshot, HostState, HygieneFinding, IpAddress, IpAddress.ports.through, Port, ProbeObservation, Project, ScanHistory,
+              Subdomain, Subdomain.ip_addresses.through, SystemTimings, Triage, TunableSettings, Vulnerability)
     return sorted({m._meta.db_table for m in models})
 
 
@@ -834,7 +835,15 @@ def _system_probes(user):
         Probe('sentinels', lambda p, n, d: _sentinels(p)),
         Probe('live_cache', lambda p, n, d: _live_cache(n), db=False),
         Probe('tools', lambda p, n, d: _tools()),
+        Probe('finding_hosts', lambda p, n, d: _finding_hosts(p)),
     ]
+
+
+def _finding_hosts(problems):
+    """Open findings by whether their host is in the current inventory (``cveFeed.finding_hosts``, counted at most every half hour): a problem line when
+    some point at hosts gone from the inventory or archived, so findings that outlive their host cannot creep back unseen."""
+    from cveFeed import finding_hosts
+    return finding_hosts.status_check(problems)
 
 
 def _taker(run, problems, notes):
@@ -916,6 +925,7 @@ def _system(user, problems, notes, run=None):
     out['sentinels'] = take('sentinels')
     out['live_cache'] = take('live_cache')
     out['tools'] = take('tools')
+    out['finding_hosts'] = take('finding_hosts')
     out['timings'] = run.timings()
     problem = _template_problem((out['tools'] or {}).get('nuclei_templates') or {})
     if problem:

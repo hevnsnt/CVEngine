@@ -20,7 +20,8 @@ filed under a target, so a host covered by two targets of one project had each f
 
 None of this touches a finding a person closed, set in progress or reopened by hand, and a closure the engine made itself is marked so
 (``cveFeed.closure.AUTOMATIC``) and read back as ``closed_automatically``. An engine closure as fixed is undone when a later scan reports the
-finding again; a person's fixed status is not (it sticks, as before).
+finding again, and so is a closure that only says the host was archived (cveFeed.archive_closure); a person's fixed status is not (it sticks,
+as before).
 """
 import logging
 import re
@@ -112,7 +113,9 @@ def seen_again(row):
     if not row.open_status:
         row.open_status = True
         changed.append('open_status')
-    if engine_fixed(row):
+    from cveFeed import archive_closure
+    if engine_fixed(row) or (archive_closure.is_archive_closed(row) and not archive_closure.still_archived(  # or only because the host was archived
+            row.target_domain.project_id if row.target_domain_id else None, row.subdomain.name if row.subdomain_id else '')):
         row.remediation_status, row.remediation_updated_at = 'open', timezone.now()
         row.remediation_note = _note(f'{REOPENED_NOTE}\n{row.remediation_note}')
         changed += ['remediation_status', 'remediation_updated_at', 'remediation_note']

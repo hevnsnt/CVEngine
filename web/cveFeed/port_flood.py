@@ -54,8 +54,10 @@ def findings_for(domain, hosts=None):
     crowded = (IpAddress.objects.filter(pk__in=own)
                .annotate(n=Count('ports', filter=Q(ports__state__in=OPEN_PORT_STATES, ports__protocol__in=TCP_PROTOCOLS)))
                .filter(n__gte=THRESHOLD))
+    from cveFeed import host_resolver
+    current = host_resolver.current_target_names(domain)  # a name gone from the latest full scan keeps its old, stale ports
     names = {n for n in Subdomain.objects.filter(target_domain=domain, ip_addresses__in=crowded).order_by().values_list('name', flat=True).distinct()
-             if _allowed(n, wanted, banned)}
+             if _allowed(n, wanted, banned) and host_resolver.normalize(n) in current}
     if not names:
         return []
     out = []

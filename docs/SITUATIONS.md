@@ -33,7 +33,7 @@ The sets are the Overview's own (`counts.exposed_matches`, `counts.actionable_fi
 
 A heat set by hand is respected: setting a finding to ice moves it to **Minor** even if a check proved it, and setting it to fire or smoke makes it at least **Likely**. A finding the AI reviewer called a false positive with high confidence, which the server did not close because somebody worked it (or it is a critical scanner finding, or closing is switched off), is **Minor**, not likely, until the reviewer's newest verdict says otherwise. A verdict the server refused for the evidence (hard evidence, a floor, or text aimed at an AI in it) or that the model was not sure of (low or medium confidence) never moves a finding, and neither does a finding a retest reopened (it reproduced): the ranking does not follow a model the server itself did not believe. A verdict from the AI's review of a whole host follows the same rule, and a false positive that an earlier real verdict on the same evidence held ("contradicts the earlier verdict on this state") never demotes either.
 
-**One host** is what the Hosts page calls one host: names that resolve to exactly the same addresses are one situation, named the way the Hosts page names it. The other names are `also_known_as`. A name that has findings but no scanned host record (an email domain, say) is its own situation.
+**One host** is what the Hosts page calls one host: names that resolve to exactly the same addresses are one situation, named the way the Hosts page names it. The other names are `also_known_as`. Every finding is put under its host by one shared answer (`cveFeed.host_resolver`): a certificate or TLS finding that names an endpoint (`mail.example.com:443`) is the host's, an alias is the host it is folded into, and a name with two current rows (a scanned one and a scanless one from certificate transparency, or the same name under two targets) is still the one host the Hosts page lists. A name that was a host and is not in the current inventory any more (gone from the latest full scan) has no situation; its findings close by themselves and reopen when it is back. A name that never was a host (an email domain, say) is its own situation, and its link opens its first finding.
 
 ## The rank rule
 
@@ -89,7 +89,7 @@ Each row of `results` has:
 | --- | --- |
 | `rank` | Position in the whole ordered list (not in the page). |
 | `project`, `project_name` | The project the host belongs to. |
-| `host`, `also_known_as`, `host_id`, `host_link`, `internal` | The host as the Hosts page names it, its other names, its host row id (null for a name with no scanned record), the Hosts page link, and whether it is inside a declared internal network. |
+| `host`, `also_known_as`, `host_id`, `host_link`, `internal` | The host as the Hosts page names it, its other names, its host row id (null for a name with no scanned record), the Hosts page link that opens it (for a name with no scanned record, the link of its first finding), and whether it is inside a declared internal network. |
 | `headline` | One short line: `Proven: CVE-2099-1 and 2 more`. |
 | `rank_reason` | Why it is where it is, one short phrase. |
 | `counts` | `{proven, likely, hygiene, exposure, minor}`: items open in each tier. |

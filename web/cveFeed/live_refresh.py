@@ -65,11 +65,12 @@ def fingerprint_tables(name):
     from agentapi.models import Agent
     from django.contrib.auth.models import User
 
-    from cveFeed.models import AutoFireRun, CVEEntry, CVEMatch, GeneratedTemplate, HygieneFinding, InternalRange, TlsCertificate, Triage, TunableSettings
+    from cveFeed.models import AutoFireRun, CVEEntry, CVEMatch, GeneratedTemplate, HostState, HygieneFinding, InternalRange, TlsCertificate, Triage, TunableSettings
     from dashboard.models import ApiToken, Org, Project, SystemTimings
     from startScan.models import IpAddress, Port, ScanHistory, Subdomain, Vulnerability
     from targetApp.models import Domain
-    hosts = (IpAddress, Port, ScanHistory, Subdomain, Domain, Project, Subdomain.ip_addresses.through, IpAddress.ports.through)
+    # HostState: an archived host is not one of the inventory's hosts (cveFeed.counts.archived_host_q)
+    hosts = (IpAddress, Port, ScanHistory, Subdomain, Domain, Project, HostState, Subdomain.ip_addresses.through, IpAddress.ports.through)
     if name == 'discovery-counts':
         return sorted({m._meta.db_table for m in hosts})
     return sorted({m._meta.db_table for m in hosts + (AutoFireRun, CVEEntry, CVEMatch, GeneratedTemplate, HygieneFinding, InternalRange, TlsCertificate, Triage,

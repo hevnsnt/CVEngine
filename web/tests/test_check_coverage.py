@@ -574,8 +574,8 @@ class StoredHostTests(TestCase):
 		sub.ip_addresses.add(ip)
 		return sub
 
-	def rows(self, token=None, project='cov-pa'):
-		status, data = call(token or self.token, 'GET', f'/api/v1/projects/{project}/hosts')
+	def rows(self, token=None, project='cov-pa', archived=False):
+		status, data = call(token or self.token, 'GET', f'/api/v1/projects/{project}/hosts' + ('?archived=1' if archived else ''))
 		self.assertEqual(status, 200, data)
 		return {h['host']: h for h in data['results']}
 
@@ -710,7 +710,8 @@ class StoredHostTests(TestCase):
 
 	def test_an_excluded_or_archived_host_is_paused(self):
 		HostState.objects.create(project=self.pa, domain=self.da, host='alpha.example.test', archived_at=timezone.now())
-		rows = self.rows()
+		self.assertNotIn('alpha.example.test', self.rows())  # an archived host is left out of the list unless asked for
+		rows = self.rows(archived=True)
 		self.assertEqual(rows['alpha.example.test']['check_coverage']['paused'], 'archived')
 		self.assertEqual(rows['alpha.example.test']['check_coverage']['applicable'], 0)
 		self.assertNotEqual(rows['www.alpha.example.test']['check_coverage']['applicable'], 0)

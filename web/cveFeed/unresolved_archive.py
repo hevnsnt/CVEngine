@@ -176,10 +176,14 @@ def check_one(row, *, now=None):
             ScanHistory.objects.filter(domain=domain, scan_status__in=(-1, 1), start_scan_date__gte=now - STUCK_SCAN_AGE).exists():
         return 'deferred'
     days = max(1, round(ttl().total_seconds() / 86400))
-    changed = HostState.objects.filter(pk=row.pk, unresolved_first_at=row.unresolved_first_at,
-                                       archived_at__isnull=True, pinned=False).update(
-        archived_at=now, archived_by_user=False,
-        archive_reason=f'Automatically archived after {days} day{"s" if days != 1 else ""} without once resolving to a scannable IP')
+    from cveFeed import archive_closure
+    with transaction.atomic():  # the archive and the closure of what is open on the host (cveFeed.archive_closure) together
+        changed = HostState.objects.filter(pk=row.pk, unresolved_first_at=row.unresolved_first_at,
+                                           archived_at__isnull=True, pinned=False).update(
+            archived_at=now, archived_by_user=False,
+            archive_reason=f'Automatically archived after {days} day{"s" if days != 1 else ""} without once resolving to a scannable IP')
+        if changed:
+            archive_closure.close_host(row.project_id, host, why=archive_closure.WHY_UNRESOLVED, when=now)
     if changed:
         activity.log('inventory', f'{host} archived after {days} days without a scannable IP',
                      project=row.project_id, status='done', host=host)

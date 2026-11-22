@@ -16,7 +16,7 @@ A **situation** is one host of a project together with everything open on it tha
 5. **minor**: everything else that is still open: other hygiene findings and ice-heat matches and findings.
 
 What is closed is not part of it: fixed, accepted risk, false positive (``cveFeed.closure.CLOSED``), a CVE match the AI ruled out, a scanner
-finding the scans no longer see, informational findings. The sets are the Overview's own: ``counts.exposed_matches``,
+finding the scans no longer see, informational findings. Nor is an archived host (``counts.archived_host_q``: archiving closed its findings). The sets are the Overview's own: ``counts.exposed_matches``,
 ``counts.actionable_findings``, ``counts.actionable_hygiene``, so every host the Overview calls exposed has a situation (``tests/test_situations.py``).
 A situation can exist for a host with only hygiene findings, which the Overview does not call exposed.
 
@@ -50,7 +50,6 @@ does not depend on the number of hosts.
 """
 import re
 from collections import defaultdict
-from urllib.parse import quote
 
 from django.db.models import BooleanField, Case, Count, F, IntegerField, Max, Min, Q, Value, When, Window
 from django.db.models.functions import Coalesce, Lower, RowNumber
@@ -137,7 +136,7 @@ def _matches(ids):
     """The Overview's exposed CVE matches of the projects, annotated with ``pid``, ``lname``, ``tier``, ``sev``, ``heat`` and ``first``."""
     from cveFeed import reviewer
     from cveFeed.threat import match_heat_rank_expr
-    qs = counts.exposed_matches().filter(subdomain__target_domain__project_id__in=ids).order_by()
+    qs = counts.exposed_matches().filter(subdomain__target_domain__project_id__in=ids).filter(~counts.archived_host_q('subdomain__')).order_by()
     qs = qs.annotate(pid=F('subdomain__target_domain__project_id'), lname=Lower('subdomain__name'), heat=match_heat_rank_expr(), sev=_cve_band(),
                      first=Coalesce('triage__first_seen', 'created_at'), **reviewer.newest_review_q('triage__'))
     qs = qs.annotate(disputed=_disputed())
@@ -166,7 +165,8 @@ def _vulns(ids):
     from cveFeed import reviewer
     from cveFeed.threat import finding_heat_rank_expr
     from startScan.models import Vulnerability
-    qs = counts.actionable_findings(Vulnerability.objects.filter(subdomain__isnull=False, target_domain__project_id__in=ids)).order_by()
+    qs = counts.actionable_findings(Vulnerability.objects.filter(subdomain__isnull=False, target_domain__project_id__in=ids)).filter(
+        ~counts.archived_host_q('subdomain__')).order_by()
     qs = qs.filter(counts_latest('subdomain__')).annotate(
         pid=F('target_domain__project_id'), lname=Lower('subdomain__name'), heat=finding_heat_rank_expr(), sev=F('severity'),
         first=Coalesce('triage__first_seen', 'discovered_date'), **reviewer.newest_review_q('triage__'))
@@ -189,7 +189,7 @@ def _high_hygiene_q():
 
 def _hygiene(ids):
     from cveFeed.models import HygieneFinding
-    qs = counts.actionable_hygiene(HygieneFinding.objects.filter(domain__project_id__in=ids)).order_by()
+    qs = counts.actionable_hygiene(HygieneFinding.objects.filter(domain__project_id__in=ids)).filter(~_archived_named('domain__project_id')).order_by()
     return qs.annotate(pid=F('domain__project_id'), lname=Lower('host'), sev=F('severity'), first=F('first_seen'), heat=Value(0, output_field=IntegerField()),
                        tier=Case(When(check_name__in=EXPOSURE_HYGIENE, then=Value(EXPOSURE)), When(_high_hygiene_q(), then=Value(HYGIENE)),
                                  default=Value(MINOR), output_field=IntegerField()))
@@ -200,9 +200,18 @@ def _secrets(ids):
     from cveFeed import secrets_catalog
     from cveFeed.models import SecretOccurrence
     qs = (SecretOccurrence.objects.filter(project_id__in=ids, retired_at__isnull=True, finding__severity__gte=1).exclude(finding__status__in=secrets_catalog.QUIET_STATUSES)
-          .exclude(finding__remediation_status__in=CLOSED).order_by())
+          .exclude(finding__remediation_status__in=CLOSED).filter(~_archived_named('project_id')).order_by())
     return qs.annotate(pid=F('project_id'), lname=Lower('host'), sev=F('finding__severity'), first=F('finding__first_seen'), heat=Value(0, output_field=IntegerField()),
                        tier=Value(HYGIENE, output_field=IntegerField()))
+
+
+def _archived_named(project):
+    """A Q over rows that name their host in ``host`` (a hygiene finding, a secret's occurrence) and reach its project through ``project``: the host
+    is archived (``counts.archived_host_q`` for a host row). Part of the grouped query, not a query of its own."""
+    from django.db.models import Exists, OuterRef
+
+    from cveFeed.models import HostState
+    return Q(Exists(HostState.objects.filter(project_id=OuterRef(project), host=Lower(OuterRef('host')), archived_at__isnull=False)))
 
 
 def _group_rows(qs, kev=None, manual=None, distinct=None):
@@ -217,19 +226,17 @@ def _group_rows(qs, kev=None, manual=None, distinct=None):
 # ----------------------------------------------------------------------------------------------------------------- hosts
 
 def _inventory(ids):
-    """``(reps, names)``: ``reps`` is ``{host key: {id, name, pid, http, server}}``, one entry per host exactly as the Hosts page collapses them, and
-    ``names`` maps ``(project id, lower-case name)`` to its host key. Two queries however many hosts."""
-    from agentapi.services import _one_per_host
-    from cveFeed.correlation import latest_scan_q
+    """``(inventory, reps)``: ``inventory`` is the current inventory's hosts by name (``host_resolver.Inventory``: the one answer to "which host is this
+    name", aliases and ``name:port`` included), ``reps`` is ``{host row id: {id, name, pid, http, server}}``, one entry per host exactly as the Hosts page
+    lists them. Two queries however many hosts."""
+    from cveFeed import host_resolver
     from startScan.models import Subdomain
-    current = Subdomain.objects.filter(latest_scan_q(), target_domain__project_id__in=ids)
-    reps = {}
-    for r in counts.with_host_key(_one_per_host(current, per_project=True)).values('id', 'name', 'target_domain__project_id', 'http_status', 'webserver', 'host_key'):
-        reps[r['host_key']] = {'id': r['id'], 'name': r['name'], 'pid': r['target_domain__project_id'], 'http': r['http_status'] or 0, 'server': r['webserver'] or ''}
-    names = {}
-    for pid, name, key in counts.with_host_key(current).values_list('target_domain__project_id', 'name', 'host_key').distinct():
-        names[(pid, name.lower())] = key
-    return reps, names
+    inventory = host_resolver.Inventory(ids)
+    rep_ids = {rep['id'] for rep in inventory.hosts.values()}
+    reps = {r['id']: {'id': r['id'], 'name': r['name'], 'pid': r['target_domain__project_id'], 'http': r['http_status'] or 0, 'server': r['webserver'] or ''}
+            for r in Subdomain.objects.filter(pk__in=sorted(rep_ids)).values('id', 'name', 'target_domain__project_id', 'http_status', 'webserver')} \
+        if rep_ids else {}
+    return inventory, reps
 
 
 # ----------------------------------------------------------------------------------------------------------------- ranking and words
@@ -254,19 +261,22 @@ def _is_internal(pid, names):
 
 
 def _build_groups(ids):
-    """``(groups, hosts)``: every situation of the projects in rank order (no items yet) and the number of hosts of the inventory."""
-    reps, names = _inventory(ids)
+    """``(groups, hosts)``: every situation of the projects in rank order (no items yet) and the number of hosts of the inventory. A finding is grouped
+    under the host the Hosts page lists for its name (``host_resolver``): ``name:443`` under ``name``, an alias under the host it is folded into. A name
+    that was a host and is not in the current inventory any more (gone from the latest full scan) has no situation: its findings close by themselves
+    (``archive_closure.close_gone``). A name that never was a host (a DNS record, a mail domain) keeps one, linked to its first finding."""
+    from cveFeed import host_resolver
+    inventory, reps = _inventory(ids)
     groups = {}
 
     def group_of(pid, lname):
-        key = names.get((pid, lname))
-        gid = key if key is not None else (pid, lname)
+        found = inventory.resolve(pid, lname)
+        gid = found['id'] if found else (pid, host_resolver.base_name(lname))
         g = groups.get(gid)
         if g is None:
-            rep = reps.get(key) if key is not None else None
-            g = groups[gid] = {'pid': pid, 'rep': rep, 'names': set(), 'n': dict.fromkeys(TIER_ORDER, 0), 'sev': dict.fromkeys(TIER_ORDER, 0),
-                               'kev': 0, 'manual': 0, 'oldest': None}
-        g['names'].add(lname)
+            g = groups[gid] = {'pid': pid, 'rep': reps.get(found['id']) if found else None, 'names': set(), 'n': dict.fromkeys(TIER_ORDER, 0),
+                               'sev': dict.fromkeys(TIER_ORDER, 0), 'kev': 0, 'manual': 0, 'oldest': None}
+        g['names'].add(lname)  # as the findings store it (``name:443`` too): the items are read by it
         return g
 
     def add(rows):
@@ -286,17 +296,39 @@ def _build_groups(ids):
     add(_group_rows(qs, manual=manual))
     add(_group_rows(_hygiene(ids)))
     add(_group_rows(_secrets(ids), distinct='finding_id'))
-    by_key = defaultdict(set)
-    for (pid, lname), key in names.items():
-        by_key[key].add(lname)
+    by_rep = defaultdict(set)
+    for (pid, name), found in inventory.hosts.items():
+        by_rep[found['id']].add(name)
+    gone = _gone(groups)
     out = []
     for gid, g in groups.items():
         rep = g['rep']
-        g['name'] = rep['name'] if rep else sorted(g['names'])[0]
-        g['all'] = g['names'] | (by_key[gid] if rep else set())
+        shown = {host_resolver.base_name(n) for n in g['names']}
+        first = min(shown)
+        if rep is None and (g['pid'], first) in gone:
+            continue
+        g['name'] = rep['name'] if rep else first
+        g['all'] = shown | (by_rep[gid] if rep else set())
         g['also'] = sorted(g['all'] - {g['name'].lower()})
         out.append(g)
     return out, len(reps)
+
+
+def _gone(groups):
+    """``{(project id, name)}`` of the groups with no host that name a host row of their project all the same: hosts gone from the current
+    inventory. One query, only when such a group exists."""
+    from cveFeed import host_resolver
+    from startScan.models import Subdomain
+    unresolved = defaultdict(set)
+    for g in groups.values():
+        if g['rep'] is None:
+            unresolved[g['pid']] |= {host_resolver.base_name(n) for n in g['names']}
+    if not unresolved:
+        return set()
+    q = Q(pk__in=[])
+    for pid, names in unresolved.items():
+        q |= Q(target_domain__project_id=pid, name__in=sorted(names))
+    return {(pid, host_resolver.normalize(name)) for pid, name in Subdomain.objects.filter(q).values_list('target_domain__project_id', 'name').distinct()}
 
 
 def lead_of(n, kev):
@@ -540,13 +572,22 @@ def _link(slug, item):
     return f"/cve/{slug}/vulns/#{item['kind']}-{item['id']}"
 
 
+def _host_link(slug, rep, shown):
+    """Where a situation's host name leads: the host on the Hosts page (``host_resolver.host_link``), or, for a name that is not a host of the
+    inventory, its first finding (an empty Hosts search helps nobody)."""
+    from cveFeed import host_resolver
+    if rep is not None:
+        return host_resolver.host_link(slug, rep)
+    return _link(slug, shown[0]) if shown else f'/cve/{slug}/vulns/'
+
+
 def _row(g, items, rank, slug, project_name, cap):
     from agentapi.services import SEVERITY_NAMES
     shown = items[:cap]
     rep = g['rep']
     return {
         'rank': rank, 'project': slug, 'project_name': project_name, 'host': g['name'], 'also_known_as': [n for n in g['also'] if n != g['name']],
-        'host_id': rep['id'] if rep else None, 'host_link': f"/cve/{slug}/hosts/?host={quote(g['name'], safe='')}", 'internal': g['internal'],
+        'host_id': rep['id'] if rep else None, 'host_link': _host_link(slug, rep, shown), 'internal': g['internal'],
         'headline': clean(_headline(g['lead'], items, g['n']), 200), 'rank_reason': g['reason'], 'counts': g['counts'], 'lead': TIER_NAMES[g['lead']],
         'first_action': clean(_action(items[0]) if items else 'Look at the open findings', 200), 'narrative': narrative(g, items),
         'oldest': g['oldest'].isoformat() if g['oldest'] else None,
@@ -628,7 +669,8 @@ def one(ids, host):
     """The situation of ``host`` (a name of it) with up to ``DETAIL_ITEMS`` items, or None when nothing needs a person there."""
     ids = list(ids)
     groups, _ = ranked(ids)
-    wanted = str(host or '').strip().lower()
+    from cveFeed import host_resolver
+    wanted = host_resolver.base_name(host)
     for rank, g in enumerate(groups, 1):
         if wanted in g['all']:
             items = _read_items([g], DETAIL_ITEMS)

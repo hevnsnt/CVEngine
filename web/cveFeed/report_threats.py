@@ -13,6 +13,8 @@ Impact is two honest numbers, counted in distinct machines (``counts.with_host_k
 - *M more run <product>, version unknown*: hosts with a technology or open-port product the correlation machinery connects to the CVE (``tech_coverage.connect``) and
   no version read for it, that do not already match. A product with no version read can be neither ruled in nor out.
 
+An archived host counts in neither: archiving closed its matches (``cveFeed.archive_closure``) and its products are not read (``counts.archived_host_q``).
+
 A briefing that names CVEs we hold is counted through them (merged per host); one that names none is matched by its product tags, through the same product-name
 aliases correlation uses, with a stop-list for class tags (RCE, Memory corruption, CMS, ...).
 
@@ -112,7 +114,8 @@ def _product(cve):
 def _sightings(ids):
     """``[(host key, normalised sighting)]``: every technology and open-port product of the scope's current hosts, each with the machine it was seen on."""
     from startScan.models import OPEN_PORT_STATES, Port, Subdomain
-    current = Subdomain._base_manager.filter(correlation.latest_scan_q()).filter(target_domain__project_id__in=list(ids)).values('pk')
+    current = (Subdomain._base_manager.filter(correlation.latest_scan_q()).filter(target_domain__project_id__in=list(ids))
+               .filter(~counts.archived_host_q()).values('pk'))  # an archived host runs nothing anyone counts on
     keys = dict(counts.with_host_key(Subdomain._base_manager.filter(pk__in=current)).values_list('pk', 'host_key'))
     seen, out = {}, []
 

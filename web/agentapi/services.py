@@ -2141,10 +2141,9 @@ def _id_array(ids):
     return RawSQL('%s::integer[]', (list(ids),), output_field=ArrayField(IntegerField()))
 
 
-def _collapse_sql(qs, per_project=False):
-    """``(sql, params)`` of the ids ``_one_per_host`` keeps (see there). The same rules as the window and DISTINCT ON passes it replaces, column for
-    column: ``cveFeed.counts.with_host_key`` for the key (the project, then ``:n:`` and the name for a row behind a CDN or with no address, else
-    ``:i:`` and its sorted address ids), names that tie on length ordered by their bytes (``COLLATE "C"``)."""
+def _collapse_ctes(qs, per_project=False):
+    """``(sql, params)`` of the common table expressions both collapses read: ``facts`` (each candidate with its open-port count, address count and host
+    key) and ``by_name`` (one row per name, or per project and name). See ``_collapse_sql``."""
     from startScan.models import OPEN_PORT_STATES, IpAddress, Port, Subdomain
     from targetApp.models import Domain
     candidates, params = qs.order_by().values('id').query.sql_with_params()
@@ -2171,13 +2170,46 @@ def _collapse_sql(qs, per_project=False):
             WHERE s.id IN (SELECT id FROM cand)),
         by_name AS (
             SELECT DISTINCT ON ({keys}) f.* FROM facts f
-            ORDER BY {keys}, f.open_ports DESC, f.ips DESC, f.scan_history_id DESC NULLS LAST, f.id DESC)
+            ORDER BY {keys}, f.open_ports DESC, f.ips DESC, f.scan_history_id DESC NULLS LAST, f.id DESC)'''
+    return sql, (*params, *OPEN_PORT_STATES)
+
+
+# the order that picks the one row a host is shown as, among the names that share its key (the project's own target name first, else the shortest name)
+_REP_ORDER = 'CASE WHEN b.name = b.domain_name THEN 0 ELSE 1 END ASC, LENGTH(b.name) ASC, b.name COLLATE "C" ASC, b.open_ports DESC, b.id DESC'
+
+
+def _collapse_sql(qs, per_project=False):
+    """``(sql, params)`` of the ids ``_one_per_host`` keeps (see there). The same rules as the window and DISTINCT ON passes it replaces, column for
+    column: ``cveFeed.counts.with_host_key`` for the key (the project, then ``:n:`` and the name for a row behind a CDN or with no address, else
+    ``:i:`` and its sorted address ids), names that tie on length ordered by their bytes (``COLLATE "C"``)."""
+    ctes, params = _collapse_ctes(qs, per_project)
+    sql = f'''{ctes}
         SELECT r.id FROM (
-            SELECT b.id, ROW_NUMBER() OVER (PARTITION BY b.host_key ORDER BY CASE WHEN b.name = b.domain_name THEN 0 ELSE 1 END ASC, LENGTH(b.name) ASC,
-                                            b.name COLLATE "C" ASC, b.open_ports DESC, b.id DESC) AS rank
+            SELECT b.id, ROW_NUMBER() OVER (PARTITION BY b.host_key ORDER BY {_REP_ORDER}) AS rank
             FROM by_name b) r
         WHERE r.rank = 1'''
-    return sql, (*params, *OPEN_PORT_STATES)
+    return sql, params
+
+
+def host_of_names(qs):
+    """``[(project id, name, host row id, host name)]``: for every name of the rows ``qs`` (the current inventory of some projects), the row the Hosts page
+    shows its host as: the name's own row when it stands for its host, else the row of the name it is folded under (names on the same addresses are one
+    host). The same collapse as ``_one_per_host`` (per project), in one statement, so a name always reaches the host the Hosts page lists, whichever of
+    its rows a finding hangs on (a scanless row beside the scanned one, the same name under two targets). ``cveFeed.host_resolver`` reads it."""
+    from django.core.exceptions import EmptyResultSet
+    from django.db import connection
+    try:
+        ctes, params = _collapse_ctes(qs, per_project=True)
+    except EmptyResultSet:
+        return []
+    sql = f'''{ctes},
+        ranked AS (
+            SELECT b.project_id, b.name, b.id, b.host_key, ROW_NUMBER() OVER (PARTITION BY b.host_key ORDER BY {_REP_ORDER}) AS rank
+            FROM by_name b)
+        SELECT n.project_id, n.name, r.id, r.name FROM ranked n INNER JOIN ranked r ON r.host_key = n.host_key AND r.rank = 1'''
+    with connection.cursor() as cursor:
+        cursor.execute(sql, params)
+        return cursor.fetchall()
 
 
 def _hosts_page(project, qs, params, extra=None, coverage=True, load=None, page_extra=None):
@@ -2293,13 +2325,43 @@ def _internal_filter(qs, params, prefix=''):
     return qs
 
 
+ARCHIVED_HIDE, ARCHIVED_INCLUDE, ARCHIVED_ONLY = 'hide', 'include', 'only'
+
+
+def _archived_mode(params):
+    """What ``?archived=`` asks of a host list: ``hide`` (absent, 0, false: the default, archived hosts are left out), ``include`` (1, true: every host)
+    or ``only`` (the archived hosts alone: the Hosts page's Archived view). A 400 for anything else."""
+    raw = params.get('archived') if params else None
+    if raw is None or raw is False or raw == '':
+        return ARCHIVED_HIDE
+    if raw is True:
+        return ARCHIVED_INCLUDE
+    value = str(raw).strip().lower()
+    if value in ('0', 'false', 'no', 'hide'):
+        return ARCHIVED_HIDE
+    if value in ('1', 'true', 'yes', 'include', 'all'):
+        return ARCHIVED_INCLUDE
+    if value == ARCHIVED_ONLY:
+        return ARCHIVED_ONLY
+    raise ApiError(400, 'archived must be 0 (leave archived hosts out, the default), 1 (include them) or only (archived hosts alone)')
+
+
+def _archived_filter(qs, mode, prefix=''):
+    """Host rows narrowed by ``mode`` (``_archived_mode``): an archived host (``cveFeed.counts.archived_host_q``) is out of every list unless asked for."""
+    from cveFeed.counts import archived_host_q
+    if mode == ARCHIVED_INCLUDE:
+        return qs
+    return qs.filter(archived_host_q(prefix)) if mode == ARCHIVED_ONLY else qs.filter(~archived_host_q(prefix))
+
+
 def list_hosts(ctx, slug, params):
-    """The Shodan-style inventory: hosts with IPs, open ports and service/product/version, highest score first (?sort=name)."""
+    """The Shodan-style inventory: hosts with IPs, open ports and service/product/version, highest score first (?sort=name). Archived hosts are left
+    out unless ``archived`` is 1 (all) or only (``_archived_mode``)."""
     from django.db.models import Q
     from startScan.models import Subdomain
     project, _ = get_project(ctx, slug)
     from cveFeed.correlation import latest_scan_q
-    qs = _scoped(Subdomain.objects.all(), project, 'target_domain__project').filter(latest_scan_q())
+    qs = _archived_filter(_scoped(Subdomain.objects.all(), project, 'target_domain__project').filter(latest_scan_q()), _archived_mode(params))
     if params.get('q'):
         qs = qs.filter(Q(name__icontains=params['q']) | _alias_note_q(params['q'], project))
     if params.get('target_id'):
@@ -3119,7 +3181,8 @@ def _cached_facets(project, qs, terms, params, facet_names, facet_size, with_uns
                 'facets': _search_facets(by_id.keys(), facet_names, facet_size) if facet_names else {}}
     ids = sorted(project.ids) if _is_all(project) else [project.pk]
     # every parameter that narrows ``qs`` is part of the key: the names filter and the exposed filter as much as the terms
-    narrowing = [str(params.get('internal', '')).strip().lower(), str(params.get('names') or '').strip().lower(), str(params.get('exposed') or '').strip().lower() in ('1', 'true', 'yes')]
+    narrowing = [str(params.get('internal', '')).strip().lower(), str(params.get('names') or '').strip().lower(), str(params.get('exposed') or '').strip().lower() in ('1', 'true', 'yes'),
+                 _archived_mode(params)]
     scope = snapshot_cache.scope_hash('search-facets', ids, [list(t) for t in terms], *narrowing, facet_names, facet_size, with_unscannable)
     cost_key = f'cve:snap:search-facets:cost:{scope}'
     try:
@@ -3224,10 +3287,11 @@ def _host_has(q):
     return found
 
 
-def search_host_rows(project, terms, names=None):
+def search_host_rows(project, terms, names=None, archived=ARCHIVED_HIDE):
     """One Subdomain row per host that matches ``terms``: what the interactive search lists and a saved search counts. ``names`` (``_host_names_q``) keeps
-    only the rows of those hosts, before the rows are folded into one per host, so a host listed by any of its names is found whichever name it is shown under."""
-    rows = _search_matches(project, terms)
+    only the rows of those hosts, before the rows are folded into one per host, so a host listed by any of its names is found whichever name it is shown under.
+    ``archived`` (``_archived_mode``): an archived host is left out unless asked for, before the fold, so it never stands for the names it shares addresses with."""
+    rows = _archived_filter(_search_matches(project, terms), archived)
     if names is not None:
         from django.db.models.functions import Lower
         rows = rows.alias(_lname=Lower('name')).filter(names)
@@ -3311,7 +3375,8 @@ def search_hosts(ctx, slug, params):
     ``facets`` (comma-separated, among port|product|tech|os|country) adds the same whole-match counting for those fields,
     each up to ``facet_size`` values (default 10, max 50), highest count first. Each result says what matched. No ``q`` lists every
     host. ``names`` keeps only the hosts it lists by exact name (``_host_names_q``: ``a.example,b.example``, or ``acme/a.example`` for one project's host),
-    ANDed with ``q``: the Overview links a threat's host count to exactly the hosts it counts this way. Highest score first; ``sort=name`` for names."""
+    ANDed with ``q``: the Overview links a threat's host count to exactly the hosts it counts this way. An archived host is left out of the rows, the
+    count and the facets unless ``archived`` is 1 (every host) or only (the archived ones alone): ``_archived_mode``. Highest score first; ``sort=name`` for names."""
     from startScan.models import Subdomain
     project, _ = get_project(ctx, slug)
     heat = params.get('heat') or ''
@@ -3327,7 +3392,8 @@ def search_hosts(ctx, slug, params):
         raise ApiError(400, 'facet_size must be an integer')
     terms = parse_search(params.get('q'))
     names = _host_names_q(project, params.get('names'))
-    qs = _internal_filter(search_host_rows(project, terms, names), params)
+    archived = _archived_mode(params)
+    qs = _internal_filter(search_host_rows(project, terms, names, archived=archived), params)
     counts_only = page_args(params, zero_ok=True)[1] == 0
     if not (counts_only and not heat):
         # the collapse once: the facets' walk, the exposed filter and the page all read its ids (it ran once for the facets and again for the page)
