@@ -24,6 +24,7 @@ RETENTION = {
     'AgentActivity': ('CVENGINE_ACTIVITY_RETENTION_DAYS', 30, 'created_at'),
     'TriageCall': ('CVENGINE_TRIAGE_CALL_RETENTION_DAYS', 90, 'started_at'),
     'AIUsage': ('CVENGINE_AI_USAGE_RETENTION_DAYS', 400, 'started_at'),  # a year of cost history for the AI usage page
+    'McpCall': ('CVENGINE_MCP_LOG_RETENTION_DAYS', 90, 'at'),  # the MCP page's History of tool calls
 }
 # The routine audit rows of the Sentinel queue: one claim, accept and completion per task, nearly all of the audit log on an instance with Sentinels
 # (a million rows in a few weeks at 3000 targets). They are archived and deleted with the log tables once older than this; every other audit action

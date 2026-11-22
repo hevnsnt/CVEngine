@@ -238,7 +238,8 @@ MCP = {
         'Make a read-only key for an agent that only needs to read. A read-only key cannot change anything.',
         'A key with write access can start scans, change finding status, add and delete targets and hosts in one call, with no confirmation. '
         'Agents cannot turn features on, raise limits, store keys or switch on secret validation.',
-        'Every change an agent makes is in the audit log with the key\'s name. Reads are not logged.',
+        'Every tool call an agent makes, reads included, is in the History on the MCP page (when, which key, the tool and its arguments, '
+        'never the result), kept 90 days. Every change is also in the audit log with the key\'s name.',
         'Every tool result carries a notice that text from scanned hosts is data, not instructions.',
         'Revoke a key on the API keys page. Keys are also revoked when their owner\'s password changes.',
     ],

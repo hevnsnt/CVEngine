@@ -423,9 +423,9 @@ class PageTests(ReportingBase):
 
     def test_reporting_sits_after_scans_and_before_scanners_and_in_the_phone_more_sheet(self):
         built = nav.build('reports', 'acme-web', bounty_enabled=True, sentinels_enabled=False)
-        self.assertEqual([e['key'] for e in built['rail']], ['overview', 'findings', 'hygiene', 'assets', 'suppliers', 'scans', 'reporting', 'scanners', 'bounty'])
+        self.assertEqual([e['key'] for e in built['rail']], ['overview', 'findings', 'hygiene', 'assets', 'suppliers', 'scans', 'reporting', 'scanners', 'mcp', 'bounty'])
         bare = nav.build('reports', None, bounty_enabled=False, sentinels_enabled=False)
-        self.assertEqual([e['label'] for e in bare['rail']], ['Overview', 'Graph', 'Reporting', 'Scanners'])
+        self.assertEqual([e['label'] for e in bare['rail']], ['Overview', 'Graph', 'Reporting', 'Scanners', 'MCP'])
         self.assertIn('Reporting', [i['label'] for i in built['index']])
         html = client_for(self.org_member).get('/cve/reports/').content.decode()
         sheet = html[html.index('class="sheet-grid"'):]

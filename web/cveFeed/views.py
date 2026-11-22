@@ -782,6 +782,17 @@ def ai_data_page(request):
     return render(request, 'cveFeed/ai_data.html', {**ui_context(request, 'ai'), **ai_disclosure.page_context(request.user), 'no_scanner_bar': True})
 
 
+def mcp_page(request):
+    """The MCP page: connect an agent (snippets that name this server's /mcp/ address), what to ask it, and the History of MCP tool calls made
+    as the viewer (an App Admin sees everyone's). Every signed-in person may open it: the History is filtered to what they may read
+    (``agentapi.mcp_log.visible_to``)."""
+    from cveFeed import mcp_page as page
+    url = request.build_absolute_uri('/mcp/')
+    return render(request, 'cveFeed/mcp.html', {**ui_context(request, 'mcp'), 'mcp_url': url, 'mcp_clients': page.clients(url),
+                                                'mcp_examples': page.EXAMPLES, 'mcp_fix_loop': page.FIX_LOOP, **page.history(request),
+                                                'no_scanner_bar': True})
+
+
 def admin_page(request):
     from django.core.exceptions import PermissionDenied
 
