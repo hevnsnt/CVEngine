@@ -77,20 +77,41 @@ def is_dev_host(name):
     return any(DEV_LABEL.match(part) for label in labels for part in [label, *label.split('-')])
 
 
+def cert_vendor(cert_names):
+    """The one vendor most of a certificate's names are on ('' when there is none or two share it): a certificate whose names are a vendor's is
+    the vendor's own, whatever the name it was reached by. Three quarters, not all, because the stored list is cut short and a vendor's
+    certificate carries internal and pre-production names the vendor list does not carry."""
+    names = [n for n in cert_names if n]
+    if not names:
+        return ''
+    counts = {}
+    for n in names:
+        vendor = vendor_of(n)
+        if vendor:
+            counts[vendor] = counts.get(vendor, 0) + 1
+    if not counts:
+        return ''
+    vendor, n = max(counts.items(), key=lambda kv: kv[1])
+    return vendor if n * 4 >= len(names) * 3 and len(counts) == 1 else ''
+
+
 def ownership(name, cnames=(), cert_names=()):
     """``(kind, vendor)``: ``('vendor', V)`` when the endpoint is the vendor's own service (a Microsoft discovery name pointing at
-    Microsoft), ``('vendor-managed', V)`` when the client's name is served by a vendor platform, ``('', '')`` otherwise."""
+    Microsoft), ``('vendor-managed', V)`` when the client's name is served by a vendor platform, ``('', '')`` otherwise. The CNAME is
+    the evidence when one is stored; with none stored (a host that was never resolved, or has left the inventory) a certificate that is
+    the vendor's is the same evidence."""
     data = platforms()
     targets = [c for c in cnames if c and c != _clean(name)]
     vendors = [v for v in (vendor_of(t) for t in targets) if v]
+    by_cert = cert_vendor(cert_names)
     first = _clean(name).split('.', 1)[0]
     if first in data['discovery_labels']:
-        names = [n for n in cert_names if n]
-        by_cert = bool(names) and all(vendor_of(n) == data['discovery_vendor'] for n in names)
-        if data['discovery_vendor'] in vendors or by_cert:
+        if data['discovery_vendor'] in vendors or by_cert == data['discovery_vendor']:
             return 'vendor', data['discovery_vendor']
     if vendors:
         return VENDOR_TAG, vendors[0]
+    if by_cert and not targets:
+        return VENDOR_TAG, by_cert
     return '', ''
 
 
