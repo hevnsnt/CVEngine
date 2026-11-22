@@ -8,6 +8,7 @@
 </div></div>
 
 <div class="api-keys-page">
+  <p class="note api-keys-ai">Everything an AI agent reads with a key goes to that agent's own AI provider. <a href="{% url 'cve_ai' %}#mcp">What an agent can read</a>, and why a read-only key is the safer choice for one that only reads.</p>
   <form class="card" id="f" autocomplete="off">
     {% csrf_token %}
     <h2>New API key</h2>

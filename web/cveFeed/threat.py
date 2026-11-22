@@ -193,15 +193,16 @@ def manual_heat(finding):
     return value if value in HEAT_RANK else ""
 
 
-def manual_heat_reason(finding):
+def manual_heat_reason(finding, person=True):
     """"set to smoke by alice: <their reason>" for a finding whose heat a person set (``manual_heat``), else ''. The user is
-    ``heat_override_by`` (load ``triage__heat_override_by`` with a list to save a query per overridden row)."""
+    ``heat_override_by`` (load ``triage__heat_override_by`` with a list to save a query per overridden row). ``person=False`` (what an AI prompt
+    is given) says "by a person" instead of the login: who set a heat is personal data no model needs."""
     heat = manual_heat(finding)
     if not heat:
         return ""
     row = finding.triage
     by = getattr(row, "heat_override_by", None) if getattr(row, "heat_override_by_id", None) else None
-    who = by.username if by is not None else "a user no longer here"
+    who = "a person" if not person else (by.username if by is not None else "a user no longer here")
     reason = (getattr(row, "heat_override_reason", "") or "").strip()
     return f"set to {heat} by {who}" + (f": {reason}" if reason else "")
 
@@ -278,13 +279,13 @@ REASON_NOT_HOT = "not on the KEV and no known exploit"
 REASON_REPORTED_ONLY = "the version was only reported by a third party: ice until our own read or a check confirms it"
 
 
-def heat_reason(match, heat=None):
+def heat_reason(match, heat=None, person=True):
     """One short sentence that says WHY a CVEMatch shows its heat, for tooltips, host reasons, the REST/MCP ``heat_reason`` field and the AI's
     context: "on the KEV; version proven (...)", "on the KEV; version not proven", "not on the KEV and no known exploit", "the host's
     distribution has patched it", ... ``heat`` is ``match_heat(match)`` when the caller has it. For a heat a person set: "set to smoke by
     alice: <their reason>" (``manual_heat_reason``)."""
     from cveFeed import match_policy
-    manual = manual_heat_reason(match)
+    manual = manual_heat_reason(match, person)
     if manual:
         return manual
     cve = match.cve_entry
@@ -437,12 +438,12 @@ def finding_heat(vuln, capped=True, hot_names=None, policy=None):
     return capped_by_triage(heat, vuln)
 
 
-def finding_heat_reason(vuln, heat, hot_names=None):
+def finding_heat_reason(vuln, heat, hot_names=None, person=True):
     """Why a scanner finding has its heat: under the KEV policy for one that names CVEs, and for any finding a cap holds below its severity
     (a validation that came back clean, a triage still pending or needing validation, a template match no validation reproduced); else ''
     (a finding without CVEs is rated by its severity). A heat a person set says who set it and why, under either policy
     (``manual_heat_reason``)."""
-    manual = manual_heat_reason(vuln)
+    manual = manual_heat_reason(vuln, person)
     if manual:
         return manual
     if heat is None:

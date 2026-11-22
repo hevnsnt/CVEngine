@@ -12,6 +12,7 @@ urlpatterns = [
     re_path(r'^api/welcome/(?P<path>.*)$', welcome.dispatch, name='cve_api_welcome'),
     path('account/', views.account_page, name='cve_account'),
     path('about/', views.about_page, name='cve_about'),
+    path('ai/', views.ai_data_page, name='cve_ai'),
     path('how-it-works/', views.how_page, name='cve_how'),
     path('admin/', views.admin_page, name='cve_admin'),
     re_path(r'^api/account/(?P<path>.*)$', account_api.dispatch, name='cve_api_account'),

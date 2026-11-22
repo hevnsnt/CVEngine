@@ -13,6 +13,7 @@ Start with the [project README](../README.md) for what cvENGINE is and how to in
 | [FIRE-SMOKE-ICE.md](FIRE-SMOKE-ICE.md) | How cvENGINE rates every CVE and why                                                                                                                                                      |
 | [BUG-BOUNTY.md](BUG-BOUNTY.md)         | The bug bounty page: who may use it, program scope, reports, and submission                                                                                                               |
 | [AI-USAGE.md](AI-USAGE.md)             | AI model usage, tokens, and cost estimates                                                                                                                                                |
+| [AI-DATA.md](AI-DATA.md)               | What each AI job sends, what MCP agents can read, how to send nothing                                                                                                                     |
 
 ## How it works
 

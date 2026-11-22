@@ -966,6 +966,28 @@ pre.mono{margin:0 0 var(--s-2);padding:var(--s-2) var(--s-3);background:var(--in
   .about-table td .about-detail{grid-column:2}
   .about-table td.num{font-size:12px}
 }
+/* AI and your data (/cve/ai/, cveFeed/ai_disclosure.py): the About page's sections, with one folded card per AI job */
+.ai-now{padding:20px;display:grid;gap:8px}
+.ai-now h2{font-size:16px;margin:0}
+.ai-now-lede{margin:0;font-size:14px;max-width:72ch;overflow-wrap:anywhere}
+.ai-now .note{margin:0}
+.ai-dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:8px;vertical-align:1px;background:var(--muted)}
+.ai-dot.hosted{background:var(--smoke,#c58a1e)}.ai-dot.local{background:var(--ok,#3f8f5f)}
+.ai-group-h{font-size:15px;margin:24px 0 4px}
+.ai-job>summary{flex-wrap:wrap;row-gap:4px}
+.ai-job .ai-state{margin-left:8px}
+.ai-job .ai-state.off{color:var(--muted)}
+.ai-job>.about-text{margin:0 0 8px}
+.ai-facts{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:0 20px;margin:0 0 16px;font-size:13.5px;max-width:880px}
+.ai-facts>div{display:contents}
+.ai-facts dt{color:var(--muted);padding:8px 0;border-top:1px solid var(--line)}
+.ai-facts dd{margin:0;padding:8px 0;border-top:1px solid var(--line);color:var(--ink-2);overflow-wrap:anywhere;min-width:0}
+.ai-facts ul,.ai-list{margin:0;padding-left:18px}
+.ai-facts li,.ai-list li{margin:2px 0}
+.ai-list{font-size:14px;max-width:72ch;color:var(--ink-2)}
+.ai-data .about-text+.about-text{margin-top:8px}
+@media (max-width:560px){.ai-facts{grid-template-columns:minmax(0,1fr)}.ai-facts dt{padding-bottom:0}.ai-facts dd{border-top:0;padding-top:2px}}
+.api-keys-ai{margin:0}
 .about-rengine{padding-top:24px;border-top:1px solid var(--line)}
 .two-step h3,.recovery h3,.card>h3{margin-bottom:var(--s-1)}
 .two-step .note{margin-bottom:var(--s-3)}

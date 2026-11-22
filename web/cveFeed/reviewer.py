@@ -430,14 +430,15 @@ def other_hosts_hold(real):
 
 
 def _heat(kind, finding):
+    """``(heat, reason)`` as a model is given them: a heat a person set says "by a person", never their login (``threat.manual_heat_reason``)."""
     from cveFeed import threat
     try:
         if kind == 'cve_match':
             heat = threat.match_heat(finding)
-            return heat, threat.heat_reason(finding, heat)
+            return heat, threat.heat_reason(finding, heat, person=False)
         if kind in ('nuclei', 'db_exposure', 'bbot'):
             heat = threat.finding_heat(finding)
-            return heat, threat.finding_heat_reason(finding, heat)
+            return heat, threat.finding_heat_reason(finding, heat, person=False)
     except Exception:  # noqa: BLE001 - the heat is context for the model; a failure to read it never blocks the review
         logger.warning('reviewer: could not read the heat of %s %s', kind, finding.pk, exc_info=True)
     return '', ''
@@ -464,7 +465,9 @@ def build_packet(triage, key):
     prior = prior_line(*same_evidence_prior(triage))  # cvENGINE's own count of earlier verdicts: numbers, no host names, nothing the host wrote
     steps = [{'check': str(s.get('label') or s.get('kind') or '')[:80], 'result': str(s.get('result') or '')[:40]}
              for s in (triage.validation_steps or [])[:10] if isinstance(s, dict)]
-    return {
+    from cveFeed.ai_jobs import _redact
+    # the same secret masking every queued AI job gets (ai_jobs._clean_parts): this packet goes to the reviewer container without the queue
+    return _redact({
         'ref': f't{triage.pk}', 'review_key': key, 'kind': kind,
         'trusted': {
             'heat': heat, 'heat_reason': str(heat_reason or '')[:300],
@@ -483,7 +486,7 @@ def build_packet(triage, key):
             'facts': d.get('payload'), 'host_context': d.get('host_context'),
             'earlier_triage_reason_written_by_a_model': triage_lib.strip_instructions((triage.reason or '')[:800]),
         },
-    }
+    })
 
 
 def next_packets(limit=PACKET_LIMIT, now=None):
@@ -1244,6 +1247,8 @@ def snapshot(now=None, templates_release=None, _scan_only=False):
             'fleet': fleet.fleet_facts(now), 'actions': {name: f'at most once every {int(gap.total_seconds() // 60)} minutes' for name, gap in ACTIONS.items()}}
     if isinstance(signals, dict) or tuning:
         snap.update(maintainer_checks.brief(signals, tuning))
+    from cveFeed.ai_jobs import _redact
+    snap = _redact(snap)  # error and activity text can quote anything a task saw: the same secret masking every queued AI job gets
     if _scan_only:  # the report-time rescan: the same keys, built again now, nothing stored and no offer
         return snap
     snap.update(_tuning_offer(snap, now))
