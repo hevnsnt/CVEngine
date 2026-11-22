@@ -7,6 +7,7 @@ import json
 import logging
 import time
 
+from django.conf import settings
 from django.http import HttpResponse, JsonResponse
 from django.core.exceptions import RequestDataTooBig
 
@@ -54,7 +55,10 @@ INSTRUCTIONS = ('CVEngine vulnerability management. Start with whoami and list_p
                 'Sentinels (scan-stage agents, kind=scanner) use the matching register_sentinel/sentinel_heartbeat/get_next_sentinel_task/'
                 'accept_sentinel_task/report_sentinel_task_result loop instead, over SentinelTask, not AgentTask. '
                 + UNTRUSTED_NOTICE)
-SERVER_INFO = {'name': 'cvengine', 'version': '1.0.0'}
+def server_info():
+    """The serverInfo block for initialize. The version is the release's own (web/.version via settings), read on each call, so it never needs a
+    hand edit at release time."""
+    return {'name': 'cvengine', 'version': settings.RENGINE_CURRENT_VERSION}
 MAX_BODY_BYTES = 256 * 1024
 MAX_BATCH_ITEMS = 20
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
@@ -781,7 +785,7 @@ def handle_message(ctx, msg):
         asked = params.get('protocolVersion')
         return _rpc_result(rpc_id, {
             'protocolVersion': asked if asked in SUPPORTED_VERSIONS else SUPPORTED_VERSIONS[0],
-            'capabilities': {'tools': {'listChanged': False}}, 'serverInfo': SERVER_INFO,
+            'capabilities': {'tools': {'listChanged': False}}, 'serverInfo': server_info(),
             'instructions': INSTRUCTIONS})
     if method == 'ping':
         return _rpc_result(rpc_id, {})
