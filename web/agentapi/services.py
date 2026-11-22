@@ -1548,15 +1548,36 @@ def _prime_nuclei(*groups):
         r._nuclei_ran_scan = r.scan_history_id in done
 
 
-def _host_names(sub):
+HOST_NAME_MODULES = ('ptr', 'tls-san')  # the discovery events that name an address: reverse DNS and a certificate's names
+
+
+def _host_names(sub, shared=None):
     """Names an IP target answers to (reverse DNS and certificate), recorded at discovery. Not added as targets: they may be
-    out of scope. Empty for a hostname."""
+    out of scope. Empty for a hostname. ``shared['host_names']`` (``_host_names_for``) holds them for a whole page, read at once."""
     from cveFeed.models import DiscoveryEvent
     from targetApp.target_types import IP, classify_target
     if classify_target(sub.name) != IP or not sub.target_domain_id:
         return []
+    if shared and 'host_names' in shared:
+        return sorted(shared['host_names'].get((sub.target_domain_id, sub.name), ()))
     return sorted({(e.module, e.label) for e in DiscoveryEvent.objects.filter(
-        domain_id=sub.target_domain_id, host=sub.name, module__in=('ptr', 'tls-san'))})
+        domain_id=sub.target_domain_id, host=sub.name, module__in=HOST_NAME_MODULES)})
+
+
+def _host_names_for(subs):
+    """``{(target id, host name): {(module, label)}}``: what ``_host_names`` reads for every IP host of a page, in one query, where it asked once per
+    host. Keyed by the row's own target and name, so a row only ever gets the events of its own target, as before."""
+    from cveFeed.models import DiscoveryEvent
+    from targetApp.target_types import IP, classify_target
+    ip_subs = [s for s in subs if s.target_domain_id and classify_target(s.name) == IP]
+    out = {}
+    if not ip_subs:
+        return out
+    for domain_id, host, module, label in DiscoveryEvent.objects.filter(
+            domain_id__in={s.target_domain_id for s in ip_subs}, host__in={s.name for s in ip_subs}, module__in=HOST_NAME_MODULES) \
+            .values_list('domain_id', 'host', 'module', 'label').distinct():
+        out.setdefault((domain_id, host), set()).add((module, label))
+    return out
 
 
 def _also_served(sub, ips, shared):
@@ -1671,7 +1692,7 @@ def _host(sub, others=(), labels=(), profile=None, excluded=False, root=None, sh
                                       for n, i in sorted(archived.items())],
             'http': http,
             'hosting': hosting_info,
-            'names': _host_names(sub),
+            'names': _host_names(sub, shared),
             # the other names that point at this host's addresses: one host, several domain names
             'aliases': sorted({o.name for o in others if o.name.lower() != sub.name.lower()}, key=str.lower),
             # what a Sentinel said the name resolves to that a second source has not confirmed yet (agentapi.dns_crosscheck): shown, never stored on the host
@@ -2227,6 +2248,7 @@ def _hosts_page(project, qs, params, extra=None, coverage=True, load=None, page_
     profiles, excluded, tags = _profiles_for(project, subs, others)
     roots, shared = _roots_for(project, subs), _shared_for(project, subs)
     shared['tags'] = tags
+    shared['host_names'] = _host_names_for(subs)  # the names each IP host answers to, for the page at once
     shared['inventories'] = _inventories_for(project, subs, others)
     if coverage:  # which of the checks that apply to each host have run: a few queries for the whole page (cveFeed.check_coverage)
         shared['coverage'] = _coverage_for(subs, others, project)

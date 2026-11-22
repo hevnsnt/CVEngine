@@ -548,7 +548,9 @@ class DiscoveryEvent(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        indexes = [models.Index(fields=["scan", "id"]), models.Index(fields=["domain", "id"])]
+        indexes = [models.Index(fields=["scan", "id"]), models.Index(fields=["domain", "id"]),
+                   # the names an IP host answers to (agentapi.services._host_names_for): few rows, so the index is small
+                   models.Index(fields=["domain", "host"], name="discevent_dom_host_names_idx", condition=models.Q(module__in=["ptr", "tls-san"]))]
         ordering = ["id"]
 
     def __str__(self):
