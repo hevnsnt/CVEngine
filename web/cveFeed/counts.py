@@ -10,7 +10,8 @@ Definitions (also shown to the user as the tooltip of each dashboard tile):
 
 * **Hosts**: distinct hosts in a project's current inventory (``latest_scan_q``). The same name in two targets of one project is one
   host, and so are names that resolve to exactly the same addresses (``example.com`` and ``www.example.com`` on the same servers are one
-  host with two names; names behind a CDN stay separate). The same name in two projects is two hosts. This is the Hosts page's count.
+  host with two names; names behind a CDN stay separate). The same name in two projects is two hosts. An archived host is not counted
+  (``archived_host_q``; archiving closed its findings, ``cveFeed.archive_closure``). This is the Hosts page's count.
 * **Live hosts**: hosts that resolved to an IP address or answered over HTTP. These are the tiles of the attack-surface map.
 * **Exposed hosts**: hosts with a CVE match the AI has not ruled out, or an open finding of medium severity or worse.
 * **CVE matches**: matches the AI has not ruled out. The Matches page opens on the same view. Counted per host: the same jQuery file on
@@ -168,6 +169,7 @@ def machines(project_ids):
         return Machines({}, {}, {})
     rows = list(Subdomain._base_manager.filter(latest_scan_q()).filter(target_domain__project_id__in=ids)
                 .values_list('id', 'name', 'scan_history_id', 'target_domain__project_id', 'target_domain__name'))
+    rows = inventory_counts._active(rows)  # an archived host is no machine of the inventory (the Hosts page leaves it out too)
     by_name = {}
     best, _key = inventory_counts._collapse(rows, names_out=by_name)
     by_row = {sub_id: by_name[(project_id, name)] for sub_id, name, _scan, project_id, _target in rows if (project_id, name) in by_name}
@@ -204,6 +206,27 @@ def host_siblings(sub_ids):
     return out
 
 
+def archived_host_q(prefix=''):
+    """A Q over host rows (``prefix`` reaches a Subdomain from another model) that holds when the host is archived in its project (``HostState.archived_at``).
+    Lists and counts leave such a host out by default (``qs.filter(~archived_host_q())``); its own page and the Archived view still show it. One indexed
+    lookup per row (the state's project and host)."""
+    from django.db.models import Exists, OuterRef
+    from django.db.models.functions import Lower
+
+    from cveFeed.models import HostState
+    return Q(Exists(HostState.objects.filter(project_id=OuterRef(f'{prefix}target_domain__project_id'), host=Lower(OuterRef(f'{prefix}name')),
+                                             archived_at__isnull=False)))
+
+
+def archived_keys(project_ids=None):
+    """``{(project id, host name)}`` of the archived hosts (of ``project_ids``, or every project): for a count worked out in Python."""
+    from cveFeed.models import HostState
+    qs = HostState.objects.filter(archived_at__isnull=False)
+    if project_ids is not None:
+        qs = qs.filter(project_id__in=list(project_ids))
+    return set(qs.values_list('project_id', 'host'))
+
+
 def exposed_among(reps, project_ids=None):
     """The hosts of ``reps`` (one row each, see ``host_reps``) that are exposed. A host is exposed when any of its names is, so a
     finding on ``www`` exposes the host whose row is ``example.com``. ``project_ids``: the projects ``reps`` is drawn from, so the
@@ -230,7 +253,7 @@ def host_reps(domain_id=None, domain_ids=None, in_scope=False):
     from agentapi.services import _one_per_host
     from cveFeed.correlation import latest_scan_q
     from startScan.models import Subdomain
-    base = Subdomain.objects.filter(latest_scan_q())
+    base = Subdomain.objects.filter(latest_scan_q()).filter(~archived_host_q())  # an archived host is not one of the inventory's hosts
     if in_scope:
         from targetApp.models import in_target_scope_q
         base = base.filter(in_target_scope_q())

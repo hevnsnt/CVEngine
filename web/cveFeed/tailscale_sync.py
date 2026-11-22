@@ -237,9 +237,11 @@ def import_device(link, device, now, row=None, taken=frozenset()):
 
 def _restore_if_ours(link, host):
     """A device that came back is restored when this sync archived it; a person's own archive is theirs to lift."""
+    from cveFeed import archive_closure
     from cveFeed.models import HostState
-    HostState.objects.filter(project=link.project, host=host, archived_at__isnull=False, archived_by_user=False,
-                             archive_reason__startswith=ARCHIVE_MARK).update(archived_at=None, archive_reason='')
+    if HostState.objects.filter(project=link.project, host=host, archived_at__isnull=False, archived_by_user=False,
+                                archive_reason__startswith=ARCHIVE_MARK).update(archived_at=None, archive_reason=''):
+        archive_closure.reopen_quietly(link.project_id, host)  # what the archive closed is open again (cveFeed.archive_closure)
 
 
 def retire(link, row, why, now):
@@ -254,6 +256,8 @@ def retire(link, row, why, now):
         if not state.archived_at and not state.pinned:
             state.archived_at, state.archive_reason, state.archived_by_user = now, (ARCHIVE_MARK + why)[:300], False
             state.save(update_fields=['archived_at', 'archive_reason', 'archived_by_user'])
+            from cveFeed import archive_closure
+            archive_closure.close_quietly(link.project_id, host, why=archive_closure.WHY_TAILNET)  # what is open on it closes with it
         HygieneFinding.objects.filter(domain=row.domain, check_name__startswith=tailscale_checks.PREFIX, status='open').update(
             status='resolved', resolved_at=now)
 

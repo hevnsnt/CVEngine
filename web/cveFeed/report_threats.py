@@ -14,6 +14,8 @@ host, and every copy of a name is the machine its chosen row is), so a card's nu
 - *M more run <product>, version unknown*: hosts with a technology or open-port product the correlation machinery connects to the CVE (``tech_coverage.connect``) and
   no version read for it, that do not already match. A product with no version read can be neither ruled in nor out.
 
+An archived host counts in neither: archiving closed its matches (``cveFeed.archive_closure``) and its products are not read (``counts.archived_host_q``).
+
 A briefing that names CVEs we hold is counted through them (merged per host); one that names none is matched by its product tags, through the same product-name
 aliases correlation uses, with a stop-list for class tags (RCE, Memory corruption, CMS, ...).
 
@@ -115,7 +117,8 @@ def _sightings(ids, machines=None):
     (``machines``: ``counts.machines(ids)`` when the caller has it)."""
     from startScan.models import OPEN_PORT_STATES, Port, Subdomain
     machines = counts.machines(ids) if machines is None else machines
-    current = Subdomain._base_manager.filter(correlation.latest_scan_q()).filter(target_domain__project_id__in=list(ids)).values('pk')
+    current = (Subdomain._base_manager.filter(correlation.latest_scan_q()).filter(target_domain__project_id__in=list(ids))
+               .filter(~counts.archived_host_q()).values('pk'))  # an archived host runs nothing anyone counts on
     seen, out = {}, []
 
     def add(sub_id, name, version, source, cpe):

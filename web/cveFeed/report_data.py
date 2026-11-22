@@ -186,10 +186,13 @@ def _branding():
 
 # --- findings ------------------------------------------------------------------------------------------------------------------
 
-def _host_names_q(prefix, names):
+def _host_names_q(prefix, names, endpoints=False):
+    """The rows of these host names; with ``endpoints`` (a hygiene finding's ``host``) also a certificate or TLS finding of ``name:port``."""
     q = Q(pk__in=[])
     for name in names:
         q |= Q(**{f'{prefix}__iexact': name})
+        if endpoints:
+            q |= Q(**{f'{prefix}__iregex': '^' + re.escape(name) + ':[0-9]+$'})
     return q
 
 
@@ -206,7 +209,7 @@ def _sources(project, include_closed, names=None):
         elif include_closed:
             qs = qs.filter(severity__gte=1)  # a closed informational detection is not a finding to report
         if names is not None:
-            qs = qs.filter(_host_names_q('host' if key == 'hygiene' else 'subdomain__name', names))
+            qs = qs.filter(_host_names_q('host' if key == 'hygiene' else 'subdomain__name', names, endpoints=key == 'hygiene'))
         false_positive = Q(triage__classification__in=FALSE_POSITIVES)
         ruled_out += qs.filter(false_positive).count()
         out[key] = qs.exclude(false_positive)
@@ -247,14 +250,16 @@ _PROJECT_SLUG = {'cve': 'subdomain__target_domain__project__slug', 'scanner': 't
 
 def _per_host(sources, everywhere=False):
     """``{lowercase host: how many findings it has}`` over the whole set, for the host table. For an organization the key is ``(project slug,
-    host)``: the same name in two projects is two hosts."""
+    host)``: the same name in two projects is two hosts. A certificate or TLS finding of ``name:443`` counts for ``name`` (``host_resolver.base_name``)."""
+    from cveFeed.host_resolver import base_name
     out = Counter()
     for key, qs in sources.items():
         field = 'host' if key == 'hygiene' else 'subdomain__name'
         fields = (field, _PROJECT_SLUG[key]) if everywhere else (field,)
         for row in qs.order_by().values(*fields).annotate(n=Count('id')):
             if row[field]:
-                out[(row[_PROJECT_SLUG[key]], row[field].lower()) if everywhere else row[field].lower()] += row['n']
+                name = base_name(row[field])
+                out[(row[_PROJECT_SLUG[key]], name) if everywhere else name] += row['n']
     return out
 
 
@@ -927,7 +932,9 @@ def _host_qs(project, host=None):
     everywhere = svc._is_all(project)
     qs = svc._scoped(Subdomain.objects.all(), project, 'target_domain__project').filter(latest_scan_q())
     if host:
-        qs = qs.filter(name__iexact=host)
+        qs = qs.filter(name__iexact=host)  # a report on one host is made whether or not it is archived
+    else:
+        qs = svc._archived_filter(qs, svc.ARCHIVED_HIDE)  # an archived host is not one of the scope's hosts (archiving closed its findings)
     return svc._one_per_host(qs, per_project=everywhere).select_related('target_domain__project' if everywhere else 'target_domain').prefetch_related(
         'ip_addresses__ports', 'cve_matches__cve_entry', svc.triage_prefetch('cve_matches__triage'), 'vulnerability_set', svc.triage_prefetch('vulnerability_set__triage'), 'vulnerability_set__cve_ids', 'vulnerability_set__tags',
         'technologies').order_by('-score', 'name', 'id')

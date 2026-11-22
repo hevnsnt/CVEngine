@@ -191,9 +191,18 @@ def _collapse(rows, names_out=None):
     return best, host_key
 
 
+def _active(rows):
+    """``rows`` without the archived hosts (``counts.archived_host_q``, which ``counts.host_reps`` leaves out): one read of the archived states."""
+    from cveFeed.counts import archived_keys
+    archived = archived_keys()
+    if not archived:
+        return rows
+    return [row for row in rows if (row[3], (row[1] or '').lower()) not in archived]
+
+
 def rep_ids(rows=None):
     """The ids of the one row per host of the whole inventory: what ``counts.host_reps()`` selects with no narrowing (``counts.rep_ids``)."""
-    rows = current_rows() if rows is None else rows
+    rows = _active(current_rows() if rows is None else rows)
     best, _key = _collapse(rows)
     return [sub_id for _rank, _name, _project, sub_id in best.values()]
 
@@ -201,7 +210,7 @@ def rep_ids(rows=None):
 def shared_host_counts(rows=None):
     """``{'hosts': {project_id: n}, 'exposed': {project_id: n}}`` for every project, the numbers ``compute_snapshot`` gets for each alone. ``rows``: the
     current inventory (``current_rows``) when the caller has read it."""
-    rows = current_rows() if rows is None else rows
+    rows = _active(current_rows() if rows is None else rows)
     best, host_key = _collapse(rows)
     exposed_ids = _exposed_ids([r[0] for r in rows])
     exposed_keys, exposed_names = set(), set()

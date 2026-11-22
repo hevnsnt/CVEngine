@@ -94,7 +94,12 @@ def check_one(row, *, resolver=None, tcp_probe=None, now=None):
     if count >= 2 and first <= now - MIN_ABSENCE and row.last_seen <= first:
         values.update(archived_at=now, archived_by_user=False, archive_reason='Automatically archived after two negative observations '
                       'at least 30 days apart; history is preserved')
-        if selector.update(**values):
+        from cveFeed import archive_closure
+        with transaction.atomic():  # the archive and the closure of what is open on the host (cveFeed.archive_closure) together
+            archived = selector.update(**values)
+            if archived:
+                archive_closure.close_host(row.project_id, host, why=archive_closure.WHY_GONE, when=now)
+        if archived:
             activity.log('inventory', f'{host} archived after repeated absence over 30 days',
                          project=row.project_id, status='done', host=host)
             return 'archived'

@@ -174,9 +174,10 @@ def check_one(row, *, resolver=None, tcp_probe=None):
         inactive_first_absent_at=None, inactive_last_absent_at=None, inactive_absent_checks=0,
         unresolved_first_at=None, unresolved_last_at=None, unresolved_checks=0)
     if changed:
-        from cveFeed import activity
+        from cveFeed import activity, archive_closure
         activity.log('inventory', f'{host} rediscovered; host assessment #{job.pk} queued', project=row.project_id,
                      job_id=job.pk, evidence='DNS resolution' if status == 'rediscovered_dns' else 'known TCP port answered')
+        archive_closure.reopen_quietly(row.project_id, host)  # what archiving it closed is open again, for the assessment to confirm or close
     return 'reactivated' if changed else 'checked'
 
 

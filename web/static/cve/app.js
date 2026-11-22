@@ -3147,14 +3147,14 @@ const pages = {
     // The query lives in the URL (?q=) so a search can be shared: words, tech:php, port:3306, ip:10.0.0.0/24, -host:www
     const params = new URLSearchParams(location.search);
     // Every filter lives in the URL (?q=, sort=, heat=) so any view can be bookmarked or sent; defaults stay out of the link.
-    const HOST_DEFAULTS = { q: "", sort: "score", heat: "all", view: "list", internal: "all", exposed: "0", names: "", label: "" };
+    const HOST_DEFAULTS = { q: "", sort: "score", heat: "all", view: "list", internal: "all", exposed: "0", names: "", label: "", archived: "0" };
     // ?names=a.example,b.example (or acme/a.example in _all): exactly these hosts, the ones a count on the Overview's threat cards names; ?label= is what the
     // chip says about them (shown as text, never markup). A label without names comes with a broader search (?q=) the Overview fell back to: it describes that
     // search, so it goes when the search is edited.
     let namesFilter = (params.get("names") || "").trim();
     let namesLabel = (params.get("label") || "").trim().slice(0, 200);
     const syncUrl = () => {
-      writeParams({ q: q.value.trim(), sort: sortBy.value, heat: heatFilter, view: galleryOn ? "gallery" : "list", internal: scopeFilter, exposed: exposedFilter ? "1" : "0", names: namesFilter, label: namesLabel }, HOST_DEFAULTS, ["host"]);
+      writeParams({ q: q.value.trim(), sort: sortBy.value, heat: heatFilter, view: galleryOn ? "gallery" : "list", internal: scopeFilter, exposed: exposedFilter ? "1" : "0", names: namesFilter, label: namesLabel, archived: archivedFilter }, HOST_DEFAULTS, ["host"]);
       views.refresh();
       if (searches) searches.refresh();
     };
@@ -3166,6 +3166,10 @@ const pages = {
     // /hosts/?host=name (from the dashboard map) opens that host
     const wantedHost = params.get("host") || "";
     q.value = params.get("q") || (wantedHost ? `host:"${wantedHost}"` : "");
+    // archived hosts are left out of the list (?archived=0, the default; archiving closed their findings): Archived lists them alone, Both lists every host.
+    // A link to one host (?host=) opens it whether or not it is archived.
+    const ARCHIVED_CHIPS = [["0", "Active"], ["only", "Archived"], ["1", "Both"]];
+    let archivedFilter = readParam("archived", wantedHost ? "1" : "0", ARCHIVED_CHIPS.map((c) => c[0]));
     const sortBy = select(
       "Sort",
       [
@@ -3250,6 +3254,19 @@ const pages = {
       };
       scopeBtn.set(key, b);
       scopeChips.append(b);
+    });
+    const archivedChips = el("div", "picker archived-chips", null, { role: "group", "aria-label": "Archived hosts", title: "Archived hosts are left out unless you ask for them" });
+    const archivedBtn = new Map();
+    ARCHIVED_CHIPS.forEach(([key, label]) => {
+      const b = el("button", "", label, { type: "button", "aria-pressed": String(key === archivedFilter) });
+      b.onclick = () => {
+        archivedFilter = key;
+        archivedBtn.forEach((btn, k) => btn.setAttribute("aria-pressed", String(k === archivedFilter)));
+        syncUrl();
+        list.reload();
+      };
+      archivedBtn.set(key, b);
+      archivedChips.append(b);
     });
     const countLine = el("p", "list-count note");
     // The pane never shows a host the list is hiding: when a filter or a new search drops the selected host, the pane follows
@@ -3369,7 +3386,7 @@ const pages = {
       });
     }
     async function rowArchive(h) {
-      const sure = await ask(`${h.host} will leave active scan scheduling. Its history is kept and you can restore it later.`, { title: "Archive this host?", ok: "Archive" });
+      const sure = await ask(`${h.host} will leave active scan scheduling and the host list, and its open findings are closed as fixed. Its history is kept; restoring it reopens them.`, { title: "Archive this host?", ok: "Archive" });
       if (!sure) return;
       try {
         await api("POST", hostPath(h, "archive"), { reason: "Archived from the row menu" });
@@ -3413,7 +3430,7 @@ const pages = {
     const metaTools = el("span", "meta-tools");
     const csv = exportButton({
       run: async (progress) => {
-        const { rows, truncated } = await collectAll((page, size) => api("GET", `${base}/search?${query({ q: q.value, sort: sortBy.value, ...(namesFilter ? { names: namesFilter } : {}), facets: "none", page, page_size: size })}`), progress); // the rows only: no heat counts per page
+        const { rows, truncated } = await collectAll((page, size) => api("GET", `${base}/search?${query({ q: q.value, sort: sortBy.value, ...(namesFilter ? { names: namesFilter } : {}), ...(archivedFilter !== "0" ? { archived: archivedFilter } : {}), facets: "none", page, page_size: size })}`), progress); // the rows only: no heat counts per page
         const kept = heatFilter === "all" ? rows : rows.filter((h) => (h.heat || "unscanned") === heatFilter);
         const ports = (h) => [...new Set(h.ips.flatMap((ip) => ip.ports.map((p) => (p.protocol === "udp" ? `${p.number}/udp` : p.number))))];
         const columns = [
@@ -3515,7 +3532,7 @@ const pages = {
     }
     metaTools.append(fresh.node, galleryBtn, ...(ALL ? [] : [inventoryBtn]), csv, bulk.toggle);
     metaRow.append(countLine, metaTools);
-    const lh = listHead({ page: "hosts", lead: [q], panelNodes: [sortBy, views.node, ...(searches ? [searches.node] : []), namesPick, heatChips, scopeChips], meta: metaRow });
+    const lh = listHead({ page: "hosts", lead: [q], panelNodes: [sortBy, views.node, ...(searches ? [searches.node] : []), namesPick, heatChips, scopeChips, archivedChips], meta: metaRow });
     side.append(lh.head, bulk.bar, rows, gallery);
     split.classList.toggle("gallery", galleryOn); // painted once the list exists (see below)
     const byId = new Map();
@@ -3901,7 +3918,7 @@ const pages = {
         const archiveBox = el("div", "why");
         archiveBox.append(el("h3", "sec", "Asset lifecycle"));
         archiveBox.append(el("p", "note", h.archived
-          ? `Archived${h.archive_reason ? `: ${h.archive_reason}` : ""}. History is retained; automatic scans skip this host.`
+          ? `Archived${h.archive_reason ? `: ${h.archive_reason}` : ""}. History is retained; automatic scans skip this host, it is left out of searches and counts, and the findings open when it was archived were closed (restoring it reopens them).`
           : "Active in scan scheduling. Pin a critical asset to keep it from archival."));
         if (h.archive_checked_at) archiveBox.append(el("p", "note", `Last rediscovery check: ${h.archive_check_status || "unknown"} · ${h.archive_checked_at}`));
         if (ALL) archiveBox.append(openInProject(h, "hosts", `?host=${encodeURIComponent(h.host)}`));
@@ -3918,12 +3935,14 @@ const pages = {
           const change = el("button", "btn ghost sm", h.archived ? "Restore host" : "Archive host");
           change.type = "button";
           change.onclick = async () => {
-            if (!h.archived && !window.confirm(`Archive ${h.host}? Its history will be kept and it will leave active scan scheduling. You can restore it later.`)) return;
+            if (!h.archived && !window.confirm(`Archive ${h.host}? It leaves active scan scheduling and the host list, and its open findings are closed as fixed. Its history is kept; restoring it reopens them.`)) return;
             change.disabled = true;
             try {
               const state = await api("POST", hostPath(h, h.archived ? "restore" : "archive"), h.archived ? {} : { reason: "Manually archived" });
               h.archived = !!state.archived_at; h.archive_reason = state.archive_reason; h.archive_checked_at = state.last_check_at;
               h.archive_check_status = state.last_check_status; showHost(h);
+              const moved = state.findings_closed ?? state.findings_reopened ?? 0;
+              toast(h.archived ? `Archived; ${moved} open finding${moved === 1 ? "" : "s"} closed` : `Restored; ${moved} finding${moved === 1 ? "" : "s"} reopened`);
             } catch (e) { archiveBox.append(el("p", "note", e.message)); change.disabled = false; }
           };
           actions.append(change);
@@ -4170,14 +4189,14 @@ const pages = {
         settleSelection(); // a new search may return nothing; the pane must not keep showing a host from the old one
       },
       path: `${base}/search`,
-      params: () => ({ q: q.value, sort: sortBy.value, ...(namesFilter ? { names: namesFilter } : {}), ...(heatFilter !== "all" ? { heat: heatFilter } : {}), ...(scopeFilter !== "all" ? { internal: scopeFilter } : {}), ...(exposedFilter ? { exposed: 1 } : {}) }),
+      params: () => ({ q: q.value, sort: sortBy.value, ...(namesFilter ? { names: namesFilter } : {}), ...(heatFilter !== "all" ? { heat: heatFilter } : {}), ...(scopeFilter !== "all" ? { internal: scopeFilter } : {}), ...(exposedFilter ? { exposed: 1 } : {}), ...(archivedFilter !== "0" ? { archived: archivedFilter } : {}) }),
       pageSize: () => (heatFilter === "all" && !exposedFilter ? 30 : 200), // a temperature filter lists everything it finds, up to the API's page maximum
       empty: () =>
-        q.value.trim() || namesFilter || heatFilter !== "all" || scopeFilter !== "all" || exposedFilter
+        q.value.trim() || namesFilter || heatFilter !== "all" || scopeFilter !== "all" || exposedFilter || archivedFilter !== "0"
           ? {
               icon: "search",
               title: "No host matches",
-              body: q.value.trim() ? "Try a bare word, or one filter such as port:443 or tech:nginx." : "No host is at this temperature right now.",
+              body: q.value.trim() ? "Try a bare word, or one filter such as port:443 or tech:nginx." : archivedFilter === "only" ? "No host is archived." : "No host is at this temperature right now.",
               actions: [
                 {
                   label: "Clear filters",
@@ -4186,6 +4205,8 @@ const pages = {
                     clearNames(false);
                     heatFilter = "all";
                     scopeFilter = "all";
+                    archivedFilter = "0";
+                    archivedBtn.forEach((btn, k) => btn.setAttribute("aria-pressed", String(k === "0")));
                     exposedFilter = false;
                     exposedBtn.setAttribute("aria-pressed", "false");
                     scopeBtn.forEach((btn, k) => btn.setAttribute("aria-pressed", String(k === "all")));

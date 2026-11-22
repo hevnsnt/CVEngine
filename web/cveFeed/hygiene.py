@@ -392,7 +392,7 @@ def is_ip(value):
 
 def tls_targets(domain, hosts=None):
     """(host, port) pairs to probe: port 443 on every known host, plus other TLS ports seen open."""
-    from startScan.models import Subdomain, open_ports
+    from startScan.models import open_ports
     from targetApp.target_types import scannable_hosts
     targets, seen = [], set()
     selected = set(hosts) if hosts is not None else None
@@ -408,7 +408,8 @@ def tls_targets(domain, hosts=None):
                 targets.append((host, port))
     if selected is None or domain.name in selected:
         add(domain.name, 443)
-    for sub in Subdomain.objects.filter(target_domain=domain).prefetch_related('ip_addresses__ports'):
+    from cveFeed import host_resolver
+    for sub in host_resolver.current_target_rows(domain).prefetch_related('ip_addresses__ports'):  # the Hosts page's hosts, never a stale row's ports
         if (selected is not None and sub.name not in selected) or not domain.includes_host(sub.name):  # =example.com: no name under it
             continue
         add(sub.name, 443)
@@ -429,11 +430,11 @@ ESXI_WORDS = re.compile(r'\besxi?\b|vmware[ _-]?(?:esx|vsphere|infrastructure|au
 def slp_targets(domain, hosts=None):
     """``[(host, 427)]``: the target's hosts that are VMware ESXi as far as cvENGINE knows (``ESXI_WORDS`` in a technology, a port or the OS
     guess), or have 427 open (TCP or UDP), at most ``MAX_SLP_TARGETS``, each a host the project may scan now."""
-    from startScan.models import Subdomain
+    from cveFeed import host_resolver
     from targetApp.target_types import scannable_hosts
     selected = set(hosts) if hosts is not None else None
     out = []
-    for sub in Subdomain.objects.filter(target_domain=domain).prefetch_related('ip_addresses__ports', 'technologies').order_by('name'):
+    for sub in host_resolver.current_target_rows(domain).prefetch_related('ip_addresses__ports', 'technologies').order_by('name'):
         if len(out) >= MAX_SLP_TARGETS:
             break
         if (selected is not None and sub.name not in selected) or not domain.includes_host(sub.name):
@@ -454,10 +455,10 @@ def slp_targets(domain, hosts=None):
 def mail_candidates(domain):
     """``(own, extra)``: the target's own name (none for an address) and up to 100 of its discovered hosts that may have mail of their own, before
     any DNS says so (``email_domains`` keeps the ones with an MX record that are not a CNAME)."""
-    from startScan.models import Subdomain
+    from cveFeed import host_resolver
     own = [] if is_ip(domain.name) else [domain.name]
-    extra = [s.name for s in Subdomain.objects.filter(target_domain=domain).exclude(name=domain.name)[:100]
-             if not is_ip(s.name) and domain.includes_host(s.name)]
+    names = host_resolver.current_target_rows(domain).exclude(name=domain.name).order_by('name').values_list('name', flat=True).distinct()[:100]
+    extra = [name for name in names if not is_ip(name) and domain.includes_host(name)]
     return own, extra
 
 
@@ -492,7 +493,7 @@ def store_findings(domain, found, hosts=None, owns=lambda check: True, live_cnam
     left as it is, never resolved for want of an answer."""
     from django.utils import timezone
 
-    from cveFeed import hygiene_rating
+    from cveFeed import archive_closure, hygiene_rating
     from cveFeed.finding_lifecycle import FOLDED
     from cveFeed.models import HygieneFinding
     try:
@@ -526,9 +527,10 @@ def store_findings(domain, found, hosts=None, owns=lambda check: True, live_cnam
                 status = PENDING  # one resolver, once: kept with its evidence, opened only if the next run sees it too
         defaults = {'severity': f.severity, 'title': f.title[:300], 'detail': f.detail, 'evidence': f.evidence,
                     'status': status, 'resolved_at': None}
-        if status == 'open' and target is not None and target.status in ('resolved', PENDING) and target.remediation_status == 'fixed':
+        if status == 'open' and target is not None and target.remediation_status == 'fixed' and (
+                target.status in ('resolved', PENDING) or archive_closure.reopens_on_sight(target, domain.project_id, target.host)):
             # it was fixed, the sweep saw it gone, and now it is back (a DNS absence after a second look): a regression must reappear
-            # in the actionable view
+            # in the actionable view. A closure that only said the host was archived ends the same way: the host is back and the check finds it
             defaults.update(remediation_status='open', remediation_updated_at=timezone.now(), remediation_by=None,
                             remediation_note=(target.remediation_note + '\n' if target.remediation_note else '')
                             + 'Reopened: the check found this again after it was marked fixed.')
@@ -545,7 +547,8 @@ def store_findings(domain, found, hosts=None, owns=lambda check: True, live_cnam
         x.save(update_fields=['status', 'resolved_at'])
     if domain.project_id:  # hygiene issues count toward the host score: a new or resolved one moves it now, not at the daily pass
         from cveFeed import scoring
-        touched = sorted({h.lower() for h, _ in keep} | {x.host.lower() for x in stale})
+        from cveFeed.host_resolver import base_name
+        touched = sorted({base_name(h) for h, _ in keep} | {base_name(x.host) for x in stale})  # a certificate finding's name:443 scores its host
         for i in range(0, len(touched), scoring.CHUNK):
             scoring.rescore_quietly(domain.project_id, touched[i:i + scoring.CHUNK])
     return stale
@@ -707,6 +710,9 @@ def run_hygiene(domain_id, now=None, hosts=None):
             return any(host == name or host.endswith('.' + name) for name in review['unknown_mail'])
     stale = store_findings(domain, found, hosts=hosts, owns=lambda check: not check.startswith(('ts_', 'tlsa_', 'bkt_', 'udp_', 'src_'))  # the tailnet, the TLS audit, cloud storage, UDP and secrets-scan checks keep their own
                            and (cleartext_ok or not check.startswith('cleartext_')) and (flood_ok or not check.startswith('portflood_')), live_cnames=True, across_targets=True, unanswered=unanswered)
+    if project:  # the open findings of a host that left the current inventory close (cveFeed.archive_closure.close_gone; they reopen when it is back)
+        from cveFeed import archive_closure
+        archive_closure.close_gone_quietly([project])
     if project:  # a redirect alias's copy of what its target host has is folded into the target's row (cveFeed.finding_lifecycle)
         from cveFeed import finding_lifecycle
         names = {finding_lifecycle.host_name(f.host or domain.name) for f in found} | {host for host, _port in targets}

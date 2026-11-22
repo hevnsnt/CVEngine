@@ -19,6 +19,8 @@ tech:ollama vuln:ollama             Ollama servers whose API answers anyone
 | **MCP** | The `search_hosts` tool, so an agent can ask the same questions |
 | **Saved searches** | Keep a search and be told when it finds something new ([below](#saved-searches-and-alerts)) |
 
+An archived host is not searched: every search, saved search and count leaves it out (archiving closed its findings). The Hosts page's **Archived** chip lists the archived hosts and **Both** lists every host; over the API add `archived=only` or `archived=1`.
+
 Use the slug `_all` to search every project you can see.
 
 ### Your inventory or the CVE catalog
