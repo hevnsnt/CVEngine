@@ -1482,10 +1482,11 @@ def add_entries(project, entries, discover=True, mode=None, excluded=(), refused
 
 # --- inventory and findings ----------------------------------------------------
 
-def _heat_reasons(sub, capped=True):
+def _heat_reasons(sub, capped=True, hot_names=None):
     """What a host's colour rests on: its CVE matches (rated as they apply to a host) and its open findings, hottest first. ``capped=False``
     rates each CVE match by ``threat.validation_heat`` (the heat once proven): what a confirmer (OpenVAS) orders hosts by. Each CVE reason says
-    why it has its heat (``threat.heat_reason``: "on the KEV; version not proven", "not on the KEV and no known exploit", ...)."""
+    why it has its heat (``threat.heat_reason``: "on the KEV; version not proven", "not on the KEV and no known exploit", ...). ``hot_names``
+    (``_hot_names_for``): the hot CVE ids among every finding of a page, read once for the page, where each row asked on its own."""
     from cveFeed.counts import finding_is_live, match_is_live
     from cveFeed.distro import label_for
     from cveFeed.threat import (LEGACY_POLICY, SEVERITY_HEAT, finding_cve_names, finding_heat, finding_heat_reason, heat_policy, heat_reason,
@@ -1509,7 +1510,8 @@ def _heat_reasons(sub, capped=True):
                         'finding': 'match', 'id': m.id, 'classification': _classification_of(m)})
     # a scanner finding that names CVEs follows the CVE rule under the KEV policy (threat.finding_heat); any other keeps its severity heat
     live = [v for v in sub.vulnerability_set.all() if finding_is_live(v) and v.severity in SEVERITY_HEAT]
-    hot = (hot_cve_names({n for v in live for n in finding_cve_names(v)}) if live and heat_policy() != LEGACY_POLICY else set())
+    hot = set() if not live or heat_policy() == LEGACY_POLICY else \
+        hot_names if hot_names is not None else hot_cve_names({n for v in live for n in finding_cve_names(v)})
     for v in live:
         temp = finding_heat(v, capped=capped, hot_names=hot)
         why = finding_heat_reason(v, temp, hot)
@@ -1534,6 +1536,18 @@ def _host_heat(sub, reasons=None):
     if scan_ran is None:
         scan_ran = bool(sub.scan_history_id and ScanActivity.objects.filter(scan_of_id=sub.scan_history_id, name__in=NUCLEI_STAGES, status=2).exists())
     return 'clean' if bool(sub.vulnerability_set.all()) or scan_ran else 'unscanned'
+
+
+def _hot_names_for(*groups):
+    """The hot CVE ids (``threat.hot_cve_names``) among the CVEs that the live findings of every host row of ``groups`` (lists of Subdomain rows,
+    findings and their ``cve_ids`` prefetched) name: one query, what ``_heat_reasons`` read once per row. A row only ever tests its own names
+    against it, so the answer per row is the same. None under the legacy policy, where no CVE is looked up."""
+    from cveFeed.counts import finding_is_live
+    from cveFeed.threat import LEGACY_POLICY, SEVERITY_HEAT, finding_cve_names, heat_policy, hot_cve_names
+    if heat_policy() == LEGACY_POLICY:
+        return None
+    return hot_cve_names({n for group in groups for row in group for v in row.vulnerability_set.all()
+                          if finding_is_live(v) and v.severity in SEVERITY_HEAT for n in finding_cve_names(v)})
 
 
 def _prime_nuclei(*groups):
@@ -1593,10 +1607,10 @@ def _also_served(sub, ips, shared):
     return out[:20]
 
 
-def _merge_group(sub, others):
+def _merge_group(sub, others, hot_names=None):
     """The whole host as one: ``sub`` (the richest copy of the name) plus its other current-inventory copies. IPs are merged by
     address and ports by (address, number, protocol), CVE matches by CVE id and open findings by id, so the counts agree with the
-    score and the web routes, which are both read by name."""
+    score and the web routes, which are both read by name. ``hot_names``: see ``_heat_reasons``."""
     from cveFeed.counts import finding_is_live, match_is_live
     from cveFeed.threat import HEAT_RANK
     from startScan.models import open_services
@@ -1614,7 +1628,7 @@ def _merge_group(sub, others):
                 if key not in seen_ports:
                     seen_ports.add(key)
                     entry['ports'].append(p)
-        for r in _heat_reasons(row):
+        for r in _heat_reasons(row, hot_names=hot_names):
             key = (r['kind'], r['finding'], r['label'] if r['kind'] == 'cve' else r['id'])
             if key not in seen_reasons:
                 seen_reasons[key] = len(reasons)
@@ -1638,7 +1652,7 @@ def _merge_group(sub, others):
 def _host(sub, others=(), labels=(), profile=None, excluded=False, root=None, shared=None):
     """One host row. ``others`` are the same name's other current-inventory Subdomain rows (see ``_name_siblings``): the counts, IPs,
     ports, matches and open findings cover all of them, while score, technologies and screenshot come from ``sub``."""
-    ips, reasons, vulns, cve_count = _merge_group(sub, others)
+    ips, reasons, vulns, cve_count = _merge_group(sub, others, (shared or {}).get('hot'))
     techs = {t.name for row in [sub, *others] for t in row.technologies.all() if t.name}
     score_detail = list(sub.score_detail or [])
     if not ips:
@@ -2249,6 +2263,7 @@ def _hosts_page(project, qs, params, extra=None, coverage=True, load=None, page_
     roots, shared = _roots_for(project, subs), _shared_for(project, subs)
     shared['tags'] = tags
     shared['host_names'] = _host_names_for(subs)  # the names each IP host answers to, for the page at once
+    shared['hot'] = _hot_names_for(subs, *others.values())  # the hot CVE ids among the page's findings, one query
     shared['inventories'] = _inventories_for(project, subs, others)
     if coverage:  # which of the checks that apply to each host have run: a few queries for the whole page (cveFeed.check_coverage)
         shared['coverage'] = _coverage_for(subs, others, project)
@@ -3167,11 +3182,12 @@ def _heat_facets_walk(project, qs):
     subs = subs[:HEAT_FACET_CAP]
     others = _name_siblings(project, subs)
     _prime_nuclei(subs, *others.values())
+    hot = _hot_names_for(subs, *others.values())
     counts = {v: 0 for v in HEAT_FACET_VALUES}
     heat_by_id = {}
     for sub in subs:
         sibs = others.get(sub.id, [])
-        _, reasons, _, _ = _merge_group(sub, sibs)
+        _, reasons, _, _ = _merge_group(sub, sibs, hot)
         heat = _host_heat_merged(sub, sibs, reasons)
         counts[heat] = counts.get(heat, 0) + 1
         heat_by_id[sub.id] = heat
