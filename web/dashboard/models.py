@@ -287,6 +287,8 @@ class AuditLog(models.Model):
 
 	class Meta:
 		ordering = ['-id']
+		# the weekly prune of the routine Sentinel rows (cveFeed.maintenance) and every lookup of one action newest or oldest first
+		indexes = [models.Index(fields=['action', 'id'], name='auditlog_action_id_idx')]
 
 	def __str__(self):
 		return f'{self.actor_name} {self.action} {self.target}'
