@@ -797,6 +797,13 @@ class AgentApiTests(TestCase):
 		content = data['result']['content'][0]['text']
 		return data['result']['isError'], (json.loads(content) if not data['result']['isError'] else content)
 
+	def test_mcp_server_info_reports_the_release_version(self):
+		from django.conf import settings
+		status, data = rpc(self.t_alice, 'initialize', {})
+		self.assertEqual(data['result']['serverInfo'], {'name': 'cvengine', 'version': settings.RENGINE_CURRENT_VERSION})
+		self.assertNotEqual(data['result']['serverInfo']['version'], '1.0.0')
+		self.assertNotEqual(data['result']['serverInfo']['version'], 'unknown')
+
 	def test_mcp_tells_the_agent_which_text_is_untrusted(self):
 		from agentapi.mcp import UNTRUSTED_NOTICE
 		status, data = rpc(self.t_alice, 'initialize', {})
