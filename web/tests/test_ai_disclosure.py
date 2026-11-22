@@ -39,6 +39,11 @@ class PageTests(TestCase):
 		cls.reader = User.objects.create_user('ai-reader', password='x')
 		cls.admin = User.objects.create_superuser('ai-admin', password='x')
 
+	def setUp(self):
+		from django.core.cache import cache
+		cache.delete(ai_disclosure.COUNTS_CACHE_KEY)  # the counts are cached for ten minutes: no test sees another's
+		self.addCleanup(cache.delete, ai_disclosure.COUNTS_CACHE_KEY)
+
 	def get(self, user):
 		return client_for(user).get('/cve/ai/')
 
@@ -96,6 +101,20 @@ class PageTests(TestCase):
 		self.assertIn('id="job-finding_triage"', html)  # everything the page says about what is sent is still there
 		self.assertNotIn('calls in 30 days', html)
 		self.assertIn('call counts could not be read', html)
+
+	def test_the_thirty_day_counts_are_kept_for_ten_minutes_and_a_failure_is_not_kept(self):
+		from django.core.cache import cache
+		from django.db import OperationalError
+		cache.delete(ai_disclosure.COUNTS_CACHE_KEY)
+		with mock.patch.object(ai_disclosure, '_count_calls', side_effect=OperationalError('timeout')) as failing:
+			self.assertIsNone(ai_disclosure._counts())
+			self.assertIsNone(ai_disclosure._counts())
+		self.assertEqual(failing.call_count, 2)  # a failure is tried again on the next view
+		with mock.patch.object(ai_disclosure, '_count_calls', return_value={'finding_triage': 7}) as ok:
+			self.assertEqual(ai_disclosure._counts(), {'finding_triage': 7})
+			self.assertEqual(ai_disclosure._counts(), {'finding_triage': 7})
+		self.assertEqual(ok.call_count, 1)  # the second view came from the cache
+		cache.delete(ai_disclosure.COUNTS_CACHE_KEY)
 
 	def test_the_account_menu_and_the_api_keys_page_link_to_it(self):
 		self.assertIn('href="/cve/ai/"', client_for(self.reader).get('/cve/about/').content.decode())
