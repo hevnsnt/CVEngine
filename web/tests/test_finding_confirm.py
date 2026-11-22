@@ -9,6 +9,7 @@ import json
 import re
 import shlex
 from unittest import mock
+from urllib.parse import urlsplit
 
 from django.contrib.auth.models import User
 from django.test import SimpleTestCase, TestCase
@@ -104,7 +105,9 @@ class OpenVasGuideTests(TestCase):
         self.assertEqual(urls[0], f'https://secinfo.greenbone.net/nvt/{PHP_OID}')
         for cve in PHP_CVES:
             self.assertIn(f'https://access.redhat.com/security/cve/{cve}', urls)
-        self.assertFalse(any('ubuntu.com' in u or 'debian.org' in u for u in urls))
+        hosts = {urlsplit(u).hostname for u in urls}
+        self.assertFalse(hosts & {'ubuntu.com', 'security-tracker.debian.org', 'www.debian.org'})
+        self.assertFalse(any(h.endswith(('.ubuntu.com', '.debian.org')) for h in hosts if h))
         verdict = guide['verdict']
         self.assertEqual(verdict['fixed'], '8.1.31, 8.2.26, 8.3.14')
         self.assertIn('backported fix', verdict['not_affected'])
