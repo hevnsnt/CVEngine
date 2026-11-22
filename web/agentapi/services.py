@@ -5602,11 +5602,12 @@ def finding_detail(ctx, slug, kind, finding_id):
         'retest': {**_retest_of(obj), 'history': _retest_history(t)} if kind in STATUS_KINDS else None,
         'secrets': _tracked_secrets(obj) if kind == 'vulnerability' else [],  # "Tracked in Secrets": the inventory rows a token finding fed
         'cve': {**_cve_context(obj.cve_entry), 'detection': _detection(obj.cve_entry)} if kind == 'match' else None,
-        'confirm': _confirm_guide(obj) if kind == 'match' else tls_guide,
+        # how to confirm it by hand, for every kind (a CVE match, a TLS audit result, a scanner, hygiene or route finding): never empty
+        'confirm': _confirm_for(kind, obj, tls_guide, title, host, text['validation_notes']),
         'explain': _explain(obj) if kind == 'match' else None,
         'validation': {'status': _triage_brief(t)['validation_status'] if t else 'none', 'steps': steps, 'evidence': evidence,
                        'validated': _iso(t.validated_at) if t else None, 'next_attempt': _iso(t.next_attempt_at) if t else None,
-                       'confidence_adjust': t.confidence_adjust if t else 0.0},
+                       'confidence_adjust': t.confidence_adjust if t else 0.0, 'automatic': _automatic_plan(kind, obj, t)},
     }
 
 
@@ -5620,6 +5621,63 @@ def _confirm_guide(m):
         import logging
         logging.getLogger(__name__).warning('could not build the confirm guide of match %s', m.pk, exc_info=True)
         return None
+
+
+def _confirm_for(kind, obj, tls_guide, title, host, advice):
+    """The "Confirm it yourself" guide of any finding: a CVE match's (cveFeed.confirm_guide), a TLS audit result's (cveFeed.tls_catalogue),
+    a scanner, hygiene or route finding's (cveFeed.finding_confirm). When none can be built it falls back to where the finding is and the AI
+    review's advice, so the panel is never empty; building it never fails the detail."""
+    from cveFeed import finding_confirm
+    guide = None
+    try:
+        if kind == 'match':
+            guide = _confirm_guide(obj)
+        elif kind == 'vulnerability':
+            guide = finding_confirm.scanner_guide(obj, advice)
+        elif kind == 'hygiene':
+            guide = tls_guide or finding_confirm.hygiene_guide(obj, advice)
+        elif kind == 'route':
+            guide = finding_confirm.route_guide(obj, advice)
+    except Exception:  # noqa: BLE001 - the guide is help on top of the evidence; a gap in it must not cost the finding its page
+        import logging
+        logging.getLogger(__name__).warning('could not build the confirm guide of %s %s', kind, obj.pk, exc_info=True)
+    return guide or finding_confirm.minimal_guide(title, host, advice)
+
+
+def _automatic_plan(kind, obj, t):
+    """Whether an automatic check exists for this finding and whether the validation sweep will queue one, so the page can say which is true
+    instead of "None has run yet": ``check`` (its kind has an approved check: a CVE match, an unauthenticated database or an open route; a scanner
+    or hygiene finding gets an AI review only), ``lane`` (fire, smoke or ice: the sweep queues it, hottest first; '' when it will not) and ``why``
+    (why it will not, in a few words)."""
+    from cveFeed import hot_validation, match_policy, triage as triage_lib, validation
+    from cveFeed.threat import ICE
+    if kind == 'match':
+        tkind = 'cve_match'
+    elif kind == 'vulnerability':
+        tkind = triage_lib.kind_of_vulnerability(obj)
+    else:
+        tkind = 'route_auth' if kind == 'route' else 'hygiene'
+    out = {'check': tkind in validation.PLANNED_KINDS, 'lane': '', 'why': ''}
+    if t is None:
+        out['why'] = 'it is not tracked for triage yet'
+        return out
+    try:
+        lane = hot_validation.tier_for(t) or ''
+    except Exception:  # noqa: BLE001 - a finding whose lane cannot be read is said to have none, never a failed page
+        lane = ''
+    if kind == 'match':
+        if obj.source == hot_validation.HOST_REPORTED:
+            lane, out['why'] = '', "it comes from the host's own inventory report, which no outside check can see"
+        elif match_policy.version_unknown(obj):
+            lane, out['why'] = '', 'its version is not known, so there is nothing to test it against'
+        elif obj.ai_verdict == 'not_affected' or obj.distro_status == 'patched':
+            out['why'] = 'it is ruled out (not affected, or patched by the distribution)'
+        elif lane == ICE and not hot_validation.validate_all_matches():
+            lane, out['why'] = '', 'only Fire and Smoke matches are validated automatically on this server'
+    elif not lane and out['check']:
+        out['why'] = 'only open Fire and Smoke findings are checked automatically'
+    out['lane'] = lane
+    return out
 
 
 MAX_COMMENT_LENGTH = 4000

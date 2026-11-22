@@ -370,7 +370,9 @@ class MatchGuideTests(TestCase):
 	def test_the_guide_never_fails_the_finding_and_is_in_the_report(self):
 		match = self.jquery_match()
 		with mock.patch.object(confirm_guide, 'match_guide', side_effect=RuntimeError('boom')):
-			self.assertIsNone(self.site.detail(match)['confirm'])
+			fallback = self.site.detail(match)['confirm']  # never empty: where the finding is, and what to compare (cveFeed.finding_confirm)
+		self.assertEqual(fallback['class'], 'finding')
+		self.assertEqual(fallback['where'], [{'label': 'Host', 'text': 'blog.example.com'}])
 		from cveFeed.report_data import _match_entry
 		match = CVEMatch.objects.select_related('cve_entry', 'subdomain').get(pk=match.pk)
 		match.sev = 2
