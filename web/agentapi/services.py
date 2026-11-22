@@ -5156,7 +5156,7 @@ def work_items(ctx, slug, params):
     agent's registered assets (or ?assets=a,b) and optionally to a tier (``fire``, ``smoke`` or ``ice``, filtered in the database). At most ``WORK_ITEMS_WINDOW``
     matches are read, best ranked first; ``truncated`` is true when there were more. It refers to that project-wide window, before the asset filter (which looks only
     at the window): with assets set it can be true when none of the window belongs to them."""
-    from cveFeed.models import CVEMatch
+    from cveFeed.threat import match_heat
     project, _ = get_one_project(ctx, slug)
     asked = [a.strip() for a in (params.get('assets') or '').split(',') if a.strip()]
     if len(asked) > MAX_ASSET_PATTERNS:
@@ -5168,41 +5168,78 @@ def work_items(ctx, slug, params):
     # triage classification remains reviewable unless the caller requests ?include_fp=0.
 
     from cveFeed.counts import CLOSED
-    qs = _matches_qs(project).exclude(ai_verdict='not_affected') \
+    # The window is read light: the match, its CVE, host and Triage row (what the asset test, the heat, the order and the grouping read), with no
+    # comment or agent task subqueries and no ports or technologies. Only the page's items are then built as full rows (``_match``). Building all
+    # 2,000 full rows to show 50 cost three correlated subqueries per row and a prefetch of every port and technology of 2,000 hosts.
+    qs = _matches_qs(project, counting=True).exclude(ai_verdict='not_affected') \
         .exclude(version_in_range=False) \
-        .exclude(remediation_status__in=CLOSED) \
-        .prefetch_related('subdomain__ip_addresses__ports', 'subdomain__technologies')  # the ports and technologies: each row's explain reads them
+        .exclude(remediation_status__in=CLOSED)
     if params.get('include_fp') == '0':
         qs = qs.exclude(triage__classification__in=FALSE_POSITIVES)
     tier = params.get('tier')
     if tier:  # the tier is a filter of the query (the database form of the heat every list shows), not of the 2,000 rows that happened to rank first
         from cveFeed.threat import HEAT_RANK, match_heat_rank_expr
         qs = qs.annotate(_heat_rank=match_heat_rank_expr()).filter(_heat_rank=HEAT_RANK[tier]) if tier in HEAT_RANK else qs.none()
-    rows = list(qs[:WORK_ITEMS_WINDOW + 1])
+    rows = list(qs.select_related('cve_entry', 'subdomain', 'triage').order_by('-confidence', '-id')[:WORK_ITEMS_WINDOW + 1])
     truncated = len(rows) > WORK_ITEMS_WINDOW  # more matches than the window: the list below is the best-ranked part of them, and says so
-    items = []
-    for m in rows[:WORK_ITEMS_WINDOW]:
+    rows = rows[:WORK_ITEMS_WINDOW]
+    # a host's addresses matter to the asset test only when an asset is a network (``AssetFilter.matches``): read them for the window in one query then
+    addresses = _addresses_of({m.subdomain_id for m in rows if m.subdomain_id}) if wanted and wanted.networks else {}
+    light = []
+    for m in rows:
         sub = m.subdomain
-        ips = [ip.address for ip in sub.ip_addresses.all()] if sub else []
         if wanted:
             key = sub.pk if sub else None
             if key not in placed:
-                placed[key] = wanted.matches([sub.name.lower()] if sub else [], ips)
+                placed[key] = wanted.matches([sub.name.lower()] if sub else [], addresses.get(key, []))
             if not placed[key]:
                 continue
-        item = _match(m)
-        item['ips'] = ips
-        item['host_score'] = sub.score if sub else 0
-        item['fixed_in'] = _fixed_versions(m.cve_entry, m.matched_product)
-        items.append(item)
+        triage = _triage_of(m)
+        light.append({'id': m.id, 'm': m, 'cve': {'cve_id': m.cve_entry.cve_id, 'tier': match_heat(m), 'cvss': m.cve_entry.cvss},
+                      'triage': {'classification': triage.classification if triage is not None else ''},
+                      'host': sub.name if sub else None, 'product': m.matched_product, 'version': m.matched_version,
+                      'host_score': sub.score if sub else 0, 'fixed_in': _fixed_versions(m.cve_entry, m.matched_product)})
     order = {'fire': 0, 'smoke': 1, 'ice': 2}
-    items.sort(key=lambda i: (i['triage']['classification'] in FALSE_POSITIVES, order.get(i['cve']['tier'], 3), -(i['cve']['cvss'] or 0),
+    light.sort(key=lambda i: (i['triage']['classification'] in FALSE_POSITIVES, order.get(i['cve']['tier'], 3), -(i['cve']['cvss'] or 0),
                               -i['host_score']))  # likely false positives last; the host score breaks ties
-    matches = len(items)
-    items = _one_item_per_upgrade(items)
+    matches = len(light)
+    light = _one_item_per_upgrade(light)
     page, size = page_args(params)
-    return {'count': len(items), 'matches': matches, 'truncated': truncated, 'registered_assets': patterns, 'page': page, 'page_size': size,
-            'results': items[(page - 1) * size:page * size]}
+    return {'count': len(light), 'matches': matches, 'truncated': truncated, 'registered_assets': patterns, 'page': page, 'page_size': size,
+            'results': _work_rows(project, light[(page - 1) * size:page * size])}
+
+
+def _addresses_of(sub_ids):
+    """``{subdomain id: [address, ...]}`` of the hosts ``sub_ids``, in one query."""
+    from startScan.models import Subdomain
+    out = {}
+    for sub_id, address in Subdomain.ip_addresses.through.objects.filter(subdomain_id__in=list(sub_ids)) \
+            .values_list('subdomain_id', 'ipaddress__address'):
+        out.setdefault(sub_id, []).append(address)
+    return out
+
+
+def _work_rows(project, light):
+    """The full work items of one page: ``_match`` of each light item's match (loaded now, with everything a list row reads, for the page's matches
+    only), with the host's addresses and score, the fixed versions and the grouping ``_one_item_per_upgrade`` gave it."""
+    if not light:
+        return []
+    ids = [i['id'] for i in light]
+    full = {m.pk: m for m in _matches_qs(project, current_ids=sorted({i['m'].subdomain_id for i in light})).filter(pk__in=ids)
+            .prefetch_related('subdomain__ip_addresses__ports', 'subdomain__technologies')}  # the ports and technologies: each row's explain reads them
+    out = []
+    for i in light:
+        m = full.get(i['id'])
+        if m is None:  # gone between the two reads (deleted or moved off the current inventory): skipped, as a later call would skip it
+            continue
+        sub = m.subdomain
+        item = _match(m)
+        item['ips'] = [ip.address for ip in sub.ip_addresses.all()] if sub else []
+        item['host_score'] = i['host_score']
+        item['fixed_in'] = i['fixed_in']
+        item.update(cves=i['cves'], match_ids=i['match_ids'], upgrade_to=i['upgrade_to'])
+        out.append(item)
+    return out
 
 
 def _upgrade_to(version, fixed):
