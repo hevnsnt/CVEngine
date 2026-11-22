@@ -350,6 +350,30 @@ def get_task_title(task_name, scan_id=None, subscan_id=None):
 #--------------#
 
 
+_WHATPORTIS_TABLE = None  # {port number as text: (name, description)}, read once per process
+
+
+def _whatportis_table():
+	"""
+		The whatportis table as a dict, parsed once per process: whatportis.get_ports opens a new TinyDB and parses the
+		whole JSON file on every call, and the ingest looks up every discovered port. The first row of a port wins,
+		as whatportis.get_ports(...)[0] did. An empty or unreadable table is not kept, so a later call reads it again.
+	"""
+	global _WHATPORTIS_TABLE
+	if _WHATPORTIS_TABLE is not None:
+		return _WHATPORTIS_TABLE
+	table = {}
+	try:
+		from whatportis.db import get_database
+		for row in get_database().all():
+			table.setdefault(str(row.get('port')), (row.get('name'), row.get('description')))
+	except Exception as exc:
+		logger.warning(f'whatportis table could not be read: {exc}')
+	if table:
+		_WHATPORTIS_TABLE = table
+	return table
+
+
 def get_port_service_description(port):
 	"""
 		Retrieves the standard service name and description for a given port 
@@ -365,12 +389,11 @@ def get_port_service_description(port):
 	logger.info('Fetching Port Service Name and Description')
 	try:
 		port = int(port)
-		whatportis_result = whatportis.get_ports(str(port))
-		
-		if whatportis_result and whatportis_result[0].name:
+		name, description = _whatportis_table().get(str(port), (None, None))
+		if name:
 			return {
-				"service_name": whatportis_result[0].name,
-				"description": whatportis_result[0].description
+				"service_name": name,
+				"description": description
 			}
 		else:
 			try:
@@ -400,8 +423,12 @@ def update_or_create_port(port_number, service_name=None, description=None, ip=N
 
 		Args:
 			port_number (int): The port number to update or create.
-			service_name (str, optional): The name of the service associated with the port.
-			description (str, optional): A description of the service associated with the port.
+			service_name (str, optional): The name of the service associated with the port. On an existing port it only
+				fills an empty service name: the caller's name is a port table guess or a URL scheme, and must not replace
+				the service a scanner detected on the port (see cveFeed.port_inventory).
+			description (str, optional): A description of the service associated with the port. On an existing port it
+				only fills an empty description, and only when the stored service name is empty or the same as service_name,
+				so a description never describes another service than the one stored.
 			ip (IpAddress, optional): when given, the port is looked up among (and created for) this IP only, never
 				shared with another IP: nmap's product and version are stored on the row, so a shared row would show
 				one host's service on every host that has the same port number open.
@@ -424,12 +451,16 @@ def update_or_create_port(port_number, service_name=None, description=None, ip=N
 		)
 		created = True
 	else:
-		# avoid updating None values in service and description if they already exist
-		if service_name is not None and port.service_name != service_name:
-			port.service_name = service_name
-		if description is not None and port.description != description:
+		# fill only what is empty, and write only the fields that changed (none: no UPDATE at all)
+		changed = []
+		if description and not port.description and (not port.service_name or port.service_name == service_name):
 			port.description = description
-		port.save()
+			changed.append('description')
+		if service_name and not port.service_name:
+			port.service_name = service_name
+			changed.append('service_name')
+		if changed:
+			port.save(update_fields=changed)
 	return port, created
 	
 
