@@ -87,7 +87,7 @@ class OneNamePerPageTests(TestCase):
 
 	def test_the_rail_with_no_project_names_the_page_it_opens(self):
 		built = nav.build('dashboard', None, bounty_enabled=False, sentinels_enabled=False)
-		self.assertEqual([e['label'] for e in built['rail']], ['Overview', 'Graph', 'Reporting', 'Scanners'])
+		self.assertEqual([e['label'] for e in built['rail']], ['Overview', 'Graph', 'Reporting', 'Scanners', 'MCP'])
 
 
 class PurposeLineTests(TestCase):

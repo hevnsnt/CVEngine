@@ -43,7 +43,7 @@ class MenuTests(TestCase):
 
 	def test_the_menu_order_and_labels(self):
 		self.assertEqual([l for l, _, _ in menu(self.page('/cve/alpha/hosts/'))],
-						['Overview', 'Findings', 'Hygiene', 'Hosts', 'Suppliers', 'Scans', 'Reporting', 'Scanners', 'Bug bounty'])
+						['Overview', 'Findings', 'Hygiene', 'Hosts', 'Suppliers', 'Scans', 'Reporting', 'Scanners', 'MCP', 'Bug bounty'])
 
 	def test_every_link_opens_appears_once_and_has_a_name(self):
 		html = self.page('/cve/alpha/hosts/')
@@ -192,7 +192,7 @@ class MenuTests(TestCase):
 		self.assertEqual(re.findall(r'</svg>([^<]+)</a>', bar), ['Overview', 'Findings', 'Hosts', 'Scans'])
 		self.assertNotRegex(bar, r'aria-current="page"[^>]*><svg[^>]*><use href="#i-server"')  # Hosts is not current on Suppliers
 		sheet = html[html.index('id="sheet"'):html.index('id="acct-sheet"')]
-		self.assertEqual(re.findall(r'</svg>([^<]+)</a>', sheet)[:5], ['Hygiene', 'Suppliers', 'Reporting', 'Scanners', 'Bug bounty'])
+		self.assertEqual(re.findall(r'</svg>([^<]+)</a>', sheet)[:6], ['Hygiene', 'Suppliers', 'Reporting', 'Scanners', 'MCP', 'Bug bounty'])
 		self.assertRegex(sheet, r'aria-current="page"><svg[^>]*><use href="#i-building"/></svg>Suppliers')
 		self.assertRegex(html, r'id="more-btn"[^>]*aria-current="page"')  # the bar shows where you are: More holds the current entry
 		self.assertNotRegex(self.page('/cve/alpha/hosts/'), r'id="more-btn"[^>]*aria-current')
@@ -204,7 +204,7 @@ class MenuTests(TestCase):
 
 	def test_without_a_project_the_menu_leaves_out_what_needs_one(self):
 		out = nav.build('about', None, bounty_enabled=False, sentinels_enabled=False)
-		self.assertEqual([e['label'] for e in out['rail']], ['Overview', 'Graph', 'Reporting', 'Scanners'])
+		self.assertEqual([e['label'] for e in out['rail']], ['Overview', 'Graph', 'Reporting', 'Scanners', 'MCP'])
 
 
 class RuleTests(SimpleTestCase):

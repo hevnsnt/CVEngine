@@ -5,11 +5,12 @@ tenancy scoping, role checks and read-only-token rules as the REST API.
 """
 import json
 import logging
+import time
 
 from django.http import HttpResponse, JsonResponse
 from django.core.exceptions import RequestDataTooBig
 
-from agentapi import db_timeout, storage_safe
+from agentapi import db_timeout, mcp_log, storage_safe
 from agentapi import agent_broker as broker
 from agentapi import host_export
 from agentapi import host_manage as hosts
@@ -793,12 +794,17 @@ def handle_message(ctx, msg):
             return _rpc_error(rpc_id, -32602, 'tool name must be a string and arguments an object')
         if params['name'] not in BY_NAME:
             return _rpc_error(rpc_id, -32602, f"unknown tool {params['name'][:80]!r}")  # the spec: an unknown tool is a protocol error
+        name, started = params['name'], time.monotonic()
+        writes = BY_NAME[name][4]
         try:
-            data = call_tool(ctx, params.get('name'), params.get('arguments'))
-            return _rpc_result(rpc_id, {'content': [{'type': 'text', 'text': json.dumps(data, default=str)}], 'isError': False,
-                                        '_meta': {'cvengine/untrusted_text': UNTRUSTED_NOTICE}})
+            data = call_tool(ctx, name, params.get('arguments'))
         except ApiError as e:
+            mcp_log.record(ctx, name, params.get('arguments'), ok=False, error=e.message, writes=writes,
+                           duration_ms=int((time.monotonic() - started) * 1000))  # the MCP page's History (agentapi.mcp_log)
             return _rpc_result(rpc_id, {'content': [{'type': 'text', 'text': e.message}], 'isError': True})
+        mcp_log.record(ctx, name, params.get('arguments'), ok=True, result=data, writes=writes, duration_ms=int((time.monotonic() - started) * 1000))
+        return _rpc_result(rpc_id, {'content': [{'type': 'text', 'text': json.dumps(data, default=str)}], 'isError': False,
+                                    '_meta': {'cvengine/untrusted_text': UNTRUSTED_NOTICE}})
     return _rpc_error(rpc_id, -32601, f'method not found: {method}')
 
 
