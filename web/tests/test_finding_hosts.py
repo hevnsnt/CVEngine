@@ -251,7 +251,8 @@ class AuditTests(Base):
         out = StringIO()
         call_command('audit_finding_hosts', stdout=out)
         self.assertIn('Dry run', out.getvalue())
-        self.assertIn('gone: 2 eligible now, 0 missing but inside the grace period (2 full scans and 7 days)', out.getvalue())
+        from cveFeed.host_resolver import gone_after_days
+        self.assertIn(f'gone: 2 eligible now, 0 missing but inside the grace period (2 full scans and {gone_after_days()} days)', out.getvalue())
         call_command('audit_finding_hosts', '--apply', stdout=out)
         after = finding_hosts.audit([self.project.pk])
         self.assertEqual((after['totals']['gone'], after['totals']['archived']), (0, 0))
