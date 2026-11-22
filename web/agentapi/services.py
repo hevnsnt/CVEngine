@@ -745,12 +745,15 @@ def list_scan_endpoints(ctx, slug, scan_id, params):
 def list_scan_vulnerabilities(ctx, slug, scan_id, params):
     from startScan.models import Vulnerability
     scan = _scan_in_project(ctx, slug, scan_id)
-    qs = Vulnerability.objects.filter(scan_history=scan).select_related('subdomain', 'triage__verdict', 'remediation_by', 'assignee') \
+    # ``_vuln`` reads the target and a manual heat's author of every row: joined here, not one query per row. The page is cut on ids first
+    # (``paginate_narrow``), so the joins and the comment count run for the page's rows only, as in ``list_vulnerabilities``.
+    qs = Vulnerability.objects.filter(scan_history=scan).select_related('subdomain', 'target_domain', 'triage__verdict', 'triage__heat_override_by',
+                                                                         'remediation_by', 'assignee') \
         .prefetch_related('cve_ids', 'tags', _matches_of_host()).annotate(comment_count=_comment_count_annotation('vulnerability')).order_by('-severity', '-id')
     inverse = {v: k for k, v in SEVERITY_NAMES.items()}
     if params.get('severity') in inverse:
         qs = qs.filter(severity=inverse[params['severity']])
-    return paginate(qs, params, _vuln)
+    return paginate_narrow(qs, params, _vuln)
 
 
 def scan_activity(ctx, slug, scan_id, params):
