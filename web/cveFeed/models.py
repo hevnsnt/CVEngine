@@ -1062,7 +1062,8 @@ class HostAssessment(models.Model):
     finished_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
-        indexes = [models.Index(fields=['project', 'status', 'created_at'], name='hostassess_project_idx')]
+        indexes = [models.Index(fields=['project', 'status', 'created_at'], name='hostassess_project_idx'),
+                   models.Index(fields=['project', 'host', 'created_at'], name='hostassess_proj_host_idx')]  # a host's recent and last assessment
         constraints = [models.UniqueConstraint(fields=['project', 'host'], condition=models.Q(status__in=['queued', 'running']),
                                            name='one_active_host_assessment')]
 
