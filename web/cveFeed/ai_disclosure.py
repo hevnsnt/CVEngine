@@ -319,14 +319,32 @@ def _row(getter):
         return None
 
 
+COUNTS_CACHE_KEY = 'cvengine:ai-disclosure:calls-30d'
+COUNTS_CACHE_SECONDS = 600
+
+
 def _counts():
     """The calls of the last 30 days per job, or None when the count fails (a slow database past the web statement timeout, a busy install). The
-    figures are a courtesy for App Admins; the page's account of what is sent must open without them, so a failure here never becomes a 500."""
+    figures are a courtesy for App Admins; the page's account of what is sent must open without them, so a failure here never becomes a 500.
+    The answer is kept for ten minutes (a 30-day total does not move in a way anyone watches), so a page view and a reload cost the database
+    nothing; a failure is not kept, so the next view tries again."""
+    from django.core.cache import cache
     try:
-        return _count_calls()
+        counts = cache.get(COUNTS_CACHE_KEY)
+    except Exception:  # noqa: BLE001 - a cache that is down is a cache miss
+        counts = None
+    if counts is not None:
+        return counts
+    try:
+        counts = _count_calls()
     except Exception:  # noqa: BLE001 - OperationalError on a statement timeout, or any database error
         logging.getLogger(__name__).warning('AI and your data: the 30-day call counts could not be read', exc_info=True)
         return None
+    try:
+        cache.set(COUNTS_CACHE_KEY, counts, COUNTS_CACHE_SECONDS)
+    except Exception:  # noqa: BLE001
+        pass
+    return counts
 
 
 def _count_calls():
