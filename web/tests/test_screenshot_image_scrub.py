@@ -59,4 +59,4 @@ class ScreenshotImageScrubTests(TestCase):
         now = timezone.now()
         qs = (SentinelTask._base_manager.filter(kind='web_screenshot', status='done', finished_at__lt=now - sentinel_broker.STALE_IMAGES_AFTER)
               .exclude(result__has_key='images_scrubbed').order_by('id').values_list('id', flat=True)[:sentinel_broker.STALE_IMAGES_BATCH])
-        self.assertIn('sentineltask_unscrubbed_img_idx', plan(qs))
+        self.assertIn('sentineltask_unscrub_img_idx', plan(qs))

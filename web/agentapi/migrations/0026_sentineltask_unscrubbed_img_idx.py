@@ -17,6 +17,6 @@ class Migration(migrations.Migration):
         AddIndexConcurrently(
             model_name='sentineltask',
             index=models.Index(condition=models.Q(('kind', 'web_screenshot'), ('status', 'done'), models.Q(('result__has_key', 'images_scrubbed'), _negated=True)),
-                               fields=['id'], name='sentineltask_unscrubbed_img_idx'),
+                               fields=['id'], name='sentineltask_unscrub_img_idx'),
         ),
     ]

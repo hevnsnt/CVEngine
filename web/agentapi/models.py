@@ -174,7 +174,7 @@ class SentinelTask(models.Model):
                    models.Index(fields=['id'], name='sentineltask_unscrubbed_idx',
                                 condition=models.Q(status='done', kind__in=['secrets_scan', 'route_probe']) & ~models.Q(result__has_key='values_scrubbed')),
                    # ``sentinel_broker.scrub_stale_images`` (once a minute): finished screenshot tasks whose pictures are still inside the result. Same idea as the index above
-                   models.Index(fields=['id'], name='sentineltask_unscrubbed_img_idx',
+                   models.Index(fields=['id'], name='sentineltask_unscrub_img_idx',
                                 condition=models.Q(status='done', kind='web_screenshot') & ~models.Q(result__has_key='images_scrubbed'))]
 
     def save(self, *args, **kwargs):
