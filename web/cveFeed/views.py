@@ -775,6 +775,13 @@ def about_page(request):
     return render(request, 'cveFeed/about.html', {**ui_context(request, 'about'), **context, 'no_scanner_bar': True})  # reference text: no scanner status strip
 
 
+def ai_data_page(request):
+    """"AI and your data": what each AI job sends, what an MCP agent can read, and which jobs are on here (cveFeed.ai_disclosure). Every
+    signed-in person may read it: they are the ones whose data it is about. The calls of each job are shown to App Admins only."""
+    from cveFeed import ai_disclosure
+    return render(request, 'cveFeed/ai_data.html', {**ui_context(request, 'ai'), **ai_disclosure.page_context(request.user), 'no_scanner_bar': True})
+
+
 def admin_page(request):
     from django.core.exceptions import PermissionDenied
 

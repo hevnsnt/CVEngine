@@ -24,7 +24,7 @@ OWN_ENTRY = {'hygiene': 'hygiene', 'suppliers': 'suppliers'}
 
 # Pages that belong to the person, not to the work: no rail entry is current on them (by design), the account control is, and so is
 # the one item of the account menu that opens the page. 'agents' is the API keys page (MCP and agents), whose menu item is 'API keys'.
-UTILITY = {'account': 'My account', 'admin': 'Administration', 'settings': 'Settings', 'agents': 'API keys', 'about': 'About', 'setup': 'Connect AI model',
+UTILITY = {'account': 'My account', 'admin': 'Administration', 'settings': 'Settings', 'agents': 'API keys', 'about': 'About', 'ai': 'AI and your data', 'setup': 'Connect AI model',
            'welcome': ''}
 
 SECTION_ICON = {'overview': 'pulse', 'findings': 'bug', 'hygiene': 'shield', 'assets': 'server', 'suppliers': 'building', 'scans': 'radar',

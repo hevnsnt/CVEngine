@@ -1360,7 +1360,9 @@ def validate_match_on_demand(request_id):
         remaining = [check for check in available_checks if check['kind'] not in selected]
         if remaining and checks and not check_result.get('hits') and not check_result.get('stopped'):
             row.refresh_from_db()
-            observations = [{'kind': step.get('kind'), 'result': step.get('result'), 'summary': step.get('summary')}
+            # a step's summary can quote the URL it read ("Fetched https://<host>/..."): the host's own names out, as in the host context
+            names = host_context._names_of(match.subdomain)
+            observations = [{'kind': step.get('kind'), 'result': step.get('result'), 'summary': host_context._s(step.get('summary'), 300, names)}
                             for step in (row.validation_steps or [])[-6:]]
             second_step = activity.log('confirm', f'Validation request #{job.pk}: reviewing observations and choosing the next check',
                                        project=job.project_id, cve_id=cve_id, status='running', **detail)

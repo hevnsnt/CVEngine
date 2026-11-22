@@ -224,14 +224,14 @@ def _inventory(project_id, host, row=_UNREAD):
             'reported_at': row.reported_at.isoformat()}
 
 
-def _steps(project_id, host, rows=None):
+def _steps(project_id, host, rows=None, names=()):
     from cveFeed.models import Triage
     out = []
     if rows is None:
         rows = Triage.objects.filter(project_id=project_id, host=host).exclude(validation_steps=[]).order_by('-validated_at')[:4]
     for row in rows:
         for step in (row.validation_steps or [])[-3:]:
-            out.append({'kind': _s(step.get('kind'), 20), 'result': _s(step.get('result'), 20), 'summary': _s(step.get('summary'), 160)})
+            out.append({'kind': _s(step.get('kind'), 20), 'result': _s(step.get('result'), 20), 'summary': _s(step.get('summary'), 160, names)})
     return out[:MAX_STEPS]
 
 
@@ -313,7 +313,7 @@ def host_context(sub, project_id=None, focus=None, pre=None):
                                                       HostLabel.objects.filter(project_id=project_id, host=host).values_list('label', flat=True)[:30])}),
         'operating_system': _os(sub, names), 'tailscale': _tailscale(project_id, host, pre.get('tailscale', _UNREAD)),
         'certificates': _certificates(project_id, host, pre.get('certificates')), 'host_inventory': _inventory(project_id, host, pre.get('inventory', _UNREAD)),
-        'probe_results': _probes(rows, names), 'earlier_checks': _steps(project_id, host, pre.get('steps')), 'other_cve_matches': _matches(sub, names, pre.get('matches')),
+        'probe_results': _probes(rows, names), 'earlier_checks': _steps(project_id, host, pre.get('steps'), names), 'other_cve_matches': _matches(sub, names, pre.get('matches')),
         'wordpress': wordpress_summary(rows),
         'rules': [UNVERSIONED_NOTE] + ([EDGE_NOTE] if edge['fronted'] else []),
     }

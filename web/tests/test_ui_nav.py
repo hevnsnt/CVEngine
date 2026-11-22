@@ -114,9 +114,9 @@ class ShellTests(TestCase):
 		def menu(user):
 			html = self.get(user, '/cve/about/')
 			return re.findall(r'<a data-nav="([^"]+)"', html[html.index('<details class="acct">'):html.index('</aside>')])
-		self.assertEqual(menu(self.root), ['My account', 'Administration', 'Connect AI model', 'Settings', 'API keys', 'About'])
-		self.assertEqual(menu(self.org_admin), ['My account', 'Administration', 'API keys', 'About'])
-		self.assertEqual(menu(self.analyst), ['My account', 'API keys', 'About'])
+		self.assertEqual(menu(self.root), ['My account', 'Administration', 'Connect AI model', 'Settings', 'API keys', 'AI and your data', 'About'])
+		self.assertEqual(menu(self.org_admin), ['My account', 'Administration', 'API keys', 'AI and your data', 'About'])
+		self.assertEqual(menu(self.analyst), ['My account', 'API keys', 'AI and your data', 'About'])
 
 	def test_the_project_sentinels_tab_only_appears_for_a_project_that_has_one(self):
 		from unittest import mock
