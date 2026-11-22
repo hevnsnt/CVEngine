@@ -58,6 +58,12 @@ class ScanHistory(models.Model):
 			models.Index(fields=['scan_status', 'id'], name='scan_status_id_idx'),
 			models.Index(fields=['domain', 'scan_status'], name='scan_domain_status_idx'),
 			models.Index(fields=['domain', 'start_scan_date'], name='scan_domain_started_idx'),
+			# The finished full scans and the finished host-pipeline scans by domain, for cveFeed.current_scans (the current inventory). The task
+			# name is cveFeed.discovery.HOST_PIPELINE_TASK, written out because this module cannot import cveFeed.
+			models.Index(fields=['domain', 'id'], name='scan_done_full_idx',
+				condition=models.Q(scan_status=2) & ~models.Q(tasks__contains=['host_pipeline'])),
+			models.Index(fields=['domain', 'id'], name='scan_done_pipe_idx',
+				condition=models.Q(scan_status=2) & models.Q(tasks__contains=['host_pipeline'])),
 		]
 
 	def __str__(self):

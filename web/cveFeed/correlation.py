@@ -2353,36 +2353,31 @@ def latest_scan_q(prefix=""):
     these scans, the newest row wins. A domain that has never had a successful full scan keeps all its rows (newest per host),
     so a first scan in progress (or one that failed part way) does not hide the hosts it found. ``prefix`` reaches the host
     from another model ("subdomain__" for a CVEMatch)."""
-    from django.db.models import Case, Exists, F, Max, OuterRef, Q, Value, When, Window
+    from django.db.models import Exists, OuterRef, Q
 
-    from cveFeed.discovery import HOST_PIPELINE_TASK
-    from startScan.models import ScanHistory, Subdomain
+    from cveFeed.current_scans import current_scan_sets
+    from startScan.models import Subdomain
 
-    done = ScanHistory.objects.filter(scan_status=2)
-    full = done.exclude(tasks__contains=[HOST_PIPELINE_TASK])
-    latest_full = full.values("domain_id").annotate(last=Max("id")).values("last")
-    # A host-pipeline scan is "after the full scan" when it is newer than the newest full scan of its domain (any, when the domain has none). It was
-    # ``id > COALESCE((the newest full scan of the domain), 0)``, a subquery run once per finished host-pipeline scan that walked every finished scan of
-    # the domain to find it: a domain keeps 170 or more of them, so 3,300 scans meant 590,000 row visits (1.4 s) each time the set was built, and every
-    # host statement builds it once or twice. Now ONE pass over the finished scans: a window gives each row the newest full scan id of its domain, with
-    # nothing correlated for the planner to repeat per row (a NOT EXISTS version was hashed on PostgreSQL 16 and read 6.7 million buffers on 18).
-    # Both conditions are on windows so that both are applied after them (a plain filter on the tasks would cut the rows the window sees).
-    is_full = ~Q(tasks__contains=[HOST_PIPELINE_TASK])
-    after_full = (done.annotate(_newest_full=Window(Max(Case(When(is_full, then=F("id")))), partition_by=[F("domain_id")]),
-                                _is_pipeline=Window(Max(Case(When(is_full, then=Value(0)), default=Value(1))), partition_by=[F("id")]))
-                  .filter(_is_pipeline=1).filter(Q(_newest_full__isnull=True) | Q(id__gt=F("_newest_full"))).values("id"))
+    # The scan ids are read here, in one small statement over two partial indexes (cveFeed.current_scans), and passed as array literals. Embedded
+    # as subqueries they were rebuilt by every statement (a window over every finished scan and two seq scans of the scan table) and kept the
+    # planner from reaching the rows by them: it read every host and filtered most away (52,000 buffers, about 140 ms for the bare id query on a
+    # live install of 31,000 hosts; about 4,000 buffers and 15 ms this way). The rows are the same; the sets are read when the filter is built.
+    sets = current_scan_sets()
+    after_full = sets.after_full
     same_host = Subdomain.objects.filter(target_domain_id=OuterRef(prefix + "target_domain_id"),
                                          name=OuterRef(prefix + "name"))
-    newer_row = same_host.filter(scan_history_id__in=after_full,
+    newer_row = same_host.filter(scan_history_id__in_id_array=after_full,
                                  scan_history_id__gt=OuterRef(prefix + "scan_history_id"))
     # Before the first successful full scan, keep the newest scanned copy of each host. A scanless row (certificate transparency,
     # an import) is not a copy of a scan: its own addresses and findings fold into the host, so it stays current beside the scanned copy.
     newer_fallback = same_host.filter(scan_history__isnull=False, id__gt=OuterRef(prefix + "id"))
-    return ((Q(**{prefix + "scan_history_id__in": latest_full}) | Q(**{prefix + "scan_history_id__in": after_full})
+    # "Not a domain with a full scan" is written as "a domain without one, or none": the same rows (every domain id is a Domain), and the
+    # planner can reach them by the domain index instead of reading every host.
+    return ((Q(**{prefix + "scan_history_id__in_id_array": sets.latest_full | after_full})
              | Q(**{prefix + "scan_history__isnull": True})
-             | ~Q(**{prefix + "target_domain_id__in": full.values("domain_id")}))
+             | Q(**{prefix + "target_domain_id__in_id_array": sets.unfull_domains}) | Q(**{prefix + "target_domain_id__isnull": True}))
             & ~Q(Exists(newer_row))
-            & (Q(**{prefix + "scan_history__isnull": True}) | Q(**{prefix + "target_domain_id__in": full.values("domain_id")})
+            & (Q(**{prefix + "scan_history__isnull": True}) | Q(**{prefix + "target_domain_id__in_id_array": sets.full_domains})
                | ~Q(Exists(newer_fallback))))
 
 
