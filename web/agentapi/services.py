@@ -2370,6 +2370,11 @@ def list_hosts(ctx, slug, params):
         qs = qs.filter(target_domain_id=_int_param(params['target_id'], 'target_id'))
     qs = _internal_filter(qs, params)
     ordered = _one_per_host(qs, per_project=_is_all(project)).order_by(*_host_order(params))
+    page, size = page_args(params, zero_ok=True)
+    if not size:  # the count alone (a poll, a badge): shared for a moment by every caller of the same scope and filters, the collapse is not rerun for each
+        count = _cached_host_count(project, ordered, 'hosts', _archived_mode(params), str(params.get('q') or ''), str(params.get('target_id') or ''),
+                                   str(params.get('internal', '')).strip().lower())
+        return {'count': count, 'page': page, 'page_size': 0, 'results': []}
 
     def load(ids):  # the page's rows with what the host cards read, in the order of ``ids``
         rows = Subdomain.objects.filter(pk__in=ids).select_related('target_domain__project' if _is_all(project) else 'target_domain') \
@@ -3194,6 +3199,19 @@ def _cached_facets(project, qs, terms, params, facet_names, facet_size, with_uns
     return snapshot_cache.snapshot('search-facets', scope, compute, fresh)['payload']
 
 
+HOST_COUNT_SECONDS = 15  # how long a count-only Hosts or Search answer is shared; a revision bump (a host archived, a finding closed, a scan ended) drops it
+
+
+def _cached_host_count(project, qs, *narrowing):
+    """``qs.count()`` of a count-only Hosts or Search request (``page_size=0``, "the cheap mode for a poll, a palette or a badge"), as a shared snapshot
+    (``cveFeed.snapshot_cache``) keyed by who may see the rows (the project ids, the caller's allowed projects) and by ``narrowing``: every parameter that
+    narrows ``qs``. The count runs the one-row-per-host collapse over the current inventory, about half a second at 10,000 hosts, on every poll."""
+    from cveFeed import snapshot_cache
+    ids = sorted(project.ids) if _is_all(project) else [project.pk]
+    scope = snapshot_cache.scope_hash('host-count', ids, *narrowing)
+    return snapshot_cache.snapshot('host-count', scope, qs.count, HOST_COUNT_SECONDS)['payload']
+
+
 def _unscannable_facet(qs, heat_by_id):
     """``{count, private, no_dns, unknown}``: the hosts counted as ``unscanned`` that have no address a scanner can use, so "never scanned" can say
     which are waiting their turn and which have nothing to scan. ``private`` points inside a private network (only a Sentinel inside it can scan
@@ -3407,8 +3425,10 @@ def search_hosts(ctx, slug, params):
     no_facets = counts_only or str(params.get('facets') or '').strip().lower() == 'none'
     if no_facets:
         facet_names = []
-    if counts_only and not heat:
-        return {'count': qs.count(), 'page': 1, 'page_size': 0, 'results': [], 'facets': None, 'has_internal': _any_internal()}
+    if counts_only and not heat:  # every parameter that narrows ``qs`` is part of the key, as for the facets (``_cached_facets``)
+        count = _cached_host_count(project, qs, 'search', [list(t) for t in terms], str(params.get('internal', '')).strip().lower(),
+                                   str(params.get('names') or ''), str(params.get('exposed') or '').lower() in ('1', 'true', 'yes'), archived)
+        return {'count': count, 'page': 1, 'page_size': 0, 'results': [], 'facets': None, 'has_internal': _any_internal()}
     if heat or not no_facets:
         bundle = _cached_facets(project, qs, terms, params, facet_names, facet_size, with_unscannable=not no_facets)
         heat_counts, heat_by_id, heat_truncated, unscannable, search_facets = bundle['heat'], bundle['by_id'], bundle['truncated'], bundle['unscannable'], bundle['facets']
