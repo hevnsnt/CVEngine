@@ -394,29 +394,30 @@ def tls_targets(domain, hosts=None):
     """(host, port) pairs to probe: port 443 on every known host, plus other TLS ports seen open."""
     from startScan.models import open_ports
     from targetApp.target_types import scannable_hosts
-    targets, seen = [], set()
     selected = set(hosts) if hosts is not None else None
-
-    allowed = {}
-
-    def add(host, port):
-        if (host, port) not in seen and len(targets) < MAX_TLS_TARGETS:
-            seen.add((host, port))
-            if host not in allowed:  # a stored name may point somewhere a scanner must not go now
-                allowed[host] = bool(scannable_hosts([host], project=domain.project_id))
-            if allowed[host]:
-                targets.append((host, port))
+    candidates = []
     if selected is None or domain.name in selected:
-        add(domain.name, 443)
+        candidates.append((domain.name, 443))
     from cveFeed import host_resolver
     for sub in host_resolver.current_target_rows(domain).prefetch_related('ip_addresses__ports'):  # the Hosts page's hosts, never a stale row's ports
         if (selected is not None and sub.name not in selected) or not domain.includes_host(sub.name):  # =example.com: no name under it
             continue
-        add(sub.name, 443)
+        candidates.append((sub.name, 443))
         for ip in sub.ip_addresses.all():
             for port in open_ports(ip):
                 if port.number in TLS_PORTS and port.number != 443:
-                    add(sub.name, port.number)
+                    candidates.append((sub.name, port.number))
+    # a stored name may point somewhere a scanner must not go now: every host is judged by scannable_hosts, all of them in one call (the
+    # exclusions, archived hosts and the program's scope are read once, not once per host; each host gets the answer it gets on its own)
+    if not candidates:
+        return []
+    allowed = set(scannable_hosts(list(dict.fromkeys(host for host, _port in candidates)), project=domain.project_id))
+    targets, seen = [], set()
+    for host, port in candidates:
+        if (host, port) not in seen and len(targets) < MAX_TLS_TARGETS:
+            seen.add((host, port))
+            if host in allowed:
+                targets.append((host, port))
     return targets
 
 
@@ -433,10 +434,8 @@ def slp_targets(domain, hosts=None):
     from cveFeed import host_resolver
     from targetApp.target_types import scannable_hosts
     selected = set(hosts) if hosts is not None else None
-    out = []
+    found = []
     for sub in host_resolver.current_target_rows(domain).prefetch_related('ip_addresses__ports', 'technologies').order_by('name'):
-        if len(out) >= MAX_SLP_TARGETS:
-            break
         if (selected is not None and sub.name not in selected) or not domain.includes_host(sub.name):
             continue
         words = [t.name for t in sub.technologies.all()]
@@ -447,9 +446,12 @@ def slp_targets(domain, hosts=None):
                     continue
                 listening = listening or port.number == SLP_PORT
                 words += [port.service_name or '', port.product or '', port.os_guess or '']
-        if (listening or ESXI_WORDS.search(' '.join(w for w in words if w)[:4000])) and scannable_hosts([sub.name], project=domain.project_id):
-            out.append((sub.name, SLP_PORT))
-    return out
+        if listening or ESXI_WORDS.search(' '.join(w for w in words if w)[:4000]):
+            found.append(sub.name)
+    if not found:
+        return []
+    allowed = set(scannable_hosts(list(dict.fromkeys(found)), project=domain.project_id))  # one call for every host, not one per host
+    return [(name, SLP_PORT) for name in found if name in allowed][:MAX_SLP_TARGETS]
 
 
 def mail_candidates(domain):
