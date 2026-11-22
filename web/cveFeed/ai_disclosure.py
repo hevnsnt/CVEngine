@@ -7,6 +7,7 @@ AI job cannot ship without saying what it sends. ``state()`` reads the live sett
 The text was checked against the code that builds each prompt (``ai_providers.triage_parts``, ``host_context``, ``host_review.build``,
 ``reviewer.build_packet`` and ``reviewer.snapshot``, ``validation_plan.plan``, ``detection_author.user_parts``, ``templategen``, ``autotune``,
 ``rdp_shot``, ``nuclei_templates``) and the MCP server (``agentapi.mcp``). Change one and the other together."""
+import logging
 import os
 
 # Stages that no code calls any more: their rows stay in the usage ledger, so they stay in STAGES, but nothing sends them.
@@ -307,7 +308,7 @@ def state(include_counts=False):
             why = 'the AI reviewer container is off'
         out['jobs'][job['id']] = (ok, '' if ok else why)
     if include_counts:
-        out['counts'] = _counts()
+        out['counts'] = _counts()  # None when the database could not answer in time: the page still opens, without the figures
     return out
 
 
@@ -319,6 +320,16 @@ def _row(getter):
 
 
 def _counts():
+    """The calls of the last 30 days per job, or None when the count fails (a slow database past the web statement timeout, a busy install). The
+    figures are a courtesy for App Admins; the page's account of what is sent must open without them, so a failure here never becomes a 500."""
+    try:
+        return _count_calls()
+    except Exception:  # noqa: BLE001 - OperationalError on a statement timeout, or any database error
+        logging.getLogger(__name__).warning('AI and your data: the 30-day call counts could not be read', exc_info=True)
+        return None
+
+
+def _count_calls():
     from datetime import timedelta
 
     from django.db.models import Count
@@ -343,6 +354,6 @@ def page_context(user):
             on, why = live['jobs'][job['id']]
             jobs.append({**job, 'on': on, 'why': why, 'calls': (live['counts'] or {}).get(job['id']) if admin else None})
         groups.append({'key': key, 'title': title, 'intro': intro, 'jobs': jobs})
-    return {'ai': live, 'ai_groups': groups, 'ai_admin': admin, 'host_context': HOST_CONTEXT, 'protections': PROTECTIONS,
+    return {'ai': live, 'ai_groups': groups, 'ai_admin': admin, 'ai_counts_ok': live['counts'] is not None, 'host_context': HOST_CONTEXT, 'protections': PROTECTIONS,
             'still_sent': STILL_SENT, 'mcp': MCP, 'how_to_stop': HOW_TO_STOP,
             'ai_jobs_on': sum(1 for on, _why in live['jobs'].values() if on), 'ai_jobs_total': len(JOBS)}

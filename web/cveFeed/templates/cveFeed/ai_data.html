@@ -19,7 +19,7 @@
     <p class="ai-now-lede"><span class="ai-dot local" aria-hidden="true"></span>AI jobs are sent to a <b>{{ ai.provider }}</b> server your administrator runs{% if ai_admin and ai.host %} at <code>{{ ai.host }}</code>{% endif %}. The data goes only to that server: it stays on your network if the server is on it.</p>
     {% endif %}
     {% if ai.kind != 'off' and not ai.container %}<p class="note">The AI reviewer container is turned off (<code>CVENGINE_REVIEWER=0</code>), so AI jobs wait and nothing is sent.</p>{% endif %}
-    <p class="note">{{ ai_jobs_on }} of {{ ai_jobs_total }} AI jobs are on. Each one below says whether it is on here{% if ai_admin %} and how many calls it made in the last 30 days{% endif %}.</p>
+    <p class="note">{{ ai_jobs_on }} of {{ ai_jobs_total }} AI jobs are on. Each one below says whether it is on here{% if ai_admin and ai_counts_ok %} and how many calls it made in the last 30 days{% endif %}.{% if ai_admin and not ai_counts_ok %} The call counts could not be read just now (the database was slow); reload in a minute.{% endif %}</p>
   </section>
 
   <section class="about-sec" id="where" aria-labelledby="where-h">

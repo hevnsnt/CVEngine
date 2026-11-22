@@ -87,6 +87,16 @@ class PageTests(TestCase):
 	def test_app_admins_see_the_calls_of_each_job(self):
 		self.assertIn('calls in 30 days', self.get(self.admin).content.decode())
 
+	def test_a_database_that_cannot_count_the_calls_does_not_make_the_page_a_500(self):
+		from django.db import OperationalError
+		with mock.patch.object(ai_disclosure, '_count_calls', side_effect=OperationalError('canceling statement due to statement timeout')):
+			r = self.get(self.admin)
+		self.assertEqual(r.status_code, 200)
+		html = r.content.decode()
+		self.assertIn('id="job-finding_triage"', html)  # everything the page says about what is sent is still there
+		self.assertNotIn('calls in 30 days', html)
+		self.assertIn('call counts could not be read', html)
+
 	def test_the_account_menu_and_the_api_keys_page_link_to_it(self):
 		self.assertIn('href="/cve/ai/"', client_for(self.reader).get('/cve/about/').content.decode())
 		self.assertIn('/cve/ai/#mcp', client_for(self.admin).get('/cve/agents/').content.decode())
