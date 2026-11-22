@@ -5015,10 +5015,11 @@ MAX_BULK_HEAT = 500
 HEAT_REASON_MAX = 1000
 
 
-def _shown_heat(kind, obj):
-    """The heat a CVE match or a scanner finding shows on its host (``threat.match_heat``, ``threat.finding_heat``; a heat set by hand wins)."""
+def _shown_heat(kind, obj, hot_names=None):
+    """The heat a CVE match or a scanner finding shows on its host (``threat.match_heat``, ``threat.finding_heat``; a heat set by hand wins).
+    ``hot_names``: the hot CVE ids among many scanner findings' CVEs, read once for all of them (``threat.hot_cve_names``)."""
     from cveFeed.threat import finding_heat, match_heat
-    return match_heat(obj) if kind == 'match' else finding_heat(obj)
+    return match_heat(obj) if kind == 'match' else finding_heat(obj, hot_names=hot_names)
 
 
 def _shown_heat_reason(kind, obj, heat):
@@ -5135,6 +5136,79 @@ def set_finding_heat(ctx, slug, kind, finding_id, heat, reason=None):
     return _heat_state(kind, obj, changed)
 
 
+def _bulk_heat_batched(ctx, project, wanted, heat, reason):
+    """``{(kind, id): result}`` for ``bulk_set_finding_heat``: ``('changed', finding, before, after)``, ``('unchanged',)`` or ``('error', message)``,
+    each what ``_apply_heat`` gives that finding, in a fixed number of statements however many findings there are, where the call read and
+    wrote each finding on its own (about six statements each, 3,000 for 500). The project's findings of each kind are read at once (another
+    project's id is missing, so 404 like a missing one), the ones with no Triage row get one (``triage.track``, once), the hot CVEs of the scanner
+    findings are read once, and the overrides and their audit events are written in one transaction: one UPDATE (every change sets the same
+    four values) and one INSERT of the events."""
+    from django.db import transaction
+
+    from cveFeed import triage as triage_lib
+    from cveFeed.models import FindingAuditEvent, Triage
+    from cveFeed.threat import LEGACY_POLICY, finding_cve_names, heat_policy, hot_cve_names
+    out, todo = {}, []
+    for kind, ids in wanted.items():
+        try:
+            objs = {o.pk: o for o in _finding_qs(project, kind).filter(pk__in=sorted(ids))}
+            missing = [objs[i] for i in sorted(objs) if _triage_of(objs[i]) is None]
+            if missing:  # made the way triage makes it, then read again with the new rows (as ``_apply_heat`` does one by one)
+                fk = 'match_id' if kind == 'match' else 'vulnerability_id'
+                tracked = {getattr(row, fk) for row, _d in triage_lib.track(missing)}
+                objs.update({o.pk: o for o in _finding_qs(project, kind).filter(pk__in=[o.pk for o in missing])})
+            for i in sorted(ids):
+                if i not in objs:
+                    out[(kind, i)] = ('error', 'finding not found')
+                elif _triage_of(objs[i]) is None:
+                    tracked_here = missing and i in tracked
+                    out[(kind, i)] = ('error', 'this finding has no triage record to rate it on' if tracked_here
+                                      else 'this finding has no owning project to rate it under')
+                else:
+                    todo.append((kind, objs[i]))
+        except Exception:  # noqa: BLE001 - one bad kind must never fail the rest of the batch
+            logger.warning('bulk heat change could not read the %s findings', kind, exc_info=True)
+            for i in ids:
+                out.setdefault((kind, i), ('error', 'could not be updated'))
+    vulns = [obj for kind, obj in todo if kind == 'vulnerability']
+    hot = hot_cve_names({n for v in vulns for n in finding_cve_names(v)}) if vulns and heat_policy() != LEGACY_POLICY else None
+    now = timezone.now()
+    fields = {'heat_override': heat, 'heat_override_reason': reason if heat else '', 'heat_override_by': ctx.user if heat else None,
+              'heat_override_at': now if heat else None}
+    changing = []
+    for kind, obj in todo:
+        try:
+            row = _triage_of(obj)
+            before, old = _shown_heat(kind, obj, hot), row.heat_override or ''
+            if heat == old and (not heat or reason == row.heat_override_reason):
+                out[(kind, obj.pk)] = ('unchanged',)
+            else:
+                changing.append((kind, obj, row, before, old))
+        except Exception:  # noqa: BLE001 - one bad row must never fail the rest of the batch
+            logger.warning('bulk heat change failed for %s %s', kind, obj.pk, exc_info=True)
+            out[(kind, obj.pk)] = ('error', 'could not be updated')
+    if not changing:
+        return out
+    try:
+        with transaction.atomic():
+            Triage.objects.filter(pk__in=[row.pk for _k, _o, row, _b, _old in changing]).update(**fields, updated_at=now)  # these four only
+            events = []
+            for kind, obj, row, before, old in changing:
+                for name, value in fields.items():
+                    setattr(row, name, value)
+                after = _shown_heat(kind, obj, hot)
+                events.append(FindingAuditEvent(project=project, finding_kind=kind, finding_id=obj.pk, event='heat', actor=ctx.user,
+                                                before={'heat': before, 'override': old or None},
+                                                after={'heat': after, 'override': heat or None, 'reason': reason}))
+                out[(kind, obj.pk)] = ('changed', obj, before, after)
+            FindingAuditEvent.objects.bulk_create(events)
+    except Exception:  # noqa: BLE001 - nothing of the batch was written: each finding says so, as one failing finding did before
+        logger.warning('bulk heat change failed for %d findings', len(changing), exc_info=True)
+        for kind, obj, _row, _b, _old in changing:
+            out[(kind, obj.pk)] = ('error', 'could not be updated')
+    return out
+
+
 def bulk_set_finding_heat(ctx, slug, items, heat, reason=None):
     """``set_finding_heat`` for up to MAX_BULK_HEAT findings at once, with one heat and one reason: ``items`` is ``[{kind, id}, ...]``. Each
     item is independent (one bad kind or id never blocks the rest, and another project's finding 404s exactly like a missing one); each
@@ -5146,7 +5220,7 @@ def bulk_set_finding_heat(ctx, slug, items, heat, reason=None):
         raise ApiError(400, 'items must be a non-empty list')
     if len(items) > MAX_BULK_HEAT:
         raise ApiError(400, f'at most {MAX_BULK_HEAT} items per call')
-    changes, unchanged, failed = [], 0, []
+    outcome, wanted = [], {}  # per item, in order: ('failed', kind, id, error) or ('ok', kind, id); the findings asked for, by kind
     for item in items:
         kind = item.get('kind') if isinstance(item, dict) else None
         finding_id = item.get('id') if isinstance(item, dict) else None
@@ -5158,16 +5232,26 @@ def bulk_set_finding_heat(ctx, slug, items, heat, reason=None):
                 finding_id = int(finding_id)
             except (TypeError, ValueError):
                 raise ApiError(400, 'id must be a whole number')
-            obj, before, after, changed = _apply_heat(project, kind, _finding_obj(project, kind, finding_id), heat, reason, ctx.user)
-            if changed:
-                changes.append((kind, obj, before, after))
-            else:
-                unchanged += 1
         except ApiError as e:
-            failed.append({'kind': kind, 'id': finding_id, 'error': e.message})
-        except Exception:  # noqa: BLE001 - one bad row must never fail the rest of the batch
-            logger.warning('bulk heat change failed for %s %s', kind, finding_id, exc_info=True)
-            failed.append({'kind': kind, 'id': finding_id, 'error': 'could not be updated'})
+            outcome.append(('failed', kind, finding_id, e.message))
+            continue
+        outcome.append(('ok', kind, finding_id))
+        wanted.setdefault(kind, set()).add(finding_id)
+    results = _bulk_heat_batched(ctx, project, wanted, heat, reason)
+    changes, unchanged, failed, seen = [], 0, [], set()
+    for entry in outcome:
+        if entry[0] == 'failed':
+            failed.append({'kind': entry[1], 'id': entry[2], 'error': entry[3]})
+            continue
+        key = entry[1:]
+        result = results.get(key) or ('error', 'could not be updated')
+        if result[0] == 'error':
+            failed.append({'kind': key[0], 'id': key[1], 'error': result[1]})
+        elif result[0] == 'changed' and key not in seen:
+            changes.append((key[0], *result[1:]))
+        else:  # unchanged, or the same finding listed again after it changed: the second time it already has this heat and reason
+            unchanged += 1
+        seen.add(key)
     _heat_followup(project, changes, heat, reason)
     return {'updated': len(changes), 'unchanged': unchanged, 'failed': failed}
 
