@@ -274,8 +274,19 @@ def response(ctx, params, slug=None, org=None):
 def tool(ctx, args):
     """The MCP tool ``export_hosts``: the same file as text, with its name and counts (a file too big for an MCP answer is a 413 that points at REST)."""
     export = prepare(ctx, args, slug=args.get('project'), org=args.get('org'))
-    text = export.text()
-    if len(text.encode('utf-8')) > MCP_MAX_BYTES:
+    # the text is gathered chunk by chunk and given up as soon as it is past the cap: a file too big for an answer is refused after the chunks
+    # that pass the cap, not after every chunk of the project was read (the size only grows, so the answer is the same)
+    parts, size, chunks = [], 0, export.chunks()
+    try:
+        for part in chunks:
+            parts.append(part)
+            size += len(part.encode('utf-8'))
+            if size > MCP_MAX_BYTES:
+                break
+    finally:
+        chunks.close()
+    text = ''.join(parts)
+    if size > MCP_MAX_BYTES:
         raise ApiError(413, f'the list is too large for an MCP answer ({export.hosts} hosts): download it with GET {"orgs" if args.get("org") else "projects"}/'
                        f'{args.get("org") or args.get("project")}/hosts/export, or narrow it with scope=external and archived=0')
     return {'filename': export.filename, 'format': export.format, 'scope': export.scope, 'archived': export.include_archived, 'hosts': export.hosts,
