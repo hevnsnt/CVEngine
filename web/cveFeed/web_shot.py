@@ -259,29 +259,49 @@ def _record_static(project_id, domain_id, host, scheme, port, outcome, reason, n
         HostScreenshot.objects.filter(pk=row.pk).update(outcome=outcome, reason=reason[:300], attempted_at=now, domain_id=domain_id)
 
 
-def queue_refusal(project_id, host, gate, unattended):
+def queue_refusal(project_id, host, gate, unattended, banned=None, archived=None):
     """Why this host is not photographed at all, or '' (the organization's exclusion and the program's scope are read afresh; an unreadable
-    exclusion list stops the stage rather than clearing everything)."""
+    exclusion list stops the stage rather than clearing everything). ``banned`` (``excluded_names(project_id, strict=True)``) and ``archived``
+    (``archived_names(project_id)``) let a caller that asks about many hosts of one call read them once; each is a callable that reads it."""
     from cveFeed.exclusions import excluded_names, normalize
     from cveFeed.archive_rediscovery import archived_names
-    if normalize(host) in excluded_names(project_id, strict=True):
+    if normalize(host) in (banned() if banned is not None else excluded_names(project_id, strict=True)):
         return 'excluded'
-    if host in archived_names(project_id):
+    if host in (archived() if archived is not None else archived_names(project_id)):
         return 'archived'
     return gate.refusal(project_id, host, unattended=unattended)
+
+
+def _read_once(read):
+    """A callable that runs ``read`` the first time it is called and answers the same value after that (for one call of a function only, never
+    kept between calls). An exception is not remembered: it propagates, as the read itself would."""
+    box = []
+
+    def get():
+        if not box:
+            box.append(read())
+        return box[0]
+    return get
 
 
 def queue_for_subs(subs, project_id, *, by_person=False, force=False, limit=None, manual=False):
     """Plan the pages of ``subs`` (Subdomain rows of one project, ports prefetched) and queue them. Returns
     ``{'queued', 'kept', 'blocked', 'hosts', 'rdp'}``. A host the organization excluded or archived is left alone (no row), one the bug bounty
     scope or confirmation holds back, or inside a network only a Sentinel can reach, gets a row that says so."""
+    from cveFeed.archive_rediscovery import archived_names
     from cveFeed.bounty_gate import Gate
+    from cveFeed.exclusions import excluded_names
     from targetApp.models import Domain
-    from targetApp.target_types import sentinel_only_target
+    from targetApp.target_types import internal_networks, sentinel_only_target
     gate, seen = Gate(), set()
     summary = {'queued': 0, 'kept': 0, 'blocked': 0, 'hosts': 0, 'rdp': 0, 'targets': []}
     limit = limit or per_scan_cap()
     now = timezone.now()
+    # the project's exclusion list (fail closed: an unreadable address list excludes everything, a failed name read raises), archived hosts and
+    # internal networks are read once for this call, the first time a host needs them, and every host of the call is judged against the same answer
+    banned = _read_once(lambda: excluded_names(project_id, strict=True))
+    archived = _read_once(lambda: archived_names(project_id))
+    networks = _read_once(lambda: internal_networks(project_id))
     for sub in subs:
         host = host_of(sub)
         if not host or host in seen or not sub.target_domain_id:
@@ -290,12 +310,12 @@ def queue_for_subs(subs, project_id, *, by_person=False, force=False, limit=None
         domain_id = sub.target_domain_id
         if not by_person and sub.target_domain.discovery_mode == Domain.DISCOVERY_MANUAL:  # "just add them, do not scan yet": no page is opened unless a person asks
             continue
-        why = queue_refusal(project_id, host, gate, unattended=not by_person)
+        why = queue_refusal(project_id, host, gate, unattended=not by_person, banned=banned, archived=archived)
         if why in ('excluded', 'archived'):
             continue
         targets = web_targets(sub, manual=manual)
         planned = {(scheme, number) for scheme, number in targets}
-        if not why and not sentinel_only_target(host, project_id):
+        if not why and not sentinel_only_target(host, project_id, networks=networks()):
             for number, reason in rdp_outcomes(sub):
                 _record_static(project_id, domain_id, host, 'rdp', number, NLA, reason, now)
                 planned.add(('rdp', number))
@@ -308,7 +328,7 @@ def queue_for_subs(subs, project_id, *, by_person=False, force=False, limit=None
                                'Not captured: this host is behind a CDN and only a port of the edge other than 80 and 443 looks like a web port.', now)
             continue
         summary['hosts'] += 1
-        if why or sentinel_only_target(host, project_id):
+        if why or sentinel_only_target(host, project_id, networks=networks()):
             text = f'Not captured: {why}' if why else 'Blocked: the address is inside a network only a Sentinel can reach; screenshots of internal addresses are not taken yet.'
             for scheme, number in targets:
                 _record_static(project_id, domain_id, host, scheme, number, BLOCKED, text, now)
