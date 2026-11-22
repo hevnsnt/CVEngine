@@ -1812,7 +1812,9 @@ def _inventories_for(project, subs, others):
     pids = _pids_of(project, subs)
     days = {pid: host_inventory.stale_days_of(pid) for pid in pids}
     out = {}
-    for inv in HostInventory.objects.filter(project_id__in=pids, host__in=wanted).order_by('reported_at', 'id'):
+    # brief() reads the package count, never the lists: leave a report's package, patch and listening-socket JSON in the table (a host page of
+    # reporting hosts read thousands of packages each for nothing)
+    for inv in HostInventory.objects.filter(project_id__in=pids, host__in=wanted).defer('packages', 'patches', 'services').order_by('reported_at', 'id'):
         out[(inv.project_id, inv.host)] = host_inventory.brief(inv, days[inv.project_id])
     return out
 
