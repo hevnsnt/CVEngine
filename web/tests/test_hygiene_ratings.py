@@ -106,7 +106,7 @@ class VendorEndpointTests(Base):
 		# the client's own wildcard on the wrong names, or a certificate of two vendors, or one stored CNAME that is not a vendor: no vendor claim
 		own = hy.evaluate_cert(cert('bwater.support.example.com', sans=['*.prd30.example.com'], subject='*.prd30.example.com'), now=NOW)
 		self.assertEqual([f.severity for f in hr.rate(self.domain, own, cnames={}, label=False)], [hy.HIGH])
-		mixed = hy.evaluate_cert(cert('app.example.com', sans=['mailgun.org', 'x.zendesk.com']), now=NOW)
+		mixed = hy.evaluate_cert(cert('app.example.com', sans=['mailgun.org', 'x.zendesk.com'], subject='mailgun.org'), now=NOW)
 		self.assertEqual([f.severity for f in hr.rate(self.domain, mixed, cnames={}, label=False)], [hy.HIGH])
 		mailgun = hy.evaluate_cert(cert('email.mg.example.com', sans=['mailgun.org'], subject='mailgun.org'), now=NOW)
 		self.assertEqual([f.severity for f in hr.rate(self.domain, mailgun, cnames={'email.mg.example.com': ['somewhere.example.net']}, label=False)], [hy.HIGH])
