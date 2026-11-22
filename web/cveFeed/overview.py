@@ -259,12 +259,12 @@ def status_block(hosts, counts, last_scan_at, now, threat_group=None, exposed_ti
     sentences = []
     if p and l:
         headline = (f"{_hosts_have(p)} a confirmed vulnerability, and {l:,} more "
-                    f"{'has a likely one' if l == 1 else 'have likely ones'} to review.")
+                    f"{'likely has one and needs' if l == 1 else 'likely have one and need'} review.")
     elif p:
         headline = f"{_hosts_have(p)} a confirmed vulnerability."
     elif l:
-        headline = (f"{_hosts_have(l)} a likely vulnerability to review, not confirmed yet." if l == 1
-                    else f"{_hosts_have(l)} likely vulnerabilities to review, none confirmed yet.")
+        headline = (f"{l:,} host likely has a vulnerability and needs review." if l == 1
+                    else f"{l:,} hosts likely have vulnerabilities and need review.")
     elif h:
         headline = f"{_hosts_have(h)} a high-priority hygiene problem, such as an expired certificate."
     else:
