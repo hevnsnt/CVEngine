@@ -102,11 +102,31 @@ def host_link(slug, rep):
     return f"/cve/{slug}/hosts/?host={quote(rep['name'], safe='')}"
 
 
-def gone_names(project_ids, names_by_project):
-    """``{(project id, name): last seen}`` for the names (``names_by_project``: ``{project id: {name}}``, lower case, without ports) that were hosts
-    of the project (they have a host row) but are not in its current inventory and not archived: gone from the latest full scan. Only a target whose
-    latest successful full scan decides counts: a target with no successful full scan keeps every row in the inventory, and a target with a scan queued
-    or running (started in the last three days) is left alone, so a failed or unfinished scan never makes a host gone. A target's own name is never gone."""
+GONE_MISSED_SCANS = 2  # successful full scans of its target in a row that must miss a name before its findings close as gone
+GONE_AFTER_DAYS_DEFAULT = 7
+
+
+def gone_after_days():
+    """``CVENGINE_GONE_AFTER_DAYS``: how many days a name must have been missing (since a scan last saw it) before its findings close as gone."""
+    import os
+    try:
+        return max(0, int(os.environ.get('CVENGINE_GONE_AFTER_DAYS', GONE_AFTER_DAYS_DEFAULT)))
+    except (TypeError, ValueError):
+        return GONE_AFTER_DAYS_DEFAULT
+
+
+def absent_names(project_ids, names_by_project, now=None):
+    """``{(project id, name): {'last_seen', 'missed_scans', 'eligible'}}`` for the names (``names_by_project``: ``{project id: {name}}``, lower case,
+    without ports) that were hosts of the project (they have a host row) but are not in its current inventory and not archived or excluded.
+
+    ``eligible`` (the name is gone: its findings may close, ``archive_closure.close_gone``) needs all of: missed by at least ``GONE_MISSED_SCANS``
+    successful full scans of each target that held it, counted after the newest scan that did; and missing for at least ``gone_after_days()`` days, from
+    the time a scan last saw it (``HostState.last_seen``, the clock the inventory already keeps; the newest row's scan date when it has none). One lighter
+    or passive full scan that finds fewer names never closes anything: the name is only absent, inside the grace period.
+
+    Never absent at all: a name held by a target with no successful full scan (its rows all stay in the inventory) or a scan queued or running (started
+    in the last three days), and a target's own name."""
+    from collections import defaultdict
     from datetime import timedelta
 
     from django.db.models import Max
@@ -118,41 +138,57 @@ def gone_names(project_ids, names_by_project):
     from cveFeed.models import HostState
     from startScan.models import ScanHistory, Subdomain
     from targetApp.models import Domain
+    now = now or timezone.now()
     out = {}
     wanted = {pid: {normalize(n) for n in names} for pid, names in names_by_project.items() if names and pid in set(project_ids)}
     if not wanted:
         return out
     pids = sorted(wanted)
-    full = set(ScanHistory.objects.filter(domain__project_id__in=pids, scan_status=2).exclude(tasks__contains=[HOST_PIPELINE_TASK])
-               .values_list('domain_id', flat=True))
+    full_scans = defaultdict(list)  # target -> ids of its successful full scans
+    for scan_id, domain_id in (ScanHistory.objects.filter(domain__project_id__in=pids, scan_status=2).exclude(tasks__contains=[HOST_PIPELINE_TASK])
+                               .values_list('id', 'domain_id')):
+        full_scans[domain_id].append(scan_id)
     busy = set(ScanHistory.objects.filter(domain__project_id__in=pids, scan_status__in=(-1, 1),
-                                          start_scan_date__gte=timezone.now() - timedelta(days=3)).values_list('domain_id', flat=True))
+                                          start_scan_date__gte=now - timedelta(days=3)).values_list('domain_id', flat=True))
     targets = {}
     for pid, domain_id, name in Domain.objects.filter(project_id__in=pids).values_list('project_id', 'id', 'name'):
         targets.setdefault(pid, set()).add(normalize(name))
         if domain_id in busy:
-            full.discard(domain_id)
+            full_scans.pop(domain_id, None)
     current = {(pid, normalize(n)) for pid, n in current_rows(pids).values_list('target_domain__project_id', 'name')}
     rows = (Subdomain.objects.filter(target_domain__project_id__in=pids).values('target_domain__project_id', 'name', 'target_domain_id')
-            .annotate(last=Max('discovered_date')).order_by())
-    seen, unsettled = {}, set()
+            .annotate(last=Max('discovered_date'), last_scan=Max('scan_history_id'), scan_date=Max('scan_history__start_scan_date')).order_by())
+    seen, missed, unsettled = {}, {}, set()
     for row in rows:
         pid, name = row['target_domain__project_id'], normalize(row['name'])
         if name not in wanted[pid]:
             continue
-        if row['target_domain_id'] not in full:
-            unsettled.add((pid, name))  # a target whose inventory is not decided by a finished full scan holds it: not gone
+        key = (pid, name)
+        scans = full_scans.get(row['target_domain_id'])
+        if not scans:
+            unsettled.add(key)  # a target whose inventory no finished full scan decides holds it: never absent
             continue
-        if row['last'] and (seen.get((pid, name)) is None or row['last'] > seen[(pid, name)]):
-            seen[(pid, name)] = row['last']
-        seen.setdefault((pid, name), None)
+        after = sum(1 for scan_id in scans if scan_id > (row['last_scan'] or 0))  # full scans of this target since the newest one that held the name
+        missed[key] = after if key not in missed else min(missed[key], after)
+        when = max(d for d in (row['last'], row['scan_date']) if d) if (row['last'] or row['scan_date']) else None
+        if when and (seen.get(key) is None or when > seen[key]):
+            seen[key] = when
+        seen.setdefault(key, None)
     states = {(pid, host): last for pid, host, last in HostState.objects.filter(project_id__in=pids, host__in={n for _p, n in seen})
               .values_list('project_id', 'host', 'last_seen')}
     banned = {pid: (archived_names(pid), excluded_names(pid, names_only=True)) for pid in pids}
+    grace = timedelta(days=gone_after_days())
     for key, last in seen.items():
         pid, name = key
         archived, excluded = banned[pid]
         if key in current or key in unsettled or name in targets.get(pid, ()) or name in archived or name in excluded:
             continue
-        out[key] = states.get(key) or last
+        last_seen = states.get(key) or last
+        out[key] = {'last_seen': last_seen, 'missed_scans': missed[key],
+                    'eligible': missed[key] >= GONE_MISSED_SCANS and last_seen is not None and last_seen <= now - grace}
     return out
+
+
+def gone_names(project_ids, names_by_project, now=None):
+    """``{(project id, name): last seen}``: the names of ``absent_names`` that are gone (``eligible``)."""
+    return {key: info['last_seen'] for key, info in absent_names(project_ids, names_by_project, now=now).items() if info['eligible']}

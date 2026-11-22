@@ -6,8 +6,10 @@ Every open CVE match, scanner finding and hygiene finding is put in one class by
 * ``port`` (cause A): the finding names an endpoint, ``name:port`` (certificate and TLS findings), and the name is a host.
 * ``alias`` (cause B): the name is a host only through the collapse: it is folded into another name on the same addresses, or it has more than one
   current row (a scanless row beside the scanned one, the same name under two targets), so a lookup of one of its rows could miss the host.
-* ``gone`` (cause C): the name was a host of the project and is not in the current inventory (``host_resolver.gone_names``). ``--apply`` closes these
+* ``gone`` (cause C): the name was a host of the project, is not in the current inventory, and has been missing long enough
+  (``host_resolver.absent_names``: two successful full scans of its target in a row and ``CVENGINE_GONE_AFTER_DAYS``). ``--apply`` closes these
   (``archive_closure.close_gone``); they reopen when the name is back.
+* ``gone_grace``: missing from the current inventory, but not for long enough yet (one lighter scan that found fewer names, say): left open.
 * ``archived``: the host is archived and the finding is still open (archived before archiving closed findings). ``--apply`` closes these too
   (``archive_closure.backfill``).
 * ``not_a_host``: the name never was a host row of the project (a DNS record or mail domain name): reported, never closed.
@@ -20,8 +22,8 @@ from collections import defaultdict
 
 logger = logging.getLogger(__name__)
 
-CLASSES = ('ok', 'port', 'alias', 'gone', 'archived', 'not_a_host')
-UNRESOLVED = ('gone', 'archived', 'not_a_host')
+CLASSES = ('ok', 'port', 'alias', 'gone', 'gone_grace', 'archived', 'not_a_host')
+UNRESOLVED = ('gone', 'gone_grace', 'archived', 'not_a_host')
 CACHE_KEY, CACHE_SECONDS = 'cvengine:finding-hosts:audit', 1800
 
 
@@ -76,7 +78,7 @@ def audit(project_ids=None):
             pending.append((kind, pid, host, n))
         else:
             resolved_rows.append((pid, host, n, found))
-    gone = host_resolver.gone_names(pids, unresolved_names)
+    absent = host_resolver.absent_names(pids, unresolved_names)
 
     def count(pid, cls, n, host):
         per = out['projects'].setdefault(pid, dict.fromkeys(CLASSES, 0))
@@ -96,7 +98,8 @@ def audit(project_ids=None):
         count(pid, cls, n, host)
     for _kind, pid, host, n in pending:
         base = host_resolver.base_name(host)
-        cls = 'archived' if base in archived[pid] else 'gone' if (pid, base) in gone else 'not_a_host'
+        info = absent.get((pid, base))
+        cls = 'archived' if base in archived[pid] else 'not_a_host' if info is None else 'gone' if info['eligible'] else 'gone_grace'
         count(pid, cls, n, host)
     out['unresolved'] = sum(out['totals'][c] for c in UNRESOLVED)
     out['samples'] = dict(out['samples'])

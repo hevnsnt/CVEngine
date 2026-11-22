@@ -2,7 +2,8 @@
 (cveFeed.finding_hosts).
 
 Classes: ok; port (A: a certificate or TLS finding names name:port); alias (B: the name is a host only through the collapse, an alias or a name
-with several current rows); gone (C: no longer in the current inventory); archived; not_a_host (a DNS or mail name that never was a host row).
+with several current rows); gone (C: no longer in the current inventory, missed by two full scans of its target in a row and for CVENGINE_GONE_AFTER_DAYS days); gone_grace
+(missing, not for long enough yet: left open); archived; not_a_host (a DNS or mail name that never was a host row).
 Every page reads ok, port and alias through cveFeed.host_resolver, so only gone and archived change with --apply: they are closed as fixed with a
 note that says why, and reopen when the host is back. A dry run by default.
 
@@ -35,8 +36,12 @@ class Command(BaseCommand):
                 self.stdout.write(f"{slugs.get(pid, pid)}: " + ', '.join(f'{c} {per[c]}' for c in finding_hosts.CLASSES))
         totals = result['totals']
         summary = ', '.join(f'{c} {totals[c]}' for c in finding_hosts.CLASSES)
+        from cveFeed.host_resolver import GONE_MISSED_SCANS, gone_after_days
+        grace = (f"gone: {totals['gone']} eligible now, {totals['gone_grace']} missing but inside the grace period "
+                 f"({GONE_MISSED_SCANS} full scans and {gone_after_days()} days)")
         if not apply:
-            self.stdout.write(f"Dry run: open findings by host: {summary}. --apply would close {totals['gone']} (gone) and {totals['archived']} (archived).")
+            self.stdout.write(f"Dry run: open findings by host: {summary}; {grace}. --apply would close {totals['gone']} (gone) and "
+                              f"{totals['archived']} (archived).")
             return
         done = finding_hosts.fix(ids)
         gone, archived = done['gone'], done['archived']

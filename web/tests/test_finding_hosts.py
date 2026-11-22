@@ -1,12 +1,13 @@
 """Findings that outlive their host, or name it differently from the Hosts page (cveFeed.host_resolver, cveFeed.finding_hosts, archive_closure.close_gone).
 
-The scene, project ``fh`` with the target ``zebra.test`` and two finished full scans (the newer one is the current inventory):
+The scene, project ``fh`` with the target ``zebra.test`` and three finished full scans, 30, 10 and 1 day ago (the newest is the current inventory):
 
 * ``confluence.zebra.test`` is a current host; its certificate finding names the endpoint ``confluence.zebra.test:443`` (cause A).
 * ``confluence-alt.zebra.test`` answers on confluence's address (an alias, folded into confluence on the Hosts page).
 * ``outbound.zebra.test`` is current twice: its scanned row and a scanless row with no address beside it (cause B: a lookup of one row of the name
   found a host key the collapse never chose).
-* ``ftpr.zebra.test`` was only in the older full scan; its old address still has FTP open (cause C: gone).
+* ``ftpr.zebra.test`` was only in the oldest full scan, last seen 30 days ago and missed by the two since; its old address still has FTP open
+  (cause C: gone).
 * ``mail-only.zebra.test`` never was a host row: a DMARC finding names it (not a host; never closed).
 """
 from datetime import timedelta
@@ -52,7 +53,8 @@ class Base(TestCase):
         self.other = Project.objects.create(name='FH2', slug='fh2', insert_date=now, org=self.org)
         self.engine = EngineType.objects.create(engine_name='fh', yaml_configuration='x', default_engine=True)
         self.domain = Domain.objects.create(name='zebra.test', project=self.project, insert_date=now)
-        self.old_scan = self.scan(now - timedelta(days=20))
+        self.old_scan = self.scan(now - timedelta(days=30))
+        self.mid_scan = self.scan(now - timedelta(days=10))
         self.new_scan = self.scan(now - timedelta(days=1))
         self.cve = CVEEntry.objects.create(cve_id='CVE-2099-8101', cvss=9.8)
         self.root = self.sub('zebra.test', '203.0.113.1')
@@ -73,7 +75,7 @@ class Base(TestCase):
                                                        scan_history=self.new_scan, http_url='https://confluence-alt.zebra.test/admin', open_status=True)
         self.ftpr_vuln = Vulnerability.objects.create(name='Anonymous FTP', severity=3, subdomain=self.ftpr_old, target_domain=self.domain,
                                                       scan_history=self.old_scan, http_url='ftp://ftpr.zebra.test/', open_status=True)
-        HostState.objects.create(project=self.project, domain=self.domain, host='ftpr.zebra.test', last_seen=now - timedelta(days=20))
+        self.ftpr_state = HostState.objects.create(project=self.project, domain=self.domain, host='ftpr.zebra.test', last_seen=now - timedelta(days=30))
         patcher = mock.patch('cveFeed.scoring.rescore_quietly')
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -156,6 +158,25 @@ class GoneClosureTests(Base):
         self.assertEqual(self.ftp.remediation_status, 'open')
         self.assertTrue(self.ftp.remediation_note.startswith(archive_closure.RETURNED))
 
+    def test_one_missed_full_scan_keeps_them_open(self):
+        self.sub('ftpr.zebra.test', '192.0.2.33', scan=self.mid_scan)  # the scan 10 days ago still saw it: only the newest one missed it
+        HostState.objects.filter(pk=self.ftpr_state.pk).update(last_seen=self.mid_scan.start_scan_date)
+        self.assertEqual(archive_closure.close_gone([self.project.pk])['hosts'], 0)
+        self.ftp.refresh_from_db()
+        self.assertEqual(self.ftp.remediation_status, 'open')
+        info = host_resolver.absent_names([self.project.pk], {self.project.pk: {'ftpr.zebra.test'}})[(self.project.pk, 'ftpr.zebra.test')]
+        self.assertEqual((info['missed_scans'], info['eligible']), (1, False))
+        per = finding_hosts.audit([self.project.pk])['projects'][self.project.pk]
+        self.assertEqual((per['gone'], per['gone_grace']), (0, 2))
+
+    def test_missing_for_less_than_the_grace_period_keeps_them_open(self):
+        HostState.objects.filter(pk=self.ftpr_state.pk).update(last_seen=timezone.now() - timedelta(days=3))  # two scans missed it, but only 3 days
+        self.assertEqual(archive_closure.close_gone([self.project.pk])['hosts'], 0)
+        self.ftp.refresh_from_db()
+        self.assertEqual(self.ftp.remediation_status, 'open')
+        with mock.patch.dict('os.environ', {'CVENGINE_GONE_AFTER_DAYS': '2'}):
+            self.assertEqual(archive_closure.close_gone([self.project.pk])['hosts'], 1)  # the grace period is set by CVENGINE_GONE_AFTER_DAYS
+
     def test_a_person_s_closure_is_never_touched(self):
         HygieneFinding.objects.filter(pk=self.ftp.pk).update(remediation_status='accepted_risk', remediation_by=User.objects.create_user('p'))
         archive_closure.close_gone([self.project.pk])
@@ -211,7 +232,7 @@ class AuditTests(Base):
         out = StringIO()
         call_command('audit_finding_hosts', stdout=out)
         self.assertIn('Dry run', out.getvalue())
-        self.assertIn('gone 2', out.getvalue())
+        self.assertIn('gone: 2 eligible now, 0 missing but inside the grace period (2 full scans and 7 days)', out.getvalue())
         call_command('audit_finding_hosts', '--apply', stdout=out)
         after = finding_hosts.audit([self.project.pk])
         self.assertEqual((after['totals']['gone'], after['totals']['archived']), (0, 0))

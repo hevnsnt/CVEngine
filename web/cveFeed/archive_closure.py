@@ -334,8 +334,9 @@ def _names_with_live_findings(project_ids):
 
 
 def gone_hosts(project_ids=None):
-    """``{(project id, name): last seen}``: the names with an open finding that were hosts of their project and are no longer in its current
-    inventory (``host_resolver.gone_names``: never because a scan failed or is still running), at most ``MAX_GONE``."""
+    """``{(project id, name): last seen}``: the names with an open finding that were hosts of their project and are gone from its current inventory
+    (``host_resolver.gone_names``: missed by two successful full scans of their target in a row and for ``CVENGINE_GONE_AFTER_DAYS`` days; never because
+    a scan failed, is still running or found fewer names once), at most ``MAX_GONE``."""
     from cveFeed import host_resolver
     from dashboard.models import Project
     pids = list(Project.objects.values_list('id', flat=True)) if project_ids is None else list(project_ids)
