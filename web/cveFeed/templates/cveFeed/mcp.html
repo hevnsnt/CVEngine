@@ -1,0 +1,96 @@
+{% extends 'cveFeed/base.html' %}
+{% load assets %}
+{% block title %}CVEngine · MCP{% endblock %}
+{% block content %}
+<div class="about mcp">
+  <div class="page-head">
+    <div>
+      <h1>MCP</h1>
+      <p class="sub">Connect an AI agent to cvENGINE, see what to ask it, and see every tool call agents made as you.</p>
+    </div>
+  </div>
+
+  <nav class="mcp-jump" aria-label="On this page"><a href="#connect">Connect</a><a href="#examples">Examples</a><a href="#history">History <span class="count">{{ total }}</span></a></nav>
+
+  <section class="about-sec" id="connect" aria-labelledby="connect-h">
+    <h2 id="connect-h">Connect your agent</h2>
+    <ol class="mcp-steps">
+      <li><b>Make an API key</b> on the <a href="{% url 'cve_agents' %}">API keys</a> page. It acts as you, with your projects and roles. Choose <b>Read only</b> for an agent that only needs to read.</li>
+      <li><b>Add this server to your agent</b> with one of the setups below. Replace <code>&lt;your API key&gt;</code> with the key.</li>
+      <li><b>Ask it something</b>, such as "list my projects". Its calls appear under <a href="#history">History</a>.</li>
+    </ol>
+    <div class="card mcp-endpoint">
+      <span class="note">MCP server address (streamable HTTP, JSON-RPC)</span>
+      <div class="mcp-endpoint-row"><code id="mcp-url">{{ mcp_url }}</code><button type="button" class="btn ghost sm" data-copy-from="mcp-url">Copy</button></div>
+    </div>
+    {% for c in mcp_clients %}
+    <details class="about-group mcp-client" id="client-{{ c.id }}"{% if forloop.first %} open{% endif %}>
+      <summary><span class="about-group-title">{{ c.name }}</span> <span class="note">{{ c.where }}</span></summary>
+      <div class="mcp-code"><pre id="code-{{ c.id }}"><code>{{ c.code }}</code></pre><button type="button" class="btn ghost sm" data-copy-from="code-{{ c.id }}">Copy</button></div>
+      <p class="note">{{ c.note }}</p>
+    </details>
+    {% endfor %}
+    <p class="note about-intro">Everything a tool returns goes into your agent's conversation, and so to the agent's own AI provider. <a href="{% url 'cve_ai' %}#mcp">What an agent can read</a>.</p>
+  </section>
+
+  <section class="about-sec" id="examples" aria-labelledby="examples-h">
+    <h2 id="examples-h">What to ask</h2>
+    <p class="note about-intro">Talk to your agent in plain words. It picks the tools; these are the ones it will reach for.</p>
+    <div class="mcp-examples">
+      {% for e in mcp_examples %}
+      <article class="card mcp-example">
+        <p class="mcp-ask">"{{ e.ask }}"</p>
+        <p class="note">{{ e.what }}</p>
+        <p class="mcp-tools">{% for t in e.tools %}<code>{{ t }}</code>{% endfor %}{% if e.writes %}<span class="chip mcp-write" title="Needs a key with write access">Write</span>{% endif %}</p>
+      </article>
+      {% endfor %}
+    </div>
+    <p class="about-text">{{ mcp_fix_loop }} Every tool and its arguments are in the <a href="https://github.com/hevnsnt/CVEngine/blob/HEAD/docs/AGENT-API.md" rel="noopener" target="_blank">agent API guide</a>.</p>
+  </section>
+
+  <section class="about-sec" id="history" aria-labelledby="history-h">
+    <h2 id="history-h">History <span class="count">{{ total }}</span></h2>
+    <p class="note about-intro">Every MCP tool call made {% if is_app_admin %}by anyone (you are an App Admin){% else %}as you, with your keys or your browser{% endif %}: when, which key and agent, the tool, its arguments (secrets masked) and how it ended. Results are never kept. Heartbeats and polls that found no work are left out. Calls are kept 90 days.</p>
+    <form class="mcp-filter" method="get" action="#history">
+      <label>Tool <select name="tool"><option value="">Any</option>{% for t in tools_seen %}<option value="{{ t }}"{% if t == filters.tool %} selected{% endif %}>{{ t }}</option>{% endfor %}</select></label>
+      <label>Key <select name="key"><option value="">Any</option>{% for k in keys_seen %}<option value="{{ k }}"{% if k == filters.key %} selected{% endif %}>{{ k }}</option>{% endfor %}</select></label>
+      {% if is_app_admin %}<label>User <select name="user"><option value="">Anyone</option>{% for u in users_seen %}<option value="{{ u }}"{% if u == filters.user %} selected{% endif %}>{{ u }}</option>{% endfor %}</select></label>{% endif %}
+      <label>Outcome <select name="outcome"><option value="">Any</option><option value="ok"{% if filters.outcome == 'ok' %} selected{% endif %}>Worked</option><option value="failed"{% if filters.outcome == 'failed' %} selected{% endif %}>Failed</option></select></label>
+      <label class="mcp-check"><input type="checkbox" name="writes" value="1"{% if filters.writes %} checked{% endif %}> Changes only</label>
+      <button type="submit" class="btn sm">Show</button>{% if filtered %} <a class="btn ghost sm" href="{% url 'cve_mcp' %}#history">Clear</a>{% endif %}
+    </form>
+    {% if calls.object_list %}
+    <div class="about-table-wrap">
+      <table class="about-table mcp-table">
+        <colgroup><col class="c-when"><col class="c-who"><col class="c-tool"><col class="c-args"><col class="c-result"></colgroup>
+        <thead><tr><th scope="col">When</th><th scope="col">Who</th><th scope="col">Tool</th><th scope="col">Arguments</th><th scope="col">Result</th></tr></thead>
+        <tbody>
+          {% for c in calls %}
+          <tr>
+            <td data-label="When" class="num"><time datetime="{{ c.at|date:'c' }}" title="{{ c.at|date:'Y-m-d H:i:s' }} UTC">{{ c.at|date:'M j, H:i' }}</time></td>
+            <td data-label="Who">{% if is_app_admin %}<b>{{ c.username|default:'deleted user' }}</b><span class="about-detail">{% endif %}{% if c.token_name %}key {{ c.token_name }}{% else %}browser session{% endif %}{% if c.agent_name %} · agent {{ c.agent_name }}{% endif %}{% if is_app_admin %}</span>{% endif %}</td>
+            <td data-label="Tool"><code>{{ c.tool }}</code>{% if c.writes %} <span class="chip mcp-write">Write</span>{% endif %}{% if c.project %}<span class="about-detail">{{ c.project }}</span>{% endif %}</td>
+            <td data-label="Arguments">{% if c.arguments %}<details class="mcp-args"><summary>{{ c.arguments|length }} argument{{ c.arguments|length|pluralize }}</summary><pre>{% for k, v in c.arguments.items %}{{ k }}: {{ v }}
+{% endfor %}</pre></details>{% else %}<span class="note">none</span>{% endif %}</td>
+            <td data-label="Result">{% if c.ok %}<span class="mcp-ok">Worked</span>{% else %}<span class="mcp-fail">Failed</span><span class="about-detail">{{ c.error }}</span>{% endif %}<span class="about-detail">{{ c.duration_ms }} ms</span></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% if calls.has_other_pages %}
+    <nav class="mcp-pages" aria-label="History pages">
+      {% if calls.has_previous %}<a class="btn ghost sm" href="?{% if query %}{{ query }}&amp;{% endif %}page={{ calls.previous_page_number }}#history">Newer</a>{% endif %}
+      <span class="note">Page {{ calls.number }} of {{ calls.paginator.num_pages }}</span>
+      {% if calls.has_next %}<a class="btn ghost sm" href="?{% if query %}{{ query }}&amp;{% endif %}page={{ calls.next_page_number }}#history">Older</a>{% endif %}
+    </nav>
+    {% endif %}
+    {% elif filtered %}
+    <p class="note">No call matches these filters.</p>
+    {% else %}
+    <p class="note">No MCP calls yet. Once an agent is connected, each tool call it makes shows here.</p>
+    {% endif %}
+  </section>
+</div>
+{% endblock %}
+{% block scripts %}<script type="module" src="{% asset 'cve/mcp-page.js' %}"></script>{% endblock %}

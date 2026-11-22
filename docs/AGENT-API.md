@@ -16,6 +16,8 @@ Connect Claude Code:
 ```bash
 claude mcp add --transport http cvengine https://<your-host>/mcp/ --header "Authorization: Bearer <token>"
 ```
+The **MCP** page in the left rail (`/cve/mcp/`) shows this server's address with a copyable setup for Claude Code, Claude Desktop, Cursor, VS Code and curl, what to ask an agent, and the **History** of every MCP tool call made as you (an App Admin sees everyone's): when, the key and the agent holding it, the tool, its arguments with secrets masked, whether it worked and how long it took. The result is never kept. Heartbeats and polls that found no work are left out, and calls are kept `CVENGINE_MCP_LOG_RETENTION_DAYS` days (90; `agentapi/mcp_log.py`).
+
 
 ## Endpoints and tools
 

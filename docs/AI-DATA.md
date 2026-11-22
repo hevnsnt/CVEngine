@@ -88,7 +88,7 @@ An agent reads with an API key that acts as its owner across every project they 
 **Write keys and agent rules**
 - A write key can change and delete in one call, with no confirmation.
 - Agents cannot turn features on, raise limits, store keys or enable secret validation ([AGENT-API.md](AGENT-API.md)).
-- Changes are audited with the key's name. Reads are not.
+- Every tool call, reads included, is in the History on the **MCP** page (`/cve/mcp/`, kept 90 days, never the result). Changes are also audited with the key's name.
 - Every result carries an untrusted-text notice.
 - Use read-only keys for agents that only read.
 

@@ -1265,6 +1265,32 @@ class TriageCall(models.Model):
                                                condition=models.Q(status="running"), name="one_running_triage_signature")]
 
 
+class McpCall(models.Model):
+    """One MCP tool call (``agentapi.mcp_log``): who called which tool through which API key, with what arguments (secret-masked and clipped),
+    whether it worked and how long it took. Never the result. Read by the MCP page's History (/cve/mcp/#history); kept
+    ``CVENGINE_MCP_LOG_RETENTION_DAYS`` (90) days (``cveFeed.maintenance``)."""
+
+    at = models.DateTimeField(default=timezone.now, db_index=True)
+    user = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    username = models.CharField(max_length=150, blank=True, default="")  # kept when the user is deleted
+    token = models.ForeignKey("dashboard.ApiToken", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    token_name = models.CharField(max_length=100, blank=True, default="")  # '' for a signed-in browser session
+    agent_name = models.CharField(max_length=100, blank=True, default="")  # the registered agent that holds the key, if any
+    tool = models.CharField(max_length=64, db_index=True)
+    writes = models.BooleanField(default=False)
+    project = models.CharField(max_length=100, blank=True, default="")  # the project the call named (its slug argument), if any
+    arguments = models.JSONField(default=dict, blank=True)
+    ok = models.BooleanField(default=True)
+    error = models.CharField(max_length=300, blank=True, default="")
+    duration_ms = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        indexes = [models.Index(fields=["user", "-at"], name="mcpcall_user_at")]
+
+    def __str__(self):
+        return f"{self.username} {self.tool} {self.at:%Y-%m-%d %H:%M}"
+
+
 class AIUsage(models.Model):
     """One provider completion attempt; no prompt, response, URL, or credential content."""
 

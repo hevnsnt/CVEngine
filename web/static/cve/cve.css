@@ -988,6 +988,37 @@ pre.mono{margin:0 0 var(--s-2);padding:var(--s-2) var(--s-3);background:var(--in
 .ai-data .about-text+.about-text{margin-top:8px}
 @media (max-width:560px){.ai-facts{grid-template-columns:minmax(0,1fr)}.ai-facts dt{padding-bottom:0}.ai-facts dd{border-top:0;padding-top:2px}}
 .api-keys-ai{margin:0}
+/* MCP (/cve/mcp/, cveFeed/mcp_page.py): connect an agent, what to ask, and the History of tool calls */
+.mcp-jump{display:flex;gap:16px;flex-wrap:wrap;margin:4px 0 0;font-size:var(--fs-3)}
+.mcp-jump .count{font:var(--fw-medium) var(--fs-1) var(--mono);color:var(--muted);margin-left:2px}
+.mcp-steps{margin:0 0 16px;padding-left:20px;font-size:var(--fs-3);max-width:72ch;color:var(--ink-2)}
+.mcp-steps li{margin:4px 0}
+.mcp-endpoint{padding:12px 16px;margin-bottom:16px;display:grid;gap:4px;max-width:880px}
+.mcp-endpoint-row{display:flex;gap:12px;align-items:center;flex-wrap:wrap;min-width:0}
+.mcp-endpoint-row code{font:var(--fw-medium) var(--fs-2) var(--mono);overflow-wrap:anywhere;min-width:0}
+.mcp-client>summary{flex-wrap:wrap;row-gap:2px}
+.mcp-client>summary .note{font-weight:var(--fw-regular);margin-left:8px}
+.mcp-code{position:relative;max-width:880px;margin-bottom:8px}
+.mcp-code pre{margin:0;padding:12px 16px;padding-right:76px;background:var(--sunk);border-radius:var(--r);overflow-x:auto;font:var(--fw-medium) var(--fs-2)/1.5 var(--mono)}
+.mcp-code .btn{position:absolute;top:8px;right:8px}
+.mcp-client>.note{margin:0 0 12px;max-width:72ch}
+.mcp-examples{display:grid;gap:12px;grid-template-columns:repeat(auto-fill,minmax(min(100%,300px),1fr));margin-bottom:16px}
+.mcp-example{padding:12px 16px;display:grid;gap:8px;align-content:start;min-width:0}
+.mcp-example p{margin:0}
+.mcp-ask{font-weight:var(--fw-semi);font-size:var(--fs-3)}
+.mcp-tools{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.mcp-tools code{font:var(--fw-medium) var(--fs-1) var(--mono);background:var(--sunk);padding:2px 8px;border-radius:var(--r-s)}
+.mcp-write{background:var(--smoke-bg);color:var(--smoke-ink)}
+.mcp-filter{display:flex;gap:8px 16px;flex-wrap:wrap;align-items:end;margin:0 0 12px;font-size:var(--fs-2)}
+.mcp-filter label{display:grid;gap:4px;color:var(--ink-2)}
+.mcp-filter select{min-height:36px;padding:0 8px;border:1px solid var(--line-2);border-radius:var(--r);background:var(--surface);color:var(--ink);font:inherit;max-width:220px}
+.mcp-filter .mcp-check{display:flex;align-items:center;gap:8px;min-height:36px}
+.mcp-table .c-when{width:13%}.mcp-table .c-who{width:20%}.mcp-table .c-tool{width:22%}.mcp-table .c-args{width:27%}.mcp-table .c-result{width:18%}
+.mcp-args summary{cursor:pointer;color:var(--ink-2)}
+.mcp-args pre{margin:4px 0 0;white-space:pre-wrap;overflow-wrap:anywhere;font:var(--fw-medium) var(--fs-1)/1.45 var(--mono);color:var(--ink-2)}
+.mcp-ok{color:var(--ok-ink)}.mcp-fail{color:var(--fire-ink);font-weight:var(--fw-semi)}
+.mcp-pages{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+@media (max-width:720px){.mcp-table thead{display:none}.mcp-table,.mcp-table tbody,.mcp-table tr,.mcp-table td{display:block;width:100%}.mcp-table colgroup{display:none}.mcp-table tr{border-top:1px solid var(--line);padding:8px 0}.mcp-table td{border-top:0;padding:2px 0}.mcp-table td::before{content:attr(data-label);display:block;font-size:var(--fs-1);color:var(--muted)}}
 .about-rengine{padding-top:24px;border-top:1px solid var(--line)}
 .two-step h3,.recovery h3,.card>h3{margin-bottom:var(--s-1)}
 .two-step .note{margin-bottom:var(--s-3)}
