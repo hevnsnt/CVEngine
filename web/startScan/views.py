@@ -207,7 +207,7 @@ def create_report(request, id):
     data['secondary_color'] = secondary_color
 
     data['subdomain_http_status_chart'] = generate_subdomain_chart_by_http_status(subdomains)
-    data['vulns_severity_chart'] = generate_vulnerability_chart_by_severity(vulns) if vulns else ''
+    data['vulns_severity_chart'] = generate_vulnerability_chart_by_severity(vulns) if vuln_total else ''  # the count above: `if vulns` would load every finding (with its request and response text) to test emptiness
 
     if report_template == 'modern':
         template = get_template('report/modern.html')
