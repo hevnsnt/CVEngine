@@ -866,7 +866,11 @@ def _without_waiting(message):
     return message
 
 
-HEAVY_TOOLS = frozenset(('search_hosts', 'list_hosts', 'list_situations', 'technology_coverage'))  # a query over a whole project's hosts: one per batch
+# A query over a whole project's hosts, findings or matches, a status probe or an export: one per batch. Each runs a statement the web service allows 30 s,
+# so twenty in one request were twenty of them back to back on one web thread (database review, MCP batch guard).
+HEAVY_TOOLS = frozenset(('search_hosts', 'list_hosts', 'list_situations', 'technology_coverage',
+                         'list_findings', 'list_cve_matches', 'list_vulnerabilities', 'list_hygiene_findings', 'list_scan_vulnerabilities',
+                         'list_triage', 'list_activity', 'get_system_status', 'export_hosts', 'get_saved_search_matches'))
 
 
 def _heavy_call(message):
@@ -949,7 +953,7 @@ def endpoint(request):
                 if heavy > 1:  # one search or listing per batch: twenty of them in one request were twenty queries run back to back (review 2 F2)
                     if isinstance(message, dict) and 'id' in message:
                         responses.append(_bounded_result(_rpc_error(message.get('id') if isinstance(message.get('id'), (str, int, float)) else None, -32600,
-                                                                    'a batch may hold one search_hosts or list_hosts call: send the others in a later request'), item_limit))
+                                                                    'a batch may hold one search_hosts or list_hosts call (or one other large listing, export or status call): send the others in a later request'), item_limit))
                     continue
             response = _internal_error(ctx, _without_waiting(message))
             if response is not None:

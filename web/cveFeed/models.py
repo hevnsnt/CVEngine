@@ -1309,7 +1309,9 @@ class AIUsage(models.Model):
     started_at = models.DateTimeField(default=timezone.now)
 
     class Meta:
-        indexes = [models.Index(fields=['started_at', 'provider', 'model'], name='aiusage_time_model_idx')]
+        indexes = [models.Index(fields=['started_at', 'provider', 'model'], name='aiusage_time_model_idx'),
+                   # the AI and your data page groups the last 30 days by stage: with stage in the index that is an index-only scan
+                   models.Index(fields=['started_at', 'stage'], name='aiusage_time_stage_idx')]
 
 
 class AIJob(models.Model):
