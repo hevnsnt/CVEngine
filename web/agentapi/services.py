@@ -1659,7 +1659,7 @@ def _host(sub, others=(), labels=(), profile=None, excluded=False, root=None, sh
         score_detail = [line for line in score_detail if not str(line.get('label', '')).startswith(('Reachable on a public IP', 'Public IP observed'))]
     display_score = min(100, sum(int(line.get('points') or 0) for line in score_detail)) if score_detail else 0
     links = {}  # where each technology came from: the other rows' first, so this row's own link speaks last
-    other_links = _technology_links([o.pk for o in others]) if others else {}
+    other_links = (shared['other_links'] if shared and 'other_links' in shared else _technology_links([o.pk for o in others])) if others else {}
     for other in others:
         links.update(other_links.get(other.pk) or {})
     links.update((shared['links'] if shared and 'links' in shared else _technology_links([sub.pk])).get(sub.pk) or {})
@@ -2264,6 +2264,7 @@ def _hosts_page(project, qs, params, extra=None, coverage=True, load=None, page_
     shared['tags'] = tags
     shared['host_names'] = _host_names_for(subs)  # the names each IP host answers to, for the page at once
     shared['hot'] = _hot_names_for(subs, *others.values())  # the hot CVE ids among the page's findings, one query
+    shared['other_links'] = _technology_links({o.pk for rows in others.values() for o in rows})  # the copies' technology links, one query
     shared['inventories'] = _inventories_for(project, subs, others)
     if coverage:  # which of the checks that apply to each host have run: a few queries for the whole page (cveFeed.check_coverage)
         shared['coverage'] = _coverage_for(subs, others, project)
