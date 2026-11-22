@@ -7,7 +7,8 @@ Two sources, both already stored (nothing is fetched or scanned here, and no AI 
 2. **CVEs** that CISA added to its KEV catalog (or VulnCheck's) in the period, and CVEs published in the period with a CVSS of 9.0 or more and a public exploit or a
    high exploitation probability, that no briefing already covers. Their text is the stored summary, else the title and the start of the description.
 
-Impact is two honest numbers, counted in distinct machines (``counts.with_host_key``: two names on the same addresses are one host):
+Impact is two honest numbers, counted in distinct machines exactly as the Hosts page folds them (``counts.machines``: two names on the same addresses are one
+host, and every copy of a name is the machine its chosen row is), so a card's number, the names its link lists and the Hosts page it opens agree:
 
 - *N hosts match by version*: open CVE matches in the scope (not closed, not ruled out by the AI, not a false positive; ``confirmed`` of them reproduced by a check);
 - *M more run <product>, version unknown*: hosts with a technology or open-port product the correlation machinery connects to the CVE (``tech_coverage.connect``) and
@@ -111,21 +112,23 @@ def _product(cve):
 
 # --- how many of your hosts ------------------------------------------------------------------------------------------------------
 
-def _sightings(ids):
-    """``[(host key, normalised sighting)]``: every technology and open-port product of the scope's current hosts, each with the machine it was seen on."""
+def _sightings(ids, machines=None):
+    """``[(host key, normalised sighting)]``: every technology and open-port product of the scope's current hosts, each with the machine it was seen on
+    (``machines``: ``counts.machines(ids)`` when the caller has it)."""
     from startScan.models import OPEN_PORT_STATES, Port, Subdomain
+    machines = counts.machines(ids) if machines is None else machines
     current = (Subdomain._base_manager.filter(correlation.latest_scan_q()).filter(target_domain__project_id__in=list(ids))
                .filter(~counts.archived_host_q()).values('pk'))  # an archived host runs nothing anyone counts on
-    keys = dict(counts.with_host_key(Subdomain._base_manager.filter(pk__in=current)).values_list('pk', 'host_key'))
     seen, out = {}, []
 
     def add(sub_id, name, version, source, cpe):
-        if sub_id not in keys or not name:
+        host = machines.of_row(sub_id)
+        if host is None or not name:
             return
         key = (name, version, source, cpe)
         if key not in seen:
             seen[key] = tech_coverage.normalise_sighting(name, version, source=source, cpe=cpe)
-        out.append((keys[sub_id], seen[key]))
+        out.append((host, seen[key]))
     for sub_id, name, cpe in Subdomain.technologies.through.objects.filter(subdomain_id__in=current).values_list('subdomain_id', 'technology__name', 'cpe'):
         add(sub_id, name, '', 'tech', cpe or '')
     ports = Port.objects.filter(ports__ip_addresses__in=current, state__in=OPEN_PORT_STATES).exclude(product='').exclude(product__isnull=True)
@@ -134,10 +137,11 @@ def _sightings(ids):
     return out
 
 
-def impact(ids, cves, sightings=None):
-    """``{CVE id (the CVEEntry pk): {'matched': {host key}, 'confirmed': {host key}, 'product_only': {host key}}}`` for the scope's project ids (see the module text)."""
+def impact(ids, cves, sightings=None, machines=None):
+    """``{CVE id (the CVEEntry pk): {'matched': {host key}, 'confirmed': {host key}, 'product_only': {host key}}}`` for the scope's project ids (see the module text).
+    A host key is a machine of ``counts.machines`` (``machines`` when the caller has it): the matches on two names of one machine, or on two copies of one name, are
+    one host."""
     from cveFeed.models import CVEMatch
-    from startScan.models import Subdomain
     cves = list(cves)
     out = {c.id: {'matched': set(), 'confirmed': set(), 'product_only': set()} for c in cves}
     if not cves or not ids:
@@ -146,9 +150,10 @@ def impact(ids, cves, sightings=None):
                 .exclude(ai_verdict='not_affected').exclude(remediation_status__in=closure.CLOSED).exclude(triage__classification__in=FALSE_POSITIVES)
                 .exclude(Q(evidence__has_key='reported_by') & Q(evidence__reported_by=SHODAN_PROVIDER))  # a Shodan InternetDB reading is a lead, never a host that matches (cveFeed.source_versions)
                 .values_list('cve_entry_id', 'subdomain_id', 'template_result', 'triage__validation_status'))
-    keys = dict(counts.with_host_key(Subdomain._base_manager.filter(pk__in={r[1] for r in rows})).values_list('pk', 'host_key')) if rows else {}
+    if machines is None and (rows or sightings is None):
+        machines = counts.machines(ids)
     for cve_id, sub_id, result, validation in rows:
-        key = keys.get(sub_id)
+        key = machines.of_row(sub_id)
         if key is None:
             continue
         out[cve_id]['matched'].add(key)
@@ -157,7 +162,7 @@ def impact(ids, cves, sightings=None):
     index = correlation.build_product_index(cves)
     by_id = {c.id: c for c in cves}
     connected, unknown, versioned = {}, defaultdict(set), defaultdict(set)
-    for host, s in (_sightings(ids) if sightings is None else sightings):
+    for host, s in (_sightings(ids, machines) if sightings is None else sightings):
         token = (s['name'], s['cpe'])
         if token not in connected:
             connected[token] = tech_coverage.connect(s['name'], s['cpe'], index, by_id)['cves']
@@ -168,34 +173,27 @@ def impact(ids, cves, sightings=None):
     return out
 
 
-def host_labels(ids, keys, raw=False):
-    """``{host key: {'host', 'project'}}`` for the host keys that belong to the scope's projects ``ids``: the name of the machine (the shortest name when several names
-    share its addresses) and its project's name. A key of another project is never labelled, whatever it says. One query for the keys that name a set of addresses
-    and one for the project names; a key that names a host by its own name (see ``counts.with_host_key``) needs neither for the name. ``raw`` adds ``name``: the
-    name as stored, not clipped for display, for a link that must name the host exactly (the Overview's, ``cveFeed.overview.host_links``)."""
+def host_labels(ids, keys, raw=False, machines=None):
+    """``{host key: {'host', 'project'}}`` for the host keys (machines of ``counts.machines``) that belong to the scope's projects ``ids``: the name the Hosts page
+    shows for the machine (the target's own name, else the shortest of the names on its addresses) and its project's name. A key of another project is never
+    labelled, whatever it says. ``raw`` adds ``name``: the name as stored, not clipped for display, for a link that must name the host exactly (the Overview's,
+    ``cveFeed.overview.host_links``): one name per machine, the one the Hosts page lists it under, so the link opens as many hosts as the card counts."""
     from dashboard.models import Project
-    from startScan.models import Subdomain
     allowed = {int(i) for i in ids}
-    wanted, by_address = {}, set()
+    wanted = {}
     for key in keys:
-        project, _, rest = str(key).partition(':')
-        if not project.isdigit() or int(project) not in allowed:
-            continue
-        wanted[key] = int(project)
-        if not rest.startswith('n:'):
-            by_address.add(key)
-    names = {k: str(k).split(':', 2)[2] for k in wanted if k not in by_address}
-    if by_address:
-        current = Subdomain._base_manager.filter(correlation.latest_scan_q()).filter(target_domain__project_id__in=sorted({wanted[k] for k in by_address})).values('pk')
-        found = defaultdict(set)
-        for key, name in counts.with_host_key(Subdomain._base_manager.filter(pk__in=current)).filter(host_key__in=sorted(by_address)).values_list('host_key', 'name'):
-            found[key].add(name)
-        names.update({k: min(v, key=lambda n: (len(n), n)) for k, v in found.items()})
+        project, _, _rest = str(key).partition(':')
+        if project.isdigit() and int(project) in allowed:
+            wanted[key] = int(project)
+    names = {}
+    if wanted:
+        machines = counts.machines(sorted(set(wanted.values()))) if machines is None else machines
+        names = {k: machines.name(k) for k in wanted if machines.name(k)}
     projects = dict(Project._base_manager.filter(id__in=set(wanted.values())).values_list('id', 'name'))
     return {k: {'host': clean(names[k], 120), 'project': clean(projects.get(wanted[k], ''), 80), **({'name': names[k]} if raw else {})} for k in wanted if k in names}
 
 
-def _entry_hosts(ids, entries):
+def _entry_hosts(ids, entries, machines=None):
     """Give each entry ``hosts`` (at most HOSTS_KEPT of the hosts it was found on, proven ones first, as ``{host, project, confirmed}``) and ``host_total`` (how many)."""
     picked = {}
     for e in entries:
@@ -203,7 +201,7 @@ def _entry_hosts(ids, entries):
         found = hosts['matched'] | hosts['confirmed']
         picked[id(e)] = (sorted(hosts['confirmed']) + sorted(found - hosts['confirmed']))[:HOSTS_KEPT]
         e['host_total'] = len(found)
-    labels = host_labels(ids, {k for keys in picked.values() for k in keys})
+    labels = host_labels(ids, {k for keys in picked.values() for k in keys}, machines=machines)
     for e in entries:
         confirmed = e['_hosts']['confirmed']
         rows = [{**labels[k], 'confirmed': k in confirmed} for k in picked[id(e)] if k in labels]
@@ -336,8 +334,9 @@ def top(scope, start, end, limit=None, keep_hosts=False, with_hosts=False):
     covered = {c for b in briefings for c in b.cve_ids}
     held = {c.cve_id: c for c in CVEEntry.objects.filter(cve_id__in=covered)} if covered else {}
     news = [c for c in candidates(start, end) if c.cve_id not in covered][:IMPACT_CANDIDATES] if len(briefings) < limit else []
-    sightings = _sightings(scope.ids) if (briefings or news) else []
-    rows = impact(scope.ids, [*held.values(), *news], sightings=sightings)
+    machines = counts.machines(scope.ids) if (briefings or news) else None  # one fold of the scope's hosts for every count and name below
+    sightings = _sightings(scope.ids, machines) if (briefings or news) else []
+    rows = impact(scope.ids, [*held.values(), *news], sightings=sightings, machines=machines)
     entries = [_briefing_entry(b, held, rows, sightings, scope, base) for b in briefings]
     if len(entries) < limit:
         kev_in_period = {c.cve_id: _kev_added(c)[:10] >= start.date().isoformat() for c in news}
@@ -348,7 +347,7 @@ def top(scope, start, end, limit=None, keep_hosts=False, with_hosts=False):
         for c in sorted(news, key=rank, reverse=True)[:limit - len(entries)]:
             entries.append(_cve_entry(c, rows[c.id], scope, base, 'kev' if c.kev and kev_in_period[c.cve_id] else 'critical'))
     if with_hosts and entries:
-        _entry_hosts(scope.ids, entries)
+        _entry_hosts(scope.ids, entries, machines)
     if not keep_hosts:
         for e in entries:
             e.pop('_hosts', None)

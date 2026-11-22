@@ -59,6 +59,7 @@ BACKFILLS = (
     'backfill_version_scripts',           # vmware-version's ESXi build and the other version script output stored ports keep, runZero hw hints (re-correlated)
     'revalidate_ai_drafts',               # AI-written checks closed only because no scanner could check them go back to validation; reasons named
     'backfill_llamacpp_builds',           # llama.cpp blocks kept with no range: their record's "< b5662" read as build 5662 (re-correlated)
+    'backfill_php_link_tells',            # PHP read only from a link to a .php URL: route fingerprints and probe rows become leads, the PHP links go (re-correlated)
     'rewrite_tls_findings',               # open TLS audit findings (testssl.sh) reworded from their stored evidence: plain text, confidence in the title, unproven capped at Medium
     'close_archived_findings',            # the open findings of hosts archived before archiving closed them: closed as fixed, the note says the host was archived
     'audit_finding_hosts',                # the open findings of hosts gone from the current inventory (or archived): closed as fixed, reopened when the host is back

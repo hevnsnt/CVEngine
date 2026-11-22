@@ -75,7 +75,7 @@ Host search (everything above) answers "which of my hosts...". To look up a CVE 
 
 `port:` takes a number only and matches the port over either protocol; add `proto:` to pick one (`proto:udp port:123`). Use `product:` or `service:` for names. A bad value, such as `sev:scary`, returns an error that lists the allowed ones.
 
-`tech:` also reads what the Internet Archive saw on the host in the past (a `.php` page, `/wp-content/`). Those hits are labelled **seen in web archive**, because they are history, not what runs today.
+`tech:` is what a host runs now. What the Internet Archive saw on the host in the past (a `.php` page, `/wp-content/`) is history, not proof of what runs today: a bare word (`php`) finds it, labelled **seen in web archive**, and `tech:php` does not count it. A link to a `.php` page on the host's front page is not PHP either ([PIPELINE.md](PIPELINE.md#a-php-link-is-a-lead)).
 
 A bare word followed by a dotted version is that product at that release: `wordpress 7.1` is `tech:wordpress@7.1`. A version on its own (`7.1`) keeps matching any text that contains it.
 

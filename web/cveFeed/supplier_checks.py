@@ -263,12 +263,13 @@ def exposed_postures(domain, scheme, results, front=None):
 
 def technologies_of(fingerprints):
     """The technology list of a host card from ``route_auth.classify``'s fingerprints (``[{'name': 'PHP:8.1.2', 'source': 'header:x-powered-by'}]``,
-    the same fingerprinting owned hosts use): ``[{'name', 'version', 'category', 'source'}]``, version '' when the response states none."""
+    the same fingerprinting owned hosts use): ``[{'name', 'version', 'category', 'source'}]``, version '' when the response states none. A link to
+    a ``.php`` URL is no evidence the supplier runs PHP (``cveFeed.php_tells``): it is left out."""
     from cvengine_scanner import fingerprint
 
-    from cveFeed import correlation
+    from cveFeed import correlation, php_tells
     out = []
-    for found in fingerprints or []:
+    for found in php_tells.drop_link_tells(fingerprints):
         name, version = correlation.split_name_version(found.get('name') or '')
         if name:
             out.append({'name': name[:80], 'version': version[:60], 'category': fingerprint.categorize(found['name']), 'source': str(found.get('source', ''))[:40]})

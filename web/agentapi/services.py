@@ -2635,16 +2635,17 @@ def _tech_known_q(spec, named):
 def _tech_q(spec, project):
     """The hosts a ``tech:`` spec selects (``cveFeed.tech_search``). Every source a host's software is recorded in counts: technology rows, open
     ports (product, version, CPE, banner, NSE output, HTTP header and title), the Server header the web check stored, live routes' headers,
-    fingerprints and cookies, the web archive, version source readings (first- and third-party, products and runtimes) and, for Java, the Java
-    runtime readings. A name matches as text (what tech: always did), as the same product through the name normalisation correlation uses
-    (``spec.name_re``: its aliases, a vendor in front, an edition behind) and, for a platform, through a product that runs on it. A state after
-    @ keeps the hosts where a source states the product's version (KNOWN, or that release: ``_tech_known_q``), or where none does (UNKNOWN).
+    fingerprints and cookies, version source readings (first- and third-party, products and runtimes) and, for Java, the Java runtime readings. The
+    web archive is history, not what runs now (an archived ``.php`` URL is no proof the host runs PHP today): a bare word finds it, ``tech:`` does
+    not. A name matches as text (what tech: always did), as the same product through the name normalisation correlation uses (``spec.name_re``:
+    its aliases, a vendor in front, an edition behind) and, for a platform, through a product that runs on it. A state after @ keeps the hosts
+    where a source states the product's version (KNOWN, or that release: ``_tech_known_q``), or where none does (UNKNOWN).
     Each source is one uncorrelated subquery (no join on the outer query and no per-host work), so a 10,000-host project costs a handful of
     scans, whatever its size."""
     from django.db.models import Q
 
     from cveFeed import tech_search, version_sources
-    from cveFeed.models import HostArchive, JavaRuntime, RouteAuth
+    from cveFeed.models import JavaRuntime, RouteAuth
     v, platform = spec.raw, spec.platform
     named = lambda rows: _hosts_named_in(rows, project)  # noqa: E731 - by (project, name), as component:, java: and auth: are
     if spec.state in (tech_search.KNOWN, tech_search.RELEASE):
@@ -2665,8 +2666,7 @@ def _tech_q(spec, project):
         route = _any(route, *(Q(**{f'evidence__{key}__iregex': pattern}) for key in ('server', 'powered_by', 'fingerprint_names')))
     link = _iregex('cpe', spec.cpe_re())  # the CPE the technology template that named it states (cveFeed.nuclei_scan.tech_cpe_from)
     runs = _any(web, _tech_technology_q(tech), _tech_link_q(link) if link else None, _tech_port_q(port),
-                named(RouteAuth.objects.filter(retired_at__isnull=True).filter(route)),
-                named(HostArchive.objects.filter(tech_text__icontains=v)), named(version_sources.readings_qs().filter(reading)))
+                named(RouteAuth.objects.filter(retired_at__isnull=True).filter(route)), named(version_sources.readings_qs().filter(reading)))
     if platform is not None and platform.runtime == 'java_runtime':
         runs |= named(JavaRuntime.objects.all())
     return runs & ~_tech_known_q(spec, named) if spec.state == tech_search.UNKNOWN else runs
@@ -5668,11 +5668,12 @@ def finding_detail(ctx, slug, kind, finding_id):
         'retest': {**_retest_of(obj), 'history': _retest_history(t)} if kind in STATUS_KINDS else None,
         'secrets': _tracked_secrets(obj) if kind == 'vulnerability' else [],  # "Tracked in Secrets": the inventory rows a token finding fed
         'cve': {**_cve_context(obj.cve_entry), 'detection': _detection(obj.cve_entry)} if kind == 'match' else None,
-        'confirm': _confirm_guide(obj) if kind == 'match' else tls_guide,
+        # how to confirm it by hand, for every kind (a CVE match, a TLS audit result, a scanner, hygiene or route finding): never empty
+        'confirm': _confirm_for(kind, obj, tls_guide, title, host, text['validation_notes']),
         'explain': _explain(obj) if kind == 'match' else None,
         'validation': {'status': _triage_brief(t)['validation_status'] if t else 'none', 'steps': steps, 'evidence': evidence,
                        'validated': _iso(t.validated_at) if t else None, 'next_attempt': _iso(t.next_attempt_at) if t else None,
-                       'confidence_adjust': t.confidence_adjust if t else 0.0},
+                       'confidence_adjust': t.confidence_adjust if t else 0.0, 'automatic': _automatic_plan(kind, obj, t)},
     }
 
 
@@ -5686,6 +5687,63 @@ def _confirm_guide(m):
         import logging
         logging.getLogger(__name__).warning('could not build the confirm guide of match %s', m.pk, exc_info=True)
         return None
+
+
+def _confirm_for(kind, obj, tls_guide, title, host, advice):
+    """The "Confirm it yourself" guide of any finding: a CVE match's (cveFeed.confirm_guide), a TLS audit result's (cveFeed.tls_catalogue),
+    a scanner, hygiene or route finding's (cveFeed.finding_confirm). When none can be built it falls back to where the finding is and the AI
+    review's advice, so the panel is never empty; building it never fails the detail."""
+    from cveFeed import finding_confirm
+    guide = None
+    try:
+        if kind == 'match':
+            guide = _confirm_guide(obj)
+        elif kind == 'vulnerability':
+            guide = finding_confirm.scanner_guide(obj, advice)
+        elif kind == 'hygiene':
+            guide = tls_guide or finding_confirm.hygiene_guide(obj, advice)
+        elif kind == 'route':
+            guide = finding_confirm.route_guide(obj, advice)
+    except Exception:  # noqa: BLE001 - the guide is help on top of the evidence; a gap in it must not cost the finding its page
+        import logging
+        logging.getLogger(__name__).warning('could not build the confirm guide of %s %s', kind, obj.pk, exc_info=True)
+    return guide or finding_confirm.minimal_guide(title, host, advice)
+
+
+def _automatic_plan(kind, obj, t):
+    """Whether an automatic check exists for this finding and whether the validation sweep will queue one, so the page can say which is true
+    instead of "None has run yet": ``check`` (its kind has an approved check: a CVE match, an unauthenticated database or an open route; a scanner
+    or hygiene finding gets an AI review only), ``lane`` (fire, smoke or ice: the sweep queues it, hottest first; '' when it will not) and ``why``
+    (why it will not, in a few words)."""
+    from cveFeed import hot_validation, match_policy, triage as triage_lib, validation
+    from cveFeed.threat import ICE
+    if kind == 'match':
+        tkind = 'cve_match'
+    elif kind == 'vulnerability':
+        tkind = triage_lib.kind_of_vulnerability(obj)
+    else:
+        tkind = 'route_auth' if kind == 'route' else 'hygiene'
+    out = {'check': tkind in validation.PLANNED_KINDS, 'lane': '', 'why': ''}
+    if t is None:
+        out['why'] = 'it is not tracked for triage yet'
+        return out
+    try:
+        lane = hot_validation.tier_for(t) or ''
+    except Exception:  # noqa: BLE001 - a finding whose lane cannot be read is said to have none, never a failed page
+        lane = ''
+    if kind == 'match':
+        if obj.source == hot_validation.HOST_REPORTED:
+            lane, out['why'] = '', "it comes from the host's own inventory report, which no outside check can see"
+        elif match_policy.version_unknown(obj):
+            lane, out['why'] = '', 'its version is not known, so there is nothing to test it against'
+        elif obj.ai_verdict == 'not_affected' or obj.distro_status == 'patched':
+            out['why'] = 'it is ruled out (not affected, or patched by the distribution)'
+        elif lane == ICE and not hot_validation.validate_all_matches():
+            lane, out['why'] = '', 'only Fire and Smoke matches are validated automatically on this server'
+    elif not lane and out['check']:
+        out['why'] = 'only open Fire and Smoke findings are checked automatically'
+    out['lane'] = lane
+    return out
 
 
 MAX_COMMENT_LENGTH = 4000

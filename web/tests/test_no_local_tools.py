@@ -65,6 +65,7 @@ ALLOWED = {
         'cveFeed/discovery.py',
         'cveFeed/distro.py',
         'cveFeed/distro_releases.py',  # distro release inference: mentions nmap's stored OS CPE in a docstring, runs nothing
+        'cveFeed/finding_confirm.py',  # Confirm it yourself guides for scanner and hygiene findings: the read-only commands a person runs, as text; runs nothing
         'cveFeed/host_assessment.py',  # 1.3.2 assessment batches (develop): comments about the dispatched stages, runs nothing
         'cveFeed/host_context.py',
         'cveFeed/host_inventory.py',
@@ -140,6 +141,7 @@ ALLOWED = {
         'cveFeed/detection_commands.py',
         'cveFeed/diagnostics.py',
         'cveFeed/discovery.py',
+        'cveFeed/finding_confirm.py',  # Confirm it yourself guides for scanner and hygiene findings: the read-only commands a person runs, as text; runs nothing
         'cveFeed/fullscan.py',
         'cveFeed/internal_scan.py',
         'cveFeed/js_libraries.py',  # 1.3.3 JS library evidence (develop): a docstring naming evidence sources, runs nothing
@@ -227,6 +229,7 @@ ALLOWED = {
         'cveFeed/check_coverage.py',  # ledger kinds and the check id are data values, runs nothing
         'cveFeed/confirm_guide.py',  # matches the finding source stored in the database, runs nothing
         'cveFeed/discovery.py',  # the pipeline stage name and its result key are data values, runs nothing
+        'cveFeed/finding_confirm.py',  # Confirm it yourself guides for scanner and hygiene findings: the read-only commands a person runs, as text; runs nothing
         'cveFeed/finding_lifecycle.py',  # finding source and template id prefix stored in the database, runs nothing
         'cveFeed/host_context.py',  # reads the stored probe name, runs nothing
         'cveFeed/ledger.py',  # ledger kind names (freshness windows) are data values, runs nothing

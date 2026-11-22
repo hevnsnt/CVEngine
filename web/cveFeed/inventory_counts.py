@@ -149,9 +149,10 @@ def _exposed_ids(ids):
             | set(findings.filter(subdomain_id__in=ids).values_list('subdomain_id', flat=True).distinct()))
 
 
-def _collapse(rows):
-    """``(best, host_key, links)``: ``best`` maps each host key to ``(rank, name, project_id, subdomain id)`` of the one row that stands for the host,
-    ``host_key(sub_id, name, project_id)`` is the key of any row and ``links`` the address links read for them."""
+def _collapse(rows, names_out=None):
+    """``(best, host_key)``: ``best`` maps each host key to ``(rank, name, project_id, subdomain id)`` of the one row that stands for the host,
+    ``host_key(sub_id, name, project_id)`` is the key of any row. ``names_out`` (a dict) receives ``{(project_id, name): host key}``: the key of the
+    row that stands for each name, so every copy of a name belongs to the machine the Hosts page folds it into (``counts.machines``)."""
     ids = [r[0] for r in rows]
     links = _links(ids)
     ports = _open_ports({ip for ls in links.values() for ip, _ in ls})
@@ -182,6 +183,8 @@ def _collapse(rows):
     for i, (_rank, sub_id, name, project_id, domain_name, open_count) in enumerate(by_name.values()):
         _breathe(i)
         key = host_key(sub_id, name, project_id)
+        if names_out is not None:
+            names_out[(project_id, name)] = key
         rank = (0 if name == domain_name else 1, len(name), name, -open_count, -sub_id)
         if key not in best or rank < best[key][0]:
             best[key] = (rank, name, project_id, sub_id)
