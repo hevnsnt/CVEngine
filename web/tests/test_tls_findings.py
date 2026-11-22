@@ -331,7 +331,8 @@ class FindingPageTests(TestCase):
         row = HygieneFinding.objects.create(domain=self.domain, host='www.daliofamilyoffice.com', check_name='spf_missing', severity=2, title='No SPF',
                                             detail='The domain publishes no SPF record.', evidence={'record': 'none', 'mx': ['a', 'b']})
         data = self.detail(row)
-        self.assertIsNone(data['confirm'])
+        self.assertEqual(data['confirm']['class'], 'hygiene')  # its own read-only check (cveFeed.finding_confirm), not a TLS audit guide
+        self.assertNotEqual(data['confirm'].get('class_label'), 'testssl.sh TLS audit')
         self.assertEqual(data['description'], 'The domain publishes no SPF record.')
         by = {s['label']: s['value'] for s in data['how_found']['steps']}
         self.assertEqual(by['Mx'] if 'Mx' in by else by['MX'], 'a, b')
