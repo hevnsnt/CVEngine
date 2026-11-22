@@ -128,6 +128,7 @@ ALLOWED = {
         'agentapi/sentinel_tools.py',  # 1.4 contract 5: the names of the tools whose versions a Sentinel reports, compared with the shipped ones; runs nothing
         'agentapi/services.py',
         'agentapi/system_status.py',
+        'cveFeed/ai_disclosure.py',  # AI and your data page: says in words which AI job picks nuclei templates and what it is sent; runs nothing
         'cveFeed/apps.py',
         'cveFeed/auth_checks.py',
         'cveFeed/auth_nuclei.py',  # T8 nuclei: ledger service keys (nuclei-auth, nuclei-auth-refused) are stored data, plus activity text; runs nothing, the signed-in pass is the built-in scanner's
