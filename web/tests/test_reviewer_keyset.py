@@ -1,5 +1,6 @@
 """The finding reviewer's due list read without OFFSET paging (reviewer.due and reviewer._due_in): the same findings, in the same order and within
-the same budget as the paging it replaced, with the heat sort run at most twice a call however many pages are walked."""
+the same budget as the paging it replaced, with the heat sort run at most twice a call however many pages are walked. Also the projects ``due``
+visits, read by EXISTS, and the typical Sentinel queue wait of the operations check, read in one query: each the same as the read it replaced."""
 from datetime import timedelta
 from unittest import mock
 
@@ -189,3 +190,56 @@ class QueryCountTests(KeysetFixture):
         self.assertEqual(_heat_sorts(queries.captured_queries), 1)
         ours = [q for q in queries.captured_queries if 'cveFeed_tunablesettings' not in q['sql']]  # the heat thresholds, read once a process
         self.assertEqual(len(ours), 3)  # the page, its host fingerprints, its reviews
+
+
+class ProjectListTests(KeysetFixture):
+    def test_due_visits_the_projects_the_distinct_read_named(self):
+        now = self.now
+        quiet = Project.objects.create(name='Rev4', slug='rev-proj-4', insert_date=now, org=self.org)  # only a closed finding and a route check
+        dom = Domain.objects.create(name='example.org', project=quiet, insert_date=now)
+        sub = Subdomain.objects.create(name='www.example.org', target_domain=dom, scan_history=ScanHistory.objects.create(
+            domain=dom, scan_type=self.scan.scan_type, scan_status=2, start_scan_date=now))
+        m = CVEMatch.objects.create(cve_entry=self.cve, subdomain=sub, source='tech', matched_product='lib-q', matched_version='1.0',
+                                    version_in_range=False, confidence=0.8, ai_verdict='uncertain', scan_history=sub.scan_history, evidence={'source': 'tech'})
+        triage.track([m])
+        CVEMatch.objects.filter(pk=m.pk).update(remediation_status='fixed')
+        Project.objects.create(name='Rev5', slug='rev-proj-5', insert_date=now, org=self.org)  # nothing at all
+        old = sorted(Triage.objects.filter(reviewer.open_q()).exclude(kind='route_auth').order_by().values_list('project_id', flat=True).distinct())
+        seen = []
+        with mock.patch.object(reviewer, '_due_in', side_effect=lambda pid, limit, now: seen.append(pid) or []):
+            reviewer.due(25, now=now)
+        self.assertEqual(seen, old)
+        self.assertIn(self.proj.pk, seen)
+        self.assertNotIn(quiet.pk, seen)
+
+
+class QueueWaitTests(KeysetFixture):
+    def _old(self, kind, now):
+        from agentapi.models import SentinelTask
+        return sorted((c - k).total_seconds() for k, c in SentinelTask.objects.filter(kind=kind, claimed_at__isnull=False, created_at__gte=now - timedelta(days=1))
+                      .order_by('-id').values_list('created_at', 'claimed_at')[:reviewer.WAIT_SAMPLE])
+
+    def test_one_read_gives_each_kind_the_waits_its_own_read_gave(self):
+        from agentapi.models import SentinelTask
+        now = self.now
+        rows = []
+        for kind, n in (('nmap', 9), ('nuclei', 2), ('hygiene_check', 0)):
+            for i in range(n):
+                rows.append((kind, now - timedelta(hours=i * 2 + 1), timedelta(minutes=i + 1)))
+        rows += [('nmap', now - timedelta(days=2), timedelta(hours=30)),  # created before the day, claimed in it: left out by both
+                 ('nuclei', now - timedelta(days=3), timedelta(minutes=5))]
+        for kind, created, wait in rows:
+            task = SentinelTask.objects.create(project=self.proj, kind=kind, target={}, status='done')
+            SentinelTask.objects.filter(pk=task.pk).update(created_at=created, claimed_at=created + wait)
+        unclaimed = SentinelTask.objects.create(project=self.proj, kind='nmap', target={}, status='queued')
+        self.assertIsNone(unclaimed.claimed_at)
+        for sample in (1, 3, 200):
+            with mock.patch.object(reviewer, 'WAIT_SAMPLE', sample):
+                got = reviewer._recent_waits(['nmap', 'nuclei', 'hygiene_check'], now)
+                for kind in ('nmap', 'nuclei', 'hygiene_check'):
+                    new = sorted((c - k).total_seconds() for k, c in got.get(kind, ()))
+                    self.assertEqual(new, self._old(kind, now), f'{kind}, sample {sample}')
+        self.assertEqual(reviewer._recent_waits([], now), {})
+        with CaptureQueriesContext(connection) as queries:
+            reviewer._recent_waits(['nmap', 'nuclei'], now)
+        self.assertEqual(len(queries.captured_queries), 1)
