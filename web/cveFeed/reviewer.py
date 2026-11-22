@@ -259,20 +259,21 @@ def heat_rank_expr():
 def _due_in(project_id, limit, now):
     """``due`` for one project, hottest first: the finding's heat (``heat_rank_expr``: fire, a KEV or exploited CVE on the host, before smoke and
     ice), then its kind (CVE matches first), then the newest. The open findings are read in pages of WINDOW in that order until ``limit`` are found
-    or none are left, so a finding is reached however many reviewed ones come before it."""
+    or none are left, so a finding is reached however many reviewed ones come before it.
+
+    The first page is one sorted read of WINDOW rows. When it is full and does not hold ``limit`` findings to hand out, the ids of the remaining
+    open findings are read once, in the same order, and walked as a cursor: each later page loads its WINDOW rows by id. The heat sort runs at
+    most twice a call, where paging by OFFSET re-ran the joins and the sort of the whole open set for every page."""
     from django.db.models import Case, IntegerField, Value, When
     from cveFeed.models import Triage
     rank = Case(*[When(kind=k, then=Value(v)) for k, v in KIND_ORDER.items()], default=Value(9), output_field=IntegerField())
-    qs = (Triage.objects.filter(open_q(), project_id=project_id).exclude(kind='route_auth').annotate(heat_rank=heat_rank_expr(), kind_rank=rank)
-          .order_by('-heat_rank', 'kind_rank', '-last_seen', '-id')
-          .only('id', 'kind', 'project_id', 'host', 'evidence_key', 'signature'))
+    base = (Triage.objects.filter(open_q(), project_id=project_id).exclude(kind='route_auth')
+            .only('id', 'kind', 'project_id', 'host', 'evidence_key', 'signature'))
+    qs = base.annotate(heat_rank=heat_rank_expr(), kind_rank=rank).order_by('-heat_rank', 'kind_rank', '-last_seen', '-id')
     picked = []
-    offset = 0
-    while len(picked) < limit:
-        rows = list(qs[offset:offset + WINDOW])
-        if not rows:
-            break
-        offset += WINDOW
+    rows = list(qs[:WINDOW])  # the first page
+    rest = None  # the ordered ids after the first page, read once when a second page is needed
+    while rows and len(picked) < limit:
         fingerprints = _fingerprints({(t.project_id, t.host) for t in rows})
         seen_all = _reviewed(rows, fingerprints)
         for triage in rows:
@@ -285,6 +286,18 @@ def _due_in(project_id, limit, now):
             picked.append((triage.pk, key))
             if len(picked) >= limit:
                 break
+        if len(picked) >= limit:
+            break
+        if rest is None:
+            if len(rows) < WINDOW:
+                break  # the first page held every open finding
+            first = {t.pk for t in rows}
+            rest = [pk for pk in qs.values_list('pk', flat=True) if pk not in first]
+        rows = []
+        while rest and not rows:
+            chunk, rest = rest[:WINDOW], rest[WINDOW:]
+            by_pk = {t.pk: t for t in base.filter(pk__in=chunk)}  # still open when read, as a re-sorted page was
+            rows = [by_pk[pk] for pk in chunk if pk in by_pk]
     return picked
 
 
