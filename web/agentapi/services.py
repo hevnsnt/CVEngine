@@ -4468,7 +4468,7 @@ def list_findings(ctx, slug, params):
     if group not in GROUP_MODES:
         raise ApiError(400, 'group must be none or cve')
     sources = _finding_sources(project, params)
-    counts = {key: qs.count() for key, qs in sources.items()}
+    counts = _finding_counts(project, params, sources) if not size else {key: qs.count() for key, qs in sources.items()}
     if group == 'cve':
         return _grouped_findings(project, sources, counts, page, size)
     total = sum(counts.values())
@@ -4495,6 +4495,22 @@ def list_findings(ctx, slug, params):
     _attach_reviews(results)
     return {'count': min(total, MAX_FINDINGS), 'total': total, 'truncated': total > MAX_FINDINGS, 'page': page,
             'page_size': size, 'counts': {key: counts.get(key, 0) for key in FINDING_TYPES}, 'retest': _retest_counts(project), 'results': results}
+
+
+FINDING_COUNTS_SECONDS = 15  # how long the counts of a count-only Findings request are shared; a finding closed, reopened or given a heat drops them at once
+# (the revision bump). A page of rows always counts afresh, so its counts and its rows agree.
+FINDING_COUNT_PARAMS = ('type', 'ai', 'kev', 'status', 'heat', 'severity', 'host', 'internal')  # every parameter ``_finding_sources`` reads
+
+
+def _finding_counts(project, params, sources):
+    """``{type: count}`` of ``sources`` for a count-only request (``page_size=0``): a shared snapshot (``cveFeed.snapshot_cache``) keyed by the project
+    ids, the caller's allowed projects (``scope_hash``) and every facet the sources were built from, so two scopes or two filters never share one.
+    The Findings page asks for one such count per chip, each three COUNTs over the project's findings, on every load and every filter change."""
+    from cveFeed import snapshot_cache
+    ids = sorted(project.ids) if _is_all(project) else [project.pk]
+    scope = snapshot_cache.scope_hash('finding-counts', ids, *[str(params.get(k) or '') for k in FINDING_COUNT_PARAMS])
+    return snapshot_cache.snapshot('finding-counts', scope, lambda: {key: qs.count() for key, qs in sources.items()},
+                                   FINDING_COUNTS_SECONDS)['payload']
 
 
 RETEST_COUNTS_SECONDS = 30  # how long one scope's retest counts are shared; a finding marked fixed or reopened drops them at once (the revision bump)
