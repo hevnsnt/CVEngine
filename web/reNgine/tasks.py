@@ -78,7 +78,7 @@ def persist_bbot_result(result, ctx):
 			ip=ip)
 		port.last_seen = timezone.now()
 		fields = ['last_seen']
-		if not port.source:  # a port nmap found stays nmap's: bbot only names the source of a port nobody else recorded
+		if not port.source:  # a port another detector recorded keeps its source: bbot only names the source of a port nobody else recorded
 			port.source = 'bbot'
 			fields.append('source')
 		port.save(update_fields=fields)
