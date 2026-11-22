@@ -621,6 +621,15 @@ class GatingTests(UdpBase):
 		with mock.patch.dict(os.environ, {'CVENGINE_ALLOW_PRIVATE_TARGETS': '1'}):
 			self.assertEqual(udp_scan.pick().address, '10.1.2.3')
 
+	def test_an_address_past_the_first_page_is_reached_when_the_first_page_was_all_swept_lately(self):
+		first = [self.ip(f'192.0.2.{n}', name=f'h{n}.udp.test') for n in range(10, 13)]
+		for ip in first:
+			ledger.record(udp_scan.SERVICE, [udp_scan.asset_of(ip)])  # swept just now: not due
+		last = self.ip('192.0.2.40', name='late.udp.test')
+		with mock.patch.object(udp_scan, 'MAX_ELIGIBLE', 2):
+			self.assertEqual([ip.pk for ip in udp_scan.due(limit=2)], [last.pk])  # two per page: the due one is on the second page
+			self.assertEqual([ip.pk for ip in udp_scan.due(limit=2, want=0)], [])  # nothing wanted past the first page: it stops there
+
 	def test_a_project_whose_bounty_engagement_has_not_confirmed_automated_testing_is_not_scanned(self):
 		from cveFeed.models import BountyAsset, BountyEngagement, BountyProgram
 		program = BountyProgram.objects.create(platform='hackerone', handle='ex', name='Example')
