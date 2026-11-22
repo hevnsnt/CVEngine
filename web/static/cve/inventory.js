@@ -187,10 +187,16 @@ export function renderHostInventory(box, { h, project, readOnly }) {
     ]),
   );
   if (inv.stale) head.append(el("p", "note", `This report is more than ${inv.stale_after_days} days old, so it creates no findings and closes none until the host reports again.`));
+  // A report is a snapshot: patching the host changes nothing here until the host reports again. So the way to send a fresh one stays at the
+  // top, under the report it replaces, not below the whole package list where it was never seen.
+  head.append(
+    el("p", "note", "A report is a snapshot of the host when the script ran. After you patch or change the host, run the reporting script on it again (the same command as the first time) and this page and its findings update; a scheduled run keeps it current without you."),
+  );
+  if (!readOnly) head.append(button("Send a fresh report: show the commands", async () => openInventoryDialog({ project }), "btn sm"));
+  else head.append(el("p", "note", "A project member who can edit needs to run the script again."));
   box.append(head);
   const body = el("div", "host-col");
   box.append(body);
-  if (!readOnly) box.append(button("Reporting commands", async () => openInventoryDialog({ project }), "btn ghost sm"));
   let loaded = false;
   return () => {
     if (loaded) return;
