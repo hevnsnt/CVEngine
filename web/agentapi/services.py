@@ -2573,16 +2573,17 @@ def _tech_known_q(spec, named):
 def _tech_q(spec, project):
     """The hosts a ``tech:`` spec selects (``cveFeed.tech_search``). Every source a host's software is recorded in counts: technology rows, open
     ports (product, version, CPE, banner, NSE output, HTTP header and title), the Server header the web check stored, live routes' headers,
-    fingerprints and cookies, the web archive, version source readings (first- and third-party, products and runtimes) and, for Java, the Java
-    runtime readings. A name matches as text (what tech: always did), as the same product through the name normalisation correlation uses
-    (``spec.name_re``: its aliases, a vendor in front, an edition behind) and, for a platform, through a product that runs on it. A state after
-    @ keeps the hosts where a source states the product's version (KNOWN, or that release: ``_tech_known_q``), or where none does (UNKNOWN).
+    fingerprints and cookies, version source readings (first- and third-party, products and runtimes) and, for Java, the Java runtime readings. The
+    web archive is history, not what runs now (an archived ``.php`` URL is no proof the host runs PHP today): a bare word finds it, ``tech:`` does
+    not. A name matches as text (what tech: always did), as the same product through the name normalisation correlation uses (``spec.name_re``:
+    its aliases, a vendor in front, an edition behind) and, for a platform, through a product that runs on it. A state after @ keeps the hosts
+    where a source states the product's version (KNOWN, or that release: ``_tech_known_q``), or where none does (UNKNOWN).
     Each source is one uncorrelated subquery (no join on the outer query and no per-host work), so a 10,000-host project costs a handful of
     scans, whatever its size."""
     from django.db.models import Q
 
     from cveFeed import tech_search, version_sources
-    from cveFeed.models import HostArchive, JavaRuntime, RouteAuth
+    from cveFeed.models import JavaRuntime, RouteAuth
     v, platform = spec.raw, spec.platform
     named = lambda rows: _hosts_named_in(rows, project)  # noqa: E731 - by (project, name), as component:, java: and auth: are
     if spec.state in (tech_search.KNOWN, tech_search.RELEASE):
@@ -2603,8 +2604,7 @@ def _tech_q(spec, project):
         route = _any(route, *(Q(**{f'evidence__{key}__iregex': pattern}) for key in ('server', 'powered_by', 'fingerprint_names')))
     link = _iregex('cpe', spec.cpe_re())  # the CPE the technology template that named it states (cveFeed.nuclei_scan.tech_cpe_from)
     runs = _any(web, _tech_technology_q(tech), _tech_link_q(link) if link else None, _tech_port_q(port),
-                named(RouteAuth.objects.filter(retired_at__isnull=True).filter(route)),
-                named(HostArchive.objects.filter(tech_text__icontains=v)), named(version_sources.readings_qs().filter(reading)))
+                named(RouteAuth.objects.filter(retired_at__isnull=True).filter(route)), named(version_sources.readings_qs().filter(reading)))
     if platform is not None and platform.runtime == 'java_runtime':
         runs |= named(JavaRuntime.objects.all())
     return runs & ~_tech_known_q(spec, named) if spec.state == tech_search.UNKNOWN else runs

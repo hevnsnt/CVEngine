@@ -108,7 +108,9 @@ def with_host_key(qs):
     """Annotate Subdomain rows with ``host_key``: the identity of the machine behind the name, so names that point at the same
     addresses are one host. The key is the project plus the sorted set of the row's IP addresses; a row with no address, or with an
     address of a CDN or shared edge (many unrelated sites share those), keeps its own name as its key. The same name (several
-    scans of it) therefore shares a key, and so do ``example.com`` and ``www.example.com`` when both resolve to the same addresses."""
+    scans of it) therefore shares a key, and so do ``example.com`` and ``www.example.com`` when both resolve to the same addresses. It is a key per
+    row: two copies of one name with different addresses (or one with none) get two keys. To count machines as the Hosts page folds them, use
+    ``machines``."""
     from django.contrib.postgres.aggregates import StringAgg
     from django.db.models import Case, CharField, Exists, OuterRef, Subquery, TextField, Value, When
     from django.db.models.functions import Cast, Concat
@@ -122,6 +124,54 @@ def with_host_key(qs):
         host_key=Case(When(_cdn=True, then=Concat(project, Value(':n:'), 'name', output_field=CharField())),
                       When(_ipset__isnull=True, then=Concat(project, Value(':n:'), 'name', output_field=CharField())),
                       default=Concat(project, Value(':i:'), '_ipset', output_field=CharField()), output_field=CharField()))
+
+
+class Machines:
+    """The machines of some projects' current inventory exactly as the Hosts page folds them (``machines``). ``of_row(id)`` and ``of_name(project id,
+    name)`` give the machine key (the ``with_host_key`` form: ``<project>:i:<address ids>`` or ``<project>:n:<name>``) of a current row or name,
+    ``name(key)`` the name the Hosts page shows for that machine. A row or name outside the inventory read has no machine (None)."""
+
+    def __init__(self, by_row, by_name, names):
+        self._by_row, self._by_name, self._names = by_row, by_name, names
+
+    def of_row(self, sub_id):
+        return self._by_row.get(sub_id)
+
+    def of_name(self, project_id, name):
+        return self._by_name.get((project_id, name))
+
+    def name(self, key):
+        return self._names.get(key)
+
+    def keys(self):
+        return set(self._names)
+
+    def names(self):
+        """``[((project id, name), machine key)]`` for every name of the inventory read."""
+        return list(self._by_name.items())
+
+
+def machines(project_ids):
+    """``Machines`` of the current inventory (``latest_scan_q``) of ``project_ids``, folded by the Hosts page's own rules (``agentapi.services._one_per_host``,
+    worked out in Python by ``inventory_counts._collapse``, which ``tests/test_inventory_counts.py`` holds to the SQL): first one row per name (the most open
+    ports, the most addresses, the newest scan), then the names whose chosen rows share an address set are one machine, shown under the target's own name,
+    else the shortest. Every copy of a name (a scanless row beside the scanned one, a second target's copy) belongs to the machine of the row chosen for
+    the name, never to one of its own: ``with_host_key`` keys each row by that row's addresses alone, so a copy with no address, or with another address
+    set, used to count as a second machine. This is the one notion of a machine every count of hosts that links to the Hosts page reads (the Overview's
+    threat card, the email digest, ``reporting/threats``, ``get_threat_digest``). Reads the rows of these projects only, with the base manager: a worker
+    has no request scope, so the caller's project ids are the scope."""
+    from cveFeed import inventory_counts
+    from cveFeed.correlation import latest_scan_q
+    from startScan.models import Subdomain
+    ids = sorted({int(i) for i in project_ids or ()})
+    if not ids:
+        return Machines({}, {}, {})
+    rows = list(Subdomain._base_manager.filter(latest_scan_q()).filter(target_domain__project_id__in=ids)
+                .values_list('id', 'name', 'scan_history_id', 'target_domain__project_id', 'target_domain__name'))
+    by_name = {}
+    best, _key = inventory_counts._collapse(rows, names_out=by_name)
+    by_row = {sub_id: by_name[(project_id, name)] for sub_id, name, _scan, project_id, _target in rows if (project_id, name) in by_name}
+    return Machines(by_row, by_name, {key: rep[1] for key, rep in best.items()})
 
 
 def host_siblings(sub_ids):

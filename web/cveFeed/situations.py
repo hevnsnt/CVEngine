@@ -218,7 +218,7 @@ def _group_rows(qs, kev=None, manual=None, distinct=None):
 
 def _inventory(ids):
     """``(reps, names)``: ``reps`` is ``{host key: {id, name, pid, http, server}}``, one entry per host exactly as the Hosts page collapses them, and
-    ``names`` maps ``(project id, lower-case name)`` to its host key. Two queries however many hosts."""
+    ``names`` maps ``(project id, lower-case name)`` to its host key. A few queries however many hosts."""
     from agentapi.services import _one_per_host
     from cveFeed.correlation import latest_scan_q
     from startScan.models import Subdomain
@@ -226,9 +226,8 @@ def _inventory(ids):
     reps = {}
     for r in counts.with_host_key(_one_per_host(current, per_project=True)).values('id', 'name', 'target_domain__project_id', 'http_status', 'webserver', 'host_key'):
         reps[r['host_key']] = {'id': r['id'], 'name': r['name'], 'pid': r['target_domain__project_id'], 'http': r['http_status'] or 0, 'server': r['webserver'] or ''}
-    names = {}
-    for pid, name, key in counts.with_host_key(current).values_list('target_domain__project_id', 'name', 'host_key').distinct():
-        names[(pid, name.lower())] = key
+    # every copy of a name is the machine its chosen row is (counts.machines): keyed by each row's own addresses, a copy with none made a second host
+    names = {(pid, name.lower()): key for (pid, name), key in counts.machines(ids).names()}
     return reps, names
 
 

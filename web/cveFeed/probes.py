@@ -27,7 +27,7 @@ from django.utils import timezone
 from cvengine_scanner import cms, fingerprint, versions
 from cvengine_scanner.flags import probe_nmap_flags
 
-from cveFeed import js_libraries
+from cveFeed import js_libraries, php_tells
 
 logger = logging.getLogger(__name__)
 
@@ -377,7 +377,8 @@ def observations_from_page(response, source_prefix='page'):
     out = [o for o in out if not (o['kind'] == 'version' and not o['version'] and o['product'].lower() in stated)]  # a version replaces the bare name
     for provider in versions.edges_from_headers({**headers, 'server': response.get('server', '')}):
         out.append(_observation('edge', provider, outcome='edge', confidence=0.8, source='header:edge', url='/'))
-    return out
+    # a link to a .php URL is no evidence of PHP: one elsewhere is dropped, a same-origin one is a lead unless the server confirms PHP (cveFeed.php_tells)
+    return php_tells.judge_observations(out, response=response)
 
 
 def next_version(body):
@@ -847,9 +848,24 @@ def _remote_http(scan, due):
     return got, False
 
 
+def _judge_php_link(project_id, host, probe_id, found):
+    """``found`` with a ``.php`` link observation judged (``php_tells.judge_observations``): the host's stored routes say whether the server confirms
+    PHP (one read, only when there is such an observation). The version row an earlier run stored for the link is removed: it is a lead now."""
+    if not any(o.get('kind') == 'version' and php_tells.is_link_tell(o.get('product'), o.get('source')) for o in found):
+        return found
+    from cveFeed.models import ProbeObservation, RouteAuth
+    ProbeObservation.objects.filter(project_id=project_id, host=host.lower(), probe=probe_id, kind='version', source=php_tells.LINK_SOURCE).delete()
+    rows = RouteAuth.objects.filter(project_id=project_id, host=host.lower(), retired_at__isnull=True).values_list('url', 'http_status', 'auth_state', 'evidence')
+    results = [(url, {'status': status, 'state': state, 'evidence': evidence or {}}) for url, status, state, evidence in rows]
+    return php_tells.judge_observations(found, confirmed=php_tells.host_confirmation(results).get(host.lower(), ''),
+                                        contrary=php_tells.host_contrary(results).get(host.lower(), ''))
+
+
 def apply_remote(project_id, domain_id, sub, entry, found):
     """Store and apply what a Sentinel's run of one planned probe found (``run_one``'s second half: the observations are the scanner's). A page
-    that stated the Java runtime (``Java runtime`` observations of the headers and error-page probes) becomes a Java runtime reading of the host."""
+    that stated the Java runtime (``Java runtime`` observations of the headers and error-page probes) becomes a Java runtime reading of the host.
+    A page's ``.php`` link (``page:.php link``) is stored as a lead, or as PHP when the host's routes confirm it (``cveFeed.php_tells``)."""
+    found = _judge_php_link(project_id, sub.name, entry['probe'], found)
     record(project_id, domain_id, sub.name, entry['probe'], found)
     added = apply_to_subdomain(sub, found)
     java = any(o.get('product') == JAVA_RUNTIME and o.get('outcome') == 'found' for o in found)
