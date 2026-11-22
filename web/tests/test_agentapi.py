@@ -772,6 +772,15 @@ class AgentApiTests(TestCase):
 			self.assertEqual(by_id[refused]['error']['code'], -32600)
 			self.assertIn('one search_hosts or list_hosts', by_id[refused]['error']['message'])
 
+	def test_a_batch_runs_one_large_listing_whichever_tool_it_is(self):
+		calls = [{'jsonrpc': '2.0', 'id': i, 'method': 'tools/call', 'params': {'name': name, 'arguments': {'project': 'proj-a'}}}
+		         for i, name in enumerate(['list_findings', 'list_cve_matches', 'get_system_status', 'list_projects'], 1)]
+		status, data = self.mcp_post(calls)
+		by_id = {r['id']: r for r in data}
+		self.assertNotIn('error', by_id[1])
+		self.assertEqual((by_id[2]['error']['code'], by_id[3]['error']['code']), (-32600, -32600))
+		self.assertNotIn('error', by_id[4])  # a cheap call still runs beside the one large one
+
 	def test_a_statement_the_database_cut_off_is_answered_plainly_by_the_api_and_the_mcp(self):
 		from django.db.utils import OperationalError
 		cut = OperationalError('canceling statement due to statement timeout')
