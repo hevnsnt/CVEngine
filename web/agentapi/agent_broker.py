@@ -161,9 +161,30 @@ def _agent_of(ctx, usable=True, write=True):
     return agent
 
 
+TOUCH_EVERY = timedelta(seconds=15)  # ``last_seen`` is written at most this often per agent: far below ``LIVE_WINDOW``, so liveness reads the same
+POLL_REAP_EVERY = 5  # seconds between the reaper runs of the later rounds of the long polls (fleet wide); the first round of every call always reaps
+
+
 def _touch(agent, now=None):
-    agent.last_seen = now or timezone.now()
-    Agent.objects.filter(pk=agent.pk).update(last_seen=agent.last_seen)
+    """Mark the agent as heard from now. A long poll, a heartbeat and every report each said so, one UPDATE of the agent row each (several a second for
+    a Sentinel with many slots, each waiting behind a claim that holds the row). It is written only when the stored time is older than ``TOUCH_EVERY``
+    (or missing, or ahead of ``now``), with the same condition in the UPDATE, so a call that finds a fresh time costs nothing."""
+    now = now or timezone.now()
+    seen = agent.last_seen
+    if seen is not None and now - TOUCH_EVERY <= seen <= now:
+        return
+    stale = Q(last_seen__isnull=True) | Q(last_seen__lt=now - TOUCH_EVERY) | Q(last_seen__gt=now)
+    Agent.objects.filter(stale, pk=agent.pk).update(last_seen=now)
+    agent.last_seen = now
+
+
+def poll_reap_due(key):
+    """Whether a later round of a long poll should run its reaper now: at most once per ``POLL_REAP_EVERY`` across every process (``cache.add``).
+    Without the cache it always does, as before."""
+    try:
+        return bool(cache.add(key, 1, POLL_REAP_EVERY))
+    except Exception:  # noqa: BLE001 - without the cache every round reaps, as it did
+        return True
 
 
 def _parse_registration(body, creating):
@@ -784,10 +805,14 @@ def next_task(ctx, body=None):
     effs_cache = {}
     with _waiter_slot(wait > 0, agent.token) as slot:
         deadline = deadline if slot else 0
+        first = True
         while True:
             now = timezone.now()
             _touch(agent, now)
-            reap_expired(now)
+            due = poll_reap_due('agentapi:poll-reap')  # asked every round, so the first one's reaping holds the later ones off too
+            if due or first:
+                reap_expired(now)
+            first = False
             claimed, why = _try_claim(agent, kinds, now, effs_cache)
             if claimed or time.monotonic() >= deadline:
                 break
