@@ -549,7 +549,8 @@ def queue_work(ctx, slug, kind, match_ids=None, mode=None, tier=None, host=None,
     active = AgentTask.objects.filter(project=project, status__in=ACTIVE_TASK_STATUSES).count()
     if active >= MAX_ACTIVE_PER_PROJECT:
         raise ApiError(429, f'this project already has {MAX_ACTIVE_PER_PROJECT} agent tasks waiting or in progress')
-    qs = svc._matches_qs(project).select_related('cve_entry__detection', 'subdomain').prefetch_related('subdomain__ip_addresses__ports')
+    qs = svc._matches_qs(project, svc._current_named_ids(project, str(host)[:200]) if host and match_ids is None else None) \
+        .select_related('cve_entry__detection', 'subdomain').prefetch_related('subdomain__ip_addresses__ports')
     if match_ids is not None:
         qs = qs.filter(pk__in=match_ids)
     else:

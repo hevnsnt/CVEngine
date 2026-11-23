@@ -6,6 +6,7 @@ resolves the ones that no longer apply, so the table always reflects the current
 """
 import base64
 import datetime
+import json
 import logging
 import re
 from dataclasses import dataclass, field
@@ -394,29 +395,30 @@ def tls_targets(domain, hosts=None):
     """(host, port) pairs to probe: port 443 on every known host, plus other TLS ports seen open."""
     from startScan.models import open_ports
     from targetApp.target_types import scannable_hosts
-    targets, seen = [], set()
     selected = set(hosts) if hosts is not None else None
-
-    allowed = {}
-
-    def add(host, port):
-        if (host, port) not in seen and len(targets) < MAX_TLS_TARGETS:
-            seen.add((host, port))
-            if host not in allowed:  # a stored name may point somewhere a scanner must not go now
-                allowed[host] = bool(scannable_hosts([host], project=domain.project_id))
-            if allowed[host]:
-                targets.append((host, port))
+    candidates = []
     if selected is None or domain.name in selected:
-        add(domain.name, 443)
+        candidates.append((domain.name, 443))
     from cveFeed import host_resolver
     for sub in host_resolver.current_target_rows(domain).prefetch_related('ip_addresses__ports'):  # the Hosts page's hosts, never a stale row's ports
         if (selected is not None and sub.name not in selected) or not domain.includes_host(sub.name):  # =example.com: no name under it
             continue
-        add(sub.name, 443)
+        candidates.append((sub.name, 443))
         for ip in sub.ip_addresses.all():
             for port in open_ports(ip):
                 if port.number in TLS_PORTS and port.number != 443:
-                    add(sub.name, port.number)
+                    candidates.append((sub.name, port.number))
+    # a stored name may point somewhere a scanner must not go now: every host is judged by scannable_hosts, all of them in one call (the
+    # exclusions, archived hosts and the program's scope are read once, not once per host; each host gets the answer it gets on its own)
+    if not candidates:
+        return []
+    allowed = set(scannable_hosts(list(dict.fromkeys(host for host, _port in candidates)), project=domain.project_id))
+    targets, seen = [], set()
+    for host, port in candidates:
+        if (host, port) not in seen and len(targets) < MAX_TLS_TARGETS:
+            seen.add((host, port))
+            if host in allowed:
+                targets.append((host, port))
     return targets
 
 
@@ -433,10 +435,8 @@ def slp_targets(domain, hosts=None):
     from cveFeed import host_resolver
     from targetApp.target_types import scannable_hosts
     selected = set(hosts) if hosts is not None else None
-    out = []
+    found = []
     for sub in host_resolver.current_target_rows(domain).prefetch_related('ip_addresses__ports', 'technologies').order_by('name'):
-        if len(out) >= MAX_SLP_TARGETS:
-            break
         if (selected is not None and sub.name not in selected) or not domain.includes_host(sub.name):
             continue
         words = [t.name for t in sub.technologies.all()]
@@ -447,9 +447,12 @@ def slp_targets(domain, hosts=None):
                     continue
                 listening = listening or port.number == SLP_PORT
                 words += [port.service_name or '', port.product or '', port.os_guess or '']
-        if (listening or ESXI_WORDS.search(' '.join(w for w in words if w)[:4000])) and scannable_hosts([sub.name], project=domain.project_id):
-            out.append((sub.name, SLP_PORT))
-    return out
+        if listening or ESXI_WORDS.search(' '.join(w for w in words if w)[:4000]):
+            found.append(sub.name)
+    if not found:
+        return []
+    allowed = set(scannable_hosts(list(dict.fromkeys(found)), project=domain.project_id))  # one call for every host, not one per host
+    return [(name, SLP_PORT) for name in found if name in allowed][:MAX_SLP_TARGETS]
 
 
 def mail_candidates(domain):
@@ -473,6 +476,60 @@ def email_domains(domain, mx, cname=None):
 
 
 PENDING = 'pending'  # HygieneFinding.status of a DNS absence seen once and not agreed by two resolvers: evidence, not an open finding
+
+
+STORE_CHUNK = 500  # rows per statement when store_findings reads or writes a batch
+
+
+def _json_value(value):
+    """``value`` as a JSON column gives it back (tuples become lists, keys become strings), so a stored and a new value compare equal when the
+    database would hold the same thing. A value JSON cannot hold is returned as it is: it compares unequal and is written, as before."""
+    try:
+        return json.loads(json.dumps(value))
+    except (TypeError, ValueError):
+        return value
+
+
+def _same_value(row, name, value):
+    from django.db.models import JSONField
+    field = row._meta.get_field(name)
+    current = getattr(row, field.attname)
+    if field.is_relation:
+        return current == (value.pk if hasattr(value, 'pk') else value)
+    if isinstance(field, JSONField):
+        return _json_value(current) == _json_value(value)
+    return current == value
+
+
+def _set_fields(row, values):
+    """Set ``values`` on ``row``; returns whether any of them differs from what the row held."""
+    changed = False
+    for name, value in values.items():
+        if not _same_value(row, name, value):
+            changed = True
+        setattr(row, name, value)
+    return changed
+
+
+def _write_findings(made, dirty, seen, now):
+    """Write what ``store_findings`` decided, in batches: ``made`` (new rows, inserted; a row a parallel run filed first is updated, as
+    ``update_or_create`` did), ``dirty`` (``{pk: (row, fields)}``: only the fields the run set on that row, so a remediation a person set is
+    never written back unless the run reopened it) and the rows ``seen`` again unchanged, whose ``last_seen`` alone moves."""
+    from cveFeed.models import HygieneFinding
+    if made:
+        HygieneFinding.objects.bulk_create(made, batch_size=STORE_CHUNK, update_conflicts=True, unique_fields=['domain', 'host', 'check_name'],
+                                           update_fields=['severity', 'title', 'detail', 'evidence', 'status', 'resolved_at', 'last_seen'])
+    groups = {}
+    for row, fields in dirty.values():
+        row.last_seen = now
+        groups.setdefault(tuple(sorted(fields)), []).append(row)
+    for fields, rows in groups.items():
+        HygieneFinding.objects.bulk_update(rows, [*fields, 'last_seen'], batch_size=STORE_CHUNK)
+    same = [pk for pk in seen if pk not in dirty]
+    for row in (seen[pk] for pk in same):
+        row.last_seen = now
+    for i in range(0, len(same), STORE_CHUNK):
+        HygieneFinding.objects.filter(pk__in=same[i:i + STORE_CHUNK]).update(last_seen=now)
 
 
 def store_findings(domain, found, hosts=None, owns=lambda check: True, live_cnames=False, across_targets=False, unanswered=None):
@@ -501,6 +558,7 @@ def store_findings(domain, found, hosts=None, owns=lambda check: True, live_cnam
     except Exception:  # noqa: BLE001 - an unrated finding is better than a lost one
         logger.exception('could not rate the hygiene findings of %s', domain.name)
     keep = set()
+    now = timezone.now()
     # The same host and check filed under another target of this project (a host covered by its apex's target and by a target of its own):
     # that row is this finding too, so it is updated instead of filed twice (cveFeed.finding_lifecycle). One query for the whole run.
     elsewhere = {}
@@ -510,9 +568,19 @@ def store_findings(domain, found, hosts=None, owns=lambda check: True, live_cnam
                     .exclude(domain=domain).order_by('id')):
             if not (row.status == 'resolved' and (row.remediation_note or '').startswith(FOLDED)):
                 elsewhere.setdefault((row.host, row.check_name), row)
+    # This target's own rows of the findings, read once (one query per STORE_CHUNK names, not one per finding). A row is written only when
+    # the run changes it; one that is found again unchanged only has its last_seen moved, in one UPDATE for the run (``_write_findings``).
+    own = {}
+    if found:
+        names = sorted({f.host or domain.name for f in found})
+        checks = {f.check for f in found}
+        for i in range(0, len(names), STORE_CHUNK):
+            for row in HygieneFinding.objects.filter(domain=domain, host__in=names[i:i + STORE_CHUNK], check_name__in=checks):
+                own[(row.host, row.check_name)] = row
+    made, dirty, seen = [], {}, {}
     for f in found:
         keep.add((f.host or domain.name, f.check))
-        before = HygieneFinding.objects.filter(domain=domain, host=f.host or domain.name, check_name=f.check).first()
+        before = own.get((f.host or domain.name, f.check))
         if before is not None and before.status == 'resolved' and (before.remediation_note or '').startswith(FOLDED):
             before = None  # the engine folded this copy into another row: it stays closed, and that row is the finding
             folded_own = True
@@ -535,16 +603,31 @@ def store_findings(domain, found, hosts=None, owns=lambda check: True, live_cnam
                             remediation_note=(target.remediation_note + '\n' if target.remediation_note else '')
                             + 'Reopened: the check found this again after it was marked fixed.')
         if target is not None and target.domain_id != domain.id:
-            HygieneFinding.objects.filter(pk=target.pk).update(**defaults, last_seen=timezone.now())
+            row = target
         elif not folded_own:
-            HygieneFinding.objects.update_or_create(
-                domain=domain, host=f.host or domain.name, check_name=f.check, defaults=defaults)
+            row = before
+            if row is None:
+                row = HygieneFinding(domain=domain, host=f.host or domain.name, check_name=f.check, **defaults)
+                own[(row.host, row.check_name)] = row  # a second finding of the same row reads what this one set, as it read the database before
+                made.append(row)
+                continue
+        else:
+            continue
+        if row.pk is None:  # made by an earlier finding of this run: it is inserted with what the last one set
+            _set_fields(row, defaults)
+            continue
+        if _set_fields(row, defaults):
+            fields = dirty.setdefault(row.pk, (row, set()))[1]
+            fields.update(defaults)
+        seen[row.pk] = row
+    _write_findings(made, dirty, seen, now)
     stale = [x for x in HygieneFinding.objects.filter(domain=domain, status__in=('open', PENDING))
              if owns(x.check_name) and (hosts is None or x.host in hosts or (x.check_name.startswith('tls_') and x.host.rpartition(':')[0] in hosts))
              and (x.host, x.check_name) not in keep and not (unanswered and unanswered(x.host, x.check_name))]  # a certificate finding's host is 'name:port', a host-only run is given the names
     for x in stale:
-        x.status, x.resolved_at = 'resolved', timezone.now()
-        x.save(update_fields=['status', 'resolved_at'])
+        x.status, x.resolved_at = 'resolved', now
+    for i in range(0, len(stale), STORE_CHUNK):  # one UPDATE for the rows this run resolved, not one save per row
+        HygieneFinding.objects.filter(pk__in=[x.pk for x in stale[i:i + STORE_CHUNK]]).update(status='resolved', resolved_at=now)
     if domain.project_id:  # hygiene issues count toward the host score: a new or resolved one moves it now, not at the daily pass
         from cveFeed import scoring
         from cveFeed.host_resolver import base_name

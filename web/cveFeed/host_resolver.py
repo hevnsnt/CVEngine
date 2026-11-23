@@ -104,15 +104,26 @@ def host_link(slug, rep):
 
 GONE_MISSED_SCANS = 2  # successful full scans of its target in a row that must miss a name before its findings close as gone
 GONE_AFTER_DAYS_DEFAULT = 7
+DEEP_MARGIN_DAYS = 2  # past the deep discovery cadence: the daily sweep that queues the next deep run, and the run itself
 
 
 def gone_after_days():
-    """``CVENGINE_GONE_AFTER_DAYS``: how many days a name must have been missing (since a scan last saw it) before its findings close as gone."""
+    """How many days a name must have been missing (since a scan last saw it) before its findings close as gone: ``CVENGINE_GONE_AFTER_DAYS``,
+    but never less than the deep discovery cadence (``CVENGINE_TTL_BBOT_DEEP``, a week, ``tasks.deep_scan_apexes``) plus ``DEEP_MARGIN_DAYS``.
+
+    Only the weekly deep discovery finds some names; the standard runs between deep ones miss them. With a grace no longer than the deep
+    cadence, such a name closed as gone just before each deep run and reopened when it finished (``archive_closure.reopen_returned``), every
+    week. A name that is really gone is missed by the deep run as well and still closes, with the defaults 9 days after it was last seen
+    instead of 7."""
+    import math
     import os
+
+    from cveFeed import ledger
     try:
-        return max(0, int(os.environ.get('CVENGINE_GONE_AFTER_DAYS', GONE_AFTER_DAYS_DEFAULT)))
+        days = max(0, int(os.environ.get('CVENGINE_GONE_AFTER_DAYS', GONE_AFTER_DAYS_DEFAULT)))
     except (TypeError, ValueError):
-        return GONE_AFTER_DAYS_DEFAULT
+        days = GONE_AFTER_DAYS_DEFAULT
+    return max(days, math.ceil(max(0, ledger.ttl('bbot-deep')) / 86400) + DEEP_MARGIN_DAYS)
 
 
 def absent_names(project_ids, names_by_project, now=None):
