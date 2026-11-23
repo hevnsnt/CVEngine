@@ -1904,7 +1904,7 @@ def run_hygiene_all():
 
 @app.task(name="watch_certificate_transparency", bind=True, queue="ctwatch_queue")
 def watch_certificate_transparency(self, domain_id):
-    """Check one target against crt.sh for hosts not already known (see cveFeed.ctmonitor). When crt.sh could not be reached
+    """Check one target against crt.sh (Cert Spotter when crt.sh cannot answer) for hosts not already known (see cveFeed.ctmonitor). When no source could be reached
     (rate limit, timeout) the check is tried again later instead of the target being skipped. It has a queue of its own, off the
     feed queue that runs the work conductor, the reaper and the Sentinel feed: hundreds of lookups wait behind one shared rate limit,
     and a lookup that would sleep longer than a moment inside a slot goes back to the queue instead (``ctmonitor.CtBusy``).

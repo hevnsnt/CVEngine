@@ -63,7 +63,7 @@ ENTRIES = {
     'cve_seed_build': ('settings', 'cve_seed/build', 'Build a CVE seed export. Action.', None),
     'cve_guidance_run': ('settings', 'cve_guidance/run', 'Run the CVE guidance job now. Action.', None),
     # --- admin tables (administrators; the instance ones need an App Admin) -----------------------------------------------------------------------------
-    'timings': ('admin', 'timings', 'Timings: CVE feed interval, daily hygiene hour (UTC), certificate transparency interval, discovery and template-scan run limits.', None),
+    'timings': ('admin', 'timings', 'Timings: CVE feed interval, daily hygiene hour (UTC), certificate transparency interval and its fallback source (ct_fallback_source, true or false), discovery and template-scan run limits.', None),
     'scan_control': ('admin', 'scan-control', 'The scanning pause (and its reason).', None),
     'watchdog': ('admin', 'watchdog', 'The watchdog: what it watches, what it changed, its switches. A POST changes a switch or asks for an action.', None),
     'audit': ('admin', 'audit', 'The audit log of administrative changes (last 200).', None),

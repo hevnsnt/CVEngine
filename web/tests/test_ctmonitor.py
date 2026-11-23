@@ -210,8 +210,9 @@ class PoliteLookupTests(TestCase):
 		org = Org.objects.create(name='C', slug='c-t')
 		project = Project.objects.create(name='C', slug='ct-p', insert_date=timezone.now(), org=org)
 		domain = Domain.objects.create(name='retry.example', project=project, insert_date=timezone.now())
-		with mock.patch.object(ctmonitor, '_fetch', return_value=None):
+		with mock.patch.object(ctmonitor, '_fetch', return_value=None), mock.patch.object(ctmonitor, '_fetch_certspotter', return_value=None) as fallback:
 			self.assertEqual(ctmonitor.run_ct_watch(domain.id), {'checked': 0, 'new': 0, 'failed': True})
+		fallback.assert_called_once()  # crt.sh could not answer: the second source was asked, and could not either
 
 
 class InFlightTests(TestCase):
