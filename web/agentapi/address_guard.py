@@ -373,8 +373,9 @@ def record_resolved(scan, domain, name, ips):
     """Keep what a lookup resolved ``name`` to in the inventory (the host with its addresses), so every later question about the host is answered from it."""
     from startScan.models import IpAddress, Subdomain
     org = domain.project.org if domain.project_id else None
-    sub = Subdomain.objects.filter(scan_history=scan, target_domain=domain, name=name).first() or \
-        Subdomain.objects.create(scan_history=scan, target_domain=domain, name=name, discovered_date=timezone_now())
+    from startScan.ip_rows import get_or_create_first
+    sub = get_or_create_first(Subdomain, defaults={'discovered_date': timezone_now()},  # a host created meanwhile by another writer is read, not duplicated
+                              scan_history=scan, target_domain=domain, name=name)[0]
     for ip in ips:
         sub.ip_addresses.add(IpAddress.objects.get_or_create(address=ip, org=org)[0])
 

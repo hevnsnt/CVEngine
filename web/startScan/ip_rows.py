@@ -32,9 +32,10 @@ def get_or_create_ip(address, org_id=None):
 
 
 def get_or_create_first(model, defaults=None, **lookup):
-    """``get_or_create`` for a table without a unique constraint on the lookup (Technology by name, Subdomain by scan and name): when
-    two workers created the same row, or older data holds a duplicate, the oldest row is used instead of raising
-    MultipleObjectsReturned and failing the scan."""
+    """``get_or_create`` that never fails on a duplicate: when older data holds two rows for the lookup, the oldest is used instead of
+    raising MultipleObjectsReturned and failing the scan. Where a unique constraint backs the lookup (a host by scan, target and name,
+    ``uniq_sub_scan_dom_name``), a writer that loses the race to create the row reads the winner's row (``get_or_create`` retries the
+    read after the IntegrityError)."""
     try:
         return model.objects.get_or_create(defaults=defaults, **lookup)
     except model.MultipleObjectsReturned:

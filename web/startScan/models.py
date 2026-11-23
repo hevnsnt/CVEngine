@@ -215,6 +215,10 @@ class Subdomain(models.Model):
 			models.Index(fields=['scan_history', 'name'], name='sub_scan_name_idx'),
 			models.Index(fields=['target_domain', '-score'], name='sub_domain_score_idx'),
 		]
+		constraints = [
+			# one row per host in a scan (migration 0031 merged the duplicates); rows without a scan are not covered (NULLs differ)
+			models.UniqueConstraint(fields=['scan_history', 'target_domain', 'name'], name='uniq_sub_scan_dom_name'),
+		]
 
 	def __str__(self):
 		return str(self.name)

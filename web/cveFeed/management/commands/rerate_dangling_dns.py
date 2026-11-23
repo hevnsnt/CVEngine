@@ -62,8 +62,8 @@ def apply(vuln, severity, description, host):
     if host and vuln.target_domain_id:
         domain = vuln.target_domain
         if host == domain.name or host.endswith('.' + domain.name):
-            sub = (Subdomain.objects.filter(scan_history=vuln.scan_history, target_domain=domain, name=host).first()
-                   or Subdomain.objects.create(scan_history=vuln.scan_history, target_domain=domain, name=host))
+            from startScan.ip_rows import get_or_create_first
+            sub = get_or_create_first(Subdomain, scan_history=vuln.scan_history, target_domain=domain, name=host)[0]
             vuln.subdomain = sub
             fields.append('subdomain')
     if fields:
