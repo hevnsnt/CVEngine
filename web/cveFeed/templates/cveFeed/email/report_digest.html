@@ -32,6 +32,7 @@
         </tr>{% endfor %}
       </table>
       {% if totals_line %}<p class="soft" style="margin:0 0 4px 0;font-size:13px;color:#68686f">{{ totals_line }}</p>{% endif %}
+      {% if issues_line %}<p class="soft" style="margin:0 0 4px 0;font-size:13px;color:#68686f">{{ issues_line }}</p>{% endif %}
       <p class="ink" style="margin:0 0 4px 0;font-size:14px;color:#2e2e32">{% for h in heat_line %}<strong style="color:{% if h.heat == 'fire' %}{{ colours.fire }}{% elif h.heat == 'smoke' %}{{ colours.smoke }}{% else %}{{ colours.ice }}{% endif %}">{{ h.text }}</strong>{% if h.gloss %} <span class="soft" style="color:#68686f">{{ h.gloss }}</span>{% endif %}{% if not forloop.last %}. {% endif %}{% endfor %} <span class="soft" style="color:#68686f">&middot; CVE matches by heat</span></p>
       {% if not d.headline.compared %}<p class="soft" style="margin:0 0 4px 0;font-size:13px;color:#68686f">{{ d.headline.compared_note }}</p>{% endif %}
 

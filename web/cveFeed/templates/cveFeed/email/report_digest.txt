@@ -6,6 +6,7 @@ AT A GLANCE
 
 {% for t in tiles %}- {{ t.label }}: {{ t.value }}{% if t.delta %} ({{ t.delta }}){% elif t.note %} ({{ t.note }}){% endif %}
 {% endfor %}{% if totals_line %}{{ totals_line }}
+{% endif %}{% if issues_line %}{{ issues_line }}
 {% endif %}{% for h in heat_line %}{{ h.text }}{% if h.gloss %} {{ h.gloss }}{% endif %}{% if not forloop.last %}. {% endif %}{% endfor %} (CVE matches by heat)
 {% if not d.headline.compared %}{{ d.headline.compared_note }}
 {% endif %}{% if d.threats or d.threats_empty %}

@@ -151,7 +151,10 @@ test('the Findings page groups by product by default and keeps the other modes',
   // a group by product sends each member through the per-finding route, as a group of hosts does
   assert.deepEqual(FG.expandForBulk([row]).map((m) => m.id), row.group.member_ids);
   const header = FG.headerParts({group: 'product', total: 15, findings_total: 93, counts: {cve: 80}, groups: 2, grouped_findings: 80});
-  assert.match(header.lead, /^93 findings in 15 rows: $/);
+  assert.match(header.lead, /^93 findings in 15 distinct issues: $/);  // grouped by product, each row is a distinct issue (the numbers stay the server's)
+  assert.equal(header.note, FG.ISSUES_NOTE);
+  assert.match(FG.headerParts({group: 'product', total: 1, findings_total: 2140}).lead, /^2,140 findings in 1 distinct issue: $/);
+  assert.equal(FG.headerParts({group: 'cve', total: 5, findings_total: 15}).note, undefined);  // the other groupings keep their own words
   assert.match(header.grouped, /80 CVE matches shown as 2 rows, one per product version on a host/);
   const app = readFileSync(new URL('../static/cve/app.js', import.meta.url), 'utf8');
   assert.match(app, /import \{ versionGroupsCard \} from "\/staticfiles\/cve\/version-groups\.js"/);

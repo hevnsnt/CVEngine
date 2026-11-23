@@ -91,11 +91,29 @@ def _fixed_stats(project):
     return len(rows), (round(sum(deltas) / len(deltas), 2) if deltas else None)
 
 
-def shared_host_counts(rows=None):
+def shared_host_counts(rows=None, names_out=None):
     """``{'hosts': {project_id: n}, 'exposed': {project_id: n}}`` for every project, the numbers ``compute_snapshot`` gets for each alone, from one read of
-    the instance's hosts (``cveFeed.inventory_counts``) instead of one SQL collapse per project."""
+    the instance's hosts (``cveFeed.inventory_counts``) instead of one SQL collapse per project. ``names_out``: see ``inventory_counts.shared_host_counts``."""
     from cveFeed import inventory_counts
-    return inventory_counts.shared_host_counts(rows)
+    return inventory_counts.shared_host_counts(rows, names_out=names_out)
+
+
+def match_issue_counts(project_ids, current_ids=None, site_of=None):
+    """``{project_id: (cve matches, distinct issues)}`` of the actionable CVE matches of these projects (the set ``shared_finding_counts`` counts):
+    ``cveFeed.counts.match_issues`` over the all-projects form of the same ``_finding_sources`` query, one grouped read for every project. A project
+    with no match is absent (0 and 0). The distinct issues of a project's open findings are its ``open_findings`` total minus the matches plus
+    their issues (``counts.distinct_issues``)."""
+    from agentapi.services import AllProjects, _finding_sources
+    from cveFeed import counts
+    sources = _finding_sources(AllProjects(project_ids), {'status': 'actionable', 'type': 'cve'}, current_ids, counting=True)
+    return counts.match_issues(sources['cve'], site_of, by_project=True)
+
+
+def open_issues(project, open_findings):
+    """The distinct issues of one project's actionable findings, whose total is ``open_findings`` (``_open_findings_and_cve_matches``'s, summed)."""
+    from agentapi.services import _finding_sources
+    from cveFeed import counts
+    return counts.distinct_issues(open_findings, _finding_sources(project, {'status': 'actionable', 'type': 'cve'}, counting=True)['cve'])
 
 
 def compute_snapshot(project, date=None, with_fixed=True, shared=None):
