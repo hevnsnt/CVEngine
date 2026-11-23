@@ -38,6 +38,8 @@ up: check-env		## Build and start all services.
 	@python3 scripts/update-state.py upstream || true
 	@# a broker without a password gets one (Redis and its clients are recreated below, as their settings changed)
 	@bash -c '. scripts/redis-password.sh && cvengine_ensure_redis_password "$(CVENGINE_COMPOSE_ENV_FILE)" && echo "The Redis broker had no password: generated one (REDIS_PASSWORD in .env)." || true'
+	@# the least privilege database role the server runs as gets its password; the web service's migrate creates the role (docs/CONFIGURATION.md)
+	@bash -c '. scripts/db-app-role.sh && cvengine_ensure_db_app_password "$(CVENGINE_COMPOSE_ENV_FILE)" && echo "Generated the password of the database role the server runs as (CVENGINE_DB_APP_PASSWORD in .env)." || true'
 	${SENTINEL_BUILD_ENV} ${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} up -d --build ${SERVICES}
 	@# the old in-stack OpenVAS containers (no longer in docker-compose.yml) are stopped and removed; their volumes are kept
 	@bash -c '. scripts/retire-openvas.sh && cvengine_retire_openvas'
@@ -67,16 +69,16 @@ rotate-field-key:	## Rotate the key that encrypts stored API keys and webhook UR
 
 username: check-secrets	## Create an admin account of your own choosing (asks for the password; use after make up).
 ifeq ($(isNonInteractive), true)
-	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} exec web python3 manage.py createsuperuser --username ${DJANGO_SUPERUSER_USERNAME} --email ${DJANGO_SUPERUSER_EMAIL} --noinput
+	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} exec -e CVENGINE_DB_ROLE=owner web python3 manage.py createsuperuser --username ${DJANGO_SUPERUSER_USERNAME} --email ${DJANGO_SUPERUSER_EMAIL} --noinput
 else
-	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} exec web python3 manage.py createsuperuser
+	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} exec -e CVENGINE_DB_ROLE=owner web python3 manage.py createsuperuser
 endif
 
 changepassword:	## Change password for user
 	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} exec web python3 manage.py changepassword
 
-migrate:		## Apply migrations
-	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} exec web python3 manage.py migrate
+migrate:		## Apply migrations (as the database's owner role, which also grants the app role the server runs as)
+	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} exec -e CVENGINE_DB_ROLE=owner web python3 manage.py migrate
 
 down:			## Down all services.
 	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} down

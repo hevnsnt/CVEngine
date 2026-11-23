@@ -98,12 +98,20 @@ if os.path.exists(EDITION_FILE):
         RENGINE_EDITION = _edition
 
 # Databases
+# Two database roles (reNgine/db_roles.py, docs/CONFIGURATION.md "Database roles"). At run time web, celery and celery-beat connect as the least
+# privilege app role (CVENGINE_DB_APP_USER, default cvengine_app, with CVENGINE_DB_APP_PASSWORD). The owner role (POSTGRES_USER) is used only by
+# the migrations and the other commands in db_roles.OWNER_COMMANDS, by a process started with CVENGINE_DB_ROLE=owner, and as the fallback when
+# no app password is set or the container's entrypoint found that the app role cannot log in yet. DATABASE_ROLE says which one this process uses.
+from reNgine import db_roles as _db_roles
+import sys as _sys
+_DB_CREDENTIALS = _db_roles.resolve(os.environ, _sys.argv)
+DATABASE_ROLE = _DB_CREDENTIALS['role']
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
         'NAME': env('POSTGRES_DB'),
-        'USER': env('POSTGRES_USER'),
-        'PASSWORD': env('POSTGRES_PASSWORD'),
+        'USER': _DB_CREDENTIALS['user'] if DATABASE_ROLE == 'app' else env('POSTGRES_USER'),
+        'PASSWORD': _DB_CREDENTIALS['password'] if DATABASE_ROLE == 'app' else env('POSTGRES_PASSWORD'),
         'HOST': env('POSTGRES_HOST'),
         'PORT': env('POSTGRES_PORT'),
         # No JIT. CVEngine's host queries are large (one row per host: window functions, a dozen correlated subqueries) and Postgres

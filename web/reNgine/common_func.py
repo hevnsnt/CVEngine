@@ -429,7 +429,7 @@ def update_or_create_port(port_number, service_name=None, description=None, ip=N
 			description (str, optional): A description of the service associated with the port. On an existing port it
 				only fills an empty description, and only when the stored service name is empty or the same as service_name,
 				so a description never describes another service than the one stored.
-			ip (IpAddress, optional): when given, the port is looked up among (and created for) this IP only, never
+			ip (IpAddress, optional): when given, the port is looked up among (and created for, and linked to) this IP only, never
 				shared with another IP: nmap's product and version are stored on the row, so a shared row would show
 				one host's service on every host that has the same port number open.
 
@@ -443,7 +443,14 @@ def update_or_create_port(port_number, service_name=None, description=None, ip=N
 		port = ip.ports.filter(number=port_number, protocol__in=('', 'tcp')).order_by('id').first()  # the callers (discovery, httpx) find TCP services
 	else:
 		port = Port.objects.filter(number=port_number).order_by('id').first()
-	if port is None:
+	if port is None and ip is not None:
+		# created as this IP's own port and linked to it; a port another writer stored for this IP meanwhile is returned instead
+		from startScan.port_rows import create_port
+		port = Port(number=port_number, service_name=service_name, description=description)
+		created = create_port(ip.pk, port)
+		if not created:
+			port.refresh_from_db()
+	elif port is None:
 		port = Port.objects.create(
 			number=port_number,
 			service_name=service_name,
