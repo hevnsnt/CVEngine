@@ -2824,7 +2824,7 @@ class AdminAlert(models.Model):
     resolved_at = models.DateTimeField(null=True, blank=True)
     dismissed_at = models.DateTimeField(null=True, blank=True)
     dismissed_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
-    dismissed_digest = models.CharField(max_length=40, blank=True, default="")
+    dismissed_digest = models.CharField(max_length=40, blank=True, default="")  # the severity letter and the digest a dismissal was given for (cveFeed.reviewer.dismissal_mark)
 
     class Meta:
         indexes = [models.Index(fields=["code", "resolved_at"], name="adminalert_code_open_idx")]
