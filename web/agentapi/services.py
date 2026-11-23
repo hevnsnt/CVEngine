@@ -4296,9 +4296,15 @@ def _current_named_ids(project, text):
     return list(Subdomain.objects.filter(id__in_array=_id_array(named)).filter(latest_scan_q()).order_by().values_list('pk', flat=True))
 
 
+MATCH_GROUP_BY = ('none', 'product')  # list_cve_matches group_by: none (the default, one row per match) or product (cveFeed.version_groups)
+
+
 def list_matches(ctx, slug, params):
     project, _ = get_project(ctx, slug)
-    qs = _matches_qs(project, _current_named_ids(project, params['host']) if params.get('host') else None)
+    group_by = str(params.get('group_by') or 'none').strip().lower()
+    if group_by not in MATCH_GROUP_BY:
+        raise ApiError(400, 'group_by must be none or product')
+    qs = _matches_qs(project, _current_named_ids(project, params['host']) if params.get('host') else None, counting=group_by == 'product')
     if params.get('status') == 'closed':  # any closing status: fixed, accepted_risk or false_positive
         from cveFeed.counts import CLOSED
         qs = qs.filter(remediation_status__in=CLOSED)
@@ -4320,9 +4326,61 @@ def list_matches(ctx, slug, params):
         qs = qs.filter(cve_entry__cve_id__iexact=params['cve'].strip()[:40])
     if _kev_only(params):
         qs = qs.filter(cve_entry__kev=True)
+    if group_by == 'product':
+        return _grouped_matches(project, qs, params)
     # what each row's explanation reads about its host's distribution (match_explain.host_hint): a few queries for the page, none per row
     qs = qs.prefetch_related('subdomain__technologies', 'subdomain__ip_addresses__ports')
     return paginate_narrow(qs, params, _tagged(_match, lambda m: m.subdomain.target_domain.project) if _is_all(project) else _match)
+
+
+def _version_sites(rows):
+    """``site_of(project id, name)`` for ``cveFeed.version_groups``: the host the Hosts page shows each name of ``rows`` under (``host_of_names``:
+    every current copy of a name, and the names on exactly the same addresses, are one host, as a host's ``aliases`` say), or None for a name
+    it does not know. Two statements: the current rows of those names (read as ``_current_named_ids`` does), then the collapse over them."""
+    from cveFeed.correlation import latest_scan_q
+    from startScan.models import Subdomain
+    pairs = {(r.get('subdomain__target_domain__project_id'), r.get('subdomain__name')) for r in rows}
+    pairs = {(p, n) for p, n in pairs if p is not None and n}
+    if not pairs:
+        return None
+    named = list(Subdomain.objects.filter(target_domain__project_id__in={p for p, _ in pairs}, name__in={n for _, n in pairs})
+                 .order_by().values_list('pk', flat=True))
+    if not named:
+        return None
+    current = Subdomain.objects.filter(id__in_array=_id_array(named)).filter(latest_scan_q())
+    hosts = {(project_id, name): ('h', host_id) for project_id, name, host_id, _host in host_of_names(current)}
+    return lambda project_id, name: hosts.get((project_id, name))
+
+
+def _grouped_matches(project, qs, params):
+    """``list_matches`` with ``group_by=product``: the same filters, the matches that rest on one product version reading of one host (every
+    name of it) as one group (``cveFeed.version_groups``), hottest first, then the most severe, the most CVEs. A match that does not group (hard
+    evidence of its own, no version) is a group of one with ``single`` set. Pages over the groups (``page``, ``page_size``: the list's own
+    default and cap), with ``has_more`` and ``next_page``. ``findings_total`` counts the matches behind them; ``scan_truncated`` says the pass
+    read only the first GROUP_SCAN_MAX matches (newest first), so the groups cover those. Queries: the values() pass, the hosts of the names,
+    the affected ranges of the page's CVEs."""
+    from cveFeed import version_groups
+    from dashboard.models import Project
+    page, size = page_args(params, zero_ok=True)
+    rows = list(version_groups.rows_of(version_groups.with_list_annotations(qs)).order_by('-id')[:version_groups.GROUP_SCAN_MAX])
+    built = sorted(version_groups.build(rows, _version_sites(rows)), key=version_groups.sort_key)
+    start = (page - 1) * size
+    page_items = built[start:start + size] if size else []
+    affected = version_groups.affected_of([item for item in page_items if len(item['members']) > 1])
+    everywhere = _is_all(project)
+    slugs = dict(Project.objects.filter(id__in={item['rep']['subdomain__target_domain__project_id'] for item in page_items})
+                 .values_list('id', 'slug')) if everywhere and page_items else {}
+    results = []
+    for item in page_items:
+        row = version_groups.summary(item, affected, _iso) if len(item['members']) > 1 else {'single': version_groups.single(item['rep'], _iso)}
+        if everywhere:
+            row['project'] = slugs.get(item['rep']['subdomain__target_domain__project_id'])
+        results.append(row)
+    has_more = bool(size) and start + size < len(built)
+    truncated = len(rows) >= version_groups.GROUP_SCAN_MAX
+    return {'count': len(built), 'page': page, 'page_size': size, 'group_by': 'product', 'findings_total': qs.count() if truncated else len(rows),
+            'groups': sum(1 for item in built if len(item['members']) > 1), 'scan_truncated': truncated,
+            'has_more': has_more, 'next_page': page + 1 if has_more else None, 'results': results}
 
 
 # --- the unified Findings list: CVE matches, scanner findings and hygiene findings as one population ------------------
@@ -4539,7 +4597,8 @@ def _attach_reviews(rows):
             seen = [found[by_match[m]] for m in members if by_match.get(m) in found]
             own = max(seen, key=lambda r: r['at']) if seen else None
             if own:
-                own = {**own, 'scope_text': f"This is the newest AI review of the {len(members)} hosts in this group; it has looked at {len(seen)} of them."}
+                unit = 'findings' if row['group'].get('by') == 'product' else 'hosts'
+                own = {**own, 'scope_text': f"This is the newest AI review of the {len(members)} {unit} in this group; it has looked at {len(seen)} of them."}
         row['ai_review'] = own
     return rows
 
@@ -4549,7 +4608,8 @@ def _finding_project(kind, obj):
             'hygiene': lambda o: o.domain.project}[kind](obj)
 
 
-GROUP_MODES = ('none', 'cve')  # group=cve: the same script on sibling hosts is one row (cveFeed.finding_groups)
+GROUP_MODES = ('none', 'cve', 'product')  # group=cve: the same script on sibling hosts is one row (cveFeed.finding_groups); group=product: the CVE
+# matches of one product version on one host (its names) are one row (cveFeed.version_groups)
 
 
 def list_findings(ctx, slug, params):
@@ -4558,17 +4618,18 @@ def list_findings(ctx, slug, params):
     (actionable, the default, or all), host, and kev=1 (CVE matches of a CVE listed as exploited only, whatever their heat). ``counts`` holds the total of each type under the same facets; the list itself
     pages through at most MAX_FINDINGS rows (``truncated`` says when there are more).
 
-    ``group=cve`` folds the CVE matches of one script on sibling hosts into one row (``_grouped_findings``); the default
-    (``group=none``) is one row per host, as it always was."""
+    ``group=cve`` folds the CVE matches of one script on sibling hosts into one row (``_grouped_findings``); ``group=product`` folds
+    the CVE matches that rest on one product version reading of one host (every name of it) into one row (``cveFeed.version_groups``);
+    the default (``group=none``) is one row per host, as it always was."""
     project, _ = get_project(ctx, slug)
     page, size = page_args(params, zero_ok=True)  # page_size=0: the counts alone
     group = str(params.get('group') or 'none').strip().lower()
     if group not in GROUP_MODES:
-        raise ApiError(400, 'group must be none or cve')
+        raise ApiError(400, 'group must be none, cve or product')
     sources = _finding_sources(project, params)
     counts = _finding_counts(project, params, sources) if not size else {key: qs.count() for key, qs in sources.items()}
-    if group == 'cve':
-        return _grouped_findings(project, sources, counts, page, size)
+    if group in ('cve', 'product'):
+        return _grouped_findings(project, sources, counts, page, size, by=group)
     total = sum(counts.values())
     start, stop = (page - 1) * size, min(page * size, MAX_FINDINGS)
     merged = []
@@ -4625,7 +4686,7 @@ def _retest_counts(project):
     return snapshot_cache.snapshot('retest-counts', scope, lambda: counts_lib.retest_counts(ids), RETEST_COUNTS_SECONDS)['payload']
 
 
-def _grouped_findings(project, sources, counts, page, size):
+def _grouped_findings(project, sources, counts, page, size, by='cve'):
     """``list_findings`` with ``group=cve``: the same facets and order, but the CVE matches of one script on sibling hosts are one row
     (the rule is in ``cveFeed.finding_groups``). A group row is its hottest member's ordinary row (its id and kind open that member)
     plus ``group``: every member's id, host and own status, and the split of heat, status, classification and validation.
@@ -4634,10 +4695,22 @@ def _grouped_findings(project, sources, counts, page, size):
     ``count`` count rows (they page the list), ``findings_total`` is the host findings behind them, ``groups`` the rows that stand for
     more than one host and ``grouped_findings`` the host findings inside those. Queries: the counts, one values() pass over the
     filtered CVE matches (at most GROUP_SCAN_MAX, ``group_scan_truncated`` past that: the rest stay one row each), the top of the
-    scanner and hygiene lists, and one query for the representatives on the page."""
-    from cveFeed import finding_groups
+    scanner and hygiene lists, and one query for the representatives on the page.
+
+    ``by='product'`` groups with ``cveFeed.version_groups`` instead: the matches that rest on one product version reading of one host
+    (``_version_sites``: the Hosts page's fold of names) are one row, whatever their CVE. Two more queries: the hosts of the names read,
+    and the affected ranges of the page's groups' CVEs (for the fixed-in version)."""
+    from cveFeed import finding_groups, version_groups
     cve_qs = sources.get('cve')
-    built, scanned = finding_groups.read(cve_qs) if cve_qs is not None else ([], 0)
+    if by == 'product':
+        if cve_qs is not None:
+            rows = list(version_groups.rows_of(cve_qs)[:version_groups.GROUP_SCAN_MAX])
+            rows.sort(key=lambda r: finding_groups.sort_key({**r, 'when': r.get('created_at')}), reverse=True)  # hottest first: a group's first member speaks for it
+            built, scanned = version_groups.build(rows, _version_sites(rows)), len(rows)
+        else:
+            built, scanned = [], 0
+    else:
+        built, scanned = finding_groups.read(cve_qs) if cve_qs is not None else ([], 0)
     overflow = max(0, counts.get('cve', 0) - scanned)
     row_counts = {key: counts.get(key, 0) for key in FINDING_TYPES}
     if cve_qs is not None:
@@ -4658,10 +4731,11 @@ def _grouped_findings(project, sources, counts, page, size):
     def order(pair):
         key, item = pair
         if key == 'cve':
-            return finding_groups.sort_key(item['rep'])
+            return finding_groups.sort_key({**item['rep'], 'when': item['rep'].get('when') or item['rep'].get('created_at')} if by == 'product' else item['rep'])
         return (item.heat_rank, item.sev, item.when or epoch, item.id)
     merged.sort(key=order, reverse=True)
     page_items = merged[start:stop]
+    affected = version_groups.affected_of([item for key, item in page_items if key == 'cve' and len(item['members']) > 1]) if by == 'product' else None
     rep_ids = [item['rep']['id'] for key, item in page_items if key == 'cve']
     reps = {obj.id: obj for obj in cve_qs.filter(id__in=rep_ids).select_related('subdomain__target_domain')} if rep_ids else {}
     everywhere = _is_all(project)
@@ -4673,7 +4747,7 @@ def _grouped_findings(project, sources, counts, page, size):
                 continue
             row = _finding_row('cve', obj)
             if len(item['members']) > 1:
-                row['group'] = finding_groups.summary(item, _iso)
+                row['group'] = version_groups.summary(item, affected, _iso) if by == 'product' else finding_groups.summary(item, _iso)
         else:
             key, obj = ('cve' if key == 'cve-obj' else key), item
             row = _finding_row(key, obj)
@@ -4683,7 +4757,7 @@ def _grouped_findings(project, sources, counts, page, size):
         results.append(row)
     _attach_reviews(results)
     return {'count': min(total, MAX_FINDINGS), 'total': total, 'truncated': total > MAX_FINDINGS, 'page': page, 'page_size': size,
-            'counts': {key: counts.get(key, 0) for key in FINDING_TYPES}, 'group': 'cve', 'row_counts': row_counts,
+            'counts': {key: counts.get(key, 0) for key in FINDING_TYPES}, 'group': by, 'row_counts': row_counts,
             'findings_total': sum(counts.values()), 'groups': len(multi), 'grouped_findings': sum(len(g['members']) for g in multi),
             'group_scan_truncated': overflow > 0, 'results': results}
 
