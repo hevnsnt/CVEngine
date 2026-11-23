@@ -2355,29 +2355,27 @@ def latest_scan_q(prefix=""):
     from another model ("subdomain__" for a CVEMatch)."""
     from django.db.models import Exists, OuterRef, Q
 
-    from cveFeed.current_scans import current_scan_sets
+    from cveFeed import current_scans  # noqa: F401 (registers the lookup in_current_scans)
     from startScan.models import Subdomain
 
-    # The scan ids are read here, in one small statement over two partial indexes (cveFeed.current_scans), and passed as array literals. Embedded
-    # as subqueries they were rebuilt by every statement (a window over every finished scan and two seq scans of the scan table) and kept the
-    # planner from reaching the rows by them: it read every host and filtered most away (52,000 buffers, about 140 ms for the bare id query on a
-    # live install of 31,000 hosts; about 4,000 buffers and 15 ms this way). The rows are the same; the sets are read when the filter is built.
-    sets = current_scan_sets()
-    after_full = sets.after_full
+    # The scan ids are read when the statement is compiled, in one small statement over two partial indexes (cveFeed.current_scans), and written
+    # into it as array literals. Embedded as subqueries they were rebuilt by every statement (a window over every finished scan and two seq scans
+    # of the scan table) and kept the planner from reaching the rows by them: it read every host and filtered most away (52,000 buffers, about
+    # 140 ms for the bare id query on a live install of 31,000 hosts; about 4,000 buffers and 15 ms this way). Same rows, read at the same moment.
     same_host = Subdomain.objects.filter(target_domain_id=OuterRef(prefix + "target_domain_id"),
                                          name=OuterRef(prefix + "name"))
-    newer_row = same_host.filter(scan_history_id__in_id_array=after_full,
+    newer_row = same_host.filter(scan_history_id__in_current_scans="after_full",
                                  scan_history_id__gt=OuterRef(prefix + "scan_history_id"))
     # Before the first successful full scan, keep the newest scanned copy of each host. A scanless row (certificate transparency,
     # an import) is not a copy of a scan: its own addresses and findings fold into the host, so it stays current beside the scanned copy.
     newer_fallback = same_host.filter(scan_history__isnull=False, id__gt=OuterRef(prefix + "id"))
     # "Not a domain with a full scan" is written as "a domain without one, or none": the same rows (every domain id is a Domain), and the
     # planner can reach them by the domain index instead of reading every host.
-    return ((Q(**{prefix + "scan_history_id__in_id_array": sets.latest_full | after_full})
+    return ((Q(**{prefix + "scan_history_id__in_current_scans": "current"})
              | Q(**{prefix + "scan_history__isnull": True})
-             | Q(**{prefix + "target_domain_id__in_id_array": sets.unfull_domains}) | Q(**{prefix + "target_domain_id__isnull": True}))
+             | Q(**{prefix + "target_domain_id__in_current_scans": "unfull_domains"}) | Q(**{prefix + "target_domain_id__isnull": True}))
             & ~Q(Exists(newer_row))
-            & (Q(**{prefix + "scan_history__isnull": True}) | Q(**{prefix + "target_domain_id__in_id_array": sets.full_domains})
+            & (Q(**{prefix + "scan_history__isnull": True}) | Q(**{prefix + "target_domain_id__in_current_scans": "full_domains"})
                | ~Q(Exists(newer_fallback))))
 
 

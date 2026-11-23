@@ -569,7 +569,8 @@ class ListTests(Base):
         self.assertEqual(first, {'verified_fixed': 0, 'unverified_fixed': 0, 'reopened': 0})
         again, cheaper = poll()
         self.assertEqual(again, first)
-        self.assertEqual(cost - cheaper, 3, 'the second poll must not run the three retest aggregates')
+        # the three aggregates, and the read of the current scan ids (cveFeed.current_scans) run first by the one that reads the current hosts
+        self.assertEqual(cost - cheaper, 4, 'the second poll must not run the three retest aggregates')
         with self.captureOnCommitCallbacks(execute=True):  # what a person marking a finding fixed does: the revision moves on commit
             self.assertEqual(self.mark()[0], 200)
         after, _ = poll()

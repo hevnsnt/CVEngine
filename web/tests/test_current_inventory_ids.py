@@ -151,18 +151,33 @@ class SameAnswerTests(World):
 
 
 class ShapeTests(World):
-    def test_the_sets_are_read_in_one_statement_over_the_partial_indexes(self):
+    def test_one_read_of_the_sets_per_statement_over_the_partial_indexes(self):
         self.build()
+        qs = CVEMatch.objects.filter(latest_scan_q('subdomain__')).filter(subdomain__in=Subdomain.objects.filter(latest_scan_q()))
         with CaptureQueriesContext(connection) as queries:
-            latest_scan_q()
-        self.assertEqual(len(queries.captured_queries), 1)
-        sql = queries.captured_queries[0]['sql']
+            list(qs.values_list('id', flat=True))
+        # two filters, two subqueries each, five lookups: one read of the sets, then the statement
+        self.assertEqual(len(queries.captured_queries), 2, [q['sql'][:120] for q in queries.captured_queries])
+        sets_sql = queries.captured_queries[0]['sql']
+        self.assertTrue(sets_sql.startswith('WITH full_last'), sets_sql[:120])
         with connection.cursor() as cursor:
             cursor.execute('SET LOCAL enable_seqscan = off')  # the tables are tiny: make the planner show whether it CAN use the indexes
-            cursor.execute('EXPLAIN ' + sql)
+            cursor.execute('EXPLAIN ' + sets_sql)
             plan = '\n'.join(row[0] for row in cursor.fetchall())
         self.assertIn('scan_done_full_idx', plan)
         self.assertIn('scan_done_pipe_idx', plan)
+
+    def test_a_queryset_read_later_sees_the_scans_as_they_are_then(self):
+        """The sets are read when the statement runs, not when the filter is built (a page of a long walk is filtered again: cveFeed.work_planner)."""
+        d = self.domain('later.ci.example.test')
+        old = self.scan(d)
+        self.host(d, 'www.later', old)
+        hosts = Subdomain.objects.filter(latest_scan_q(), target_domain=d)
+        self.assertEqual(hosts.count(), 1)
+        self.host(d, 'new.later', self.scan(d))  # a newer full scan finishes: the old scan's rows leave the inventory
+        self.assertEqual(sorted(hosts.values_list('name', flat=True)), ['new.later'])
+        ScanHistory.objects.filter(domain=d).exclude(pk=old.pk).update(scan_status=0)  # and an update that sends no signal is seen too
+        self.assertEqual(sorted(hosts.values_list('name', flat=True)), ['www.later'])
 
     def test_the_statement_carries_ids_not_scan_subqueries(self):
         self.build()
@@ -176,9 +191,11 @@ class ShapeTests(World):
         self.assertIn(HOST_PIPELINE_TASK, conditions['scan_done_full_idx'])
         self.assertIn(HOST_PIPELINE_TASK, conditions['scan_done_pipe_idx'])
 
-    def test_an_empty_id_set_matches_nothing(self):
+    def test_with_no_finished_scan_the_sets_are_empty(self):
         d = self.domain('empty.ci.example.test')
         self.host(d, 'www.empty', self.scan(d, status=1))
-        self.assertFalse(Subdomain.objects.filter(scan_history_id__in_id_array=frozenset()).exists())
-        self.assertTrue(Subdomain.objects.filter(target_domain_id__in_id_array={d.id}).exists())
-        self.assertEqual(current_scans.current_scan_sets().latest_full, frozenset())
+        sets = current_scans.current_scan_sets(connection)
+        self.assertEqual((sets.current, sets.full_domains, sets.unfull_domains), (frozenset(), frozenset(), frozenset({d.id})))
+        self.assertTrue(Subdomain.objects.filter(latest_scan_q(), target_domain=d).exists())
+        with self.assertRaises(ValueError):
+            Subdomain.objects.filter(scan_history_id__in_current_scans='nonsense')
