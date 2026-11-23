@@ -3,6 +3,7 @@
 // and none of it is ever HTML.
 import { setNotices } from "/staticfiles/cve/statusstrip.js";
 import { localTimes } from "/staticfiles/cve/watchdog-text.js";
+import { afterPoll } from "/staticfiles/cve/statusstrip-logic.js";
 
 const csrf = document.querySelector("[name=csrfmiddlewaretoken]");
 const el = (tag, cls, text) => {
@@ -19,9 +20,11 @@ const POLL_MS = 120000;
 // button that opens the whole list right here (and "Show fewer" folds it back); nothing sends the person to another page.
 let current = [];
 let showAll = false;
+const dismissedAt = new Map(); // alert id -> when its dismissal was stored (Infinity while the request is on its way): a poll that began earlier does not bring it back
 let reminder = null; // the line about questions an update left open (cveFeed/setup_questions.py): it stays until they are answered, so it has no Dismiss
 
-function render(alerts) {
+// force: drawn because a person pressed a button here (Dismiss, Show all), so the strip redraws at once (statusstrip.js setNotices)
+function render(alerts, force = false) {
   current = alerts;
   const shown = showAll ? alerts : alerts.slice(0, SHOWN);
   const items = shown.map((a) => {
@@ -43,13 +46,19 @@ function render(alerts) {
     dismiss.type = "button";
     dismiss.addEventListener("click", async () => {
       dismiss.disabled = true;
+      dismissedAt.set(a.id, Infinity);
+      render(current.filter((x) => x.id !== a.id), true); // gone from the list and from the count at once
+      let stored = false;
       try {
-        await fetch(`/cve/api/settings/alerts/${encodeURIComponent(a.id)}/dismiss`, {
+        const r = await fetch(`/cve/api/settings/alerts/${encodeURIComponent(a.id)}/dismiss`, {
           method: "POST", credentials: "same-origin", headers: csrf ? { "X-CSRFToken": csrf.value } : {},
         });
-      } finally {
-        render(current.filter((x) => x.id !== a.id));
+        stored = !!(r && r.ok);
+      } catch (_) {
+        stored = false;
       }
+      if (stored) dismissedAt.set(a.id, Date.now());
+      else dismissedAt.delete(a.id); // not stored: the next poll shows it again, as the server still has it open
     });
     row.append(text, dismiss);
     return { kind: "alert", text: localTimes(a.title), node: row, rank: a.severity === "critical" ? 0 : 2 };
@@ -63,7 +72,7 @@ function render(alerts) {
     toggle.setAttribute("aria-expanded", String(showAll));
     toggle.addEventListener("click", () => {
       showAll = !showAll;
-      render(current);
+      render(current, true);
     });
     row.append(toggle);
     items.push({ kind: "more", text: label, node: row, rank: 3 });
@@ -77,16 +86,19 @@ function render(alerts) {
     row.append(text, open);
     items.unshift({ kind: "questions", text: reminder.text, node: row, rank: 2 });
   }
-  setNotices("alerts", items);
+  // the count is every open alert (also those folded behind the button) and the reminder; the "more" row is a button, not a notice
+  setNotices("alerts", items, { count: alerts.length + (items.some((i) => i.kind === "questions") ? 1 : 0), force });
 }
 
 async function poll() {
+  const started = Date.now();
   try {
     const r = await fetch("/cve/api/settings/alerts", { credentials: "same-origin", cache: "no-store" });
     if (r.ok) {
       const body = await r.json();
       reminder = body.questions && body.questions.text ? body.questions : null;
-      render(body.alerts || []);
+      render(afterPoll(body.alerts || [], dismissedAt, started));
+      for (const [id, at] of dismissedAt) if (at < started) dismissedAt.delete(id); // this answer was made after the dismissal: the server's word holds from now on
     }
   } catch (_) {
     // the server is restarting or unreachable: keep what is shown
