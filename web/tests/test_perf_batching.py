@@ -103,3 +103,5 @@ class LightPassBatchingTests(TestCase):
 		self.assertEqual(len(inserts), 1)
 		self.assertLess(len([q for q in ctx if 'startScan_technology' in q['sql']]), 10)  # 90 get_or_creates before
 		self.assertEqual(sorted(out['techs']['h0.batch.test']), ['nginx', 'php', 'wordpress'])
+		# the scan's addresses are read once for the lookup table (a prefetch), not once per host
+		self.assertLess(len([q for q in ctx if 'startScan_subdomain_ip_addresses' in q['sql']]), 5)

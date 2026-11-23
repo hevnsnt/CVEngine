@@ -696,7 +696,8 @@ def queue_retests(ip, numbers, project, pipeline=None):
     for domain_id, name, project_id in fullscan.active_attached(ip).values_list('target_domain_id', 'name', 'target_domain__project_id'):
         by_domain.setdefault((domain_id, project_id), set()).add(name.lower())
     for (domain_id, project_id), names in list(by_domain.items())[:retest.max_hosts()]:
-        names = [n for n in sorted(names) if n not in ledger.fresh(retest.RETEST_SERVICE, names, project_id)][:retest.max_hosts()]
+        fresh = ledger.fresh(retest.RETEST_SERVICE, names, project_id)  # one ledger read for the names, not one per name
+        names = [n for n in sorted(names) if n not in fresh][:retest.max_hosts()]
         if not names:
             continue
         try:

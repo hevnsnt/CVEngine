@@ -10,6 +10,8 @@ The review is always fetched through the route's own project and host (the host 
 review is a 404, exactly like a missing one. ``host_note``, a finding's ``note`` and the step's ``note`` are the model's words, and the model read text
 from the scanned host: they are cleaned on the server but a client still treats them as untrusted data and shows them as text, never as markup.
 """
+from functools import cached_property
+
 from agentapi.services import ApiError, _int_param, _iso, _user_brief, get_one_project
 
 REAL = ('true_open', 'true_in_progress', 'true_fixed', 'true_accepted_risk')
@@ -53,16 +55,40 @@ def _newest(project, host):
     return HostReview.objects.filter(project=project, host=host).select_related('dismissed_by').order_by('-created_at', '-id').first()
 
 
-def readiness(project, host):
+class _HostFacts:
+    """What one answer about a host's review reads more than once (the project's mode, the host's open rows, its unchanged review), each read at most
+    once for that answer. Nothing is written while the answer is built, so a second read would return the same thing."""
+
+    def __init__(self, project, host):
+        self.project, self.host = project, host
+
+    @cached_property
+    def mode(self):
+        from cveFeed import host_review
+        return host_review.mode_of(self.project)
+
+    @cached_property
+    def rows(self):
+        from cveFeed import host_review
+        return host_review.open_rows(self.project, self.host)
+
+    @cached_property
+    def unchanged(self):
+        from cveFeed import host_review
+        return host_review.unchanged_review(self.project, self.host, rows=self.rows)  # every path that asks this also asks for the rows
+
+
+def readiness(project, host, facts=None):
     """Whether "Review now" would be accepted, and if not why: ``{can_request, reason_code, reason}``. The codes are ``unavailable`` (not a host of the
     project, archived, excluded, gone), ``off`` (switched off for the project), ``disabled`` (switched off for the install: the default until a person turns it on in Settings), ``no_provider``, ``paused``, ``daily_limit``,
     ``open`` (a review is already running) and ``nothing_open`` (no open finding to review)."""
     from cveFeed import host_review
     from cveFeed.models import HostReview
+    facts = facts or _HostFacts(project, host)
     why = host_review.unavailable(project, host)
     if why:
         return {'can_request': False, 'reason_code': 'unavailable', 'reason': why}
-    if host_review.mode_of(project) == 'off':
+    if facts.mode == 'off':
         return {'can_request': False, 'reason_code': 'off', 'reason': 'the AI host review is switched off for this project'}
     ok, why = host_review.available()
     if not ok:
@@ -70,9 +96,9 @@ def readiness(project, host):
         return {'can_request': False, 'reason_code': code, 'reason': why}
     if HostReview.objects.filter(project=project, host=host, status__in=HostReview.OPEN).exists():
         return {'can_request': False, 'reason_code': 'open', 'reason': 'a review of this host is already running'}
-    if not host_review.open_rows(project, host):
+    if not facts.rows:
         return {'can_request': False, 'reason_code': 'nothing_open', 'reason': 'nothing is open on this host to review'}
-    if host_review.unchanged_review(project, host) is not None:
+    if facts.unchanged is not None:
         return {'can_request': False, 'reason_code': 'unchanged', 'reason': 'nothing has changed on this host since the last review'}
     return {'can_request': True, 'reason_code': '', 'reason': ''}
 
@@ -162,13 +188,14 @@ def describe(review, project):
             'step': _step(review, project) if review.status == 'applied' else None}
 
 
-def _waiting_until(project, host, row):
+def _waiting_until(project, host, row, facts=None):
     """When the next AUTOMATIC review of a host that changed is due, or None: a host is reviewed by the sweep at most once a day, so a host that changed within a day of its
     last review waits (a person's Review now does not)."""
     from cveFeed import host_review
     if row is None or row.status != 'applied' or timezone_now() - row.created_at >= host_review.AUTO_REVIEW_INTERVAL:
         return None
-    if host_review.unchanged_review(project, host) is not None or not host_review.open_rows(project, host):
+    facts = facts or _HostFacts(project, host)
+    if facts.unchanged is not None or not facts.rows:
         return None
     return _iso(row.created_at + host_review.AUTO_REVIEW_INTERVAL)
 
@@ -184,7 +211,8 @@ def get_host_review(ctx, slug, host_id):
     from cveFeed import host_review
     project, sub, host = _host_row(ctx, slug, host_id)
     row = _newest(project, host)
-    return {'host_id': sub.pk, 'host': host, 'mode': host_review.mode_of(project), 'readiness': readiness(project, host), 'waiting_until': _waiting_until(project, host, row),
+    facts = _HostFacts(project, host)  # the mode, open rows and unchanged review are read once for the whole answer
+    return {'host_id': sub.pk, 'host': host, 'mode': facts.mode, 'readiness': readiness(project, host, facts), 'waiting_until': _waiting_until(project, host, row, facts),
             'auto_close': reviewer_settings().host_review_auto_close,
             'status': row.status if row else 'none', 'review': describe(row, project) if row else None}
 
