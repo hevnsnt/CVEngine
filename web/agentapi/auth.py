@@ -55,7 +55,7 @@ def authenticate(raw):
     from dashboard.models import ApiToken
     if not raw.startswith(TOKEN_PREFIX):
         return None
-    token = ApiToken.objects.select_related('user', 'project').filter(key_hash=hash_token(raw), revoked=False).first()
+    token = ApiToken.objects.select_related('user', 'user__tenancy_profile', 'project').filter(key_hash=hash_token(raw), revoked=False).first()
     if not token or not token.user.is_active:
         return None
     if token.expires_at and token.expires_at <= timezone.now():
@@ -119,8 +119,10 @@ class AgentTokenMiddleware:
             return JsonResponse({'error': 'authentication required (Authorization: Bearer <token>)'}, status=401)
         # /api/v1/ and /mcp/ are exempt from the tenancy MFA redirect, so enforce the same rule here, for
         # sessions and for tokens owned by a user who still has to enrol (tokens work again once they do)
+        from tenancy import snapshot
         from tenancy.middleware import TenancyMiddleware
-        if TenancyMiddleware.must_enrol_mfa(request.user):
-            return JsonResponse({'error': MFA_REQUIRED_MESSAGE}, status=403)
-        request.user.mfa_checked_this_request = True  # on this request's user object only (never stored): the agent's own rights check asks the same question again (agent_broker._agent_of)
-        return self.get_response(request)
+        with snapshot.activate(request.user):  # the memberships read for the MFA policy here also answer TenancyMiddleware's questions
+            if TenancyMiddleware.must_enrol_mfa(request.user):
+                return JsonResponse({'error': MFA_REQUIRED_MESSAGE}, status=403)
+            request.user.mfa_checked_this_request = True  # on this request's user object only (never stored): the agent's own rights check asks the same question again (agent_broker._agent_of)
+            return self.get_response(request)
