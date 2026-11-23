@@ -60,6 +60,7 @@ class PortFloodTests(TestCase):
             return ip
 
         self.host(self.one, 'a.one.example.test', flooded('192.0.2.20'))
+        port_flood.findings_for(self.one)  # warm the per-project exclusion lists (cveFeed.exclusions): their reads happen once, not per host
         with CaptureQueriesContext(connection) as one:
             first = port_flood.findings_for(self.one)
         for n in range(21, 25):

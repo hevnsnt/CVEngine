@@ -832,10 +832,48 @@ class HostProfile(models.Model):
         return f"{self.host}: {self.criticality}"
 
 
+class ExclusionListQuerySet(models.QuerySet):
+    """The queryset of the exclusion list models: a bulk write that sends no model signal (``update``, ``bulk_create``, ``bulk_update``) also resets
+    the cached lists (``cveFeed.exclusions.forget``), so no write path can leave a stale copy. A save or a delete resets them through the signals."""
+
+    def _forget(self):
+        from cveFeed import exclusions
+        exclusions.forget(using=self.db)
+
+    def update(self, **kwargs):
+        try:
+            return super().update(**kwargs)
+        finally:
+            self._forget()
+
+    def bulk_create(self, *args, **kwargs):
+        try:
+            return super().bulk_create(*args, **kwargs)
+        finally:
+            self._forget()
+
+    def bulk_update(self, *args, **kwargs):
+        try:
+            return super().bulk_update(*args, **kwargs)
+        finally:
+            self._forget()
+
+    def delete(self):
+        try:
+            return super().delete()
+        finally:
+            self._forget()
+
+    update.alters_data = bulk_create.alters_data = bulk_update.alters_data = delete.alters_data = True
+    delete.queryset_only = True  # as on QuerySet: ``Model.objects.delete()`` stays undefined
+
+
 class HostMove(models.Model):
     """A host moved out of this project into another ("Move host"). The source project never brings it back: its discovery and
     scans treat the name as excluded (cveFeed.exclusions.excluded_names), while the destination scans it as its own target.
     Exact name only, lowercase. Moving the host back into this project deletes the row."""
+
+    objects = ExclusionListQuerySet.as_manager()
 
     project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
     host = models.CharField(max_length=500)  # lowercase, no trailing dot
@@ -860,6 +898,8 @@ class HostExclusion(models.Model):
     and the agentapi services, which always filter by the caller's own org, so it cannot leak across orgs. Scanners read it
     unscoped (Celery has no request scope), always through the project's own org."""
 
+    objects = ExclusionListQuerySet.as_manager()
+
     org = models.ForeignKey("dashboard.Org", on_delete=models.CASCADE, related_name="host_exclusions")
     host = models.CharField(max_length=500)  # lowercase, no trailing dot
     include_subdomains = models.BooleanField(default=False, db_default=False)  # a whole domain: the name and every name under it ("-example.com")
@@ -881,6 +921,8 @@ class ExcludedAddress(models.Model):
     a bare address is a /32 or /128, host bits are cleared, IPv6 is compressed), so the same network is one row however it was typed. Private
     ranges are valid entries. Read and written only through cveFeed.exclusions and agentapi.excluded_addresses, which always filter by the
     organization, so it cannot leak across orgs; scanners read it unscoped (Celery has no request scope) through the project's own org."""
+
+    objects = ExclusionListQuerySet.as_manager()
 
     org = models.ForeignKey("dashboard.Org", on_delete=models.CASCADE, related_name="excluded_addresses")
     cidr = models.CharField(max_length=64, default="", db_default="")

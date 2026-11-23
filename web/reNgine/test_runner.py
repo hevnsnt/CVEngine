@@ -76,6 +76,12 @@ def clear_egress_state():
         client.delete(*SAVED_SETTINGS_KEYS)
     except Exception:  # noqa: BLE001 - a test without Redis has no egress state to clear
         pass
+    try:
+        # the cached exclusion lists (cveFeed.exclusions): a test's rows roll back without a signal, so the copies a test cached must not reach the next one
+        from cveFeed import exclusions
+        exclusions._bump()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def hermetic_egress():

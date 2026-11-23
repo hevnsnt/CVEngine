@@ -370,14 +370,15 @@ def report_partial(ctx, task_id, body):
             SentinelTask.objects.filter(pk=task.pk, status='running').update(status='failed', finished_at=now, lease_expires_at=None,
                                                                              error=f'a partial result was rejected: {exc.message}'[:300])
         raise
-    from agentapi import address_guard
-    refusal = address_guard.task_refusal(task, wait_for_unknown=False)
-    if refusal and not getattr(refusal, 'unreadable', False):  # the domain itself now resolves into the do-not-scan list: the run ends here
-        broker.expire(task, f'cancelled: {refusal}')
-        raise ApiError(409, f'the task was cancelled ({refusal}): stop the run')
-    batch, _ = address_guard.filter_batch(task, batch)  # a batch about an excluded address is not stored (the address list is read again for every batch)
-    from agentapi import dns_crosscheck
-    batch = dns_crosscheck.screen_batch(task, batch)  # a resolution one Sentinel alone gives that would change a host is held, not stored (agentapi.dns_crosscheck)
+    from agentapi import address_guard, dns_crosscheck
+    from cveFeed import exclusions
+    with exclusions.memo():  # the do-not-scan list is read once for the checks of this batch (and from the shared cache, which every edit of the list resets)
+        refusal = address_guard.task_refusal(task, wait_for_unknown=False)
+        if refusal and not getattr(refusal, 'unreadable', False):  # the domain itself now resolves into the do-not-scan list: the run ends here
+            broker.expire(task, f'cancelled: {refusal}')
+            raise ApiError(409, f'the task was cancelled ({refusal}): stop the run')
+        batch, _ = address_guard.filter_batch(task, batch)  # a batch about an excluded address is not stored (the address list is checked for every batch)
+        batch = dns_crosscheck.screen_batch(task, batch)  # a resolution one Sentinel alone gives that would change a host is held, not stored (agentapi.dns_crosscheck)
     lease = min(now + broker.RUN_LEASE, (task.accepted_at or now) + broker.max_runtime(task))
     try:
         with transaction.atomic():

@@ -69,10 +69,13 @@ class BatchQueryCountTests(Base):
 		for queries in (small_again, large_again):
 			self.assertEqual(_writes(queries, 'startScan_subdomain'), [])
 			self.assertEqual(_writes(queries, 'startScan_port'), [])
-		# the first answer wrote each host's fields once and the http of its 443 row (on the host's first address), and those columns only
-		self.assertEqual(len(_writes(large_first, 'startScan_subdomain')), 20)
+		# the first answer wrote each host's fields and the http of its 443 row (on the host's first address), those columns only, in one
+		# statement per table for the whole batch
+		subdomain_writes = _writes(large_first, 'startScan_subdomain')
+		self.assertEqual(len(subdomain_writes), 1)
+		self.assertTrue(all('"score"' not in sql and '"is_important"' not in sql for sql in subdomain_writes))
 		port_writes = _writes(large_first, 'startScan_port')
-		self.assertEqual(len(port_writes), 20)
+		self.assertEqual(len(port_writes), 1)
 		self.assertTrue(all('"banner"' not in sql and '"service_name"' not in sql for sql in port_writes))
 		for name in large:
 			sub = Subdomain.objects.get(scan_history=self.scan, name=name)
