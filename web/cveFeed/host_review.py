@@ -547,6 +547,14 @@ def mode_of(project):
     return mode if mode in ('auto', 'recommend', 'off') else 'recommend'
 
 
+def modes_of(projects):
+    """``[(project, mode_of(project))]`` for many projects, with one read of their settings rows instead of one per project."""
+    from cveFeed.models import ProjectSettings
+    projects = list(projects)
+    stored = dict(ProjectSettings.objects.filter(project__in=[p.pk for p in projects]).values_list('project_id', 'host_review_mode'))
+    return [(p, mode if (mode := stored.get(p.pk) or 'recommend') in ('auto', 'recommend', 'off') else 'recommend') for p in projects]
+
+
 def _day_start(now):
     return now.replace(hour=0, minute=0, second=0, microsecond=0)
 
@@ -573,14 +581,15 @@ def available(now=None):
     return True, ''
 
 
-def unchanged_review(project, host):
-    """The newest applied review of the host when its state key is still the host's current one (nothing that matters to a verdict changed since), else None."""
+def unchanged_review(project, host, rows=None):
+    """The newest applied review of the host when its state key is still the host's current one (nothing that matters to a verdict changed since), else None.
+    ``rows`` is ``open_rows(project, host)`` when the caller already read it in the same answer; otherwise it is read here."""
     from cveFeed.models import HostReview, HostState
     last = HostReview.objects.filter(project=project, host=host, status='applied').order_by('-created_at', '-id').first()
     state = HostState.objects.filter(project=project, host=host).select_related('domain').first()
     if last is None or state is None:
         return None
-    rows = open_rows(project, host)
+    rows = open_rows(project, host) if rows is None else rows
     return last if rows and key_of(state, rows) == last.state_key else None
 
 

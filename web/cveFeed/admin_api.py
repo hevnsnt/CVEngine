@@ -80,19 +80,31 @@ def _profile(user):
 
 # --- serialisation ----------------------------------------------------------------------
 
-def user_dict(actor, u):
-    managed = roles.managed_org_ids(actor)
+def _prefetched(u, name):
+    """The rows ``users_list`` prefetched for ``u`` under ``name``, or None when it did not (every other caller of ``user_dict``)."""
+    return getattr(u, '_prefetched_objects_cache', {}).get(name)
+
+
+def user_dict(actor, u, managed=None):
+    """``managed``: ``roles.managed_org_ids(actor)`` when the caller already read it. A user from ``users_list`` comes with their memberships and
+    profile prefetched, so a list of 500 users is a handful of queries instead of four per user."""
+    managed = roles.managed_org_ids(actor) if managed is None else managed
     memberships = []
-    for m in OrgMembership.objects.filter(user=u).select_related('org'):
+    org_rows = _prefetched(u, 'org_memberships')
+    project_rows = _prefetched(u, 'project_memberships')
+    for m in (OrgMembership.objects.filter(user=u).select_related('org') if org_rows is None else org_rows):
         if actor.is_superuser or m.org_id in managed:
             memberships.append({'kind': 'org', 'id': m.id, 'scope_id': m.org_id, 'scope_name': m.org.name, 'role': m.role,
                                 'label': roles.ROLE_LABELS.get(('org', m.role), m.role)})
-    for m in ProjectMembership.objects.filter(user=u).select_related('project__org'):
+    for m in (ProjectMembership.objects.filter(user=u).select_related('project__org') if project_rows is None else project_rows):
         if actor.is_superuser or m.project.org_id in managed:
             memberships.append({'kind': 'project', 'id': m.id, 'scope_id': m.project_id,
                                 'scope_name': f'{m.project.name}' + (f' ({m.project.org.name})' if m.project.org else ''),
                                 'role': m.role, 'label': roles.ROLE_LABELS.get(('project', m.role), m.role)})
-    p = UserProfile.objects.filter(user=u).first()
+    if getattr(u, '_profile_read', False):
+        p = u._profile
+    else:
+        p = UserProfile.objects.filter(user=u).first()
     return {'id': u.id, 'username': u.username, 'first_name': u.first_name, 'last_name': u.last_name,
             'name': u.get_full_name() or u.username, 'email': u.email, 'is_active': u.is_active, 'is_superuser': u.is_superuser,
             'last_login': u.last_login.isoformat() if u.last_login else None, 'date_joined': u.date_joined.isoformat(),
@@ -115,8 +127,15 @@ def users_list(request, actor):
     q = request.GET.get('q', '').strip()
     if q:
         qs = qs.filter(username__icontains=q) | qs.filter(email__icontains=q) | qs.filter(first_name__icontains=q) | qs.filter(last_name__icontains=q)
-    users = list(qs.distinct().order_by('username')[:500])
-    return {'results': [user_dict(actor, u) for u in users], 'actor': {'is_superuser': actor.is_superuser, 'id': actor.id},
+    from django.db.models import Prefetch
+    users = list(qs.distinct().order_by('username')
+                 .prefetch_related(Prefetch('org_memberships', queryset=OrgMembership.objects.select_related('org').order_by('id')),
+                                   Prefetch('project_memberships', queryset=ProjectMembership.objects.select_related('project__org').order_by('id')))[:500])
+    profiles = {p.user_id: p for p in UserProfile.objects.filter(user__in=[u.pk for u in users])}
+    for u in users:
+        u._profile, u._profile_read = profiles.get(u.pk), True
+    managed = roles.managed_org_ids(actor)
+    return {'results': [user_dict(actor, u, managed) for u in users], 'actor': {'is_superuser': actor.is_superuser, 'id': actor.id},
             'email_ready': mailer.ready()}
 
 

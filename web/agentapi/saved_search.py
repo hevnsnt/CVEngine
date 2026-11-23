@@ -98,7 +98,7 @@ def _name_taken(ctx, project, name, except_id=None):
 
 def list_saved_searches(ctx, slug):
     project, _ = get_one_project(ctx, slug)
-    rows = SavedSearch.objects.filter(project=project, owner=ctx.user)
+    rows = SavedSearch.objects.filter(project=project, owner=ctx.user).defer('matched')  # up to 1000 matched hosts per search; the list never shows them
     return {'results': [_view(s, project) for s in rows],
             'limits': {'per_user': SavedSearch.MAX_PER_USER, 'per_project': SavedSearch.MAX_PER_PROJECT,
                        'matches': SavedSearch.MAX_MATCHES, 'frequencies': list(SavedSearch.FREQUENCIES)},

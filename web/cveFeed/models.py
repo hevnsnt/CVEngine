@@ -548,7 +548,9 @@ class DiscoveryEvent(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        indexes = [models.Index(fields=["scan", "id"]), models.Index(fields=["domain", "id"])]
+        indexes = [models.Index(fields=["scan", "id"]), models.Index(fields=["domain", "id"]),
+                   # the names an IP host answers to (agentapi.services._host_names_for): few rows, so the index is small
+                   models.Index(fields=["domain", "host"], name="discevent_dom_host_names_idx", condition=models.Q(module__in=["ptr", "tls-san"]))]
         ordering = ["id"]
 
     def __str__(self):
@@ -1062,7 +1064,8 @@ class HostAssessment(models.Model):
     finished_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
-        indexes = [models.Index(fields=['project', 'status', 'created_at'], name='hostassess_project_idx')]
+        indexes = [models.Index(fields=['project', 'status', 'created_at'], name='hostassess_project_idx'),
+                   models.Index(fields=['project', 'host', 'created_at'], name='hostassess_proj_host_idx')]  # a host's recent and last assessment
         constraints = [models.UniqueConstraint(fields=['project', 'host'], condition=models.Q(status__in=['queued', 'running']),
                                            name='one_active_host_assessment')]
 
@@ -2057,7 +2060,9 @@ class HostInventory(models.Model):
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=["project", "key"], name="uniq_hostinventory_project_key")]
-        indexes = [models.Index(fields=["project", "host"], name="hostinv_project_host_idx")]
+        indexes = [models.Index(fields=["project", "host"], name="hostinv_project_host_idx"),
+                   # the list of a project's reports, newest first (agentapi.inventory.list_inventories): read in order, not sorted
+                   models.Index(fields=["project", "-reported_at", "-id"], name="hostinv_proj_reported_idx")]
 
     def __str__(self):
         return f"{self.hostname or self.key}: {self.os_name} {self.os_version}".strip()

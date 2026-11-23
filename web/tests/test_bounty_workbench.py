@@ -1,4 +1,5 @@
 from datetime import timedelta
+from unittest import mock
 
 from django.utils import timezone
 
@@ -57,6 +58,11 @@ class WorkbenchBase(BountyBase):
         cls.s_stalled = ScanHistory.objects.create(domain=cls.domain, scan_type=cls.engine, scan_status=1, start_scan_date=now - timedelta(hours=14), tasks=[])
         cls.s_queued = ScanHistory.objects.create(domain=cls.domain, scan_type=cls.engine, scan_status=-1, start_scan_date=now, tasks=[])
         ScanHistory.objects.create(domain=cls.other_domain, scan_type=cls.engine, scan_status=1, start_scan_date=now, tasks=[])  # another target's scan
+
+    def setUp(self):
+        super().setUp()
+        from cveFeed import snapshot_cache
+        snapshot_cache.bump_revision()  # the inventory half is a snapshot shared for a few seconds: no test is served what an earlier one stored
 
     def bench(self, client=None, project='a1'):
         return call(client or self.c, 'GET', f'{B}workbench?project={project}')
@@ -150,14 +156,78 @@ class WorkbenchAccessTests(WorkbenchBase):
     def test_the_query_count_does_not_grow_with_the_hosts(self):
         from django.db import connection
         from django.test.utils import CaptureQueriesContext
+        from cveFeed import snapshot_cache
         self.bench()  # one call first: the process-wide one-time lookups (content types, caches) depend on which tests ran before in this worker
+        snapshot_cache.bump_revision()  # each measured call computes the inventory half, not reads the snapshot of the one before
         with CaptureQueriesContext(connection) as small:
             self.bench()
         for i in range(30):
             Subdomain.objects.create(target_domain=self.domain, name=f'h{i}.acme.test', scan_history=self.dead.scan_history)
             Vulnerability.objects.create(subdomain=self.www, target_domain=self.domain, scan_history=self.dead.scan_history, name=f'v{i}', severity=2)
+        snapshot_cache.bump_revision()
         with CaptureQueriesContext(connection) as big:
             self.bench()
         # a query per host or finding would add 30 or more; a query or two more is process-wide state (caches that an earlier test in the
         # same worker filled or expired between the two calls), which is not what this test is about
         self.assertLessEqual(len(big), len(small) + 5, f'{len(small)} queries for 1 host, {len(big)} for 31')
+
+
+class WorkbenchSnapshotTests(WorkbenchBase):
+    """The workbench page polls every 8 s: the inventory half (the host collapse, scans, findings, matches) is a snapshot shared by every viewer of
+    the same projects for a few seconds, keyed by everything else it depends on."""
+
+    def test_a_second_poll_runs_no_inventory_query_and_answers_the_same(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from cveFeed import counts
+        first = self.bench()[1]
+        with mock.patch.object(counts, 'rep_ids', side_effect=AssertionError('the hosts were collapsed again')), \
+                CaptureQueriesContext(connection) as ctx:
+            status, second = self.bench()
+        self.assertEqual(status, 200)
+        first.pop('updated'), second.pop('updated')
+        self.assertEqual(second, first)
+        inventory = ('"startScan_subdomain"', '"startScan_vulnerability"', '"startScan_scanhistory"', '"cveFeed_cvematch"')
+        self.assertEqual([q['sql'][:100] for q in ctx.captured_queries if any(t in q['sql'] for t in inventory)], [])
+
+    def test_the_snapshot_answers_what_a_fresh_computation_does(self):
+        cached = self.bench()[1]
+        self.bench()  # served from the snapshot
+        from cveFeed import snapshot_cache
+        snapshot_cache.bump_revision()
+        fresh = self.bench()[1]
+        cached.pop('updated'), fresh.pop('updated')
+        self.assertEqual(cached, fresh)
+        self.assertEqual((fresh['totals']['hosts'], fresh['totals']['live'], fresh['totals']['scans']), (5, 4, {'running': 1, 'queued': 1, 'stalled': 1}))
+
+    def test_an_edit_on_the_page_shows_at_once(self):
+        self.assertEqual([p['name'] for p in self.bench()[1]['potential']], ['Medium on api'])
+        BountyReport.objects.create(project=self.pa, engagement=self.eng, program=self.acme, status='draft', title='m', finding_kind='vuln', finding_id=self.medium.pk)
+        self.assertEqual(self.bench()[1]['potential'], [])  # the reported findings are part of the key
+        BountyEngagementTarget.objects.filter(engagement=self.eng, domain=self.domain).delete()
+        self.assertEqual(self.bench()[1]['totals']['hosts'], 0)  # so are the imported targets
+
+    def test_the_key_differs_per_project_and_per_caller_scope(self):
+        from cveFeed import snapshot_cache
+        from tenancy import scope
+        keys = []
+        real = snapshot_cache.snapshot
+
+        def spy(name, key, *a, **k):
+            if name == 'bounty-workbench':
+                keys.append(key)
+            return real(name, key, *a, **k)
+        BountyEngagement.objects.create(project=self.pa2, program=self.acme, status='active')
+        with mock.patch.object(snapshot_cache, 'snapshot', spy):
+            self.bench(project='a1')
+            self.bench(project='a2')
+        self.assertEqual(len(set(keys)), 2)
+        inputs = ['same inputs']
+        for allowed in ({self.pa.id}, {self.pa.id, self.pa2.id}, None):
+            tokens = scope.set_scope(allowed, None)
+            try:
+                keys.append(snapshot_cache.scope_hash('bounty-workbench', snapshot_cache.token_of(inputs)))
+            finally:
+                scope.reset_scope(tokens)
+        self.assertEqual(len(set(keys[2:])), 3, 'callers who see different projects never share a snapshot')

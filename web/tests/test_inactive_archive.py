@@ -59,7 +59,7 @@ class InactiveArchiveTests(TestCase):
             self.assertEqual(check_one(never, resolver=lambda host: ('absent', set()), now=self.now), 'deferred')
             self.assertEqual(check_one(pinned, resolver=lambda host: ('absent', set()), now=self.now), 'deferred')
             self.assertEqual(check_one(failed, resolver=lambda host: ('error', set()), now=self.now), 'error')
-            self.assertEqual(check_one(excluded, resolver=lambda host: ('absent', set()), now=self.now), 'deferred')
+            self.assertEqual(check_one(excluded, resolver=lambda host: ('absent', set()), now=self.now), 'held')  # stays so: not deferred work
         self.assertFalse(HostState.objects.filter(pk__in=[never.pk, pinned.pk, failed.pk, excluded.pk],
                                                   archived_at__isnull=False).exists())
 
@@ -90,7 +90,7 @@ class InactiveArchiveTests(TestCase):
         row.state = {'ips': {'8.8.8.8': {'ports': {'443/tcp': {}}}}}
         row.save(update_fields=['domain', 'state'])
         with mock.patch('cveFeed.scan_control.pause_requested', return_value=False):
-            self.assertEqual(check_one(row, tcp_probe=lambda host, port: False, now=self.now), 'deferred')
+            self.assertEqual(check_one(row, tcp_probe=lambda host, port: False, now=self.now), 'held')
         row.refresh_from_db()
         self.assertIsNone(row.archived_at)
         self.assertEqual(row.inactive_absent_checks, 2)
@@ -99,7 +99,7 @@ class InactiveArchiveTests(TestCase):
         row = self.state(inactive_first_absent_at=self.now - timedelta(days=40), inactive_absent_checks=2)
         with mock.patch('cveFeed.scan_control.pause_requested', return_value=False):
             self.assertEqual(check_one(row, resolver=lambda host: ('resolved', {'127.0.0.1'}),
-                                       now=self.now), 'deferred')
+                                       now=self.now), 'held')
         row.refresh_from_db()
         self.assertIsNone(row.archived_at)
         self.assertIsNone(row.inactive_first_absent_at)
@@ -149,3 +149,12 @@ class InactiveArchiveTests(TestCase):
         self.assertEqual(done['checked'], 27)
         self.assertEqual(InactiveArchiveReview.objects.get(pk=first['run_id']).status, 'completed')
         self.assertEqual(run_page(resolver=resolver)['skipped'], 'already completed today')
+
+    def test_a_review_that_meets_only_permanent_states_completes(self):
+        # a private address answers the same every day: counted as deferred, it kept every daily review partial
+        self.state('private.inactive.example')
+        with mock.patch('cveFeed.scan_control.pause_requested', return_value=False), \
+             mock.patch('cveFeed.tasks.review_inactive_hosts.apply_async'):
+            out = run_page(resolver=lambda host: ('resolved', {'127.0.0.1'}), tcp_probe=lambda ip, port: False)
+        self.assertEqual((out['status'], out['checked'], out['deferred'], out['errors']), ('completed', 1, 0, 0))
+        self.assertEqual(HostState.objects.get(host='private.inactive.example').archive_check_status, 'blocked')
