@@ -695,9 +695,11 @@ def record_info(agent, raw, now=None):
     if agent.update_requested_at and (version_changed or failed):
         fields['update_requested_at'] = None
     before = (agent.info or {}).get('tool_versions')
+    unchanged = merged == (agent.info or {}) and 'update_requested_at' not in fields  # the same report again: the row already says it, nothing is written
     for key, value in fields.items():
         setattr(agent, key, value)
-    Agent.objects.filter(pk=agent.pk).update(**fields)
+    if not unchanged:
+        Agent.objects.filter(pk=agent.pk).update(**fields)
     _note_tools_behind(agent, before, merged.get('tool_versions'))
     return True
 

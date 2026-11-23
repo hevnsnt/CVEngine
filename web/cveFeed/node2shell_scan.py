@@ -58,6 +58,8 @@ def node_sites(scan):
     if scope() == 'all':
         names = {n for n, s in subs.items() if s.http_status}
     else:
+        from django.db.models import prefetch_related_objects
+        prefetch_related_objects(list(subs.values()), 'technologies')  # one read of the technologies, not one per host
         names = {n for n, s in subs.items() if any(NODE_NAME_RE.match(t.name or '') for t in s.technologies.all())}
     routes = RouteAuth.objects.filter(project_id=scan.domain.project_id, host__in=list(subs), retired_at__isnull=True)
     for host, evidence in routes.values_list('host', 'evidence') if scope() == 'runtimes' else ():

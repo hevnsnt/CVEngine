@@ -1338,6 +1338,9 @@ def _rereview_fields(d, now):
             'hard_evidence': hard_evidence(d['kind'], d['facts'])[1], 'updated_at': now}
 
 
+_REREVIEW_FIELDS = ('signature', 'evidence_key', 'status', 'attempts', 'next_attempt_at', 'hard_evidence', 'updated_at')  # what _rereview_fields sets
+
+
 def _reset_fields(d, now):
     return {'signature': d['signature'], 'evidence_key': d['evidence_key'], 'verdict': None, 'status': 'pending', 'classification': '', 'reason': '',
             'hard_evidence': hard_evidence(d['kind'], d['facts'])[1], 'validation_status': 'none', 'validation_steps': [],
@@ -1472,7 +1475,7 @@ def _track(findings):
         for fk in set(KIND_FK[d['kind']] for _, d in described):
             ids = [f.pk for f, d in described if KIND_FK[d['kind']] == fk]
             existing[fk] = _fetch(fk, ids)
-        new_rows, changed = [], []
+        new_rows, changed, rereviewed, relabelled, seen = [], [], [], [], []
         twins = _twins([(f, d) for f, d in described if existing[KIND_FK[d['kind']]].get(f.pk) is None])
         for f, d in described:
             fk = KIND_FK[d['kind']]
@@ -1488,19 +1491,26 @@ def _track(findings):
                 new_rows.append(Triage(project_id=d['project_id'], domain_id=d['domain_id'], host=d['host'][:500], kind=d['kind'],
                                        first_seen=d['first_seen'], last_seen=now, **{f'{fk}_id': f.pk}, **fields))
                 continue
+            before = (row.host, row.kind, row.evidence_key)
             row.last_seen, row.host, row.kind = now, d['host'][:500], d['kind']
             if row.signature != d['signature']:
                 if row.evidence_key and row.evidence_key == d['evidence_key']:
                     for key, value in _rereview_fields(d, now).items():
                         setattr(row, key, value)
-                else:  # the evidence the decision rested on changed (or is unknown, on a row older than evidence_key): start over
-                    for key, value in _reset_fields(d, now).items():
-                        setattr(row, key, value)
-                    if isinstance(f, CVEMatch):
-                        reset_matches.append(f)
-            elif row.evidence_key != d['evidence_key']:
+                    rereviewed.append(row)  # the record stays: only the fields a fresh review sets are written
+                    continue
+                # the evidence the decision rested on changed (or is unknown, on a row older than evidence_key): start over
+                for key, value in _reset_fields(d, now).items():
+                    setattr(row, key, value)
+                if isinstance(f, CVEMatch):
+                    reset_matches.append(f)
+                changed.append(row)
+                continue
+            if row.evidence_key != d['evidence_key']:
                 row.evidence_key = d['evidence_key']  # rows written before evidence_key existed learn it while their signature still holds
-            changed.append(row)
+            # the signature holds: only the seen time moves, and the host, kind or evidence key when they differ. Nothing else of the row is
+            # written back (rewriting it from this read would put back what a person or a check changed since)
+            (seen if (row.host, row.kind, row.evidence_key) == before else relabelled).append(row)
         if new_rows:
             carried_hits.extend(r.match_id for r in new_rows if r.match_id and r.validation_status == 'hit')
             Triage.objects.bulk_create(new_rows, ignore_conflicts=True)  # ids are not set on a conflict-tolerant insert: read back
@@ -1511,6 +1521,12 @@ def _track(findings):
                                                  'hard_evidence', 'validation_status', 'validation_steps', 'validation_evidence',
                                                  'validated_at', 'attempts', 'next_attempt_at', 'confidence_adjust', 'carried_from', 'updated_at'],
                                        batch_size=CHUNK)
+        if rereviewed:
+            Triage.objects.bulk_update(rereviewed, ['last_seen', 'host', 'kind', *_REREVIEW_FIELDS], batch_size=CHUNK)
+        if relabelled:
+            Triage.objects.bulk_update(relabelled, ['last_seen', 'host', 'kind', 'evidence_key'], batch_size=CHUNK)
+        if seen:
+            Triage.objects.filter(pk__in=[row.pk for row in seen]).update(last_seen=now)  # one statement, no CASE per column
         for f, d in described:
             row = existing[KIND_FK[d['kind']]].get(f.pk)
             if row is not None:
@@ -1523,9 +1539,12 @@ def _track(findings):
         scoring.rescore_for_matches(reset_matches)
     if carried_verdicts:
         # the same host's own verdict for the same evidence: correlation no longer seeds a closing one from the shared table (task 256)
+        groups = {}
         for f, before in carried_verdicts:
             f.ai_verdict, f.ai_reason, f.ai_model = before.ai_verdict, before.ai_reason, before.ai_model
-            CVEMatch.objects.filter(pk=f.pk).update(ai_verdict=f.ai_verdict, ai_reason=f.ai_reason, ai_model=f.ai_model, updated_at=now)
+            groups.setdefault((f.ai_verdict, f.ai_reason, f.ai_model), []).append(f.pk)
+        for (verdict, reason, model), ids in groups.items():  # one statement per distinct verdict, not one per match
+            CVEMatch.objects.filter(pk__in=ids).update(ai_verdict=verdict, ai_reason=reason, ai_model=model, updated_at=now)
         from cveFeed import scoring
         scoring.rescore_for_matches([f for f, _ in carried_verdicts])
     if carried_hits:
@@ -2415,12 +2434,19 @@ def run_triage(pairs, provider=False, scan_id=None):
     matches = {m.pk: m for m in CVEMatch.objects.filter(pk__in=[row.match_id for row, _ in pairs if row.match_id])
                .select_related('cve_entry', 'subdomain__target_domain', 'triage')}
     eligible = []
-    for row, described in pairs:
-        match = matches.get(row.match_id) if row.match_id else None
-        if match and correlation.invalid_identity_reason(match):
-            correlation.close_invalid_correlation(match)
-            continue
-        eligible.append((row, described))
+    from cveFeed import match_policy
+    match_policy.prime_standing(list(matches.values()))  # what invalid_identity_reason asks of each match, read for all of them at once
+    match_policy.prime_sightings(list(matches.values()))
+    try:
+        for row, described in pairs:
+            match = matches.get(row.match_id) if row.match_id else None
+            reason = correlation.invalid_identity_reason(match) if match else ''
+            if reason:
+                correlation.close_invalid_correlation(match, reason)
+                continue
+            eligible.append((row, described))
+    finally:
+        match_policy.forget_primed(matches.values())  # read for this loop only
     pairs = eligible
     invalid_ids = set(TriageVerdict.objects.filter(pk__in=[row.verdict_id for row, _ in pairs if row.verdict_id],
                                                    invalid_output=True).values_list('id', flat=True))

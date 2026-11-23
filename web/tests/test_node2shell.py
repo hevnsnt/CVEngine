@@ -78,6 +78,24 @@ class NodeSitesTests(RouteFixture, TestCase):
 		scan = self.scan(names=(), ports=())
 		self.assertEqual(node2shell_scan.node_sites(scan), [])
 
+	def test_the_technologies_are_read_once_not_once_per_host(self):
+		"""Every host's technologies come from one read: the queries do not grow with the hosts, and the same hosts are picked."""
+		from django.db import connection
+		from django.test.utils import CaptureQueriesContext
+		names = ('a.rt.test', 'b.rt.test', 'c.rt.test', 'd.rt.test')
+		scan = self.scan(names=names, ports=((443, 'https'),))
+		node = Technology.objects.create(name='Express:4.18.2')
+		Subdomain.objects.get(scan_history=scan, name='a.rt.test').technologies.add(node)
+		with mock.patch('cveFeed.nuclei_scan.scan_targets', return_value=({'a.rt.test'}, set(), set())), \
+				CaptureQueriesContext(connection) as one:
+			self.assertEqual([s.name for s, _u in node2shell_scan.node_sites(scan)], ['a.rt.test'])
+		for name in names[1:3]:
+			Subdomain.objects.get(scan_history=scan, name=name).technologies.add(node, Technology.objects.create(name=f'nginx {name}'))
+		with mock.patch('cveFeed.nuclei_scan.scan_targets', return_value=(set(names), set(), set())), \
+				CaptureQueriesContext(connection) as four:
+			self.assertEqual([s.name for s, _u in node2shell_scan.node_sites(scan)], ['a.rt.test', 'b.rt.test', 'c.rt.test'])
+		self.assertEqual(len(four), len(one))
+
 
 def node2shell_dispatch(answer):
 	"""The Sentinel's ``node2shell`` in place: ``answer(url)`` is the result the Sentinel reports for one site (the detector's result shape)."""

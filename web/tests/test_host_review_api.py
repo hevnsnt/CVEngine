@@ -143,6 +143,23 @@ class ReadTests(ApiFixture):
         newer = self.queue()
         self.assertEqual(self.get()[1]['review']['id'], newer.pk)
 
+    def test_one_answer_reads_the_mode_the_open_rows_and_the_unchanged_review_once(self):
+        """Readiness and the next automatic review used to read the host's open rows up to four times and the unchanged review twice; one answer
+        now reads each once, and says the same as reading them separately."""
+        from agentapi import host_review_api
+        self.applied()
+        self.match()  # the host changed since its review: the next automatic one waits for its day
+        row = host_review_api._newest(self.proj, HOST)
+        expected = (host_review_api.readiness(self.proj, HOST), host_review_api._waiting_until(self.proj, HOST, row), host_review.mode_of(self.proj))
+        with mock.patch.object(host_review, 'open_rows', wraps=host_review.open_rows) as rows, \
+                mock.patch.object(host_review, 'unchanged_review', wraps=host_review.unchanged_review) as unchanged, \
+                mock.patch.object(host_review, 'mode_of', wraps=host_review.mode_of) as mode:
+            status, data = self.get()
+        self.assertEqual(status, 200, data)
+        self.assertEqual((data['readiness'], data['waiting_until'], data['mode']), expected)
+        self.assertIsNotNone(data['waiting_until'])
+        self.assertEqual((rows.call_count, unchanged.call_count, mode.call_count), (1, 1, 1))
+
 
 class TenancyAndPermissionTests(ApiFixture):
     def test_another_organizations_caller_gets_404_on_every_route(self):
