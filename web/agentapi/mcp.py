@@ -824,6 +824,14 @@ def handle_message(ctx, msg):
             mcp_log.record(ctx, name, params.get('arguments'), ok=False, error=e.message, writes=writes,
                            duration_ms=int((time.monotonic() - started) * 1000))  # the MCP page's History (agentapi.mcp_log)
             return _rpc_result(rpc_id, {'content': [{'type': 'text', 'text': e.message}], 'isError': True})
+        except Exception as exc:
+            # cut off by the statement timeout, or a crash: _internal_error answers it, but the History must show the call too. An update
+            # caught between its files and its migration (schema_guard) is left out: the call log's own table may be the one missing.
+            if not schema_guard.behind(exc):
+                mcp_log.record(ctx, name, params.get('arguments'), ok=False, writes=writes,
+                               error=mcp_log.TIMEOUT_ERROR if db_timeout.hit(exc) else mcp_log.INTERNAL_ERROR,
+                               duration_ms=int((time.monotonic() - started) * 1000))
+            raise
         mcp_log.record(ctx, name, params.get('arguments'), ok=True, result=data, writes=writes, duration_ms=int((time.monotonic() - started) * 1000))
         return _rpc_result(rpc_id, {'content': [{'type': 'text', 'text': json.dumps(data, default=str)}], 'isError': False,
                                     '_meta': {'cvengine/untrusted_text': UNTRUSTED_NOTICE}})
