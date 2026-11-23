@@ -173,18 +173,22 @@ def record(project_id, *, host, url, source, rule_id, value, domain_id=None, sca
                     row.status = catalog.status_after_validation(row.status, outcome)
                 rate(row, now=now)
                 row.save()
-                occurrence, made = SecretOccurrence.objects.get_or_create(
+                # The occurrence row is locked while it is read, so a parallel ``retire_missing`` cannot retire it between this read and the save below.
+                occurrence, made = SecretOccurrence.objects.select_for_update().get_or_create(
                     finding=row, url=url, source=source, rule_id=rule_id,
                     defaults={'project_id': project_id, 'domain_id': domain_id, 'scan_id': scan_id, 'host': host, 'line': line,
                               'context': context, 'vulnerability_id': vulnerability_id, 'first_seen': now, 'last_seen': now})
+                moved = made  # whether the secret's live occurrences changed, the only thing its counts are made of
                 if not made:
+                    moved = occurrence.retired_at is not None  # a retired occurrence seen again counts again
                     occurrence.last_seen, occurrence.retired_at = now, None
                     occurrence.scan_id = scan_id or occurrence.scan_id
                     occurrence.line = line if line is not None else occurrence.line
                     occurrence.vulnerability_id = vulnerability_id or occurrence.vulnerability_id
                     occurrence.context = context or occurrence.context  # a read that captured none keeps what an earlier one did
                     occurrence.save(update_fields=['last_seen', 'retired_at', 'scan_id', 'line', 'vulnerability_id', 'context'])
-                _refresh_counts(row)
+                if moved:  # a repeat sighting of a live occurrence leaves both counts as they are: no recount of every occurrence of the secret
+                    _refresh_counts(row)
                 if row.remediation_status in CLOSED_REMEDIATION[:1] and row.status != 'revoked':
                     row.remediation_status = 'open'  # marked fixed, and served again
                     row.save(update_fields=['remediation_status'])
@@ -196,11 +200,14 @@ def record(project_id, *, host, url, source, rule_id, value, domain_id=None, sca
 
 
 def _refresh_counts(row):
+    """Set ``occurrence_count`` and ``host_count`` of ``row`` from its live occurrences: one aggregate query, and a write only when a count moved."""
+    from django.db.models import Count
+
     from cveFeed.models import SecretOccurrence
-    live = SecretOccurrence.objects.filter(finding=row, retired_at__isnull=True)
-    row.occurrence_count = live.count()
-    row.host_count = live.values('host').distinct().count()
-    row.save(update_fields=['occurrence_count', 'host_count'])
+    live = SecretOccurrence.objects.filter(finding=row, retired_at__isnull=True).aggregate(n=Count('id'), hosts=Count('host', distinct=True))
+    if (row.occurrence_count, row.host_count) != (live['n'], live['hosts']):
+        row.occurrence_count, row.host_count = live['n'], live['hosts']
+        row.save(update_fields=['occurrence_count', 'host_count'])
 
 
 def retire_missing(project_id, source, seen_by_url, now=None):

@@ -76,19 +76,23 @@ def persist_bbot_result(result, ctx):
 			service_name=res.get('service_name', ''),
 			description=res.get('description', ''),
 			ip=ip)
-		port.source = 'bbot'
 		port.last_seen = timezone.now()
-		port.save()
+		fields = ['last_seen']
+		if not port.source:  # a port another detector recorded keeps its source: bbot only names the source of a port nobody else recorded
+			port.source = 'bbot'
+			fields.append('source')
+		port.save(update_fields=fields)
 		ip.ports.add(port)
 	from cveFeed import tech_links, tech_rows
 	tech_seen = {}  # {(host row id, technology id): ''}: written once for the batch, source bbot (cveFeed.tech_links)
 	tech_hosts = []
+	tech_ids = {}  # {stored name: Technology id}: one lookup per distinct name in the batch, not one per (host, technology)
+	# hosts found in an earlier streaming batch, read together once for the batch
+	earlier = _hosts_of_scan(ctx.get('scan_history_id'), {host for host, tech_name in result.technologies if tech_name and host not in subdomains})
 	for host, tech_name in result.technologies:
 		if not tech_name:
 			continue
-		subdomain = subdomains.get(host)
-		if subdomain is None and ctx.get('scan_history_id'):  # found in an earlier streaming batch
-			subdomain = Subdomain.objects.filter(scan_history_id=ctx['scan_history_id'], name=host).first()
+		subdomain = subdomains.get(host) or earlier.get(host)
 		if not subdomain:
 			continue
 		if source_versions.is_cpe(tech_name):
@@ -105,7 +109,9 @@ def persist_bbot_result(result, ctx):
 		tech_name = js_libraries.unversioned(tech_name)
 		if not tech_name:
 			continue
-		tech_seen[(subdomain.pk, tech_rows.technology(tech_name).pk)] = ''  # one row per spelling: "Caddy" and "caddy" are one (cveFeed.tech_rows)
+		if tech_name not in tech_ids:
+			tech_ids[tech_name] = tech_rows.technology(tech_name).pk  # one row per spelling: "Caddy" and "caddy" are one (cveFeed.tech_rows)
+		tech_seen[(subdomain.pk, tech_ids[tech_name])] = ''
 		tech_hosts.append(subdomain)
 	if tech_seen:
 		tech_links.link(tech_seen, tech_links.BBOT)
@@ -113,6 +119,16 @@ def persist_bbot_result(result, ctx):
 	_persist_bbot_findings(result, ctx, subdomains)
 	_persist_bbot_urls(result, ctx, subdomains)
 	_persist_bbot_http(result, ctx, subdomains)
+
+
+def _hosts_of_scan(scan_id, names):
+	"""``{name: Subdomain}`` of the hosts of scan ``scan_id`` named in ``names`` (stored by an earlier streaming batch), in one query. A name
+	stored twice gives its oldest row, as ``filter(...).first()`` did."""
+	found = {}
+	if scan_id and names:
+		for row in Subdomain.objects.filter(scan_history_id=scan_id, name__in=sorted(names)).order_by('id'):
+			found.setdefault(row.name, row)
+	return found
 
 
 MAX_BBOT_URLS_PER_SCAN = 2000
@@ -152,6 +168,13 @@ def _persist_bbot_urls(result, ctx, subdomains):
 	EndPoint.objects.bulk_create(rows)
 
 
+def _put(row, field, value, fields):
+	"""Set ``row.field`` to ``value`` and name it in ``fields`` (the columns to save) only when the value changes."""
+	if getattr(row, field) != value:
+		setattr(row, field, value)
+		fields.append(field)
+
+
 def _persist_bbot_http(result, ctx, subdomains):
 	"""bbot HTTP_RESPONSE events (httpx ran inside bbot, so this costs no extra scanning) fill what the host page shows: the root
 	answer's status, title and Server header on the Subdomain, and the response summary on the Port it came from. An answer proves
@@ -160,42 +183,58 @@ def _persist_bbot_http(result, ctx, subdomains):
 	if not result.http:
 		return
 	scan_id = ctx.get('scan_history_id')
-	cache = {}
+	# every host, address and port the records name is read once for the batch (not once per record), and a row is written only when a
+	# value changes, and then only that column
+	cache = _hosts_of_scan(scan_id, {rec['host'] for rec in result.http if not subdomains.get(rec['host'])})
+	cache.update({rec['host']: subdomains[rec['host']] for rec in result.http if subdomains.get(rec['host'])})
+	ips_of, ports_of, port_rows = {}, {}, {}  # {host id: [IpAddress] by id}, {(IpAddress id, number): [Port] by id}, {Port id: Port}
+	with_port = {cache[rec['host']].pk for rec in result.http if rec['port'] and cache.get(rec['host'])}
+	if with_port:
+		for link in Subdomain.ip_addresses.through.objects.filter(subdomain_id__in=sorted(with_port)).select_related('ipaddress').order_by('ipaddress_id'):
+			ips_of.setdefault(link.subdomain_id, []).append(link.ipaddress)
+		ip_ids = sorted({ip.pk for ips in ips_of.values() for ip in ips})
+		numbers = sorted({rec['port'] for rec in result.http if rec['port']})
+		if ip_ids:
+			for link in (IpAddress.ports.through.objects.filter(ipaddress_id__in=ip_ids, port__number__in=numbers, port__protocol__in=('', 'tcp'))
+						 .select_related('port').order_by('port_id')):
+				port = port_rows.setdefault(link.port_id, link.port)  # one object per row, so a later record sees what an earlier one wrote
+				ports_of.setdefault((link.ipaddress_id, port.number), []).append(port)
 	for rec in result.http:
-		host = rec['host']
-		if host not in cache:
-			cache[host] = subdomains.get(host) or (Subdomain.objects.filter(scan_history_id=scan_id, name=host).first() if scan_id else None)
-		sub = cache[host]
+		sub = cache.get(rec['host'])
 		if not sub:
 			continue
 		root = urlparse(rec['url']).path in ('', '/')
 		fields = []
 		if rec['status'] and (root or not sub.http_status):
-			sub.http_status = rec['status']
-			fields.append('http_status')
+			_put(sub, 'http_status', rec['status'], fields)
 			if rec['title'] and (root or not sub.page_title):
-				sub.page_title = rec['title']
-				fields.append('page_title')
+				_put(sub, 'page_title', rec['title'], fields)
 			if rec['webserver'] and (root or not sub.webserver):
-				sub.webserver = rec['webserver']
-				fields.append('webserver')
+				_put(sub, 'webserver', rec['webserver'], fields)
 		if fields:
 			sub.save(update_fields=fields)
 		if not rec['port']:
 			continue
 		summary = {k: rec[k] for k in ('url', 'status', 'title', 'webserver', 'content_type', 'location') if rec[k]}
-		ips = list(sub.ip_addresses.all())
-		ports = [p for ip in ips for p in ip.ports.filter(number=rec['port'], protocol__in=('', 'tcp'))]
+		ips = ips_of.get(sub.pk, [])
+		ports = [p for ip in ips for p in ports_of.get((ip.pk, rec['port']), [])]
+		added = None
 		if not ports and ips:
 			port, _ = update_or_create_port(port_number=rec['port'], service_name='https' if rec['url'].startswith('https') else 'http',
 				description='', ip=ips[0])
-			port.source, port.last_seen = 'bbot', timezone.now()
 			ips[0].ports.add(port)
-			ports = [port]
+			added = port_rows.setdefault(port.pk, port)
+			added.source, added.last_seen = 'bbot', timezone.now()
+			ports_of.setdefault((ips[0].pk, rec['port']), []).append(added)
+			ports = [added]
 		for port in ports:
 			if root or not port.http:
+				changed = ['http'] if port.http != summary else []
 				port.http = summary
-				port.save()
+				if port is added:  # the port this answer proved open: its source and time are stored with it
+					changed += ['source', 'last_seen']
+				if changed:
+					port.save(update_fields=changed)
 
 
 def _persist_bbot_findings(result, ctx, subdomains):
@@ -591,15 +630,12 @@ def save_subdomain(subdomain_name, ctx={}):
 			return None, False
 	subdomain, created = get_or_create_first(
 		Subdomain,
+		defaults={'discovered_date': timezone.now()},  # stored with the row, not by a second UPDATE right after the INSERT
 		scan_history=scan,
 		target_domain=domain,
 		name=subdomain_name)
-	if created:
-		# logger.warning(f'Found new subdomain {subdomain_name}')
-		subdomain.discovered_date = timezone.now()
-		if subscan_id:
-			subdomain.subdomain_subscan_ids.add(subscan_id)
-		subdomain.save()
+	if created and subscan_id:
+		subdomain.subdomain_subscan_ids.add(subscan_id)
 	return subdomain, created
 
 
@@ -623,15 +659,19 @@ def save_ip_address(ip_address, subdomain=None, subscan=None, org_id=None, proje
 	# if created:
 	# 	logger.warning(f'Found new IP {ip_address}')
 
-	# Set extra attributes
-	for key, value in kwargs.items():
-		setattr(ip, key, value)
-	ip.save()
+	# Set extra attributes. Only a column whose value changes is written: a whole-row save would put back what another writer (the
+	# full-port sweep, the port inventory) stored on this row since it was read
+	changed = [key for key, value in kwargs.items() if getattr(ip, key, None) != value]
+	for key in changed:
+		setattr(ip, key, kwargs[key])
+	columns = {f.name for f in IpAddress._meta.concrete_fields} | {f.attname for f in IpAddress._meta.concrete_fields}
+	if any(key in columns for key in changed):
+		ip.save(update_fields=[key for key in changed if key in columns])
 
-	# Add IP to subdomain
+	# Add IP to subdomain: the link is a row of its own, so the host row is not saved (that would put back the HTTP fields another
+	# writer stored on it meanwhile, agentapi.dns_crosscheck.release runs this alongside a discovery's ingest)
 	if subdomain:
 		subdomain.ip_addresses.add(ip)
-		subdomain.save()
 
 	# Add subscan to IP
 	if subscan:

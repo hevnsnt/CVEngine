@@ -218,20 +218,21 @@ def _no_handshake(result, where):
 
 def record_observations(project_id, domain_id, host, port, result, ip):
     """The durable record of one tested port: one observation per vulnerability test (found or absent) and one summary."""
-    from cveFeed.models import ProbeObservation
+    from cveFeed import probes
     now = timezone.now()
     host = host.lower()
+    rows = []
 
     def upsert(kind, product, outcome, evidence):
-        ProbeObservation.objects.update_or_create(
-            project_id=project_id, host=host, probe=PROBE, port=port, kind=kind, product=product,
-            defaults={'domain_id': domain_id, 'outcome': outcome, 'confidence': 0.95 if outcome == 'found' else 0.0, 'source': 'testssl.sh',
-                      'evidence': evidence, 'observed_at': now})
+        rows.append(({'project_id': project_id, 'host': host, 'probe': PROBE, 'port': port, 'kind': kind, 'product': product},
+                     {'domain_id': domain_id, 'outcome': outcome, 'confidence': 0.95 if outcome == 'found' else 0.0, 'source': 'testssl.sh',
+                      'evidence': evidence, 'observed_at': now}))
     for test_id, found in result.vulnerable.items():
         upsert(OBS_VULN, test_id, 'found', {'cves': found['cves'][:20], 'finding': found['finding'], 'ip': ip})
     for test_id in result.cleared:
         upsert(OBS_VULN, test_id, 'absent', {'ip': ip})
     upsert(OBS_AUDIT, '', 'found', {'protocols': result.protocols, 'issues': len(result.findings), 'ip': ip})
+    probes.upsert_many(rows)  # one read and batched writes; a test found again unchanged only has its observed_at moved
 
 
 def store_banners(sub, port, items):
