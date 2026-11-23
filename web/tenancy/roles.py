@@ -5,6 +5,8 @@ import models lazily.
 """
 import re
 
+from tenancy import snapshot
+
 ADMIN, USER, AUDIT, PENTESTER = 'admin', 'user', 'audit', 'pentester'
 RANK = {ADMIN: 4, PENTESTER: 3, USER: 2, AUDIT: 1}
 SAFE_METHODS = ('GET', 'HEAD', 'OPTIONS')
@@ -97,6 +99,9 @@ def effective_role(user, project):
     from dashboard.models import OrgMembership, ProjectMembership
     if user.is_superuser:
         return ADMIN
+    snap = snapshot.for_user(user) if project.pk is not None else None
+    if snap is not None:  # this request's own user: answered from the memberships it already read (tenancy.snapshot)
+        return resolve_role(snap.project_role(project.pk), snap.org_role(project.org_id) if project.org_id else None)
     pm = ProjectMembership.objects.filter(user=user, project=project).values_list('role', flat=True).first()
     om = None
     if project.org_id:
@@ -109,6 +114,9 @@ def allowed_project_ids(user):
     from dashboard.models import OrgMembership, Project, ProjectMembership
     if user.is_superuser:
         return None
+    snap = snapshot.for_user(user)
+    if snap is not None:
+        return snap.allowed_project_ids()
     ids = set(ProjectMembership.objects.filter(user=user).values_list('project_id', flat=True))
     org_ids = list(OrgMembership.objects.filter(user=user).values_list('org_id', flat=True))
     if org_ids:
@@ -120,6 +128,9 @@ def user_best_role(user):
     from dashboard.models import OrgMembership, ProjectMembership
     if user.is_superuser:
         return ADMIN
+    snap = snapshot.for_user(user)
+    if snap is not None:
+        return best_role(snap.roles())
     return best_role(
         list(ProjectMembership.objects.filter(user=user).values_list('role', flat=True)) +
         list(OrgMembership.objects.filter(user=user).values_list('role', flat=True)))
@@ -214,6 +225,9 @@ def user_org_ids(user):
 def requires_mfa(user):
     """Organization MFA policy also covers members assigned directly to its projects."""
     from dashboard.models import OrgMembership, ProjectMembership
+    snap = snapshot.for_user(user)
+    if snap is not None:
+        return snap.requires_mfa()
     return (OrgMembership.objects.filter(user=user, org__require_mfa=True).exists()
             or ProjectMembership.objects.filter(user=user, project__org__require_mfa=True).exists())
 
