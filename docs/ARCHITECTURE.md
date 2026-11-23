@@ -34,7 +34,7 @@ The server image carries no scan tool and no template set: what it knows about [
 
 ## Stack
 
-Ubuntu 26.04, Python 3.14, Django 6.0, PostgreSQL 18, nmap 7.993, and Go 1.27 for building the scanners.
+Ubuntu 26.04, Python 3.14 (a pinned CPython build, 3.14.10, not Ubuntu's 3.14.4: see `PYTHON_VERSION` in web/Dockerfile), Django 6.0, PostgreSQL 18, nmap 7.993, and Go 1.27 for building the scanners.
 
 ## Main data
 

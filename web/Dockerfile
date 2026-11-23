@@ -1,8 +1,23 @@
 # CVEngine application image (web, celery, celery-beat).
-# Based on the Ubuntu LTS; Python from the distribution. The server runs no scan tool and ships none, nor any template set: every probe, template
+# Based on the Ubuntu LTS for the system libraries; Python is a pinned CPython build (see the python stage below), not the distribution's. The server runs no scan tool and ships none, nor any template set: every probe, template
 # run and template check runs on a Sentinel (the built-in scanner container or an external one), and what the server knows about the templates comes
 # from the template index of the Sentinel library it installs (cvengine_scanner.template_index). tests/test_no_local_tools.py fails a build that adds
 # a scan tool back.
+
+# Python. Ubuntu 26.04 ships only CPython 3.14.4, and 3.14.0 to 3.14.4 carry the incremental cyclic garbage collector that CPython reverted in 3.14.5
+# (python.org, Python 3.14.5 release notes): under the gevent pool of the celery workers it crashed the process with "Fatal Python error: Segmentation
+# fault" inside the collector. This stage installs the pinned CPython (a python-build-standalone build, fetched and checksum verified by uv, for amd64 and
+# arm64 alike) into /opt/python, which the image stage copies; uv itself stays out of the image. tests/test_image_python.py refuses a known bad version here.
+ARG PYTHON_VERSION=3.14.10
+FROM ghcr.io/astral-sh/uv:0.13.9 AS uv
+FROM ubuntu:26.04 AS python
+ARG PYTHON_VERSION
+COPY --from=uv /uv /usr/local/bin/uv
+RUN set -eu; \
+    UV_PYTHON_INSTALL_DIR=/tmp/uv-python uv python install --no-bin "$PYTHON_VERSION"; \
+    mv "$(dirname "$(dirname "$(UV_PYTHON_INSTALL_DIR=/tmp/uv-python uv python find --no-project --managed-python "$PYTHON_VERSION")")")" /opt/python; \
+    rm -f /opt/python/lib/python*/EXTERNALLY-MANAGED; \
+    /opt/python/bin/python3 -c "import sys; v = sys.version_info[:3]; print('Python', sys.version); sys.exit(1 if v[:2] == (3, 14) and v[2] <= 4 else 0)"
 
 FROM ubuntu:26.04
 
@@ -41,10 +56,6 @@ RUN apt-get update -y && \
     libpangoft2-1.0-0 \
     libpq-dev \
     libssl-dev \
-    python3 \
-    python3-dev \
-    python3-pip \
-    python3-venv \
     tzdata && \
     rm -rf /var/lib/apt/lists/*
 
@@ -52,8 +63,10 @@ RUN apt-get update -y && \
 # Make directory for app
 WORKDIR /usr/src/app
 
-# Application dependencies in a virtual environment (the distribution Python is externally managed)
-RUN python3 -m venv /opt/venv
+# Application dependencies in a virtual environment on the pinned Python (the python stage); the image carries no distribution Python
+COPY --from=python /opt/python /opt/python
+RUN /opt/python/bin/python3 -m venv /opt/venv \
+    && python -c "import sys; v = sys.version_info[:3]; sys.exit(1 if v[:2] == (3, 14) and v[2] <= 4 else 0)"
 COPY ./requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
     && pip install --no-cache-dir -r /tmp/requirements.txt

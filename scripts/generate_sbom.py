@@ -53,6 +53,10 @@ def tools(dockerfile):
     if base:
         out.append(component(base.group(1), base.group(2), f'pkg:docker/{base.group(1)}@{base.group(2)}', kind='container',
                              pinned=False, note='a tag, not a digest: the operating system packages are those of the day the image was built'))
+    python = arg(dockerfile, 'PYTHON_VERSION')
+    if python:  # the interpreter is a pinned CPython build (python-build-standalone, installed by uv), not the base release's python3
+        out.append(component('cpython', python, f'pkg:generic/cpython@{python}', url='https://github.com/astral-sh/python-build-standalone',
+                             note='a python-build-standalone build installed by uv in the python stage of web/Dockerfile'))
     return out
 
 

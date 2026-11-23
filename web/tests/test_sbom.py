@@ -41,6 +41,12 @@ class SbomTests(SimpleTestCase):
 		self.assertNotIn('version', self.by_name['Pillow'])
 		self.assertEqual(self.by_name['Django']['purl'], f"pkg:pypi/django@{self.by_name['Django']['version']}")
 
+	def test_the_pinned_interpreter_is_listed(self):
+		# the image's Python is a pinned CPython build, not Ubuntu's python3 (tests/test_image_python.py)
+		self.assertRegex(self.by_name['cpython']['version'], r'^3\.\d+\.\d+$')
+		self.assertEqual(self.by_name['cpython']['properties'][0]['value'], 'true')
+		self.assertEqual(self.by_name['ubuntu']['version'], '26.04')  # the uv stage before it is not read as the base
+
 	def test_the_service_images_are_listed_and_the_application_image_is_not(self):
 		self.assertIn('postgres', self.by_name)
 		self.assertIn('tailscale/tailscale', self.by_name)
