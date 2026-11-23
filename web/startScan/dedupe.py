@@ -53,3 +53,35 @@ def merge_rows(connection, table, keep, extras):
                                            f'merge {table} rows {[keep, *extras]} by hand, then run migrate again')
                     cursor.execute(f'DELETE FROM {child} WHERE "{pk}" = %s', [row])
         cursor.execute(f'DELETE FROM {table} WHERE id = ANY(%s)', [list(extras)])
+
+
+def merge_groups(connection, table, columns):
+    """Merge the rows of ``table`` that share ``columns`` (none NULL) onto the oldest of each group. Returns the number of rows removed."""
+    cols = ', '.join(f'"{c}"' for c in columns)
+    present = ' AND '.join(f'"{c}" IS NOT NULL' for c in columns)
+    with connection.cursor() as cursor:
+        cursor.execute(f'SELECT array_agg(id ORDER BY id) FROM {table} WHERE {present} GROUP BY {cols} HAVING count(*) > 1')
+        groups = [row[0] for row in cursor.fetchall()]
+    for ids in groups:
+        merge_rows(connection, table, ids[0], ids[1:])
+    return sum(len(ids) - 1 for ids in groups)
+
+
+def unique_operations(model_name, table, name, columns, fields):
+    """The operations that add the unique constraint ``name`` on ``columns`` without blocking writers for the build: the unique index is
+    built CONCURRENTLY (the migration must be ``atomic = False``), then the constraint is attached to it, a short metadata change.
+    ``fields`` are the model's names of ``columns``. Reversing drops the constraint and its index."""
+    from django.db import migrations, models
+    cols = ', '.join(f'"{c}"' for c in columns)
+    return migrations.SeparateDatabaseAndState(
+        database_operations=[
+            migrations.RunSQL(f'CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS {name} ON {table} ({cols})',
+                              reverse_sql=f'DROP INDEX CONCURRENTLY IF EXISTS {name}'),
+            migrations.RunSQL(f'ALTER TABLE {table} ADD CONSTRAINT {name} UNIQUE USING INDEX {name}',
+                              reverse_sql=f'ALTER TABLE {table} DROP CONSTRAINT IF EXISTS {name}'),
+        ],
+        state_operations=[
+            migrations.AddConstraint(model_name=model_name, constraint=models.UniqueConstraint(
+                fields=tuple(fields), name=name)),
+        ],
+    )

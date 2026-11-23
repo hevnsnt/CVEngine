@@ -157,3 +157,52 @@ class HostMergeTests(Base):
 		sql = ' '.join(str(op.sql) for op in migration.operations[1].database_operations)
 		self.assertIn('CREATE UNIQUE INDEX CONCURRENTLY', sql)
 		self.assertIn('UNIQUE USING INDEX', sql)
+
+
+def merged(model, constraint, migration, function, build):
+	"""Store duplicates of ``model`` with ``constraint`` off, run the migration's merge step in a transaction as RunPython does, put the
+	constraint back (which fails if a duplicate was left) and return what ``build`` returned."""
+	model_constraint = next(c for c in model._meta.constraints if c.name == constraint)
+	with connection.schema_editor() as editor:
+		editor.remove_constraint(model, model_constraint)
+	try:
+		out = build()
+		with transaction.atomic():
+			getattr(importlib.import_module(f'startScan.migrations.{migration}'), function)(apps, SimpleNamespace(connection=connection))
+	finally:
+		with connection.schema_editor() as editor:
+			editor.add_constraint(model, model_constraint)
+	return out
+
+
+class TechnologyConstraintTests(Base):
+	def test_the_constraint_exists_and_refuses_a_second_row_for_a_name(self):
+		self.assertTrue(constraint_exists('uniq_technology_name'))
+		Technology.objects.create(name='nginx')
+		with self.assertRaises(IntegrityError), transaction.atomic():
+			Technology.objects.create(name='nginx')
+		Technology.objects.create(name='Nginx')  # another case is another row (cveFeed.tech_rows folds them)
+
+	def test_a_writer_that_loses_the_race_reads_the_winners_row(self):
+		from cveFeed import tech_rows
+		winner = Technology.objects.create(name='nginx')
+		with transaction.atomic():  # inside a caller's transaction, which stays usable
+			self.assertEqual(tech_rows.create('nginx').pk, winner.pk)
+			self.assertEqual(Technology.objects.count(), 1)
+		self.assertEqual(tech_rows.technology('php').name, 'php')
+
+	def test_the_merge_keeps_the_oldest_row_and_moves_the_links(self):
+		def build():
+			old, new = Technology.objects.create(name='nginx'), Technology.objects.create(name='nginx')
+			a, b = self.host('a.dedupe.test'), self.host('b.dedupe.test')
+			a.technologies.add(old)
+			a.technologies.add(new)  # both copies on one host: one link stays
+			b.technologies.add(new)
+			page = EndPoint.objects.create(scan_history=self.scan, target_domain=self.domain, subdomain=a, http_url='https://a/')
+			page.techs.add(new)
+			return {'old': old, 'a': a, 'b': b, 'page': page}
+		out = merged(Technology, 'uniq_technology_name', '0032_uniq_technology_name', 'merge_duplicate_names', build)
+		self.assertEqual(list(Technology.objects.filter(name='nginx').values_list('pk', flat=True)), [out['old'].pk])
+		self.assertEqual(list(out['a'].technologies.values_list('pk', flat=True)), [out['old'].pk])
+		self.assertEqual(list(out['b'].technologies.values_list('pk', flat=True)), [out['old'].pk])
+		self.assertEqual(list(out['page'].techs.values_list('pk', flat=True)), [out['old'].pk])

@@ -551,6 +551,12 @@ class Technology(models.Model):
 	version = models.CharField(max_length=200, blank=True, default='')
 	category = models.CharField(max_length=40, blank=True, default='', db_index=True)  # 'web server', 'language', 'cms', ...
 
+	class Meta:
+		constraints = [
+			# one row per exact name (migration 0032 merged the duplicates); spellings in another case stay apart (cveFeed.tech_rows)
+			models.UniqueConstraint(fields=['name'], name='uniq_technology_name'),
+		]
+
 	def save(self, *args, **kwargs):
 		from cveFeed.correlation import split_name_version
 		from cvengine_scanner.fingerprint import categorize

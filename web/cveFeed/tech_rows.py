@@ -30,7 +30,23 @@ def technology(name):
     for other in Technology.objects.filter(name__iexact=name).order_by('id')[:5]:
         if wanted is not None and key(other.name) == wanted:
             return other
-    return Technology.objects.create(name=name)
+    return create(name)
+
+
+def create(name):
+    """A new Technology row named exactly ``name``, or the row another writer created meanwhile: the name is unique
+    (``uniq_technology_name``), so the loser of the race reads the winner's row instead of failing the scan."""
+    from django.db import IntegrityError, transaction
+
+    from startScan.models import Technology
+    try:
+        with transaction.atomic():
+            return Technology.objects.create(name=name)
+    except IntegrityError:
+        row = Technology.objects.filter(name=name).first()
+        if row is None:
+            raise
+        return row
 
 
 def merge_duplicates(apply=False):

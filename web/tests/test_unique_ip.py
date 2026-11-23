@@ -77,10 +77,10 @@ class MigrationTransactionTests(TransactionTestCase):
 class TolerantGetOrCreateTests(TransactionTestCase):
 	def test_a_duplicated_row_is_not_a_crash(self):
 		from startScan.ip_rows import get_or_create_first
-		from startScan.models import Technology
-		first = Technology.objects.create(name='nginx:1.18.0')
-		Technology.objects.create(name='nginx:1.18.0')
-		row, created = get_or_create_first(Technology, name='nginx:1.18.0')
+		from startScan.models import VulnerabilityReference  # a table without a unique key (Technology names are unique since startScan 0032)
+		first = VulnerabilityReference.objects.create(url='https://example.test/a')
+		VulnerabilityReference.objects.create(url='https://example.test/a')
+		row, created = get_or_create_first(VulnerabilityReference, url='https://example.test/a')
 		self.assertEqual((row.pk, created), (first.pk, False))
-		row, created = get_or_create_first(Technology, name='apache:2.4.1')
+		row, created = get_or_create_first(VulnerabilityReference, url='https://example.test/b')
 		self.assertTrue(created)
