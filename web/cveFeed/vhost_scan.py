@@ -191,7 +191,8 @@ def known_names(project_id):
                  .values_list('name', flat=True).distinct()):
         if name and _is_name(name):
             names[name.strip().lower().rstrip('.')] = 3
-    for label in DiscoveryEvent.objects.filter(domain__project_id=project_id, module='ct-monitor').values_list('label', flat=True).distinct():
+    from cveFeed.ctmonitor import EVENT_MODULES
+    for label in DiscoveryEvent.objects.filter(domain__project_id=project_id, module__in=EVENT_MODULES).values_list('label', flat=True).distinct():
         if label and _is_name(label):
             names.setdefault(label.strip().lower().rstrip('.'), 2)
     for host in HostArchive.objects.filter(project_id=project_id).values_list('host', flat=True):

@@ -182,6 +182,8 @@ class SystemTimings(models.Model):
 	cve_sync_minutes = models.PositiveIntegerField(default=30)       # how often the cve.now feed is read
 	hygiene_hour_utc = models.PositiveSmallIntegerField(default=3)   # daily certificate/TLS/email sweep
 	ct_watch_minutes = models.PositiveIntegerField(default=20)       # how often every target is re-checked against crt.sh
+	# a lookup crt.sh cannot answer asks Cert Spotter instead (cveFeed.ctmonitor); CVENGINE_CT_FALLBACK=0 turns it off whatever this says
+	ct_fallback_source = models.BooleanField(default=True, db_default=True)
 	discovery_timeout_hours = models.PositiveSmallIntegerField(default=6)
 	nuclei_timeout_hours = models.PositiveSmallIntegerField(default=4)
 

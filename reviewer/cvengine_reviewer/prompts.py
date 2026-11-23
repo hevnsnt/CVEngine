@@ -89,7 +89,7 @@ when its check is not ok and the action addresses it. The server runs an action 
 
 Answer with the JSON object the schema describes and nothing else."""
 
-OPS_CODES = ['sentinels_idle', 'sentinels_offline', 'nuclei_templates', 'sentinel_errors', 'scan_errors', 'system', 'generated_templates', 'ai_errors', 'workers_down', 'sentinel_waiting', 'memory', 'queue_starvation', 'sentinel_claims_refused', 'ai_budget', 'triage_backlog']  # the fallback for a server that sends no list of its own (``codes`` in the snapshot); a test holds it equal to the checks the server can return
+OPS_CODES = ['sentinels_idle', 'sentinels_offline', 'nuclei_templates', 'sentinel_errors', 'scan_errors', 'system', 'generated_templates', 'ai_errors', 'workers_down', 'sentinel_waiting', 'memory', 'queue_starvation', 'sentinel_claims_refused', 'ai_budget', 'triage_backlog', 'ct_watch_stalled']  # the fallback for a server that sends no list of its own (``codes`` in the snapshot); a test holds it equal to the checks the server can return
 
 def _names(values, limit):
     return isinstance(values, list) and 0 < len(values) <= limit and all(isinstance(c, str) and 0 < len(c) <= 64 for c in values)
