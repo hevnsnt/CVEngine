@@ -2084,13 +2084,36 @@ def _vouched_on_another_row(subdomain, name, version):
     if not key or not subdomain.target_domain_id:
         return False
     tokens = {re.sub(r'[^a-z0-9]', '', key), re.sub(r'[^a-z0-9]', '', js_libraries.LIBRARIES[key][0].lower())}
-    for match in (CVEMatch.objects.filter(subdomain__name=subdomain.name, subdomain__target_domain_id=subdomain.target_domain_id, source='tech',
-                                          matched_version=version).exclude(subdomain_id=subdomain.pk)
-                  .only('id', 'source', 'matched_product', 'evidence', 'version_in_range', 'ai_verdict', 'remediation_status', 'assignee_id', 'template_result',
-                        'distro_status')):
-        if re.sub(r'[^a-z0-9]', '', (match.matched_product or '').lower()) in tokens and _library_standing(match):
+    rows = [match for match in (CVEMatch.objects.filter(subdomain__name=subdomain.name, subdomain__target_domain_id=subdomain.target_domain_id,
+                                                         source='tech', matched_version=version).exclude(subdomain_id=subdomain.pk)
+                                .only('id', 'source', 'matched_product', 'evidence', 'version_in_range', 'ai_verdict', 'remediation_status',
+                                      'assignee_id', 'template_result', 'distro_status'))
+            if re.sub(r'[^a-z0-9]', '', (match.matched_product or '').lower()) in tokens]
+    return _any_library_standing(rows)
+
+
+def _any_library_standing(matches):
+    """Whether ``_library_standing`` holds for any of ``matches``, read with four queries for all of them (``prime_standing``, their Triage
+    rows) instead of up to three per match."""
+    from django.db.models import Q
+
+    from cveFeed.models import Triage
+    from cveFeed.triage import library_body_proven
+    if not matches:
+        return False
+    match_policy.prime_standing(matches)
+    try:
+        if any(match_policy.has_standing(m) for m in matches):
             return True
-    return False
+        triaged = {}
+        for match_id, status, classification in (Triage.objects.filter(match_id__in=[m.pk for m in matches])
+                                                 .filter(Q(validation_status='hit') | Q(classification='confirmed'))
+                                                 .values_list('match_id', 'validation_status', 'classification')):
+            triaged.setdefault(match_id, []).append((status, classification))
+        return any(status == 'hit' or (classification == 'confirmed' and not library_body_proven(
+            m.source, m.evidence, m.version_in_range, m.distro_status)) for m in matches for status, classification in triaged.get(m.pk, ()))
+    finally:
+        match_policy.forget_primed(matches)
 
 
 def _library_closures(matches):
