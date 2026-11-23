@@ -2725,6 +2725,12 @@ def _reap_stuck_jobs():
         activity.log('discovery', 'Closed scans/assessments a restarted worker left running with no Celery task behind: '
                      + ', '.join(f'{n} {key}' for key, n in orphaned.items()), status='failed', **orphaned)
         counts.update({f'{key}:orphaned': n for key, n in orphaned.items()})
+    stuck = reaper.expire_stuck_queued()  # before the redispatch below, so a row closed here is never sent again in the same tick
+    if stuck:
+        ids = [pk for pk, _ in stuck]
+        activity.log('discovery', f'Closed {len(ids)} queued scan{"s" if len(ids) != 1 else ""} that nothing would ever start, marked failed with the reason '
+                     f'(#{", #".join(map(str, ids[:10]))}{", ..." if len(ids) > 10 else ""}): {stuck[0][1]}', status='notice', scan_ids=ids[:50])
+        counts['ScanHistory:queued_stuck'] = len(ids)
     again = reaper.redispatch_queued_assessments()
     if again:
         activity.log('discovery', f'Queued {again} host assessment{"s" if again != 1 else ""} again: their worker message was lost, most likely in a restart',

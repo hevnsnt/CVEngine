@@ -939,17 +939,23 @@ WAIT_SAMPLE = 200  # the claimed tasks of a kind its typical wait is read from
 
 
 def _starvation_inputs(now, paused, live):
-    """What ``maintainer_checks.queue_starvation`` needs besides the signals, counted here: the host assessments running and queued, the scans queued, and per
+    """What ``maintainer_checks.queue_starvation`` needs besides the signals, counted here: the host assessments running and queued, the scans queued that wait
+    for a worker and the queued rows nothing will start (``scans_stuck``: count, the oldest ten ids, the oldest age), and per
     Sentinel task kind the oldest queued task, what that kind normally waits (the median over its last 200 claimed tasks of the day) and the other kinds the
     Sentinels claimed lately. A count that cannot be made is ``None``: no verdict, never a zero."""
     from agentapi.models import SentinelTask
     from cveFeed.models import HostAssessment
     from django.db.models import Count, Min
-    from startScan.models import ScanHistory
-    out = {'paused': paused, 'scans_queued': None, 'assessments_running': None, 'assessments_queued': None, 'sentinel_kinds': None}
+    out = {'paused': paused, 'scans_queued': None, 'scans_stuck': None, 'assessments_running': None, 'assessments_queued': None, 'sentinel_kinds': None}
     try:
+        from cveFeed import counts
         by = {r['status']: r['n'] for r in HostAssessment.objects.filter(status__in=('queued', 'running')).values('status').annotate(n=Count('id'))}
-        out.update(assessments_running=by.get('running', 0), assessments_queued=by.get('queued', 0), scans_queued=ScanHistory.objects.filter(scan_status=-1).count())
+        # the scans that wait for a worker, apart from the queued rows nothing will start (counts.stuck_queued_q): those wait for no worker, so they are no
+        # sign of starvation, and the reaper closes them (reaper.expire_stuck_queued)
+        split = counts.queued_scan_split(now)
+        out.update(assessments_running=by.get('running', 0), assessments_queued=by.get('queued', 0), scans_queued=split['waiting'],
+                   scans_oldest_age_seconds=split['oldest_waiting_age_seconds'],
+                   scans_stuck={'count': split['stuck'], 'ids': split['stuck_ids'], 'oldest_age_seconds': split['oldest_stuck_age_seconds']})
     except Exception:  # noqa: BLE001 - one unreadable source gives no verdict, it does not stop the other checks
         logger.debug('queue starvation: could not count scans and assessments', exc_info=True)
     try:
