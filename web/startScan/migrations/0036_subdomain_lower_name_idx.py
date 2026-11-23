@@ -6,7 +6,7 @@ from django.db.models.functions import Lower
 class Migration(migrations.Migration):
     """An index of the host names in lower case, for the lookups that match ``LOWER(name)`` within a project: ``cveFeed.manual_only``
     (``other_holder`` and ``only_manual_hosts``, asked for every host a sweep considers, about 29,000 times in two hours on a live install) and the
-    network detection and nuclei service lookups. Without it the planner walked the host table by id from the newest row until it found the name,
+    network detection and service lookups. Without it the planner walked the host table by id from the newest row until it found the name,
     or read it to the end when the name was not there: 29,500 buffers and 40 ms on 32,000 hosts for a name the project does not hold, 13.8 ms on
     average. With the name reached by an expression index it is a few buffers and under 0.2 ms (measured on the live table with the equivalent
     ``sub_upper_name_idx`` of 0030). Built CONCURRENTLY, outside a transaction like 0030, so an update does not lock the table scans write their
