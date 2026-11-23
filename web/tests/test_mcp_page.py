@@ -76,8 +76,10 @@ class CallLogTests(TestCase):
 
 	def test_a_call_that_crashed_is_recorded_as_an_internal_error(self):
 		from unittest import mock
+		from tests.test_agentapi import rpc
 		with mock.patch('agentapi.mcp.call_tool', side_effect=RuntimeError('a secret path /var/x')):
-			tool_call(self.key, 'list_projects')
+			_status, data = rpc(self.key, 'tools/call', {'name': 'list_projects', 'arguments': {}})
+		self.assertEqual(data['error']['code'], -32603)  # the caller's answer is unchanged
 		row = McpCall.objects.get()
 		self.assertEqual((row.ok, row.error), (False, mcp_log.INTERNAL_ERROR))  # the exception's text stays in the server log
 
