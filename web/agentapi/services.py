@@ -891,6 +891,10 @@ def delete_targets(ctx, slug, ids=None, all_matching=False, q=''):
         scan_dirs = [f'{n}_{sid}' for sid, n in ScanHistory.objects.filter(domain_id__in=[i for i, _ in chunk])
                      .values_list('id', 'domain__name')]
         from django.db import transaction
+        from cveFeed import bounded_delete
+        # the rows under the targets first, a bounded batch per transaction, so no statement or transaction grows with the targets' size and a
+        # failure part way keeps what was done (deleting again finishes it); the scans stay for the final delete, which names their directories
+        bounded_delete.drain_below(Domain, [i for i, _ in chunk], keep=(ScanHistory,))
         with transaction.atomic():
             Domain.objects.filter(project=project, id__in=[i for i, _ in chunk]).delete()
             from cveFeed import snapshot_cache

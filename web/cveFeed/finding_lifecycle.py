@@ -494,6 +494,22 @@ def host_name(host):
     return _split_port((host or '').lower())[0]
 
 
+def _fold_rows(qs, line, **fields):
+    """Fold ``qs`` with ``line`` on top of the note. A note already there (a person's, kept under an automatic reopening) stays below the line,
+    as an archive closure keeps it (``closure.prepend_note``): it used to be replaced. One UPDATE for the rows with no note."""
+    qs.filter(remediation_note='').update(remediation_note=line, **fields)
+    for pk, note in qs.exclude(remediation_note='').values_list('pk', 'remediation_note'):
+        qs.filter(pk=pk).update(remediation_note=prepend_note(line, note), **fields)
+
+
+def _without_first_line():
+    """The note with its first line (the alias fold's) taken off: what a person had written below it stays, unfolding no longer empties it."""
+    from django.db.models import Case, TextField, Value, When
+    from django.db.models.functions import StrIndex, Substr
+    return Case(When(remediation_note__contains='\n', then=Substr('remediation_note', StrIndex('remediation_note', Value('\n')) + 1)),
+                default=Value(''), output_field=TextField())
+
+
 def fold_aliases(project_id, names=None, apply=True, now=None):
     """Fold the findings of the project's redirect aliases (``alias_map``) into their target hosts: an open scanner finding of the alias
     (same source, template and name) or hygiene finding (same check on the same port; for a certificate check, the same certificate expiry)
@@ -548,24 +564,24 @@ def fold_aliases(project_id, names=None, apply=True, now=None):
         if apply:
             stamp = now or timezone.now()
             for (keeper, host), ids in fold.items():
-                Vulnerability._base_manager.filter(pk__in=ids, open_status=True, remediation_status='open', remediation_by__isnull=True).update(
-                    open_status=False, remediation_note=alias_note('scanner finding', keeper, host, aliases[host]))
+                _fold_rows(Vulnerability._base_manager.filter(pk__in=ids, open_status=True, remediation_status='open', remediation_by__isnull=True),
+                           alias_note('scanner finding', keeper, host, aliases[host]), open_status=False)
                 touched.add(host)
             for (keeper, host), ids in hfold.items():
-                HygieneFinding.objects.filter(pk__in=ids, status='open', remediation_status='open', remediation_by__isnull=True).update(
-                    status='resolved', resolved_at=stamp, remediation_note=alias_note('hygiene finding', keeper, host, aliases[host]))
+                _fold_rows(HygieneFinding.objects.filter(pk__in=ids, status='open', remediation_status='open', remediation_by__isnull=True),
+                           alias_note('hygiene finding', keeper, host, aliases[host]), status='resolved', resolved_at=stamp)
                 touched.add(host)
     if plain:  # an alias that serves a page of its own again: what was folded for it is its own finding again
         again_v = Vulnerability._base_manager.filter(target_domain__project_id=project_id, subdomain__name__in=list(plain), open_status=False,
                                                      remediation_note__startswith=ALIAS)
-        again_h = [row.pk for row in HygieneFinding.objects.filter(domain__project_id=project_id, status='resolved',
+        again_h = [row.pk for row in HygieneFinding.objects.filter(_hosts_q(plain), domain__project_id=project_id, status='resolved',
                                                                    remediation_note__startswith=ALIAS).only('id', 'host')
-                   if _split_port(row.host.lower())[0] in plain]
+                   if _split_port(row.host.lower())[0] in plain]  # only the rows of these names are read, not every folded row of the project
         out['reopened'] = again_v.count() + len(again_h)
         if apply and out['reopened']:
             touched |= set(again_v.values_list('subdomain__name', flat=True))
-            again_v.update(open_status=True, remediation_note='')
-            HygieneFinding.objects.filter(pk__in=again_h).update(status='open', resolved_at=None, remediation_note='')
+            again_v.update(open_status=True, remediation_note=_without_first_line())
+            HygieneFinding.objects.filter(pk__in=again_h).update(status='open', resolved_at=None, remediation_note=_without_first_line())
             touched |= {_split_port(h.lower())[0] for h in HygieneFinding.objects.filter(pk__in=again_h).values_list('host', flat=True)}
     if apply and touched:
         from cveFeed import scoring
