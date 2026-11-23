@@ -141,6 +141,10 @@ apply_sentinel_plan() {
 }
 
 fill POSTGRES_PASSWORD
+# The password of the least privilege database role the server runs as (CVENGINE_DB_APP_USER, default cvengine_app; docs/CONFIGURATION.md,
+# Database roles): the first migrate creates the role with it. POSTGRES_USER stays the owner, used for migrations and backups only.
+grep -q '^CVENGINE_DB_APP_PASSWORD=' .env || echo 'CVENGINE_DB_APP_PASSWORD=' >> .env
+grep -qE '^CVENGINE_DB_APP_USER=[[:space:]]*$' .env || fill CVENGINE_DB_APP_PASSWORD
 fill AUTHORITY_PASSWORD
 fill_domain "${1:-}"
 [ "${CVENGINE_ENABLE_BUILTIN_SCANNER:-}" != 0 ] || disable_builtin_scanner

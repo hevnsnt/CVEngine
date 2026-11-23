@@ -1,7 +1,11 @@
 #!/bin/bash
 set -Eeuo pipefail
 
-python3 manage.py migrate --noinput
+# The migration runs as the database's OWNER role, and then creates or updates the least privilege app role the server runs as and grants it
+# (reNgine/db_roles.py, the post_migrate step). The server itself uses the app role, unless none is configured or it cannot log in yet: then it
+# keeps the owner role and says so (web/db-role.sh).
+CVENGINE_DB_ROLE=owner python3 manage.py migrate --noinput
+. "$(dirname "$0")/db-role.sh" && cvengine_db_role 0
 
 case "${DEBUG:-0}" in
     1|true|True|yes)
