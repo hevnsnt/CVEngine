@@ -2403,7 +2403,8 @@ def _archived_filter(qs, mode, prefix=''):
 
 def list_hosts(ctx, slug, params):
     """The Shodan-style inventory: hosts with IPs, open ports and service/product/version, highest score first (?sort=name). Archived hosts are left
-    out unless ``archived`` is 1 (all) or only (``_archived_mode``)."""
+    out unless ``archived`` is 1 (all) or only (``_archived_mode``). Paged by ``page`` and ``page_size`` (``page_args``); the answer says whether
+    more rows follow (``has_more``, ``next_page``: ``_next_page_marker``). The MCP tool asks for smaller pages (``mcp.HOSTS_MCP_PAGE_SIZE``)."""
     from django.db.models import Q
     from startScan.models import Subdomain
     project, _ = get_project(ctx, slug)
@@ -2414,19 +2415,31 @@ def list_hosts(ctx, slug, params):
     if params.get('target_id'):
         qs = qs.filter(target_domain_id=_int_param(params['target_id'], 'target_id'))
     qs = _internal_filter(qs, params)
-    ordered = _one_per_host(qs, per_project=_is_all(project)).order_by(*_host_order(params))
+    # the id last: in the all-projects view two projects can hold a host of the same name and score, and a tie with no order can move a row
+    # from one page to the next between two calls
+    ordered = _one_per_host(qs, per_project=_is_all(project)).order_by(*_host_order(params), 'id')
     page, size = page_args(params, zero_ok=True)
     if not size:  # the count alone (a poll, a badge): shared for a moment by every caller of the same scope and filters, the collapse is not rerun for each
         count = _cached_host_count(project, ordered, 'hosts', _archived_mode(params), str(params.get('q') or ''), str(params.get('target_id') or ''),
                                    str(params.get('internal', '')).strip().lower())
-        return {'count': count, 'page': page, 'page_size': 0, 'results': []}
+        return _next_page_marker({'count': count, 'page': page, 'page_size': 0, 'results': []})
 
     def load(ids):  # the page's rows with what the host cards read, in the order of ``ids``
         rows = Subdomain.objects.filter(pk__in=ids).select_related('target_domain__project' if _is_all(project) else 'target_domain') \
             .prefetch_related('ip_addresses__ports', 'cve_matches__cve_entry', triage_prefetch('cve_matches__triage'), 'vulnerability_set', triage_prefetch('vulnerability_set__triage'), 'vulnerability_set__cve_ids', 'vulnerability_set__tags', 'technologies')
         by_id = {row.pk: row for row in rows}
         return [by_id[i] for i in ids if i in by_id]
-    return _mark_zombies(project, _hosts_page(project, ordered, params, load=load))
+    return _next_page_marker(_mark_zombies(project, _hosts_page(project, ordered, params, load=load)))
+
+
+def _next_page_marker(page):
+    """``page`` (a ``paginate`` answer) with ``has_more``, true when rows follow this page, and ``next_page``, the ``page`` to ask for them (None on
+    the last page, past the end and for a ``page_size`` of 0, which lists no rows). Offset paging over a stable order: the host list's order is
+    the score, which changes as findings do, so a keyset on it would not be stable either, and the collapse that finds the hosts reads every
+    one of them whichever page is asked for."""
+    more = bool(page['page_size']) and page['page'] * page['page_size'] < page['count']
+    page['has_more'], page['next_page'] = more, (page['page'] + 1 if more else None)
+    return page
 
 
 SEARCH_FIELDS = ('tech', 'banner', 'port', 'proto', 'product', 'service', 'os', 'cve', 'ip', 'host', 'vuln', 'sev', 'auth',

@@ -101,6 +101,23 @@ ARCHIVED_PROP = {'type': ['string', 'boolean'], 'enum': ['0', '1', 'only', True,
                  'description': 'archived hosts are left out by default (archiving closed their findings); 1 or true includes them, only lists them alone'}
 
 
+# list_hosts over MCP: a host row carries its addresses and ports, check coverage, validate plan and score reasons (20 KB on average on a project of
+# 300 hosts, up to 60 KB), so the shared default of 50 rows answered about 1 MB and 200 rows passed MAX_RESPONSE_BYTES. MCP pages fewer; the REST
+# route keeps the shared default and cap (services.PAGE_SIZE_DEFAULT, PAGE_SIZE_MAX).
+HOSTS_MCP_PAGE_SIZE, HOSTS_MCP_PAGE_MAX = 20, 50
+
+
+def _hosts_mcp_page(args):
+    """``args`` with list_hosts' MCP page size: HOSTS_MCP_PAGE_SIZE when none is given, at most HOSTS_MCP_PAGE_MAX. 0 (the count alone) and every
+    other value pass on unchanged; services.page_args validates them."""
+    size = args.get('page_size', HOSTS_MCP_PAGE_SIZE)
+    try:
+        size = min(int(size), HOSTS_MCP_PAGE_MAX)
+    except (TypeError, ValueError, OverflowError):
+        pass
+    return {**args, 'page_size': size}
+
+
 def _page_props(extra=None):
     props = {'page': {'type': 'integer'}, 'page_size': {'type': 'integer'}}
     props.update(extra or {})
@@ -253,10 +270,15 @@ TOOLS = [
      lambda c, a: svc.stop_scan(c, a.get('project'), int(a['scan_id'])), True),
     ('stop_all_scans', 'Stop every running and queued scan of a project.', _schema({'project': SLUG}, ['project']),
      lambda c, a: svc.stop_scans(c, a.get('project')), True),
-    ('list_hosts', 'Inventory: hosts with IPs, open ports, product/version per service and a 0-100 score with its reasons, highest score first. Each host carries validate_plan: the read-only commands for its owner that settle the most of its open CVE matches, one question per package (Is the installed httpd package patched?), exploited first, each with the matches it resolves. Each host carries check_coverage: {done, applicable, checks: [{id, label, state done|due|not_applicable, last_run}], no_check: [{port, detail}]}, which of the checks that apply to it have run, and the ports no check exists for (not counted). unconfirmed_addresses lists the DNS answers one Sentinel gave that no second source has confirmed yet ({address, state: unconfirmed, single_source, reason: adds|replaces|into_list|out_of_list, runs, first_seen, last_seen}); they are not among the host\'s ips.',
+    ('list_hosts', 'Inventory: hosts with IPs, open ports, product/version per service and a 0-100 score with its reasons, highest score first. Each host carries validate_plan: the read-only commands for its owner that settle the most of its open CVE matches, one question per package (Is the installed httpd package patched?), exploited first, each with the matches it resolves. Each host carries check_coverage: {done, applicable, checks: [{id, label, state done|due|not_applicable, last_run}], no_check: [{port, detail}]}, which of the checks that apply to it have run, and the ports no check exists for (not counted). unconfirmed_addresses lists the DNS answers one Sentinel gave that no second source has confirmed yet ({address, state: unconfirmed, single_source, reason: adds|replaces|into_list|out_of_list, runs, first_seen, last_seen}); they are not among the host\'s ips. '
+     'Paged: a host row is large (5 to 60 KB), so this tool answers 20 hosts by default and at most 50 a call (it answered 50 by default and up to 200, '
+     'and 200 rows of a large project passed the response limit); the answer has count, page, page_size, has_more and next_page (send it as page for '
+     'the next rows; null on the last page). page_size 0 answers the count alone.',
      _schema(_page_props({'project': SLUG_OR_ALL, 'q': {'type': 'string'}, 'target_id': {'type': 'integer'}, 'sort': {'type': 'string', 'enum': ['score', 'name']},
-                          'archived': ARCHIVED_PROP, 'internal': INTERNAL_PROP}), ['project']),
-     lambda c, a: svc.list_hosts(c, a.get('project'), a), False),
+                          'archived': ARCHIVED_PROP, 'internal': INTERNAL_PROP, 'page': {'type': 'integer', 'description': 'from 1; next_page of the last answer'},
+                          'page_size': {'type': 'integer', 'description': f'hosts per page: {HOSTS_MCP_PAGE_SIZE} by default, at most {HOSTS_MCP_PAGE_MAX} '
+                                        '(a larger value is cut to it); 0 for the count alone'}}), ['project']),
+     lambda c, a: svc.list_hosts(c, a.get('project'), _hosts_mcp_page(a)), False),
     ('set_host_profile', 'Set the asset information of a host: owner, purpose, criticality (unknown, low, medium, high, critical), alias (a short display name shown beside the address in lists, search, reports and the graph; the address and discovered names never change) and note (free text). Only the fields given change; an empty alias or note clears it.', _schema(
         {'project': SLUG, 'host': {'type': 'string', 'description': 'exact host name'}, 'owner': {'type': 'string'}, 'purpose': {'type': 'string'},
          'criticality': {'type': 'string', 'enum': ['unknown', 'low', 'medium', 'high', 'critical']},
