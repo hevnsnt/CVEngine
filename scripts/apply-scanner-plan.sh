@@ -41,7 +41,8 @@ rm -f "$STATE/scanner-plan.waiting"
 
 if cvengine_scanner_enabled "${COMPOSE[@]}"; then was=on; else was=off; fi
 log "applying the scanner choice '$plan'"
-cvengine_fit_run "$plan" "${COMPOSE[@]}" | tee -a "$LOG" >/dev/null
+# only the server processes are recreated here, never the database: the Postgres sizes of the host review wait for the next update
+CV_FIT_NO_DB_RESTART=1 cvengine_fit_run "$plan" "${COMPOSE[@]}" | tee -a "$LOG" >/dev/null
 if cvengine_scanner_enabled "${COMPOSE[@]}"; then now=on; else now=off; fi
 note="$(cvengine_fit_plan_words "$plan")"
 if [ "$was" != "$now" ]; then
