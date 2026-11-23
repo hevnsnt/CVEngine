@@ -344,7 +344,7 @@ deploy_builtin() {
   for _ in $(seq 1 60); do "${compose[@]}" exec -T db pg_isready -q >/dev/null 2>&1 && break; sleep 1; done
   DEPLOY_STAGE=migrate
   phase applying "$DEPLOY_STAGE"
-  "${compose[@]}" run --rm --no-deps --entrypoint python3 web manage.py migrate --noinput || return 1
+  "${compose[@]}" run --rm --no-deps -e CVENGINE_DB_ROLE=owner --entrypoint python3 web manage.py migrate --noinput || return 1
   DEPLOY_STAGE=migrated
   phase applying "$DEPLOY_STAGE"
   "${compose[@]}" run --rm --no-deps --entrypoint python3 web manage.py collectstatic --noinput || return 1

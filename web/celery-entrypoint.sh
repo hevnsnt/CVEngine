@@ -5,11 +5,16 @@
 # administrator wins.
 export PYTHONFAULTHANDLER="${PYTHONFAULTHANDLER:-1}"
 
-# web owns migrations; wait until they are applied (avoids concurrent-migrate race)
-until python3 manage.py migrate --check >/dev/null 2>&1; do
+# web owns migrations; wait until they are applied (avoids concurrent-migrate race). The check reads django_migrations as the owner role, so the
+# wait is the same whether or not the app role exists yet (the web service's migrate creates it, after the last migration).
+until CVENGINE_DB_ROLE=owner python3 manage.py migrate --check >/dev/null 2>&1; do
     echo "Waiting for web to apply migrations..."
     sleep 3
 done
+
+# The database role this container runs as (web/db-role.sh): the least privilege app role, which the web service's migrate has just created; when
+# it cannot log in within CVENGINE_DB_ROLE_WAIT seconds, the owner role, said in the log.
+. "$(dirname "$0")/db-role.sh" && cvengine_db_role "${CVENGINE_DB_ROLE_WAIT:-60}"
 
 # The built-in scanner's first enrollment blob must not wait for the beat task (every five minutes). CVENGINE_BUILTIN_SCANNER=0 revokes it instead,
 # and never a reason for the container not to start.

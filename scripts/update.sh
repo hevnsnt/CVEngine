@@ -832,6 +832,11 @@ if . scripts/redis-password.sh && cvengine_ensure_redis_password "$compose_env_f
 else
     "${compose[@]}" up -d --no-recreate db redis
 fi
+# The least privilege database role the server runs as (scripts/db-app-role.sh): its password is generated when there is none; the migrate below
+# (as the owner role) creates the role and grants it, and the application recreated after it runs as it.
+if [[ -f scripts/db-app-role.sh ]] && . scripts/db-app-role.sh && cvengine_ensure_db_app_password "$compose_env_file"; then
+    echo 'The server had no database role of its own: generated its password (CVENGINE_DB_APP_PASSWORD in .env); the migration creates the role.'
+fi
 # The database's own settings are in the compose file (max_connections). `up -d --no-deps db` recreates the db container only when its
 # definition changed since it was created (once, on the update that brings the change: a restart of a few seconds), and is a no-op otherwise.
 "${compose[@]}" up -d --no-deps db
@@ -846,11 +851,11 @@ else
 fi
 applied_migrations() {
     local plan
-    plan=$("${compose[@]}" run --rm --no-deps -T --entrypoint python3 web manage.py showmigrations --plan 2>/dev/null) || return 1
+    plan=$("${compose[@]}" run --rm --no-deps -T -e CVENGINE_DB_ROLE=owner --entrypoint python3 web manage.py showmigrations --plan 2>/dev/null) || return 1
     grep -c '^\[X\]' <<< "$plan" || true
 }
 migrations_before=$(applied_migrations) || migrations_before=''
-if ! "${compose[@]}" run --rm --no-deps --entrypoint python3 web manage.py migrate --noinput; then
+if ! "${compose[@]}" run --rm --no-deps -e CVENGINE_DB_ROLE=owner --entrypoint python3 web manage.py migrate --noinput; then
     # Each migration runs in a transaction of its own, so a failed batch can leave the first ones applied. The previous code must not be put back on a
     # schema that is part migrated: when the count of applied migrations changed (or cannot be read) the checkout stays on the new commit.
     migrations_after=$(applied_migrations) || migrations_after=''
@@ -951,6 +956,8 @@ while (( SECONDS < deadline )); do
         echo "Local HTTP returned $status at $ready_url; every worker queue and Celery Beat are running."
         [[ -z $requeued ]] || echo "Queued ${requeued#REQUEUED } stopped scan(s) again."
         echo "This local check does not validate the public hostname, TLS certificate or task execution."
+        # which database role web, celery and celery-beat run as, with a warning when any still uses the owner role (scripts/db-app-role.sh)
+        if declare -F cvengine_db_role_report >/dev/null; then cvengine_db_role_report "${compose[@]}" || true; fi
         "${compose[@]}" ps
         rm -f "$diagnostic_log"
         # An install that never had the update watcher cannot act on Approve in Settings > Updates. This is the one manual update such an

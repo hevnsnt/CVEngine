@@ -9,7 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 SCANNER_KEYS = ('COMPOSE_PROFILES', 'CVENGINE_BUILTIN_SCANNER', 'CVENGINE_LOCAL_FALLBACK', 'SCANNER_MEM_LIMIT')
-GENERATED = ('POSTGRES_PASSWORD', 'AUTHORITY_PASSWORD', 'CVENGINE_FIELD_KEY', 'REDIS_PASSWORD', 'DOMAIN_NAME')
+GENERATED = ('POSTGRES_PASSWORD', 'AUTHORITY_PASSWORD', 'CVENGINE_FIELD_KEY', 'REDIS_PASSWORD', 'DOMAIN_NAME', 'CVENGINE_DB_APP_PASSWORD')
 STUBS = {
     'id': '#!/bin/sh\n[ "$1" = "-u" ] && echo 0 || /usr/bin/id "$@"\n',
     'docker': '#!/bin/sh\ncase "$1" in --version) echo "Docker version 27.0.1, build x";; esac\nexit 0\n',
