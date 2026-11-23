@@ -9,7 +9,7 @@ from django.test import TestCase
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
-from cveFeed import hygiene, java_runtime, version_sources, web_shot
+from cveFeed import exclusions, hygiene, java_runtime, version_sources, web_shot
 from cveFeed import version_catalogue as catalogue
 from cveFeed.models import ExcludedAddress, HostExclusion, HostScreenshot, HostState, JavaRuntime, ProbeObservation
 from dashboard.models import Org, Project
@@ -113,6 +113,7 @@ class HygieneTargetGateTests(TestCase):
             ip.ports.add(Port.objects.create(number=8443), Port.objects.create(number=427, state='open'))
 
     def gate_reads(self, run):
+        exclusions.forget()  # each run starts from a cold exclusion cache (cveFeed.exclusions), so both runs read the same lists
         with CaptureQueriesContext(connection) as ctx:
             run()
         return count(ctx, *self.GATE_TABLES)

@@ -48,7 +48,7 @@ class SearchFacetCacheTests(TestCase):
         self.assertEqual(first['facets'], second['facets'])
         self.assertEqual(sum(first['facets']['heat'].values()), self.HOSTS)
         self.assertGreater(cold, warm, 'the first poll counts the heat (a few aggregate queries): the cost the cache removes')
-        self.assertLessEqual(cold - warm, 16, 'counting heat is a fixed handful of aggregate queries, never a walk that builds a model per match, finding and port')
+        self.assertLessEqual(cold - warm, 20, 'counting heat is a fixed handful of aggregate queries, never a walk that builds a model per match, finding and port')  # 20: the cold poll also reads the three per-project exclusion lists once (cveFeed.exclusions)
         self.assertLessEqual(warm, 54, 'a cached poll is the page build and the request overhead only')  # 53: each statement over the current hosts reads the current scan ids first (cveFeed.current_scans)
 
     def test_the_cached_cost_does_not_grow_with_the_hosts(self):

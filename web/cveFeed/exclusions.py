@@ -16,10 +16,119 @@ a ``Refusal`` (a ``str`` with ``.unreadable``) for an excluded match AND for a l
 set ``excluded_names`` returns carries the same rule (``name in set``), so every scan path that already asks it is address-aware; the sites
 that decide what the INVENTORY keeps pass ``names_only=True`` (an address-excluded host stays visible, with the reason it is not scanned).
 """
+import contextlib
+import contextvars
 import ipaddress
 import logging
+import uuid
 
 logger = logging.getLogger(__name__)
+
+# The LISTS themselves (the org's excluded hosts, the hosts moved out of the project, the org's do-not-scan networks) are cached per project for at most
+# CACHE_SECONDS, under a generation that every write of HostExclusion, HostMove, ExcludedAddress (and a project changing organization) replaces at once
+# (``forget``: a model signal for a save or a delete, cascades included, and the models' own querysets for update, delete and bulk_create), so a change
+# takes effect on the very next lookup in every process. What the INVENTORY says (the names that resolve into a network, the stored addresses) is never
+# cached: it changes with every batch. A cache that cannot be read or written only means the database is asked.
+CACHE_SECONDS = 30
+GENERATION_KEY = 'cvengine:exclusions:generation'
+_memo = contextvars.ContextVar('exclusion_memo', default=None)  # {(kind, project_id): value} inside ``memo()``: one batch or request reads each list once
+
+
+def _cache():
+    from django.core.cache import cache
+    return cache
+
+
+def _generation():
+    """The current generation token, made when there is none (a token, not a counter: a lost key can never bring back an older generation's entries)."""
+    cache = _cache()
+    token = cache.get(GENERATION_KEY)
+    if token is None:
+        cache.add(GENERATION_KEY, uuid.uuid4().hex, None)
+        token = cache.get(GENERATION_KEY)
+    return token
+
+
+def _bump():
+    memo = _memo.get()
+    if memo is not None:
+        memo.clear()
+    try:
+        _cache().set(GENERATION_KEY, uuid.uuid4().hex, None)
+    except Exception:  # noqa: BLE001 - logged; an entry made before lives CACHE_SECONDS at most
+        logger.warning('could not reset the exclusion list cache', exc_info=True)
+
+
+def forget(using=None):
+    """An exclusion list changed: every cached copy is dropped now, and again when the transaction commits (a lookup made in between read the rows
+    from before the commit and must not stay cached)."""
+    from django.db import transaction
+    _bump()
+    try:
+        transaction.on_commit(_bump, using=using)
+    except Exception:  # noqa: BLE001 - no database connection to wait for: the reset above stands
+        pass
+
+
+def _changed(sender=None, using=None, **kwargs):
+    forget(using=using)
+
+
+def _project_saved(sender=None, instance=None, update_fields=None, using=None, **kwargs):
+    if update_fields is not None and not {'org', 'org_id'} & set(update_fields):
+        return  # the project's organization (whose lists it reads) did not change
+    forget(using=using)
+
+
+def connect():
+    """Reset the cache on every save and delete (cascades included) of the list models and of a project (its organization picks its lists)."""
+    from django.db.models.signals import post_delete, post_save
+    from cveFeed.models import ExcludedAddress, HostExclusion, HostMove
+    from dashboard.models import Project
+    for model in (HostExclusion, HostMove, ExcludedAddress):
+        post_save.connect(_changed, sender=model, dispatch_uid=f'exclusions-cache-save-{model.__name__}')
+        post_delete.connect(_changed, sender=model, dispatch_uid=f'exclusions-cache-delete-{model.__name__}')
+    post_save.connect(_project_saved, sender=Project, dispatch_uid='exclusions-cache-project-save')
+    post_delete.connect(_changed, sender=Project, dispatch_uid='exclusions-cache-project-delete')
+
+
+@contextlib.contextmanager
+def memo():
+    """Inside, each list of each project is read once (one batch, one request); a write made in this context still resets it."""
+    if _memo.get() is not None:
+        yield
+        return
+    token = _memo.set({})
+    try:
+        yield
+    finally:
+        _memo.reset(token)
+
+
+def _cached(kind, project_id, read):
+    """``read()`` (the rows of one list of one project), from the batch memo, else the shared cache, else the database. ``read`` may raise: nothing is
+    cached then, and the caller decides (fail closed or open) exactly as without a cache."""
+    memo, key = _memo.get(), (kind, project_id)
+    if memo is not None and key in memo:
+        return memo[key]
+    cache_key = value = None
+    try:
+        token = _generation()
+        if token:
+            cache_key = f'cvengine:exclusions:{token}:{kind}:{project_id}'
+            value = _cache().get(cache_key)
+    except Exception:  # noqa: BLE001 - no cache: the database answers
+        cache_key = value = None
+    if value is None:
+        value = read()
+        if cache_key:
+            try:
+                _cache().set(cache_key, value, CACHE_SECONDS)
+            except Exception:  # noqa: BLE001
+                pass
+    if memo is not None:
+        memo[key] = value
+    return value
 
 MAX_HOST_LENGTH = 500
 MAX_ENTRIES = 500  # the most addresses or networks one organization may list
@@ -146,7 +255,7 @@ def address_networks(project_id):
     if not project_id:
         return ()
     from cveFeed.models import ExcludedAddress
-    return _networks_of(ExcludedAddress.objects.filter(org__projects__id=project_id).values_list('cidr', flat=True))
+    return _networks_of(_cached('networks', project_id, lambda: tuple(ExcludedAddress.objects.filter(org__projects__id=project_id).values_list('cidr', flat=True))))
 
 
 def stored_addresses(project_id, names):
@@ -238,10 +347,12 @@ def excluded_names(project_id, strict=False, names_only=False):
     if not project_id:
         return ExclusionSet()
     from cveFeed.models import HostExclusion, HostMove
-    try:
-        rows = list(HostExclusion.objects.filter(org__projects__id=project_id).values_list('host', 'include_subdomains'))
+    def read():
+        found = tuple(HostExclusion.objects.filter(org__projects__id=project_id).values_list('host', 'include_subdomains'))
         # a host moved out of this project into another stays out of this one (exact name), whatever its org's list says
-        rows += [(host, False) for host in HostMove.objects.filter(project_id=project_id).values_list('host', flat=True)]
+        return found + tuple((host, False) for host in HostMove.objects.filter(project_id=project_id).values_list('host', flat=True))
+    try:
+        rows = list(_cached('names', project_id, read))
     except Exception:  # noqa: BLE001 - never let a lookup problem stop discovery
         if strict:
             raise
