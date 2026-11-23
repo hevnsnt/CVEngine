@@ -824,11 +824,11 @@ def store_reported(project_id, domain_id, host, probe, readings, provider, repor
     if not project_id or not domain_id or not host:
         return False
     observations = [_reported_observation(r, provider, reported_at, port=port, undated=undated) for r in readings if r]
-    rows = ProbeObservation.objects.filter(project_id=project_id, host=host, probe=probe)
+    rows = list(ProbeObservation.objects.filter(project_id=project_id, host=host, probe=probe))
     before = {(o.kind, o.product, o.port): (o.version, (o.evidence or {}).get('reported_at')) for o in rows}
     changed = False
     if observations:
-        probes.record(project_id, domain_id, host, probe, observations, now=now)
+        probes.record(project_id, domain_id, host, probe, observations, now=now, existing=rows)
         changed = any(before.get((o['kind'], o['product'], o['port'])) != (o['version'], o['evidence']['reported_at']) for o in observations)
     if replace:
         keep = {(o['kind'], o['product'], o['port']) for o in observations}

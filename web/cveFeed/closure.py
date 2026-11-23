@@ -70,6 +70,35 @@ def clip_note(value, limit=NOTE_MAX):
     return _CONTROL.sub('', str(value).replace('\r\n', '\n').replace('\r', '\n')).strip()[:limit].rstrip()
 
 
+# The lines the engine writes into a finding's note when it closes or reopens it by itself (cveFeed.archive_closure, finding_lifecycle.seen_again,
+# hygiene.store_findings). They are history the engine may drop again; every other line of a note is a person's text.
+ENGINE_LINES = (AUTOMATIC, 'Reopened automatically:', 'Reopened: the check found this again')
+
+
+def prepend_note(line, note, limit=NOTE_MAX):
+    """``line`` (the engine closing or reopening a finding) on top of ``note``, kept within ``limit`` without ever cutting a person's text.
+
+    Each close and reopen cycle adds a line, and cutting the note from its end (as before) lost the person's note below them once enough cycles
+    had run. When the note would be too long, the engine's own earlier lines (``ENGINE_LINES``) are dropped instead, oldest first: the block at the
+    top is newest first, so it is dropped from its bottom up, then any engine line further down. A note that is still too long keeps the person's
+    text whole (it may then run over ``limit`` by at most ``line``)."""
+    parts = [line, *note.split('\n')] if note else [line]
+    total = sum(len(p) for p in parts) + len(parts) - 1
+    if total <= limit:
+        return '\n'.join(parts)
+    top = 1
+    while top < len(parts) and parts[top].startswith(ENGINE_LINES):
+        top += 1
+    oldest_first = list(range(top - 1, 0, -1)) + [k for k in range(top, len(parts)) if parts[k].startswith(ENGINE_LINES)]
+    dropped = set()
+    for k in oldest_first:
+        if total <= limit:
+            break
+        dropped.add(k)
+        total -= len(parts[k]) + 1
+    return '\n'.join(p for k, p in enumerate(parts) if k not in dropped)
+
+
 def is_closed(status):
     return status in CLOSED
 

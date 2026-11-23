@@ -9,7 +9,7 @@ class Migration(migrations.Migration):
 
     atomic = False
 
-    dependencies = [('cveFeed', '0188_discevent_host_names_idx')]
+    dependencies = [('cveFeed', '0187_discevent_host_names_idx')]
 
     operations = [
         AddIndexConcurrently(model_name='hostinventory', index=models.Index(fields=['project', '-reported_at', '-id'], name='hostinv_proj_reported_idx')),

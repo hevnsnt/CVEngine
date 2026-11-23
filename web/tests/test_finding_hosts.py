@@ -10,6 +10,7 @@ The scene, project ``fh`` with the target ``zebra.test`` and three finished full
   (cause C: gone).
 * ``mail-only.zebra.test`` never was a host row: a DMARC finding names it (not a host; never closed).
 """
+import os
 from datetime import timedelta
 from io import StringIO
 from unittest import mock
@@ -174,8 +175,26 @@ class GoneClosureTests(Base):
         self.assertEqual(archive_closure.close_gone([self.project.pk])['hosts'], 0)
         self.ftp.refresh_from_db()
         self.assertEqual(self.ftp.remediation_status, 'open')
-        with mock.patch.dict('os.environ', {'CVENGINE_GONE_AFTER_DAYS': '2'}):
+        with mock.patch.dict('os.environ', {'CVENGINE_GONE_AFTER_DAYS': '2', 'CVENGINE_TTL_BBOT_DEEP': '0'}):
             self.assertEqual(archive_closure.close_gone([self.project.pk])['hosts'], 1)  # the grace period is set by CVENGINE_GONE_AFTER_DAYS
+
+    def test_a_name_only_the_weekly_deep_discovery_finds_does_not_close_before_the_next_deep_run(self):
+        # missed by the standard full scans since a deep run saw it 8 days ago: with the default 7 day grace it closed just before the next deep
+        # run (due after 7 days) and reopened when that run found it again, every week. The grace is never shorter than the deep cadence plus 2 days.
+        env = {k: v for k, v in os.environ.items() if k not in ('CVENGINE_GONE_AFTER_DAYS', 'CVENGINE_TTL_BBOT_DEEP')}
+        with mock.patch.dict('os.environ', env, clear=True):
+            self.assertEqual(host_resolver.gone_after_days(), 9)
+            HostState.objects.filter(pk=self.ftpr_state.pk).update(last_seen=timezone.now() - timedelta(days=8))
+            self.assertEqual(archive_closure.close_gone([self.project.pk])['hosts'], 0)
+            self.ftp.refresh_from_db()
+            self.assertEqual(self.ftp.remediation_status, 'open')
+            # a host that is really gone (the deep run missed it too) still closes
+            HostState.objects.filter(pk=self.ftpr_state.pk).update(last_seen=timezone.now() - timedelta(days=10))
+            self.assertEqual(archive_closure.close_gone([self.project.pk])['hosts'], 1)
+        with mock.patch.dict('os.environ', {'CVENGINE_GONE_AFTER_DAYS': '3', 'CVENGINE_TTL_BBOT_DEEP': '336'}):
+            self.assertEqual(host_resolver.gone_after_days(), 16)  # a two week deep cadence raises it with it
+        with mock.patch.dict('os.environ', {'CVENGINE_GONE_AFTER_DAYS': '30'}):
+            self.assertEqual(host_resolver.gone_after_days(), 30)  # a longer grace is kept as set
 
     def test_a_person_s_closure_is_never_touched(self):
         HygieneFinding.objects.filter(pk=self.ftp.pk).update(remediation_status='accepted_risk', remediation_by=User.objects.create_user('p'))
@@ -232,7 +251,8 @@ class AuditTests(Base):
         out = StringIO()
         call_command('audit_finding_hosts', stdout=out)
         self.assertIn('Dry run', out.getvalue())
-        self.assertIn('gone: 2 eligible now, 0 missing but inside the grace period (2 full scans and 7 days)', out.getvalue())
+        from cveFeed.host_resolver import gone_after_days
+        self.assertIn(f'gone: 2 eligible now, 0 missing but inside the grace period (2 full scans and {gone_after_days()} days)', out.getvalue())
         call_command('audit_finding_hosts', '--apply', stdout=out)
         after = finding_hosts.audit([self.project.pk])
         self.assertEqual((after['totals']['gone'], after['totals']['archived']), (0, 0))

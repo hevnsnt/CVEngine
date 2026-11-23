@@ -10,7 +10,7 @@ class Migration(migrations.Migration):
 
     atomic = False
 
-    dependencies = [('cveFeed', '0187_hostassess_proj_host_idx')]
+    dependencies = [('cveFeed', '0186_aiusage_time_stage_idx')]
 
     operations = [
         AddIndexConcurrently(model_name='discoveryevent', index=models.Index(
