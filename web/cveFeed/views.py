@@ -87,9 +87,10 @@ def score_part(line):
             'text': str(line.get('text') or '')[:600], 'ref': ref if isinstance(ref, dict) else None}
 
 
-def _host_tip(sub, live_matches, severities, aliases=()):
+def _host_tip(sub, live_matches, severities, aliases=(), addresses=None):
     """A compact summary for the attack-surface hover card: no extra queries, only the prefetched matches/ips and the
-    host's stored score reasons. Severities is the list of open-finding severities already gathered for this host."""
+    host's stored score reasons. Severities is the list of open-finding severities already gathered for this host. ``addresses``: the host's
+    IP addresses when the caller already read them as values (else the prefetched ``ip_addresses``)."""
     worst = None
     for match in live_matches:
         tier = match_heat(match)
@@ -103,7 +104,7 @@ def _host_tip(sub, live_matches, severities, aliases=()):
         'project': sub.target_domain.project.name if sub.target_domain_id and sub.target_domain.project_id else '',
         'org': (sub.target_domain.project.org.name if sub.target_domain_id and sub.target_domain.project_id
                 and sub.target_domain.project.org_id else ''),
-        'ips': len({ip.address for ip in sub.ip_addresses.all()}),
+        'ips': len(set(addresses) if addresses is not None else {ip.address for ip in sub.ip_addresses.all()}),
         'cves': len(live_matches),
         'top_cve': worst[0] if worst else '',
         'top_tier': worst[1] if worst else '',
@@ -117,20 +118,30 @@ def _host_tip(sub, live_matches, severities, aliases=()):
     }
 
 
+# what graph_payload reads of a host row and its target, project and organization (the wide columns of a host are never loaded)
+GRAPH_SUB_FIELDS = ('name', 'score', 'score_detail', 'scan_history', 'target_domain', 'target_domain__name', 'target_domain__alias', 'target_domain__note',
+                    'target_domain__scope_mode', 'target_domain__project', 'target_domain__project__slug', 'target_domain__project__name',
+                    'target_domain__project__org', 'target_domain__project__org__name')
+# a match needs its CVE's tier fields only: never the prose columns
+# (and what decides whether it is version-only: its source, evidence and Triage validation status, threat.match_heat)
+GRAPH_MATCH_FIELDS = ('subdomain_id', 'ai_verdict', 'evidence', 'version_in_range', 'template_result', 'distro_status', 'source', 'cve_entry__cve_id',
+                      'cve_entry__kev', 'cve_entry__epss_reached', 'cve_entry__exploit_db', 'cve_entry__cvss', 'remediation_status',
+                      'triage__validation_status', 'triage__heat_override', 'triage__status', 'triage__classification')
+
+
 def graph_payload(domain_id=None, scan_id=None):
     """Nodes/edges for the asset graph: domain > subdomain > ip, and subdomain > cve. Only live hosts are drawn (they resolved
-    to an IP, or something saw them answer); names that never resolved are left out. Ports belong on the host's detail card."""
-    from startScan.models import Subdomain, Vulnerability
+    to an IP, or something saw them answer); names that never resolved are left out. Ports belong on the host's detail card.
+
+    Every read is one statement over all the drawn hosts, never one per host: the hosts (only the columns drawn), their addresses (as
+    plain values), the live CVE matches of the hosts and of their other names in one statement, the findings of both in one statement (whether
+    each is open and actionable, and its heat, are worked out by the database in the same read), and the projects with their hygiene counts in one."""
+    from django.db.models import BooleanField, Case, Exists, IntegerField, OuterRef, Q, Value, When
+    from startScan.models import IpAddress, Subdomain, Vulnerability
     from cveFeed import internal_view
     from cveFeed.graph_overview import root_for
 
-    from django.db.models import Prefetch
-    # a match needs its CVE's tier fields only: never the prose columns
-    # (and what decides whether it is version-only: its source, evidence and Triage validation status, threat.match_heat)
-    matches = CVEMatch.objects.only('subdomain_id', 'ai_verdict', 'evidence', 'version_in_range', 'template_result', 'distro_status', 'source', 'cve_entry__cve_id', 'cve_entry__kev',
-                                    'cve_entry__epss_reached', 'cve_entry__exploit_db', 'cve_entry__cvss', 'remediation_status', 'triage__validation_status', 'triage__heat_override', 'triage__status', 'triage__classification').select_related('cve_entry', 'triage')
-    subs = Subdomain.objects.select_related('target_domain__project__org').prefetch_related(
-        'ip_addresses', Prefetch('cve_matches', queryset=matches))
+    subs = Subdomain.objects.all()
     if domain_id:
         subs = subs.filter(target_domain_id=domain_id)
     if scan_id:
@@ -148,48 +159,59 @@ def graph_payload(domain_id=None, scan_id=None):
             return True
         return False
 
-    from cveFeed.counts import CLOSED, LIVE_HOST_Q, match_is_live
+    from cveFeed.counts import CLOSED, LIVE_HOST_Q, RULED_OUT
     from django.db.models import F
-    subs = subs.filter(LIVE_HOST_Q).distinct()
+    through = Subdomain.ip_addresses.through
+    # LIVE_HOST_Q as an EXISTS: the same rows, each once, without joining every address row and then DISTINCT over every column of the host
+    listed = subs.filter(Q(Exists(through.objects.filter(subdomain_id=OuterRef('pk')))) | Q(http_status__gt=0))
     # the riskiest hosts first, then by name: past the node cap the drawn hosts are the ones that matter, and the same ones on every poll
-    sub_list = list(subs.order_by(F('score').desc(nulls_last=True), 'name', 'pk')[:GRAPH_NODE_CAP])
+    sub_list = list(listed.select_related('target_domain__project__org').only(*GRAPH_SUB_FIELDS)
+                    .order_by(F('score').desc(nulls_last=True), 'name', 'pk')[:GRAPH_NODE_CAP])
     sub_ids = [s.pk for s in sub_list]
-    # "scanned" = at least one finding exists at all, even an info-only one (something looked); a
-    # second query narrows to the ones severe enough, open, and not ruled out, to call "vulnerable".
-    scanned_ids = set(Vulnerability.objects.filter(subdomain_id__in=sub_ids).values_list('subdomain_id', flat=True))
-    vulnerable_ids = set(Vulnerability.objects.filter(
-        subdomain_id__in=sub_ids, open_status=True, severity__gte=1).exclude(remediation_status__in=CLOSED).values_list('subdomain_id', flat=True))
-    vulnerable_ids |= {s.pk for s in sub_list if any(match_is_live(m) for m in s.cve_matches.all())}
-
-    # each open finding's severity (the tip) and heat (threat.finding_heat_rank_expr: under the KEV policy a finding that names CVEs follows the
-    # CVE rule, any other its severity)
-    from cveFeed.threat import finding_heat_rank_expr
-    heat_names = {rank: heat for heat, rank in HEAT_RANK.items()}
-    severities, finding_heats = {}, {}
-    for sub_id, severity, rank in Vulnerability.objects.filter(subdomain_id__in=sub_ids, open_status=True, severity__gte=1).exclude(remediation_status__in=CLOSED) \
-            .annotate(heat_rank=finding_heat_rank_expr()).values_list('subdomain_id', 'severity', 'heat_rank'):
-        severities.setdefault(sub_id, []).append(severity)
-        if rank in heat_names:
-            finding_heats.setdefault(sub_id, []).append(heat_names[rank])
+    # each host's addresses, as values (the same join the prefetch made, with no model rows)
+    ips = {}
+    for sub_id, ip_id, address in IpAddress.objects.filter(ip_addresses__id__in=sub_ids).values_list('ip_addresses__id', 'id', 'address'):
+        ips.setdefault(sub_id, []).append((ip_id, address))
 
     # one host, several names: the evidence of the other names on the same addresses counts for the host drawn
     from cveFeed.counts import host_siblings
     siblings = host_siblings(sub_ids)
-    sibling_ids = {i for rows in siblings.values() for i, _ in rows}
-    sibling_matches, sibling_findings = {}, {}
-    if sibling_ids:
-        for m in CVEMatch.objects.filter(subdomain_id__in=sibling_ids).exclude(ai_verdict='not_affected').exclude(remediation_status__in=CLOSED).only(
-                'subdomain_id', 'ai_verdict', 'evidence', 'version_in_range', 'template_result', 'distro_status', 'source', 'cve_entry__cve_id', 'cve_entry__kev', 'cve_entry__epss_reached',
-                'cve_entry__exploit_db', 'cve_entry__cvss', 'remediation_status', 'triage__validation_status', 'triage__heat_override', 'triage__status', 'triage__classification').select_related('cve_entry', 'triage'):
-            sibling_matches.setdefault(m.subdomain_id, []).append(m)
-        for sid, severity, name, rank in Vulnerability.objects.filter(subdomain_id__in=sibling_ids, open_status=True, severity__gte=1).exclude(remediation_status__in=CLOSED) \
-                .annotate(heat_rank=finding_heat_rank_expr()).values_list('subdomain_id', 'severity', 'name', 'heat_rank'):
-            sibling_findings.setdefault(sid, []).append((severity, name, heat_names.get(rank)))
-    own_findings = {}
-    if sibling_ids:
-        for sid, severity, name in Vulnerability.objects.filter(subdomain_id__in=sub_ids, open_status=True, severity__gte=1).exclude(remediation_status__in=CLOSED) \
-                .values_list('subdomain_id', 'severity', 'name'):
-            own_findings.setdefault(sid, set()).add((severity, name))
+    sibling_ids = {i for rows in siblings.values() for i, _ in rows}  # never one of sub_ids (host_siblings leaves those out)
+    wanted_ids = [*sub_ids, *sorted(sibling_ids)]
+
+    # the live CVE matches (not ruled out, not closed: counts.match_is_live) of the drawn hosts and of their other names, in one statement and in
+    # the model's order, which is the order each host's own list had when it was prefetched
+    own_matches, sibling_matches = {}, {}
+    for m in CVEMatch.objects.filter(subdomain_id__in=wanted_ids).exclude(ai_verdict=RULED_OUT).exclude(remediation_status__in=CLOSED) \
+            .only(*GRAPH_MATCH_FIELDS).select_related('cve_entry', 'triage'):
+        (sibling_matches if m.subdomain_id in sibling_ids else own_matches).setdefault(m.subdomain_id, []).append(m)
+
+    # every finding of the drawn hosts and their other names in one statement. "scanned" = at least one finding exists at all, even an info-only one
+    # (something looked); an open one of low or above that is not closed is actionable and makes the host "vulnerable". Each actionable finding's
+    # severity (the tip) and heat (threat.finding_heat_rank_expr: under the KEV policy a finding that names CVEs follows the CVE rule, any other its
+    # severity), worked out by the database for those rows only
+    from cveFeed.threat import finding_heat_rank_expr
+    heat_names = {rank: heat for heat, rank in HEAT_RANK.items()}
+    actionable = Q(open_status=True, severity__gte=1) & ~Q(remediation_status__in=CLOSED)
+    scanned_ids, vulnerable_ids = set(), set()
+    severities, finding_heats, own_findings, sibling_findings = {}, {}, {}, {}
+    for sub_id, severity, name, live, rank in Vulnerability.objects.filter(subdomain_id__in=wanted_ids).annotate(
+            _graph_live=Case(When(actionable, then=Value(True)), default=Value(False), output_field=BooleanField()),
+            _graph_heat=Case(When(actionable, then=finding_heat_rank_expr()), default=Value(None), output_field=IntegerField())) \
+            .values_list('subdomain_id', 'severity', 'name', '_graph_live', '_graph_heat'):
+        if sub_id in sibling_ids:
+            if live:
+                sibling_findings.setdefault(sub_id, []).append((severity, name, heat_names.get(rank)))
+            continue
+        scanned_ids.add(sub_id)
+        if not live:
+            continue
+        vulnerable_ids.add(sub_id)
+        severities.setdefault(sub_id, []).append(severity)
+        if rank in heat_names:
+            finding_heats.setdefault(sub_id, []).append(heat_names[rank])
+        own_findings.setdefault(sub_id, set()).add((severity, name))
+    vulnerable_ids |= set(own_matches)
 
     from startScan.models import ScanActivity
     nuclei_done = set(ScanActivity.objects.filter(scan_of_id__in={s.scan_history_id for s in sub_list if s.scan_history_id},
@@ -199,13 +221,15 @@ def graph_payload(domain_id=None, scan_id=None):
     from agentapi.services import alias_and_note
     from cveFeed.models import HostProfile
     wanted = {s.name.lower() for s in sub_list} | {n.lower() for rows in siblings.values() for _, n in rows}
-    tags = {(row.project_id, row.host): {'alias': row.alias, 'note': row.note}
-            for row in HostProfile.objects.filter(host__in=wanted).exclude(alias='', note='')}
+    tags = {(project_id, host): {'alias': alias, 'note': note}
+            for project_id, host, alias, note in HostProfile.objects.filter(host__in=wanted).exclude(alias='', note='')
+            .values_list('project_id', 'host', 'alias', 'note')}
     cut = False  # the node cap stopped the drawing before every host was in
     for sub in sub_list:
         sid = f'sub:{sub.pk}'
         status = asset_status(sub, scanned_ids, vulnerable_ids, nuclei_done)
-        live = [m for m in sub.cve_matches.all() if match_is_live(m)]
+        mine = own_matches.get(sub.pk, [])
+        live = list(mine)
         sev = list(severities.get(sub.pk, []))
         temps = list(finding_heats.get(sub.pk, []))
         sibs = siblings.get(sub.pk, [])
@@ -227,10 +251,12 @@ def graph_payload(domain_id=None, scan_id=None):
         tiers = [match_heat(m) for m in live] + temps
         heat = host_heat(status, tiers, [])
         given = alias_and_note(sub, [SimpleNamespace(name=n, target_domain=sub.target_domain) for _, n in sibs], tags)
+        host_ips = ips.get(sub.pk, [])
         if not node(sid, 'subdomain', sub.name, target=sub.target_domain.name if sub.target_domain_id else '',
                     **{k: given[k] for k in ('alias', 'note') if given[k]},
                     project=sub.target_domain.project.slug if sub.target_domain_id and sub.target_domain.project_id else '',
-                    status=status, heat=heat, score=sub.score, info=_host_tip(sub, live, sev, [n for _, n in sibs if n.lower() != sub.name.lower()]),
+                    status=status, heat=heat, score=sub.score,
+                    info=_host_tip(sub, live, sev, [n for _, n in sibs if n.lower() != sub.name.lower()], addresses=[a for _, a in host_ips]),
                     internal=internal_view.is_internal(sub.target_domain.project_id if sub.target_domain_id else None, sub.name),
                     network=internal_view.network_of(sub.target_domain.project_id if sub.target_domain_id else None, sub.name)):
             cut = True
@@ -242,12 +268,10 @@ def graph_payload(domain_id=None, scan_id=None):
                 project_name=sub.target_domain.project.name if sub.target_domain.project_id else '',
                 root=root_for(sub.target_domain)):
             edges.add((f'dom:{sub.target_domain_id}', sid))
-        for ip in sub.ip_addresses.all():
-            if node(f'ip:{ip.pk}', 'ip', ip.address):
-                edges.add((sid, f'ip:{ip.pk}'))
-        for match in sub.cve_matches.all():
-            if not match_is_live(match):
-                continue
+        for ip_id, address in host_ips:
+            if node(f'ip:{ip_id}', 'ip', address):
+                edges.add((sid, f'ip:{ip_id}'))
+        for match in mine:
             cve = match.cve_entry
             if node(f'cve:{cve.pk}', 'cve', cve.cve_id, tier=_tier(cve)):
                 edges.add((sid, f'cve:{cve.pk}'))
@@ -271,7 +295,8 @@ def graph_payload(domain_id=None, scan_id=None):
     total_hosts, per_project = drawn_hosts, {}
     if capped:
         from django.db.models import Count
-        per_project = {slug or '': n for slug, n in subs.order_by().values_list('target_domain__project__slug').annotate(n=Count('pk', distinct=True))}
+        per_project = {slug or '': n for slug, n in subs.filter(LIVE_HOST_Q).distinct().order_by().values_list('target_domain__project__slug')
+                       .annotate(n=Count('pk', distinct=True))}
         total_hosts = max(sum(per_project.values()), drawn_hosts)
     return {'nodes': list(nodes.values()), 'edges': [{'from': a, 'to': b} for a, b in sorted(edges)],
             'hosts': {'drawn': drawn_hosts, 'total': total_hosts, 'projects': per_project},
@@ -281,17 +306,21 @@ def graph_payload(domain_id=None, scan_id=None):
 def _graph_projects(domain_id=None, scan_id=None):
     """``{slug: {'name', 'hygiene'}}`` for every project the caller sees: its open, actionable hygiene findings (the dashboard's Hygiene
     tile), which the graph hangs off the project's cloud beside its fire, smoke and ice hosts. Hygiene findings belong to a target, not
-    a host row, so they are counted here rather than from the drawn hosts. One query."""
-    from django.db.models import Count
+    a host row, so they are counted here rather than from the drawn hosts. One query: each project with its count beside it (the hygiene rows are
+    read through their own scoped manager, as before)."""
+    from django.db.models import Count, IntegerField, OuterRef, Subquery, Value
+    from django.db.models.functions import Coalesce
     from cveFeed import counts
     from dashboard.models import Project
-    hygiene = counts.actionable_hygiene(HygieneFinding.objects.all())
-    if domain_id:
-        hygiene = hygiene.filter(domain_id=domain_id)
     if scan_id:
-        hygiene = hygiene.none()  # one scan's graph: its hosts only
-    found = dict(hygiene.order_by().values_list('domain__project__slug').annotate(n=Count('id')))
-    return {slug: {'name': name, 'hygiene': found.get(slug, 0)} for slug, name in Project.objects.values_list('slug', 'name')}
+        hygiene = Value(0)  # one scan's graph: its hosts only
+    else:
+        found = counts.actionable_hygiene(HygieneFinding.objects.filter(domain__project_id=OuterRef('pk')))
+        if domain_id:
+            found = found.filter(domain_id=domain_id)
+        hygiene = Coalesce(Subquery(found.order_by().values('domain__project_id').annotate(n=Count('id')).values('n'), output_field=IntegerField()),
+                           Value(0))
+    return {slug: {'name': name, 'hygiene': n} for slug, name, n in Project.objects.annotate(_graph_hygiene=hygiene).values_list('slug', 'name', '_graph_hygiene')}
 
 
 def _running_scans(ScanHistory):
