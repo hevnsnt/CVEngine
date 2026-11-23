@@ -85,7 +85,7 @@ backup_database() {
 # How many migrations the database has applied; fails when that cannot be read.
 applied_migrations() {
   local plan
-  plan=$("${COMPOSE[@]}" run --rm --no-deps -T --entrypoint python3 web manage.py showmigrations --plan 2>/dev/null) || return 1
+  plan=$("${COMPOSE[@]}" run --rm --no-deps -T -e CVENGINE_DB_ROLE=owner --entrypoint python3 web manage.py showmigrations --plan 2>/dev/null) || return 1
   grep -c '^\[X\]' <<<"$plan" || true
 }
 
@@ -95,7 +95,8 @@ applied_migrations() {
 run_migrations() {
   local before after
   before=$(applied_migrations) || before=''
-  "${COMPOSE[@]}" run --rm --no-deps --entrypoint python3 web manage.py migrate --noinput && return 0
+  # as the database's owner role (CVENGINE_DB_ROLE=owner); the migrate also creates or updates the app role and grants it (web/reNgine/db_roles.py)
+  "${COMPOSE[@]}" run --rm --no-deps -e CVENGINE_DB_ROLE=owner --entrypoint python3 web manage.py migrate --noinput && return 0
   after=$(applied_migrations) || after=''
   if [ -z "$before" ] || [ "$before" != "$after" ]; then
     DEPLOY_STAGE=migrated
@@ -194,6 +195,11 @@ deploy_steps() {
   else
     "${compose[@]}" up -d --no-recreate db redis || return 1
   fi
+  # The least privilege database role the server runs as (scripts/db-app-role.sh): an installation without its password gets one now, in .env and
+  # the Compose env file. The migrate below creates the role with it and grants it; web, celery and celery-beat, recreated after that, run as it.
+  if [ -f scripts/db-app-role.sh ] && . scripts/db-app-role.sh && cvengine_ensure_db_app_password "$(cvengine_compose_env_file "${compose[@]}")"; then
+    log "the server had no database role of its own: generated its password (CVENGINE_DB_APP_PASSWORD in .env); the migration creates the role and the server runs as it from this update on"
+  fi
   # The database's own settings are in the compose file (max_connections). `up -d --no-deps db` recreates the db container only when its
   # definition changed since it was created (once, on the update that brings the change: a restart of a few seconds), and is a no-op otherwise.
   "${compose[@]}" up -d --no-deps db || return 1
@@ -236,6 +242,10 @@ deploy_steps() {
   phase applying verifying
   cv_status step verifying
   verify_serving || return 1
+  # Which database role web, celery and celery-beat run as; a warning when any still uses the owner role (never fails the update).
+  if declare -F cvengine_db_role_report >/dev/null; then
+    while IFS= read -r line; do [ -z "$line" ] || log "$line"; done < <(cvengine_db_role_report "${compose[@]}")
+  fi
   # The built-in scanner, once the server answers: recreated on its own network (the Tailscale sidecar follows it), kept on the new image only once a
   # heartbeat of it reaches the server, else put back on the previous one. Never a failed update: until it runs, the scans that need it wait.
   if declare -F cvengine_scanner_start >/dev/null; then
@@ -278,7 +288,7 @@ verify_serving() {
   fi
   if ! "${compose[@]}" exec -T web python3 manage.py migrate --check >/dev/null 2>&1; then
     log "the web service answers but the database has migrations waiting; applying them"
-    "${compose[@]}" exec -T web python3 manage.py migrate --noinput || return 1
+    "${compose[@]}" exec -T -e CVENGINE_DB_ROLE=owner web python3 manage.py migrate --noinput || return 1
     if ! "${compose[@]}" exec -T web python3 manage.py migrate --check >/dev/null 2>&1; then
       log "migrations are still waiting after migrate; the update is not complete"
       return 1

@@ -6,7 +6,10 @@ set -Eeuo pipefail
 # "Waiting for web to apply migrations" says WHY the check fails (pending migration, database unreachable, settings error)
 # instead of hiding it; the check can take 30 s on a busy host, so each attempt is logged with its exit status.
 for attempt in {1..60}; do
-    if out=$(python3 manage.py migrate --check 2>&1); then
+    # as the owner role, so the wait is the same whether or not the app role exists yet
+    if out=$(CVENGINE_DB_ROLE=owner python3 manage.py migrate --check 2>&1); then
+        # the database role Beat runs as (web/db-role.sh): the app role the web service's migrate created, else the owner role, said in the log
+        . "$(dirname "$0")/db-role.sh" && cvengine_db_role "${CVENGINE_DB_ROLE_WAIT:-60}"
         exec "$@"
     else
         status=$?

@@ -380,7 +380,7 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         calls = self.calls()
         self.assertIn('docker compose -f docker-compose.dev.yml build web celery celery-beat', calls)
         self.assertIn('docker compose -f docker-compose.dev.yml up -d --no-recreate db redis', calls)
-        self.assertIn('docker compose -f docker-compose.dev.yml run --rm --no-deps --entrypoint python3 web manage.py migrate --noinput', calls)
+        self.assertIn('docker compose -f docker-compose.dev.yml run --rm --no-deps -e CVENGINE_DB_ROLE=owner --entrypoint python3 web manage.py migrate --noinput', calls)
         # the dev compose file has no proxy service, so none is named (naming it made every dev update fail)
         self.assertIn('docker compose -f docker-compose.dev.yml up -d --no-deps --force-recreate web celery celery-beat', calls)
         self.assertFalse([c for c in calls if '--force-recreate' in c and 'proxy' in c])
