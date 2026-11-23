@@ -54,15 +54,19 @@ def findings_for(domain, hosts=None):
     crowded = (IpAddress.objects.filter(pk__in=own)
                .annotate(n=Count('ports', filter=Q(ports__state__in=OPEN_PORT_STATES, ports__protocol__in=TCP_PROTOCOLS)))
                .filter(n__gte=THRESHOLD))
+    # The crowded addresses are counted once: each host then reads its own from this map instead of running the count again per host.
+    crowded_counts = dict(crowded.values_list('pk', 'n'))
+    if not crowded_counts:
+        return []
     from cveFeed import host_resolver
     current = host_resolver.current_target_names(domain)  # a name gone from the latest full scan keeps its old, stale ports
-    names = {n for n in Subdomain.objects.filter(target_domain=domain, ip_addresses__in=crowded).order_by().values_list('name', flat=True).distinct()
+    names = {n for n in Subdomain.objects.filter(target_domain=domain, ip_addresses__in=sorted(crowded_counts)).order_by().values_list('name', flat=True).distinct()
              if _allowed(n, wanted, banned) and host_resolver.normalize(n) in current}
     if not names:
         return []
     out = []
     for sub in _newest_rows(domain, names, Port.objects.none()):
-        counts = {ip.address: ip.n for ip in crowded.filter(pk__in=[i.pk for i in sub.ip_addresses.all()])}
+        counts = {ip.address: crowded_counts[ip.pk] for ip in sub.ip_addresses.all() if ip.pk in crowded_counts}
         finding = evaluate(sub.name, counts)
         if finding:
             out.append(finding)
