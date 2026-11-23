@@ -81,6 +81,7 @@ Every action is followed by a check. For a host action the clock starts when the
 | per rule switch | the same panel; `{"rule": "R3", "enabled": false}` | on |
 | `CVENGINE_WATCHDOG=0` | `.env` or the environment of the host and the web container | unset (on) |
 | `CVENGINE_WATCHDOG_SECONDS` | the host watcher's tick interval, for tests | 30 |
+| `CVENGINE_WATCHDOG_STACK_WAIT` | seconds the host waits after asking the workers for their stacks, before it keeps the celery log and recreates `celery`; for tests | 3 |
 
 R1 and R2 recreate the same container, so the web side counts their restarts (and the scheduler's) **together** against the host's 24 a day, and asks for no restart the host would refuse. When the host does refuse for one of its limits (24 a day, or 10 minutes between two restarts), the rule is **held**, not failed: the attempt does not count, there is no "could not fix it" notice and no hour of silence, a warning notice says the limit was reached, and the rule asks again after an hour (15 minutes for the gap), or clears itself when the lanes answer. The host marks such an answer `limit` in `web/.watchdog-result`.
 
