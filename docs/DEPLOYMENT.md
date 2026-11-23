@@ -349,6 +349,26 @@ Load it as the owner (`POSTGRES_USER`), as above. Into a brand new database the 
 
 Every updater takes a database dump just before it migrates (`scripts/update.sh` and the in-app updater keep the last 3 in `.git/cvengine-update/backups`, mode 0700, and stop the update when a dump fails; `CVENGINE_UPDATE_BACKUPS=0` in `.env` turns that off; automatic deployment makes its own in `.git/cvengine-auto-deploy/backups`, [UPDATES.md](UPDATES.md#automatic-deployment)). These dumps stay on the same disk as the database: copy them elsewhere if the disk is what you are protecting against.
 
+### Nightly dump
+
+The update dumps exist only when an update runs. For a dump every night, run `make db-backup-schedule` once (`scripts/install-db-backup.sh`, as a user that may run Docker; root on most hosts). It adds one line, marked `# cvengine-db-backup`, to that user's crontab: at 03:17 host time it runs `scripts/db-backup-daily.sh`, which
+
+- dumps the database with `pg_dump -Fc` (PostgreSQL's custom format: compressed, and `pg_restore` can restore it whole or table by table) as the owner role, inside the `db` container;
+- writes it to `backups/db/cvengine-<time>.dump` (`CVENGINE_DB_BACKUP_DIR`), the folder mode 0700 and the file 0600, and checks it with `pg_restore --list` before keeping it;
+- then removes dumps older than `CVENGINE_DB_BACKUP_DAYS` days (default 7). A dump that fails removes nothing, so a run of failed nights never empties the folder. `CVENGINE_DB_BACKUP_DAYS=0` turns the nightly dump off.
+
+The folder holds dumps only: `.env` and `web/secret` are never written there, so it can be copied to your normal backup store while the keys go to another one, as above. Its log is `backups/db/backup.log`. `make db-backup` takes one now. `scripts/install-db-backup.sh --remove` takes the crontab line away and keeps the dumps. `make rotate-secrets` puts its dump before a rotation in the same folder (`cvengine-<time>-before-rotation.dump`), where the nightly run removes it after the same number of days. Each dump is about the size of the database compressed, so keep an eye on free disk when you raise the days kept.
+
+Restore a custom format dump the way the plain one above is restored, with `pg_restore` instead of `psql`:
+
+```bash
+docker compose exec -T db sh -c 'pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --clean --if-exists' < backups/db/cvengine-20261123T091700Z.dump
+```
+
+### Checking that a dump restores
+
+`make restore-check` (`scripts/restore-check.sh`) proves the newest dump can be restored, without touching the live database: it creates a throwaway database, `cvengine_restore_check_<number>`, in the same PostgreSQL, restores the newest nightly dump into it (or, with none, the newest update dump; `scripts/restore-check.sh FILE` takes a given `.dump` or `.sql.gz`), prints the row counts of a few tables (migrations, users, projects, targets, hosts, findings, CVEs) next to the live counts, and drops it again, also when the restore fails or you interrupt it. It fails when a table is missing or the migrations or users table is empty in the copy. It needs free disk for one more copy of the database for a few minutes and loads the database server while it runs, so run it in a quiet hour, for example once a week after the nightly dump.
+
 ## Make targets
 
 `make help` lists them. They all use `docker-compose.yml` alone, and the ones that name services (`stop`, `restart`, `rm`, `logs`, `images`, `build`, `up`) act on the six core services only.
@@ -365,6 +385,8 @@ Every updater takes a database dump just before it migrates (`scripts/update.sh`
 | `make logs`, `make images` | Follow the logs (last 1000 lines), or show the images. |
 | `make test` | Runs the test suite in the running `celery` container. |
 | `make redis-auth`, `make rotate-field-key` | One-time hardening of an older install ([CONFIGURATION.md](CONFIGURATION.md#templates-and-secrets), [UPGRADE.md](UPGRADE.md#upgrading-to-12)). |
+| `make rotate-secrets` | Rotates the database passwords, the Redis password, the field key and the Django secret, then verifies the site; `ARGS=--dry-run` prints the plan ([CONFIGURATION.md](CONFIGURATION.md#rotating-secrets)). |
+| `make db-backup`, `make db-backup-schedule`, `make restore-check` | Dump the database now, dump it every night, or prove the newest dump restores ([Backups](#nightly-dump)). |
 | `make export-cve-seed` | Writes this instance's CVE catalog to `web/cve-seed.jsonl.gz` ([PIPELINE.md](PIPELINE.md#seeding-the-catalog)). |
 | `make scanner-update` | The Scanner update: pull the newest published scanner image, start it, keep it only once it has checked in with a contract version the server accepts, else put the previous image back ([BUILTIN-SCANNER.md](BUILTIN-SCANNER.md#keeping-it-current-the-scanner-update)). Run it from cron on a host without the updater timer. |
 | `make scanner-build`, `make scanner-logs` | Build the built-in scanner's image from the known-good floor commit `scanner.lock.json` names (the offline fallback when the published image cannot be pulled), or follow its log ([BUILTIN-SCANNER.md](BUILTIN-SCANNER.md)). |

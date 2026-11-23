@@ -72,3 +72,55 @@ class DedicatedKeyTests(TestCase):
 	def test_every_encrypted_column_is_found_for_rotation(self):
 		names = {m.__name__ for m, _ in crypto_fields.encrypted_fields()}
 		self.assertTrue({'AIProviderSettings', 'ApiCredential', 'UserProfile', 'Notification'} <= names)
+
+
+class StoredSecretCheckTests(TestCase):
+	"""rotate_field_key --check: what scripts/rotate-secrets.sh asks before it removes the old key and after the rotation."""
+
+	def check(self, env, *args):
+		out = StringIO()
+		with mock.patch.dict(os.environ, env):
+			try:
+				call_command('rotate_field_key', '--check', *args, stdout=out)
+			except CommandError as exc:
+				return out.getvalue(), str(exc)
+		return out.getvalue(), None
+
+	def test_it_sorts_values_by_the_key_that_reads_them_and_changes_nothing(self):
+		with mock.patch.dict(os.environ, {'CVENGINE_FIELD_KEY': KEY_A}):
+			row = AIProviderSettings.objects.create(api_key='sk-check-me')
+		before = stored(row)
+		out, error = self.check({'CVENGINE_FIELD_KEY': KEY_A, 'CVENGINE_FIELD_KEY_PREVIOUS': ''})
+		self.assertIsNone(error)
+		self.assertIn('1 under the current key, 0 under an older key, 0 unreadable', out)
+		out, error = self.check({'CVENGINE_FIELD_KEY': KEY_B, 'CVENGINE_FIELD_KEY_PREVIOUS': KEY_A})
+		self.assertIsNone(error)
+		self.assertIn('0 under the current key, 1 under an older key, 0 unreadable', out)
+		self.assertIn('dashboard.AIProviderSettings.api_key', out)
+		_, error = self.check({'CVENGINE_FIELD_KEY': KEY_B, 'CVENGINE_FIELD_KEY_PREVIOUS': KEY_A}, '--strict')
+		self.assertIn('older key', error)
+		out, error = self.check({'CVENGINE_FIELD_KEY': KEY_B, 'CVENGINE_FIELD_KEY_PREVIOUS': ''})
+		self.assertIn('0 under an older key, 1 unreadable', out)
+		self.assertIn('cannot be decrypted', error)
+		self.assertNotIn('sk-check-me', out + (error or ''))
+		self.assertEqual(stored(row), before)
+
+	def test_a_value_under_the_key_derived_from_the_django_secret_counts_as_older_once_a_dedicated_key_is_set(self):
+		with mock.patch.dict(os.environ, {'CVENGINE_FIELD_KEY': '', 'CVENGINE_FIELD_KEY_PREVIOUS': ''}):
+			AIProviderSettings.objects.create(api_key='sk-legacy')
+		out, error = self.check({'CVENGINE_FIELD_KEY': '', 'CVENGINE_FIELD_KEY_PREVIOUS': ''})
+		self.assertIn('1 under the current key', out)
+		out, error = self.check({'CVENGINE_FIELD_KEY': KEY_A, 'CVENGINE_FIELD_KEY_PREVIOUS': ''}, '--strict')
+		self.assertIn('1 under an older key', out)
+		self.assertIsNotNone(error)
+
+	def test_the_raw_value_states(self):
+		with mock.patch.dict(os.environ, {'CVENGINE_FIELD_KEY': KEY_A, 'CVENGINE_FIELD_KEY_PREVIOUS': ''}):
+			token = crypto_fields.encrypt_text('x')
+			self.assertEqual(crypto_fields.stored_value_state(token), 'current')
+			self.assertEqual(crypto_fields.stored_value_state({crypto_fields.JSON_MARKER: token}), 'current')
+			self.assertEqual(crypto_fields.stored_value_state('{"%s": "%s"}' % (crypto_fields.JSON_MARKER, token)), 'current')
+			for plain in ('', None, 'not encrypted', {'api_key': 'x'}, '{"a": 1}', '{broken'):
+				self.assertEqual(crypto_fields.stored_value_state(plain), 'plain', plain)
+		with mock.patch.dict(os.environ, {'CVENGINE_FIELD_KEY': KEY_B, 'CVENGINE_FIELD_KEY_PREVIOUS': ''}):
+			self.assertEqual(crypto_fields.stored_value_state(token), 'unreadable')
