@@ -197,9 +197,9 @@ class HostFilterCurrentIdsTests(TestCase):
 		for sql in match_sql:
 			self.assertNotIn('OVER (PARTITION BY', sql)
 			self.assertIn('"cveFeed_cvematch"."subdomain_id" = ANY(', sql)
-		rule = [q['sql'] for q in ctx.captured_queries if 'OVER (PARTITION BY' in q['sql']]
+		# the rule is read once, as a statement on the host table over the named hosts, with the current scan ids as one literal array
+		rule = [q['sql'] for q in ctx.captured_queries if q['sql'].lstrip().upper().startswith('SELECT') and 'FROM "startScan_subdomain" WHERE' in q['sql'] and '"scan_history_id" = ANY(' in q['sql']]
 		self.assertEqual(len(rule), 1)
-		self.assertIn('FROM "startScan_subdomain"', rule[0])
 
 	def test_current_ids_are_one_array_parameter(self):
 		# the inventory counts pass every current host id: one array parameter, not one placeholder per id
