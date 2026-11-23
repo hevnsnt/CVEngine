@@ -95,6 +95,8 @@ class BranchFixReadingTests(SimpleTestCase):
 		item = {'vendor': 'F5', 'product': 'NGINX Open Source', 'ranges': STORED['CVE-2026-42055']}
 		self.assertIs(item_verdict(parse_version('1.30.5'), item, '1.30.5')[0], False)
 		self.assertIs(item_verdict(parse_version('1.31.1'), item, '1.31.1')[0], True)
+		# the literal reading, kept for the recheck command's comparison
+		self.assertIs(item_verdict(parse_version('1.30.5'), item, '1.30.5', branch_rule=False)[0], True)
 
 
 class RecheckBranchFixesCommandTests(TestCase):
@@ -117,6 +119,10 @@ class RecheckBranchFixesCommandTests(TestCase):
 		match(cls.c42055, cls.mainline, '1.31.1', STORED['CVE-2026-42055'][0])       # mainline before 1.31.2: stays
 		match(cls.c123634, cls.mainline, '1.31.9', STORED['CVE-2026-123634'][2])     # the open range, past 1.31.9: closes
 		match(cls.c27654, cls.stable, '1.28.2', STORED['CVE-2026-27654'][1])         # no branch fix concerns it: stays
+		# stale for another reason (PHP 8.2.35 is past 8.2.20 read either way): left to the next scan's correlation, not counted here
+		php = CVEEntry.objects.create(cve_id='CVE-2024-4577', cvss=9.8, affected=[{'product': 'PHP', 'ranges': [
+			{'introduced': '8.1', 'fixed': '8.1.29'}, {'introduced': '8.2', 'fixed': '8.2.20'}, {'introduced': '8.3', 'fixed': '8.3.8'}]}])
+		match(php, cls.stable, '8.2.35', {'fixed': '8.3.8'})
 
 	def test_dry_run_names_the_cves_and_writes_nothing(self):
 		out = StringIO()
@@ -125,6 +131,7 @@ class RecheckBranchFixesCommandTests(TestCase):
 		self.assertIn('CVE-2026-42055: 1 match(es)', text)
 		self.assertIn('CVE-2026-123634: 1 match(es)', text)
 		self.assertNotIn('CVE-2026-27654', text)
+		self.assertNotIn('CVE-2024-4577', text)
 		self.assertIn('dry run: 2 CVEs, 2 matches', text)
 		self.assertFalse(CVEEntry.objects.filter(needs_recorrelation=True).exists())
 
@@ -133,7 +140,7 @@ class RecheckBranchFixesCommandTests(TestCase):
 		self.assertEqual(set(CVEEntry.objects.filter(needs_recorrelation=True).values_list('cve_id', flat=True)),
 						 {'CVE-2026-42055', 'CVE-2026-123634'})
 		# the match rows themselves are left to correlation
-		self.assertEqual(CVEMatch.objects.filter(version_in_range=True).count(), 4)
+		self.assertEqual(CVEMatch.objects.filter(version_in_range=True).count(), 5)
 
 	def test_nothing_to_recheck(self):
 		CVEMatch.objects.filter(matched_version__in=['1.30.5', '1.31.9']).delete()

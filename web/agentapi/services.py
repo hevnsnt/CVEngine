@@ -4415,7 +4415,7 @@ def _kev_only(params):
     return str(params.get('kev') or '').strip().lower() in ('1', 'true', 'yes', 'on')
 
 
-def _finding_sources(project, params, current_ids=None, counting=False):
+def _finding_sources(project, params, current_ids=None, counting=False, keep_dismissed=False):
     """The querysets the facets allow, keyed by type, each annotated with ``heat_rank`` (3 fire, 2 smoke, 1 ice, 0 none: the
     host card's rules, threat.match_temperature and SEVERITY_HEAT) and ``sev`` (0 info .. 4 critical; a CVE by its CVSS band,
     an unscored one as low), and filtered by heat, severity, status and host.
@@ -4424,7 +4424,9 @@ def _finding_sources(project, params, current_ids=None, counting=False):
     above info, an open hygiene finding above info. ``status=all`` adds the rest (informational, closed, ruled out). ``status=closed``
     is the findings a person closed (fixed, accepted_risk or false_positive), and one of those three exactly that one, whatever the scan
     or the AI says about them. ``counting``: the same filters but none of what a list row shows (related rows, comment counts, the review, the order, the
-    ``when`` column, and ``heat_rank`` on the kinds that have no heat of their own to group by), for a caller that only groups and counts (``cveFeed.stats_history``)."""
+    ``when`` column, and ``heat_rank`` on the kinds that have no heat of their own to group by), for a caller that only groups and counts (``cveFeed.stats_history``).
+    Actionable leaves out what the triage dismissed (``counts.dismissed_q``: a likely false positive or not applicable) of every kind, as the
+    dashboard and the reports count; ``keep_dismissed`` keeps those rows for a caller that counts them apart (the PDF report's ruled-out line)."""
     from django.db.models import Case, F, IntegerField, Q, Value, When
 
     from cveFeed.models import HygieneFinding
@@ -4464,6 +4466,7 @@ def _finding_sources(project, params, current_ids=None, counting=False):
             qs = qs.filter(cve_entry__kev=True)
         if status == 'actionable':
             qs = qs.exclude(ai_verdict='not_affected').exclude(remediation_status__in=CLOSED)
+            qs = qs if keep_dismissed else qs.exclude(counts_lib.dismissed_q())
         elif by_status is not None:
             qs = qs.filter(by_status)
         elif status in RETEST_FACETS:
@@ -4482,6 +4485,7 @@ def _finding_sources(project, params, current_ids=None, counting=False):
                           comment_count=_comment_count_annotation('vulnerability'))
         if status == 'actionable':
             qs = qs.filter(open_status=True, severity__gte=1).exclude(remediation_status__in=CLOSED)
+            qs = qs if keep_dismissed else qs.exclude(counts_lib.dismissed_q())
         elif by_status is not None:
             qs = qs.filter(by_status)
         elif status in RETEST_FACETS:
@@ -4499,6 +4503,7 @@ def _finding_sources(project, params, current_ids=None, counting=False):
                           comment_count=_comment_count_annotation('hygiene'))
         if status == 'actionable':
             qs = qs.filter(status='open', severity__gte=1).exclude(remediation_status__in=CLOSED)
+            qs = qs if keep_dismissed else qs.exclude(counts_lib.dismissed_q())
         elif by_status is not None:
             qs = qs.filter(by_status)
         elif status in RETEST_FACETS:

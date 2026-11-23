@@ -18,8 +18,8 @@ from django.utils import timezone
 
 
 def stale_cves():
-    """``{cve entry id: (cve id, matches the new reading closes)}``: the CVEs with a match stored in range whose entry's branch fix now
-    leaves its version outside (``correlation.item_verdict`` says not True)."""
+    """``{cve entry id: (cve id, matches the new reading closes)}``: the CVEs with a match stored in range whose entry holds its version when read
+    literally and leaves it outside once the entry's own branch fix is read (``correlation.item_verdict`` with and without ``branch_rule``)."""
     from cveFeed.correlation import branch_fixes, item_verdict, parse_version, prepared_ranges
     from cveFeed.models import CVEEntry, CVEMatch
     rows = {}
@@ -36,7 +36,10 @@ def stale_cves():
             if item is None or not branch_fixes(prepared_ranges(item.get('ranges'))):
                 continue  # only an entry that states a branch fix reads differently now
             parsed = parse_version(version)
-            if parsed is not None and item_verdict(parsed, item, version)[0] is not True:
+            # only what the rule changes: in range read literally, outside once the branch fix is read (a match stale for another reason is
+            # left to the next scan's correlation, as before)
+            if (parsed is not None and item_verdict(parsed, item, version, branch_rule=False)[0] is True
+                    and item_verdict(parsed, item, version)[0] is not True):
                 out.setdefault(pk, [cve_id, 0])
                 out[pk][1] += CVEMatch.objects.filter(cve_entry_id=pk, matched_version=version, version_in_range=True,
                                                       evidence__affected_index=index).count()

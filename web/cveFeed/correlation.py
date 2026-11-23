@@ -1078,12 +1078,13 @@ def branch_fixed(ver, rng, fixes):
     return _runs_past(rng, line)
 
 
-def range_verdict(ver, ranges):
+def range_verdict(ver, ranges, branch_rule=True):
     """``(result, deciding range, no_lower_bound)`` for ``ver`` against the ranges of one affected entry: result True / False / None
     (unknown) as for ``version_in_range``. The deciding range is the one that put ``ver`` inside (None for any other result);
     ``no_lower_bound`` is True when the answer came from a fix-only branch list (``fix_only_branch_verdict``). One entry with no usable
     bound is unknown. Main correlation and the WordPress matcher both decide through this, so they cannot read a range list differently.
-    A range the entry's own branch fix closes for ``ver`` (``branch_fixed``) does not hold it."""
+    A range the entry's own branch fix closes for ``ver`` (``branch_fixed``) does not hold it; ``branch_rule=False`` reads the ranges literally, as
+    before that rule (``manage.py recheck_branch_fixes`` compares the two readings)."""
     prepared = prepared_ranges(ranges)
     if not prepared or isinstance(ver, _Build):
         return None, None, False  # a parenthesised build is compared only with listed builds (``item_verdict``)
@@ -1091,7 +1092,7 @@ def range_verdict(ver, ranges):
         # no lower bounds were published: each fix is compared only with the releases of its own line (issue 205)
         result, fixed = fix_only_branch_verdict(ver, prepared)
         return result, ({"fixed": str(fixed)[:60]} if result is True else None), True
-    fixes = branch_fixes(prepared)
+    fixes = branch_fixes(prepared) if branch_rule else {}
     unknown = False
     for rng in prepared:
         result = version_in_range(ver, rng)
@@ -1117,7 +1118,7 @@ def _exact_single(rng):
     return isinstance(rng, dict) and bool(rng.get("introduced")) and rng.get("introduced") == rng.get("lastAffected") and not rng.get("fixed")
 
 
-def item_verdict(ver, item, raw=None):
+def item_verdict(ver, item, raw=None, branch_rule=True):
     """``range_verdict`` for one affected entry, with the exact builds it lists (``builds``, see cveFeed.intel.convert_affected).
 
     ``raw`` is the version text as read (``ver`` parsed from it). A version that is one of the listed builds is in range. An entry that lists
@@ -1143,7 +1144,7 @@ def item_verdict(ver, item, raw=None):
                 return False, None, False  # a closed list of builds, and this version is not on it
     if isinstance(ver, _Build):
         return None, None, False
-    return range_verdict(ver, ranges)
+    return range_verdict(ver, ranges, branch_rule=branch_rule)
 
 
 def _is_branch_range(rng):
