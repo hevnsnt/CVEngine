@@ -76,9 +76,12 @@ def persist_bbot_result(result, ctx):
 			service_name=res.get('service_name', ''),
 			description=res.get('description', ''),
 			ip=ip)
-		port.source = 'bbot'
 		port.last_seen = timezone.now()
-		port.save()
+		fields = ['last_seen']
+		if not port.source:  # a port another detector recorded keeps its source: bbot only names the source of a port nobody else recorded
+			port.source = 'bbot'
+			fields.append('source')
+		port.save(update_fields=fields)
 		ip.ports.add(port)
 	from cveFeed import tech_links, tech_rows
 	tech_seen = {}  # {(host row id, technology id): ''}: written once for the batch, source bbot (cveFeed.tech_links)

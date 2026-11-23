@@ -198,8 +198,8 @@ class RoutineAuditRetentionTests(TestCase):
         kept = [self.row('sentinel.task.claim', 10), self.row('sentinel.task.expire_sweep', 400), self.row('sentinel.secret.read', 400),
                 self.row('user.role_change', 400), self.row('sentinel.task.late', 400)]
         out = maintenance.run()
-        self.assertEqual(out['archived'].get('AuditLog'), 3)
-        self.assertEqual(out['deleted'].get('AuditLog'), 3)
+        self.assertEqual(out['archived'].get('AuditLog'), len(old))
+        self.assertEqual(out['deleted'].get('AuditLog'), len(old))
         self.assertFalse(AuditLog.objects.filter(pk__in=old).exists())
         self.assertEqual(AuditLog.objects.filter(pk__in=kept).count(), len(kept))
         with tarfile.open(out['archive']) as tar:
@@ -208,10 +208,65 @@ class RoutineAuditRetentionTests(TestCase):
 
     def test_the_retention_is_a_setting(self):
         from cveFeed import maintenance
-        pk = self.row('sentinel.task.complete', 40)
+        young, old = self.row('sentinel.task.complete', 20), self.row('sentinel.task.complete', 40)
         with mock.patch.dict(os.environ, {'CVENGINE_SENTINEL_AUDIT_RETENTION_DAYS': '30'}):
             maintenance.run()
+        self.assertTrue(AuditLog.objects.filter(pk=young).exists())
+        self.assertFalse(AuditLog.objects.filter(pk=old).exists())
+
+    def test_the_default_retention_is_fourteen_days(self):
+        from cveFeed import maintenance
+        os.environ.pop('CVENGINE_SENTINEL_AUDIT_RETENTION_DAYS', None)
+        old = [self.row(action, 15) for action in maintenance.ROUTINE_AUDIT_ACTIONS]
+        young = [self.row(action, 13) for action in maintenance.ROUTINE_AUDIT_ACTIONS]
+        out = maintenance.run()
+        self.assertEqual(out['deleted'].get('AuditLog'), len(old))
+        self.assertFalse(AuditLog.objects.filter(pk__in=old).exists())
+        self.assertEqual(AuditLog.objects.filter(pk__in=young).count(), len(young))
+
+    def test_security_relevant_rows_survive_at_any_age(self):
+        from cveFeed import maintenance
+        kept = [self.row(action, 1000) for action in (
+            'user.login', 'login.failed', 'user.role_change', 'membership.role', 'token.create', 'apikey.create', 'agent.delete', 'agent.status',
+            'agent.unregister', 'sentinel.secret.read', 'sentinel.task.expire_sweep', 'sentinel.task.cancel', 'sentinel.task.late',
+            'sentinel.task.adopt', 'exclusion.add', 'project.delete', 'settings.reviewer', 'host.archive', 'system.factory_reset', 'sentinel.task.other')]
+        self.row('sentinel.task.claim', 1000)
+        out = maintenance.run()
+        self.assertEqual(out['deleted'].get('AuditLog'), 1)
+        self.assertEqual(AuditLog.objects.filter(pk__in=kept).count(), len(kept))
+
+    def test_the_prune_is_an_allow_list_of_the_routine_task_actions(self):
+        from cveFeed import maintenance
+        self.assertEqual(set(maintenance.ROUTINE_AUDIT_ACTIONS),
+                         {'sentinel.task.claim', 'sentinel.task.accept', 'sentinel.task.complete', 'sentinel.task.expire'})
+
+    def test_the_delete_runs_in_bounded_batches_and_keeps_rows_between_them(self):
+        from cveFeed import maintenance
+        old = []
+        kept = []
+        for _ in range(5):
+            old.append(self.row('sentinel.task.claim', 30))
+            kept.append(self.row('user.role_change', 30))
+            old.append(self.row('sentinel.task.complete', 30))
+        with mock.patch.object(maintenance, 'DELETE_CHUNK', 2), CaptureQueriesContext(connection) as captured:
+            out = maintenance.run()
+        deletes = [q['sql'] for q in captured.captured_queries if q['sql'].startswith('DELETE FROM "dashboard_auditlog"')]
+        self.assertEqual(len(deletes), 6)  # 5 rows of each action, 2 a batch: 3 batches per action
+        for sql in deletes:
+            self.assertLessEqual(sql.count(','), 1)  # never more than 2 ids in one statement
+        self.assertEqual(out['deleted'].get('AuditLog'), len(old))
+        self.assertFalse(AuditLog.objects.filter(pk__in=old).exists())
+        self.assertEqual(AuditLog.objects.filter(pk__in=kept).count(), len(kept))
+
+    def test_rows_newer_than_the_archive_are_never_deleted(self):
+        from cveFeed import maintenance
+        pk = self.row('sentinel.task.accept', 30)
+        routine = maintenance._routine_audit(timezone.now())
+        late = self.row('sentinel.task.accept', 30)  # aged past the cutoff after the archive was planned
+        self.assertGreater(late, pk)
+        self.assertEqual(maintenance._delete_routine_audit(routine), 1)
         self.assertFalse(AuditLog.objects.filter(pk=pk).exists())
+        self.assertTrue(AuditLog.objects.filter(pk=late).exists())
 
     def test_nothing_old_means_no_audit_entry(self):
         from cveFeed import maintenance
