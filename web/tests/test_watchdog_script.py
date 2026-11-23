@@ -25,6 +25,8 @@ case " $* " in
     exit 0;;
   *" ps -a --filter "*) exit 0;;
   *" ps -a --services "*) cat "$STUB_DIR/services" 2>/dev/null; exit 0;;
+  *" exec -T celery python3 -c "*) if [ -f "$STUB_DIR/stacks_fail" ]; then exit 1; fi; exit 0;;
+  *" logs --no-color --timestamps --tail "*) echo "celery log $(date +%s%N)"; exit 0;;
   *" up -d --no-deps --force-recreate "*)
     # the update lock must be held by the watchdog's own shell while it recreates a container
     if ( exec 9>>"$STUB_STATE/update.lock"; flock -n 9 ); then echo "NOLOCK" >> "$STUB_DIR/calls.log"; else echo "LOCKED" >> "$STUB_DIR/calls.log"; fi
@@ -50,7 +52,7 @@ class WatchdogScriptTests(unittest.TestCase):
         for name in ('watchdog.sh', 'update-state.py', 'compose-layout.sh', 'update-watch.sh'):
             shutil.copy(SCRIPTS / name, self.work / 'scripts' / name)
         (self.work / 'docker-compose.yml').write_text('services: {}\n')
-        self.env = {**os.environ, 'PATH': f'{self.stub}:{os.environ["PATH"]}', 'STUB_DIR': str(self.stub), 'GIT_CONFIG_GLOBAL': os.devnull,
+        self.env = {**os.environ, 'PATH': f'{self.stub}:{os.environ["PATH"]}', 'STUB_DIR': str(self.stub), 'GIT_CONFIG_GLOBAL': os.devnull, 'CVENGINE_WATCHDOG_STACK_WAIT': '0',
                     'GIT_CONFIG_SYSTEM': os.devnull, 'GIT_AUTHOR_NAME': 't', 'GIT_AUTHOR_EMAIL': 't@t', 'GIT_COMMITTER_NAME': 't', 'GIT_COMMITTER_EMAIL': 't@t'}
         for name in ('CVENGINE_WATCHDOG', 'CVENGINE_COMPOSE_FILES', 'CVENGINE_COMPOSE_FILE', 'CVENGINE_COMPOSE_ENV_FILE', 'CVENGINE_COMPOSE_PROJECT'):
             self.env.pop(name, None)
@@ -155,6 +157,41 @@ class WatchdogScriptTests(unittest.TestCase):
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         finally:
             os.close(fd)
+
+    def test_restart_celery_first_asks_the_workers_for_their_stacks_and_keeps_the_log(self):
+        # a lane is restarted because it stopped answering, and recreating the container drops its log: the stacks and the log end are kept first
+        self.request()
+        self.run_script('act')
+        calls = self.docker_calls()
+        order = [i for i, c in enumerate(calls) if 'exec -T celery python3 -c' in c] + [i for i, c in enumerate(calls) if ' logs --no-color' in c] \
+            + [i for i, c in enumerate(calls) if '--force-recreate celery' in c]
+        self.assertEqual(len(order), 3, calls)
+        self.assertEqual(order, sorted(order))
+        self.assertTrue(any('signal.SIGUSR2' in c for c in self.calls()))  # the code is passed as one argument; the stub's log splits it over lines
+        kept = self.state / 'celery-before-restart.log'
+        first = kept.read_text()
+        self.assertIn('celery log', first)
+        self.assertIn('kept the end of the celery log', self.log_text())
+        # the next restart keeps the previous copy as .1
+        time.sleep(0.01)
+        self.request(rid='abcdef012345')
+        (self.state / 'watchdog-actions.log').write_text('')  # past the host's own gap
+        self.run_script('act')
+        self.assertEqual((self.state / 'celery-before-restart.log.1').read_text(), first)
+        self.assertNotEqual(kept.read_text(), first)
+
+    def test_a_failed_stack_request_never_stops_the_restart(self):
+        (self.stub / 'stacks_fail').write_text('x')
+        self.request()
+        self.run_script('act')
+        self.assertEqual(len([c for c in self.docker_calls() if '--force-recreate celery' in c]), 1)
+        self.assertTrue(self.result()['ok'])
+        self.assertIn('could not ask the workers for their stacks', self.log_text())
+
+    def test_restart_celery_beat_takes_no_stacks(self):
+        self.request('restart-celery-beat', 'R6')
+        self.run_script('act')
+        self.assertFalse([c for c in self.docker_calls() if 'exec -T celery' in c or ' logs ' in c])
 
     def test_the_scanner_and_the_tailscale_sidecar_are_left_alone_when_celery_is_recreated(self):
         # they have a network of their own (the sidecar is in the scanner's namespace): recreating celery does not touch them

@@ -78,10 +78,58 @@ def _plural(n, word):
 
 # --- memory ------------------------------------------------------------------------------------------------------------------------
 
-def memory(signals):
-    """Worker lanes and containers against their memory limits, kernel oom kills, lane restarts. ``signals`` is ``system.signals['signals']``."""
+def _restart_was_memory(entry, limit):
+    """True when the lane's own record says memory may have ended it: it holds at least ``MEMORY_WARN_PERCENT`` of its limit now, or did just before its last
+    restart. False when both readings are below that share. None when neither can be compared (no limit, no reading)."""
+    pct = _num(entry.get('percent_of_limit'))
+    last_rss = _num((entry.get('last_restart') or {}).get('last_rss_mb'))
+    before = round(100 * last_rss / limit, 1) if last_rss is not None and limit else None
+    readings = [p for p in (pct, before) if p is not None]
+    if not readings:
+        return None
+    return max(readings) >= MEMORY_WARN_PERCENT
+
+
+def _restart_sentences(rows, watchdog_restarts):
+    """The restart issues of the lanes whose memory was low: one sentence for lanes that restarted together (the celery container restarts all four at once),
+    with their memory, and what the watchdog says it did. ``rows`` is ``[(row, last_epoch)]``."""
+    groups = {}
+    for row, last in rows:
+        groups.setdefault(row['restarts_24h'], []).append((row, last))
+    out = []
+    for count, members in sorted(groups.items(), key=lambda g: -g[0]):
+        names = [r['lane'] for r, _ in members]
+        lasts = [last for _, last in members if last]
+        pcts = [r['percent_of_limit'] for r, _ in members if r.get('percent_of_limit') is not None]
+        limits = {r['limit_mb'] for r, _ in members if r.get('limit_mb')}
+        who = (f'all {len(names)} worker lanes' if len(names) >= 4 else 'the ' + ', '.join(names[:-1]) + (' and ' if len(names) > 1 else '') + names[-1]
+               + (' worker lanes' if len(names) > 1 else ' worker lane'))
+        text = f'{who} restarted {count} times in 24 hours' + (' together' if len(names) > 1 else '') + (f' (last at {_utc(max(lasts))})' if lasts else '')
+        if pcts and len(pcts) == len(members):
+            low, high = min(pcts), max(pcts)
+            share = f'{low:.0f}%' if round(low) == round(high) else f'{low:.0f}% to {high:.0f}%'
+            text += (f', while using {share} of {"their" if len(names) > 1 else "its"} {_mb(limits.pop()) + " " if len(limits) == 1 else ""}memory limit, '
+                     f'so memory is not what stops {"them" if len(names) > 1 else "it"}')
+        else:
+            text += ', and no memory reading against a limit points at memory'
+        out.append(text)
+    wd = watchdog_restarts if isinstance(watchdog_restarts, dict) else {}
+    n = wd.get('count')
+    if isinstance(n, int) and n > 0:
+        out.append(f"the watchdog restarted the workers {_plural(n, 'time')} in 24 hours because a lane stopped answering"
+                   + (f" (rule {', '.join(sorted(wd.get('rules') or []))})" if wd.get('rules') else '')
+                   + (f', last at {_utc(wd["last_at"])}' if wd.get('last_at') else ''))
+    return out
+
+
+def memory(signals, watchdog_restarts=None):
+    """Worker lanes and containers against their memory limits, kernel oom kills, lane restarts. ``signals`` is ``system.signals['signals']``.
+    ``watchdog_restarts`` (optional) is what the watchdog's own events say it did: ``{'count': restarts of the workers it had carried out in 24 hours, 'rules':
+    [rule codes], 'last_at': epoch}``. A lane that keeps restarting while its memory is low is not called out of memory: the title says it keeps restarting
+    and the detail gives its memory and the restarts the watchdog made, so the reader looks for the cause where it is."""
     lanes_signal, containers_signal = (signals or {}).get('lanes'), (signals or {}).get('containers')
-    issues = []          # (rank, sentence, next step, fact)
+    issues = []          # (rank, sentence, kind, fact)
+    quiet_restarts = []  # (row, last restart epoch): lanes that keep restarting with low memory, said together below
     facts = {'lanes': [], 'containers': [], 'not_read': [],
              'thresholds': {'warn_percent': MEMORY_WARN_PERCENT, 'problem_percent': MEMORY_PROBLEM_PERCENT, 'oom_kills_24h': OOM_KILLS_PROBLEM,
                             'lane_restarts_24h': LANE_RESTARTS_PROBLEM}}
@@ -104,7 +152,11 @@ def memory(signals):
         if isinstance(restarts, int) and restarts >= LANE_RESTARTS_PROBLEM:
             bad = True
             last = (entry.get('last_restart') or {}).get('at')
-            issues.append((2, f"the {entry['lane']} worker lane restarted {restarts} times in 24 hours" + (f' (last at {_utc(last)})' if last else ''), 'restarts', row))
+            row['memory_cause'] = _restart_was_memory(entry, row['limit_mb'])
+            if not row['memory_cause']:  # low memory, or nothing to compare: a restart alone is not evidence of memory
+                quiet_restarts.append((row, last))
+            else:
+                issues.append((2, f"the {entry['lane']} worker lane restarted {restarts} times in 24 hours" + (f' (last at {_utc(last)})' if last else ''), 'restarts', row))
         if bad:
             facts['lanes'].append(row)
     if not _known(lanes_signal):
@@ -132,8 +184,20 @@ def memory(signals):
     facts['not_read'] = sorted(set(facts['not_read']))
     if not read:
         return unknown('no worker lane and no container has a current memory reading, so nothing can be said about memory')
-    if not issues:
+    if quiet_restarts:
+        facts['restarts_not_memory'] = True
+        if isinstance(watchdog_restarts, dict) and watchdog_restarts.get('count') is not None:
+            facts['watchdog_restarts_24h'] = watchdog_restarts.get('count')
+    if not issues and not quiet_restarts:
         return {'state': 'ok', 'title': 'Memory is within its limits', 'detail': '', 'facts': facts}
+    if not issues:  # nothing points at memory: the lanes keep restarting for another reason, and the alert says so
+        sentences = _restart_sentences(quiet_restarts, watchdog_restarts)
+        detail = '; '.join(sentences)
+        several = len(quiet_restarts) > 1
+        step = ('Next step: the watchdog events (Status, Watchdog) say which lane stopped answering before each restart it made; `docker compose logs celery` shows '
+                'why a worker stopped on its own (a "Segmentation fault" line is a crash of the worker process, not a lack of memory).')
+        return {'state': 'problem', 'title': 'The worker lanes keep restarting' if several else 'A worker lane keeps restarting',
+                'detail': detail[0].upper() + detail[1:] + '. ' + step, 'facts': facts}
     issues.sort(key=lambda i: -i[0])
     worst = issues[0]
     state = 'problem' if worst[0] >= 2 else 'warning'
@@ -147,7 +211,9 @@ def memory(signals):
     else:
         step = (f"Next step: `docker compose logs celery` shows what the {worst[3]['lane']} lane was running before each restart; the status page lists the tasks "
                 'that left it largest.')
-    detail = '; '.join(i[1] for i in issues[:4])
+    sentences = [i[1] for i in issues[:4]] + [f"the {row['lane']} worker lane restarted {row['restarts_24h']} times in 24 hours" + (f' (last at {_utc(last)})' if last else '')
+                                              for row, last in quiet_restarts]  # beside memory evidence, a restart may well be the kill: no verdict on its cause
+    detail = '; '.join(sentences)
     return {'state': state, 'title': 'A container or worker lane is out of memory' if worst[0] >= 2 else 'Memory is getting close to its limit',
             'detail': detail[0].upper() + detail[1:] + '. ' + step, 'facts': facts}
 

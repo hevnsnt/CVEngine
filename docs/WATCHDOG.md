@@ -81,10 +81,11 @@ Every action is followed by a check. For a host action the clock starts when the
 | per rule switch | the same panel; `{"rule": "R3", "enabled": false}` | on |
 | `CVENGINE_WATCHDOG=0` | `.env` or the environment of the host and the web container | unset (on) |
 | `CVENGINE_WATCHDOG_SECONDS` | the host watcher's tick interval, for tests | 30 |
+| `CVENGINE_WATCHDOG_STACK_WAIT` | seconds the host waits after asking the workers for their stacks, before it keeps the celery log and recreates `celery`; for tests | 3 |
 
 R1 and R2 recreate the same container, so the web side counts their restarts (and the scheduler's) **together** against the host's 24 a day, and asks for no restart the host would refuse. When the host does refuse for one of its limits (24 a day, or 10 minutes between two restarts), the rule is **held**, not failed: the attempt does not count, there is no "could not fix it" notice and no hour of silence, a warning notice says the limit was reached, and the rule asks again after an hour (15 minutes for the gap), or clears itself when the lanes answer. The host marks such an answer `limit` in `web/.watchdog-result`.
 
-The host keeps limits of its own whatever the web side asks: at least 10 minutes between two restarts of one kind (30 for the prune) and 24 restarts a day (`$STATE/watchdog-actions.log`), so a bug in the web side cannot loop restarts. `$STATE/watchdog.log` (private to the host, trimmed to 1 MB) records every action and every failed tick; `$STATE` is `git rev-parse --git-path cvengine-update`.
+The host keeps limits of its own whatever the web side asks: at least 10 minutes between two restarts of one kind (30 for the prune) and 24 restarts a day (`$STATE/watchdog-actions.log`), so a bug in the web side cannot loop restarts. `$STATE/watchdog.log` (private to the host, trimmed to 1 MB) records every action and every failed tick; `$STATE` is `git rev-parse --git-path cvengine-update`. Before it recreates `celery`, the host asks each Celery worker to print the stack of every thread (SIGUSR2, which `reNgine/lane_stacks.py` hands to Python's faulthandler, so a lane stuck inside C code still answers) and keeps the last 1,500 lines of the celery log in `$STATE/celery-before-restart.log` (the previous one as `.1`): recreating the container drops its log, and that copy is what says where a silent lane had stopped.
 
 ## What it does not do
 
