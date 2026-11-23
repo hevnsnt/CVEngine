@@ -456,6 +456,10 @@ a.cve-link{font-family:var(--mono)}
 /* update bar */
 .updatebar{display:flex;gap:var(--s-3);align-items:center;flex-wrap:wrap;padding:var(--s-3) var(--gutter);background:var(--brand);color:var(--on-brand);font-size:var(--fs-3);font-weight:var(--fw-semi)}
 .updatebar .btn.ghost{background:transparent;color:var(--on-brand);border-color:var(--on-brand)}
+/* the two-step sign-in reminder for administrators (tenancy.mfa_nag): in the page, above its heading, until MFA is on or snoozed for the session */
+.mfa-nag{display:flex;gap:var(--s-3);align-items:center;flex-wrap:wrap;margin:0 0 var(--s-4);padding:var(--s-3) var(--s-4);background:var(--surface);border:2px solid var(--brand);border-radius:var(--r-s);font-size:var(--fs-3)}
+.mfa-nag p{flex:1 1 320px;min-width:0;margin:0;overflow-wrap:anywhere}
+.mfa-nag form{margin:0}
 /* the one status strip (static/cve/statusstrip.js): scanner notices and an admin's alerts in a single 40px line with a count and a Details button;
    the notices open in full under it. */
 .scannerbar{background:var(--ice-bg);color:var(--ice-ink);box-shadow:0 1px 0 var(--ring-ice);font-size:var(--fs-3);line-height:1.4}

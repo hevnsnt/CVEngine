@@ -1395,10 +1395,12 @@ class LiveDashboardTests(TestCase):
 		cls.user = User.objects.create_user('liveuser', password='x')
 		ProjectMembership.objects.create(user=cls.user, project=cls.pa, role='user')
 
-	def test_activity_feed_is_scoped_but_includes_global_entries(self):
+	def test_activity_feed_is_scoped_and_global_entries_reach_an_app_admin_only(self):
 		c = client_for(self.user)
 		msgs = [i['message'] for i in c.get('/cve/api/activity').json()['items']]
-		self.assertIn('Reading the cve.now feed', msgs)
+		self.assertNotIn('Reading the cve.now feed', msgs)  # a line with no project describes the instance (tenancy.scope)
+		root = client_for(User.objects.create_superuser('liveroot', 'r@x.io', 'x'))
+		self.assertIn('Reading the cve.now feed', [i['message'] for i in root.get('/cve/api/activity').json()['items']])
 		self.assertIn('A target', msgs)
 		self.assertNotIn('B secret target', msgs)
 
@@ -1431,7 +1433,7 @@ class LiveDashboardTests(TestCase):
 		msgs = [i['message'] for i in c.get('/cve/api/activity?project=la').json()['items']]
 		self.assertIn('A target', msgs)
 		self.assertNotIn('B secret target', msgs)
-		self.assertIn('Reading the cve.now feed', msgs)  # system-wide lines stay
+		self.assertNotIn('Reading the cve.now feed', msgs)  # system-wide lines are an App Admin's only
 		self.assertEqual(c.get(f'/cve/api/discovery?project=la&scan={self.sb.id}').json()['scan'], None)
 
 	def test_dashboard_project_the_user_cannot_see_is_not_found(self):

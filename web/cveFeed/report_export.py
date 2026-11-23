@@ -25,6 +25,7 @@ from django.utils import timezone
 
 from agentapi import report_scope
 from agentapi.services import ALL_PROJECTS, ApiError, Ctx
+from tenancy import scope as tenancy_scope
 
 logger = logging.getLogger(__name__)
 
@@ -269,7 +270,8 @@ def execute(job_id, celery_id=None):
     final = os.path.join(directory, filename)
     partial = final + '.partial'
     try:
-        summary = build_file(scope, job.kind, job.format, job.include_closed, partial, now, host=job.host)
+        with tenancy_scope.as_user(user):  # a second guard: every read below already filters by the report's projects
+            summary = build_file(scope, job.kind, job.format, job.include_closed, partial, now, host=job.host)
         os.chmod(partial, 0o600)
         os.replace(partial, final)
     except LookupError:

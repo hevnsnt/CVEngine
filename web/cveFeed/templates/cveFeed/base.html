@@ -92,6 +92,11 @@
 </div>
 {% endif %}
 <main class="wrap" id="main">
+  {% if mfa_nag %}<section class="mfa-nag" role="region" aria-label="Security reminder" data-mfa-nag>
+    <p><b>Your administrator account has no two-step sign-in.</b> Anyone who learns your password can sign in as you and change settings for everyone. It takes about a minute to turn on.</p>
+    <a class="btn sm" href="{{ mfa_nag.setup_url }}">Turn on two-step sign-in</a>
+    <form method="post" action="{{ mfa_nag.snooze_url }}">{% csrf_token %}<input type="hidden" name="next" value="{{ mfa_nag.next }}"><button class="btn sm ghost" type="submit">Remind me later</button></form>
+  </section>{% endif %}
   {% block pagetabs %}{% if nav.tabs %}<nav class="pagetabs" aria-label="{{ nav.group_label }} pages">{% for t in nav.tabs %}<a href="{{ t.href }}" {% if t.current %}aria-current="page"{% endif %}>{{ t.label }}</a>{% endfor %}</nav>{% endif %}{% endblock %}
   {% block content %}{% endblock %}
 </main>
