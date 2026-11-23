@@ -60,8 +60,18 @@ class EntrypointTests(SimpleTestCase):
                        'docker compose up -d db', 'CREATE EXTENSION IF NOT EXISTS pg_stat_statements'):
             self.assertIn(needle, sizing)
         config = (root / 'docs' / 'CONFIGURATION.md').read_text()
-        for name in ('POSTGRES_WORK_MEM', 'POSTGRES_SHARED_PRELOAD_LIBRARIES', 'DB_MEM_LIMIT', 'docker compose up -d db'):
+        for name in ('POSTGRES_WORK_MEM', 'POSTGRES_SHARED_PRELOAD_LIBRARIES', 'DB_MEM_LIMIT', 'docker compose up -d db',
+                     '`POSTGRES_TRACK_IO_TIMING` | `off`', '`POSTGRES_LOG_MIN_DURATION_STATEMENT` | `-1`', 'DEPLOYMENT.md#finding-slow-queries'):
             self.assertIn(name, config)
+
+    def test_finding_slow_queries_is_documented(self):
+        deploy = (SCRIPT.parent.parent / 'docs' / 'DEPLOYMENT.md').read_text()
+        section = deploy.split('## Finding slow queries', 1)[1].split('\n## ', 1)[0]
+        for needle in ('`POSTGRES_SHARED_PRELOAD_LIBRARIES` | empty | `pg_stat_statements`', '`POSTGRES_TRACK_IO_TIMING` | `off` | `on`',
+                       '`POSTGRES_LOG_MIN_DURATION_STATEMENT` | `-1` (no log) | `1000`', 'CREATE EXTENSION IF NOT EXISTS pg_stat_statements',
+                       'FROM pg_stat_statements ORDER BY total_exec_time DESC', 'shared_blk_read_time', 'docker compose up -d db',
+                       'the update never sets them'):
+            self.assertIn(needle, section)
 
     def test_postgres_allows_enough_connections_for_the_workers_and_updates_apply_it(self):
         root = SCRIPT.parent.parent
@@ -72,7 +82,9 @@ class EntrypointTests(SimpleTestCase):
             for setting in ('shared_buffers=${POSTGRES_SHARED_BUFFERS:-256MB}', 'effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-768MB}',
                             'maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM:-64MB}', 'random_page_cost=${POSTGRES_RANDOM_PAGE_COST:-1.1}',
                             # PostgreSQL's own defaults, so an install that sets neither runs exactly as before
-                            'work_mem=${POSTGRES_WORK_MEM:-4MB}', 'shared_preload_libraries=${POSTGRES_SHARED_PRELOAD_LIBRARIES:-}'):
+                            'work_mem=${POSTGRES_WORK_MEM:-4MB}', 'shared_preload_libraries=${POSTGRES_SHARED_PRELOAD_LIBRARIES:-}',
+                            # the slow query diagnostics, off by default (PostgreSQL's own defaults: no IO timing, no slow statement log)
+                            'track_io_timing=${POSTGRES_TRACK_IO_TIMING:-off}', 'log_min_duration_statement=${POSTGRES_LOG_MIN_DURATION_STATEMENT:--1}'):
                 self.assertIn(setting, text, name)
         # the shipped file sets no memory ceiling on db (an overlay's DB_MEM_LIMIT does): adding one would change every install on update
         db = (root / 'docker-compose.yml').read_text().split('\n  db:\n', 1)[1].split('\n  redis:\n', 1)[0]

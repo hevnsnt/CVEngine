@@ -69,6 +69,20 @@ class SizingTests(Case):
         self.assertEqual(hr.pg_defaults([str(ROOT / 'docker-compose.yml')]), hr.PG_DEFAULTS)
         self.assertEqual(hr.pg_defaults([str(ROOT / 'docker-compose.dev.yml')]), hr.PG_DEFAULTS)
 
+    def test_the_diagnostic_settings_are_never_written_by_the_review(self):
+        # track_io_timing and the slow query log are diagnostics an operator turns on while looking (docs/DEPLOYMENT.md, Finding slow queries):
+        # the rule does not read them as sizes, and an update never writes or changes them, set or not
+        for key in ('POSTGRES_TRACK_IO_TIMING', 'POSTGRES_LOG_MIN_DURATION_STATEMENT', 'POSTGRES_SHARED_PRELOAD_LIBRARIES'):
+            self.assertNotIn(key, hr.pg_defaults([str(ROOT / 'docker-compose.yml')]))
+        self.review()
+        for key in ('POSTGRES_TRACK_IO_TIMING', 'POSTGRES_LOG_MIN_DURATION_STATEMENT'):
+            self.assertNotIn(key, self.read())
+        self.env('DB_MEM_LIMIT=2g\nPOSTGRES_TRACK_IO_TIMING=on\nPOSTGRES_LOG_MIN_DURATION_STATEMENT=1000\n')
+        self.review()
+        self.assertIn('POSTGRES_TRACK_IO_TIMING=on\n', self.read())
+        self.assertIn('POSTGRES_LOG_MIN_DURATION_STATEMENT=1000\n', self.read())
+        self.assertEqual(self.read().count('POSTGRES_LOG_MIN_DURATION_STATEMENT='), 1)
+
     def test_a_12_gb_host_with_a_2g_database_ceiling_gets_raised_values_that_fit_inside_it(self):
         result = self.review()
         v = self.values()
