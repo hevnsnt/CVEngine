@@ -38,7 +38,9 @@ logger = get_task_logger(__name__)
 
 
 def persist_bbot_result(result, ctx):
-	"""Write a BbotResult to the DB as Subdomain / IpAddress / Port rows."""
+	"""Write a BbotResult to the DB as Subdomain / IpAddress / Port rows. Each kind of row is read and written once per batch (the hosts, the
+	addresses and their links, the ports and their links), with the same rows, links and values the per-row ``save_subdomain``,
+	``save_ip_address`` and ``update_or_create_port`` calls stored."""
 	own_name = own_project = None  # the target this batch belongs to: only it can carry a tailnet device's address
 	if ctx.get('scan_history_id'):  # the organization's excluded hosts, read once for the whole batch
 		from cveFeed.exclusions import excluded_names
@@ -48,45 +50,25 @@ def persist_bbot_result(result, ctx):
 		ctx = {**ctx, '_excluded_hosts': excluded_names(project_id, names_only=True), '_org_id': org_id_of_project(project_id), '_scan': scan}  # read once per batch, not per name
 		if ctx.get('domain_id'):
 			ctx['_domain'] = Domain.objects.filter(id=ctx['domain_id']).first()
-	subdomains = {}
-	for name in result.subdomains:
-		subdomain, _ = save_subdomain(name, ctx=ctx)
-		if subdomain:
-			subdomains[name] = subdomain
-	for name, address in result.resolutions:
-		if name in subdomains:
-			save_ip_address(address, subdomain=subdomains[name], org_id=ctx.get('_org_id'), project_id=own_project if name == own_name else None)
-	banned = ctx.get('_excluded_hosts') or ()
-	for host, port_number in result.ports:
-		if banned and host.strip().lower().rstrip('.') in banned:
-			continue
-		subdomain = subdomains.get(host)
-		if subdomain is None and ctx.get('scan_history_id'):  # found in an earlier streaming batch
-			subdomain = Subdomain.objects.filter(scan_history_id=ctx['scan_history_id'], name=host).first()
-		ip = None
-		if validators.ipv4(host) or validators.ipv6(host):
-			ip, _ = save_ip_address(host, subdomain=None, org_id=ctx.get('_org_id'), project_id=own_project if host == own_name else None)
-		elif subdomain:
-			ip = subdomain.ip_addresses.first()
-		if not ip:
-			continue
-		res = get_port_service_description(port_number)
-		port, _ = update_or_create_port(
-			port_number=port_number,
-			service_name=res.get('service_name', ''),
-			description=res.get('description', ''),
-			ip=ip)
-		port.last_seen = timezone.now()
-		fields = ['last_seen']
-		if not port.source:  # a port another detector recorded keeps its source: bbot only names the source of a port nobody else recorded
-			port.source = 'bbot'
-			fields.append('source')
-		port.save(update_fields=fields)
-		ip.ports.add(port)
+	now = timezone.now()
+	if '_scan' in ctx:
+		subdomains = _save_subdomains(result.subdomains, ctx, now)
+		_save_resolutions(result.resolutions, subdomains, ctx.get('_org_id'), own_project, own_name)
+	else:  # no scan to read the batch's rows from: one host at a time, as before
+		subdomains = {}
+		for name in result.subdomains:
+			subdomain, _ = save_subdomain(name, ctx=ctx)
+			if subdomain:
+				subdomains[name] = subdomain
+		for name, address in result.resolutions:
+			if name in subdomains:
+				save_ip_address(address, subdomain=subdomains[name], org_id=ctx.get('_org_id'), project_id=own_project if name == own_name else None)
+	_save_ports(result.ports, subdomains, ctx, own_project, own_name, now)
 	from cveFeed import tech_links, tech_rows
 	tech_seen = {}  # {(host row id, technology id): ''}: written once for the batch, source bbot (cveFeed.tech_links)
 	tech_hosts = []
 	tech_ids = {}  # {stored name: Technology id}: one lookup per distinct name in the batch, not one per (host, technology)
+	reported = {}  # {host row id: (host row, [Shodan readings])}: stored once per host, in the order they came
 	# hosts found in an earlier streaming batch, read together once for the batch
 	earlier = _hosts_of_scan(ctx.get('scan_history_id'), {host for host, tech_name in result.technologies if tech_name and host not in subdomains})
 	for host, tech_name in result.technologies:
@@ -99,9 +81,9 @@ def persist_bbot_result(result, ctx):
 			# a CPE is what Shodan's InternetDB told bbot (passive, of unknown age): versioned or not, an application or an operating system, a
 			# third-party reading of the host labelled "vendor product" with its CPE (cveFeed.source_versions.shodan_reading), matched only while
 			# nothing first-party names the product, never a technology that outlives a fresher scan
-			reported = source_versions.reported_cpe(tech_name)
-			if reported:
-				source_versions.store_bbot_reported(subdomain, [reported])
+			reading = source_versions.reported_cpe(tech_name)
+			if reading:
+				reported.setdefault(subdomain.pk, (subdomain, []))[1].append(reading)
 			continue
 		tech_name = versions.normalize_technology(tech_name)  # a "v3.3.7" would otherwise store a name no advisory matches
 		tech_name = stored_technology_name(tech_name)  # a Server-header token ("nginx/1.28.3") is the product and its version
@@ -113,6 +95,8 @@ def persist_bbot_result(result, ctx):
 			tech_ids[tech_name] = tech_rows.technology(tech_name).pk  # one row per spelling: "Caddy" and "caddy" are one (cveFeed.tech_rows)
 		tech_seen[(subdomain.pk, tech_ids[tech_name])] = ''
 		tech_hosts.append(subdomain)
+	for subdomain, readings in reported.values():  # one store per host (a reading named twice is one row with the last values, as two stores left it)
+		source_versions.store_bbot_reported(subdomain, readings)
 	if tech_seen:
 		tech_links.link(tech_seen, tech_links.BBOT)
 		tech_links.forget(*tech_hosts)
@@ -121,13 +105,137 @@ def persist_bbot_result(result, ctx):
 	_persist_bbot_http(result, ctx, subdomains)
 
 
+def _save_subdomains(names, ctx, now):
+	"""``{name: Subdomain}`` for the ``names`` ``save_subdomain(name, ctx)`` keeps (the same checks, the batch's scan ``ctx['_scan']``): the rows the
+	scan already has read in one query (the oldest of a name stored twice, as ``get_or_create_first`` picks), the missing ones created together, and
+	the new ones linked to the subscan in one statement."""
+	scan = ctx['_scan']
+	checker = SubdomainScopeChecker(ctx.get('out_of_scope_subdomains', []))
+	kept = [name for name in dict.fromkeys(names) if _keeps_subdomain(name, ctx, checker, lambda: scan)]
+	domain = scan.domain if scan else None
+	rows = {}
+	for start in range(0, len(kept), 1000):
+		for row in Subdomain.objects.filter(scan_history=scan, target_domain=domain, name__in=kept[start:start + 1000]).order_by('id'):
+			rows.setdefault(row.name, row)
+	new = [Subdomain(scan_history=scan, target_domain=domain, name=name, discovered_date=now) for name in kept if name not in rows]
+	if new:
+		Subdomain.objects.bulk_create(new, batch_size=1000)
+		rows.update({row.name: row for row in new})
+		if ctx.get('subscan_id'):
+			through = SubScan.subdomain_subscan_ids.through
+			through.objects.bulk_create([through(subscan_id=ctx['subscan_id'], subdomain_id=row.pk) for row in new], ignore_conflicts=True, batch_size=1000)
+	return {name: rows[name] for name in kept}
+
+
+def _save_resolutions(resolutions, subdomains, org_id, own_project, own_name):
+	"""``save_ip_address(address, subdomain=..., org_id=org_id, project_id=...)`` for each resolution of a host the batch kept, in one go: the same
+	address checks, the organization's rows read (and the missing ones created) together, and every host and address link in one statement."""
+	pairs = []
+	for name, address in resolutions:
+		sub = subdomains.get(name)
+		if sub is not None and _storable_ip(address, sub, own_project if name == own_name else None):
+			pairs.append((sub, address))
+	if not pairs:
+		return
+	from cveFeed.port_inventory import _ips_of
+	ips = _ips_of([address for _, address in pairs], org_id)
+	through = Subdomain.ip_addresses.through
+	links = {(sub.pk, ips[address].pk) for sub, address in pairs if address in ips}
+	through.objects.bulk_create([through(subdomain_id=s, ipaddress_id=i) for s, i in sorted(links)], ignore_conflicts=True, batch_size=1000)
+
+
+def _save_ports(ports, subdomains, ctx, own_project, own_name, now):
+	"""Each (host, port) on the host's address (an address host: its own; a named host: its first address), as ``update_or_create_port`` and the
+	``last_seen`` / ``source`` save stored it one port at a time: the hosts, addresses and ports are read once for the batch, new ports and their links
+	are created together, and a stored port has only the columns that change written, one statement per set of columns."""
+	banned = ctx.get('_excluded_hosts') or ()
+	wanted = [(host, port_number) for host, port_number in ports if not (banned and host.strip().lower().rstrip('.') in banned)]
+	if not wanted:
+		return
+	is_address = lambda host: bool(validators.ipv4(host) or validators.ipv6(host))  # noqa: E731
+	scan_id = ctx.get('scan_history_id')
+	earlier = _hosts_of_scan(scan_id, {host for host, _ in wanted if host not in subdomains and not is_address(host)}) if scan_id else {}
+	literal = {}  # {address host: IpAddress or None}
+	literals = [host for host in dict.fromkeys(host for host, _ in wanted) if is_address(host)]
+	allowed = [host for host in literals if _storable_ip(host, None, own_project if host == own_name else None)]
+	if allowed:
+		from cveFeed.port_inventory import _ips_of
+		literal = _ips_of(allowed, ctx.get('_org_id'))
+	named = {host: subdomains.get(host) or earlier.get(host) for host, _ in wanted if not is_address(host)}
+	first_ip = {}  # {host row id: its address with the lowest id}: what ``subdomain.ip_addresses.first()`` returns
+	sub_ids = sorted({sub.pk for sub in named.values() if sub is not None})
+	for start in range(0, len(sub_ids), 1000):
+		for link in (Subdomain.ip_addresses.through.objects.filter(subdomain_id__in=sub_ids[start:start + 1000]).select_related('ipaddress')
+					 .order_by('ipaddress_id')):
+			first_ip.setdefault(link.subdomain_id, link.ipaddress)
+	plan = []  # [(IpAddress, number)] in the order of the batch
+	for host, port_number in wanted:
+		if is_address(host):
+			ip = literal.get(host)
+		else:
+			sub = named.get(host)
+			ip = first_ip.get(sub.pk) if sub is not None else None
+		if ip:
+			plan.append((ip, int(port_number)))
+	if not plan:
+		return
+	through = IpAddress.ports.through
+	found = {}  # {(IpAddress id, number): Port}: the oldest TCP port of that number on that address, as ``update_or_create_port`` looks it up
+	ip_ids, numbers = sorted({ip.pk for ip, _ in plan}), sorted({number for _, number in plan})
+	for start in range(0, len(ip_ids), 1000):
+		for link in (through.objects.filter(ipaddress_id__in=ip_ids[start:start + 1000], port__number__in=numbers, port__protocol__in=('', 'tcp'))
+					 .select_related('port').order_by('port_id')):
+			found.setdefault((link.ipaddress_id, link.port.number), link.port)
+	new, dirty = [], {}  # [(IpAddress id, new Port)]; {Port id: (Port, {columns to write})}
+	for ip, number in plan:
+		res = get_port_service_description(number)
+		service_name, description = res.get('service_name', ''), res.get('description', '')
+		port = found.get((ip.pk, number))
+		if port is None:
+			port = Port(number=number, service_name=service_name, description=description)
+			found[(ip.pk, number)] = port
+			new.append((ip.pk, port))
+		fields = []
+		# fill only what is empty (update_or_create_port), then the time it was seen, and bbot as the source of a port nobody else recorded
+		if description and not port.description and (not port.service_name or port.service_name == service_name):
+			port.description = description
+			fields.append('description')
+		if service_name and not port.service_name:
+			port.service_name = service_name
+			fields.append('service_name')
+		port.last_seen = now
+		fields.append('last_seen')
+		if not port.source:
+			port.source = 'bbot'
+			fields.append('source')
+		if port.pk:
+			dirty.setdefault(port.pk, (port, set()))[1].update(fields)
+	if new:
+		Port.objects.bulk_create([port for _, port in new], batch_size=500)
+		through.objects.bulk_create([through(ipaddress_id=ip_id, port_id=port.pk) for ip_id, port in new], ignore_conflicts=True, batch_size=1000)
+	_write_changed(Port, dirty)
+
+
+def _write_changed(model, dirty):
+	"""Write ``{pk: (row, {columns})}``: one ``bulk_update`` per set of columns, rows in id order, so only the columns that changed are written."""
+	groups = {}
+	for pk in sorted(dirty):
+		row, fields = dirty[pk]
+		if fields:
+			groups.setdefault(tuple(sorted(fields)), []).append(row)
+	for fields, rows in groups.items():
+		model.objects.bulk_update(rows, list(fields), batch_size=500)
+
+
 def _hosts_of_scan(scan_id, names):
 	"""``{name: Subdomain}`` of the hosts of scan ``scan_id`` named in ``names`` (stored by an earlier streaming batch), in one query. A name
 	stored twice gives its oldest row, as ``filter(...).first()`` did."""
 	found = {}
 	if scan_id and names:
-		for row in Subdomain.objects.filter(scan_history_id=scan_id, name__in=sorted(names)).order_by('id'):
-			found.setdefault(row.name, row)
+		names = sorted(names)
+		for start in range(0, len(names), 1000):
+			for row in Subdomain.objects.filter(scan_history_id=scan_id, name__in=names[start:start + 1000]).order_by('id'):
+				found.setdefault(row.name, row)
 	return found
 
 
@@ -146,15 +254,17 @@ def _persist_bbot_urls(result, ctx, subdomains):
 		return
 	wanted = sorted({u for u, _ in result.urls if len(u) <= MAX_URL_LENGTH})
 	existing = set(EndPoint.objects.filter(scan_history_id=scan_id, http_url__in=wanted).values_list('http_url', flat=True))
-	hosts = {}
+	# the hosts of the batch's URLs, read once (a host of an earlier streaming batch is read from the scan's rows)
+	named = {(urlparse(url).hostname or '').lower() for url in wanted if url not in existing}
+	hosts = {host: subdomains.get(host) for host in named if subdomains.get(host)}
+	hosts.update(_hosts_of_scan(scan_id, {host for host in named if host not in hosts}))
 	rows = []
+	rooted = {}  # {host row id: host row}: the hosts whose root URL fills their empty http_url, written together
 	for url, status in sorted(result.urls):
 		if url in existing or len(url) > MAX_URL_LENGTH or len(rows) >= room:
 			continue
 		host = (urlparse(url).hostname or '').lower()
-		if host not in hosts:
-			hosts[host] = subdomains.get(host) or Subdomain.objects.filter(scan_history_id=scan_id, name=host).first()
-		sub = hosts[host]
+		sub = hosts.get(host)
 		if not sub:
 			continue
 		existing.add(url)
@@ -164,8 +274,9 @@ def _persist_bbot_urls(result, ctx, subdomains):
 			sub.http_url = url
 			if status:
 				sub.http_status = status
-			sub.save(update_fields=['http_url', 'http_status'])
+			rooted[sub.pk] = sub
 	EndPoint.objects.bulk_create(rows)
+	_write_changed(Subdomain, {pk: (sub, {'http_url', 'http_status'}) for pk, sub in rooted.items()})
 
 
 def _put(row, field, value, fields):
@@ -199,6 +310,7 @@ def _persist_bbot_http(result, ctx, subdomains):
 						 .select_related('port').order_by('port_id')):
 				port = port_rows.setdefault(link.port_id, link.port)  # one object per row, so a later record sees what an earlier one wrote
 				ports_of.setdefault((link.ipaddress_id, port.number), []).append(port)
+	sub_dirty, port_dirty, new_ports = {}, {}, []  # {row id: (row, {columns changed})} of hosts and ports; [(IpAddress id, new Port)]
 	for rec in result.http:
 		sub = cache.get(rec['host'])
 		if not sub:
@@ -212,37 +324,45 @@ def _persist_bbot_http(result, ctx, subdomains):
 			if rec['webserver'] and (root or not sub.webserver):
 				_put(sub, 'webserver', rec['webserver'], fields)
 		if fields:
-			sub.save(update_fields=fields)
+			sub_dirty.setdefault(sub.pk, (sub, set()))[1].update(fields)
 		if not rec['port']:
 			continue
 		summary = {k: rec[k] for k in ('url', 'status', 'title', 'webserver', 'content_type', 'location') if rec[k]}
 		ips = ips_of.get(sub.pk, [])
 		ports = [p for ip in ips for p in ports_of.get((ip.pk, rec['port']), [])]
-		added = None
 		if not ports and ips:
-			port, _ = update_or_create_port(port_number=rec['port'], service_name='https' if rec['url'].startswith('https') else 'http',
-				description='', ip=ips[0])
-			ips[0].ports.add(port)
-			added = port_rows.setdefault(port.pk, port)
-			added.source, added.last_seen = 'bbot', timezone.now()
+			# no TCP port of that number on any of the host's addresses (what update_or_create_port would look up on the first): created with
+			# the batch, its source and time stored with it
+			added = Port(number=rec['port'], service_name='https' if rec['url'].startswith('https') else 'http', description='', source='bbot',
+				last_seen=timezone.now())
+			new_ports.append((ips[0].pk, added))
 			ports_of.setdefault((ips[0].pk, rec['port']), []).append(added)
 			ports = [added]
 		for port in ports:
 			if root or not port.http:
-				changed = ['http'] if port.http != summary else []
+				if port.pk and port.http != summary:
+					port_dirty.setdefault(port.pk, (port, set()))[1].add('http')
 				port.http = summary
-				if port is added:  # the port this answer proved open: its source and time are stored with it
-					changed += ['source', 'last_seen']
-				if changed:
-					port.save(update_fields=changed)
+	if new_ports:
+		Port.objects.bulk_create([port for _, port in new_ports], batch_size=500)
+		IpAddress.ports.through.objects.bulk_create([IpAddress.ports.through(ipaddress_id=ip_id, port_id=port.pk) for ip_id, port in new_ports],
+			ignore_conflicts=True, batch_size=1000)
+	_write_changed(Port, port_dirty)
+	_write_changed(Subdomain, sub_dirty)
 
 
 def _persist_bbot_findings(result, ctx, subdomains):
 	"""bbot FINDING / VULNERABILITY events become scanner findings (source 'bbot') on their host."""
 	if not ctx.get('scan_history_id') or not ctx.get('domain_id'):
 		return
-	scan = ScanHistory.objects.filter(pk=ctx['scan_history_id']).first()
-	domain = Domain.objects.filter(pk=ctx['domain_id']).first()
+	if not result.findings:
+		return
+	scan = ctx.get('_scan')  # the batch's scan and target, read once by persist_bbot_result
+	if scan is None or str(scan.pk) != str(ctx['scan_history_id']):
+		scan = ScanHistory.objects.filter(pk=ctx['scan_history_id']).first()
+	domain = ctx.get('_domain')
+	if domain is None or str(domain.pk) != str(ctx['domain_id']):
+		domain = Domain.objects.filter(pk=ctx['domain_id']).first()
 	if not (scan and domain):
 		return
 	from cveFeed.labels import record_label
@@ -253,7 +373,10 @@ def _persist_bbot_findings(result, ctx, subdomains):
 		banned = excluded_names(domain.project_id, names_only=True)
 	from cveFeed import dangling_dns
 	pending = [f for f in result.findings if f['module'] == 'baddns' and not f.get('informational') and not (banned and normalize(f['host']) in banned)]
-	ratings = dict(zip(map(id, pending), dangling_dns.assess_all(pending, project=domain.project)))  # one batch, through a Sentinel when one can take it
+	ratings = dict(zip(map(id, pending), dangling_dns.assess_all(pending, project=domain.project))) if pending else {}  # one batch, through a Sentinel when one can take it
+	# the hosts the findings name that came in an earlier streaming batch, read together once
+	hosts = _hosts_of_scan(scan.pk, {f['host'] for f in result.findings if not f.get('informational') and f['host'] and not subdomains.get(f['host'])
+								   and not (banned and normalize(f['host']) in banned)})
 	for f in result.findings:
 		if banned and normalize(f['host']) in banned:  # nothing is recorded for a host the organization excluded for good
 			continue
@@ -272,10 +395,12 @@ def _persist_bbot_findings(result, ctx, subdomains):
 			if rating is not None:
 				severity = rating.severity if rating.severity is not None else severity
 				description = dangling_dns.with_note(description, rating)
-		sub = subdomains.get(f['host']) or Subdomain.objects.filter(scan_history=scan, name=f['host']).first()
+		sub = subdomains.get(f['host']) or hosts.get(f['host'])
 		if sub is None and f['module'] == 'baddns' and f['host']:
 			# a dangling name often does not resolve, so no host row exists for it yet: the finding is still about that name ("Matched at")
 			sub, _ = save_subdomain(f['host'], ctx=ctx)
+			if sub is not None:
+				hosts[f['host']] = sub  # a later finding of the batch on that name finds the row
 		save_vulnerability(
 			target_domain=domain, scan_history=scan, subdomain=sub, http_url=f['url'] or (f"{f['host']}:{f['port']}" if f['host'] and f.get('port') else f['host']), name=f['name'],
 			severity=severity, description=description, source='bbot', type='bbot', template_id=f['module'],  # a finding with a port is filed against host:port
@@ -589,45 +714,20 @@ def save_subdomain(subdomain_name, ctx={}):
 	"""
 	scan_id = ctx.get('scan_history_id')
 	subscan_id = ctx.get('subscan_id')
-	out_of_scope_subdomains = ctx.get('out_of_scope_subdomains', [])
-	subdomain_checker = SubdomainScopeChecker(out_of_scope_subdomains)
-	valid_domain = (
-		validators.domain(subdomain_name) or
-		validators.ipv4(subdomain_name) or
-		validators.ipv6(subdomain_name)
-	)
-	if not valid_domain:
-		logger.error(f'{subdomain_name} is not an invalid domain. Skipping.')
+	subdomain_checker = SubdomainScopeChecker(ctx.get('out_of_scope_subdomains', []))
+	found = {}
+
+	def scan_of():
+		if 'scan' not in found:
+			scan = ctx.get('_scan')
+			if scan is None or str(scan.pk) != str(scan_id):
+				scan = ScanHistory.objects.select_related('domain').filter(pk=scan_id).first()
+			found['scan'] = scan
+		return found['scan']
+	if not _keeps_subdomain(subdomain_name, ctx, subdomain_checker, scan_of):
 		return None, False
-
-	if subdomain_checker.is_out_of_scope(subdomain_name):
-		logger.error(f'{subdomain_name} is out-of-scope. Skipping.')
-		return None, False
-
-	if ctx.get('domain_id'):
-		domain = ctx.get('_domain') or Domain.objects.get(id=ctx.get('domain_id'))
-		if subdomain_name != domain.name and not subdomain_name.endswith('.' + domain.name):  # dot boundary: example.com.evil.net is not in scope
-			logger.error(f"{subdomain_name} is not a subdomain of domain {domain.name}. Skipping.")
-			return None, False
-		if not domain.includes_host(subdomain_name):  # a target added as exactly one host (=example.com): nothing under it is kept
-			logger.info(f'{subdomain_name} skipped: {domain.name} is scoped to that host only')
-			return None, False
-
-	scan = ctx.get('_scan')
-	if scan is None or str(scan.pk) != str(scan_id):
-		scan = ScanHistory.objects.select_related('domain').filter(pk=scan_id).first()
+	scan = scan_of()
 	domain = scan.domain if scan else None
-	if domain is not None and domain.exact_host_only() and not domain.includes_host(subdomain_name):  # the scan's own target, when the caller named none
-		logger.info(f'{subdomain_name} skipped: {domain.name} is scoped to that host only')
-		return None, False
-	if domain is not None:
-		from cveFeed.exclusions import excluded_names, normalize
-		banned = ctx.get('_excluded_hosts')  # persist_bbot_result reads the list once for a whole batch
-		if banned is None:
-			banned = excluded_names(domain.project_id, names_only=True)  # an address-excluded host is still recorded (it stays visible, unscanned)
-		if normalize(subdomain_name) in banned:  # the organization excluded this exact host for good
-			logger.info(f'{subdomain_name} is excluded for this organization. Skipping.')
-			return None, False
 	subdomain, created = get_or_create_first(
 		Subdomain,
 		defaults={'discovered_date': timezone.now()},  # stored with the row, not by a second UPDATE right after the INSERT
@@ -639,19 +739,51 @@ def save_subdomain(subdomain_name, ctx={}):
 	return subdomain, created
 
 
+def _keeps_subdomain(subdomain_name, ctx, subdomain_checker, scan_of):
+	"""Whether ``save_subdomain`` stores ``subdomain_name`` (logs why not): a valid name, in scope, under the target, not excluded. ``scan_of()``
+	gives the scan row (read only once a name passed the checks before it)."""
+	valid_domain = (
+		validators.domain(subdomain_name) or
+		validators.ipv4(subdomain_name) or
+		validators.ipv6(subdomain_name)
+	)
+	if not valid_domain:
+		logger.error(f'{subdomain_name} is not an invalid domain. Skipping.')
+		return False
+
+	if subdomain_checker.is_out_of_scope(subdomain_name):
+		logger.error(f'{subdomain_name} is out-of-scope. Skipping.')
+		return False
+
+	if ctx.get('domain_id'):
+		domain = ctx.get('_domain') or Domain.objects.get(id=ctx.get('domain_id'))
+		if subdomain_name != domain.name and not subdomain_name.endswith('.' + domain.name):  # dot boundary: example.com.evil.net is not in scope
+			logger.error(f"{subdomain_name} is not a subdomain of domain {domain.name}. Skipping.")
+			return False
+		if not domain.includes_host(subdomain_name):  # a target added as exactly one host (=example.com): nothing under it is kept
+			logger.info(f'{subdomain_name} skipped: {domain.name} is scoped to that host only')
+			return False
+
+	scan = scan_of()
+	domain = scan.domain if scan else None
+	if domain is not None and domain.exact_host_only() and not domain.includes_host(subdomain_name):  # the scan's own target, when the caller named none
+		logger.info(f'{subdomain_name} skipped: {domain.name} is scoped to that host only')
+		return False
+	if domain is not None:
+		from cveFeed.exclusions import excluded_names, normalize
+		banned = ctx.get('_excluded_hosts')  # persist_bbot_result reads the list once for a whole batch
+		if banned is None:
+			banned = excluded_names(domain.project_id, names_only=True)  # an address-excluded host is still recorded (it stays visible, unscanned)
+		if normalize(subdomain_name) in banned:  # the organization excluded this exact host for good
+			logger.info(f'{subdomain_name} is excluded for this organization. Skipping.')
+			return False
+	return True
+
+
 def save_ip_address(ip_address, subdomain=None, subscan=None, org_id=None, project_id=None, **kwargs):
 	"""Store one address (and attach it to ``subdomain``). ``project_id`` may authorise a tailnet device of that project, and only when
 	the host IS that address (``subdomain`` named by it, or no subdomain because the host is the address itself)."""
-	if not (validators.ipv4(ip_address) or validators.ipv6(ip_address)):
-		logger.info(f'IP {ip_address} is not a valid IP. Skipping.')
-		return None, False
-	from targetApp.target_types import in_internal_range, internal_networks, is_scannable_ip
-	own = project_id if subdomain is None or str(subdomain.name) == ip_address else None
-	# a tailnet device's own address is allowed on the host named by that address; an address a name resolved to never is. Likewise an
-	# address of a network the project declared internal: storing it is only data, and no local scanner is ever aimed at it (they all re-check)
-	if not is_scannable_ip(ip_address, project=own) and not (own and in_internal_range(ip_address, internal_networks(own))):
-		# a hostname the target controls can resolve anywhere; never store (and so never scan) internal addresses
-		logger.warning(f'IP {ip_address} is loopback, link-local or internal. Skipping.')
+	if not _storable_ip(ip_address, subdomain, project_id):
 		return None, False
 	if org_id is None and subdomain is not None:  # the organization of the host the address was found for
 		org_id = org_id_of_subdomain(subdomain)
@@ -678,3 +810,19 @@ def save_ip_address(ip_address, subdomain=None, subscan=None, org_id=None, proje
 		ip.ip_subscan_ids.add(subscan)
 
 	return ip, created
+
+
+def _storable_ip(ip_address, subdomain, project_id):
+	"""Whether ``save_ip_address`` stores ``ip_address`` (logs why not): a valid address that may be scanned, or that the project may hold."""
+	if not (validators.ipv4(ip_address) or validators.ipv6(ip_address)):
+		logger.info(f'IP {ip_address} is not a valid IP. Skipping.')
+		return False
+	from targetApp.target_types import in_internal_range, internal_networks, is_scannable_ip
+	own = project_id if subdomain is None or str(subdomain.name) == ip_address else None
+	# a tailnet device's own address is allowed on the host named by that address; an address a name resolved to never is. Likewise an
+	# address of a network the project declared internal: storing it is only data, and no local scanner is ever aimed at it (they all re-check)
+	if not is_scannable_ip(ip_address, project=own) and not (own and in_internal_range(ip_address, internal_networks(own))):
+		# a hostname the target controls can resolve anywhere; never store (and so never scan) internal addresses
+		logger.warning(f'IP {ip_address} is loopback, link-local or internal. Skipping.')
+		return False
+	return True

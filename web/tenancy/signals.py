@@ -21,6 +21,8 @@ def place_new_project(sender, instance, created, **kwargs):
         org = org or Org.objects.order_by('id').first()
         if org:
             type(instance)._base_manager.filter(pk=instance.pk).update(org=org)  # unscoped: the new project is not in the caller's set yet
+            from cveFeed import exclusions
+            exclusions.forget()  # the project now reads its new organization's exclusion lists
     if user and not user.is_superuser:
         ProjectMembership.objects.get_or_create(
             user=user, project=instance, defaults={'role': roles.ADMIN})
