@@ -17,7 +17,7 @@ collection looks at. After that a tick collects only the young generations (``gc
 ``FULL_EVERY`` ticks, so a cycle that outlived two young collections is still freed, a few minutes later. Frozen objects are never re-frozen and never unfrozen: a second
 freeze would move whatever the worker holds by then, cycles that have become garbage among it included, out of the collector's reach for good, and the start-up objects of a
 worker are not garbage until the process ends (a cycle among them that is dropped later is freed by reference counting or stays, which is a few kilobytes, not growth).
-The young tick is ``gc.collect(1)`` only where that is a young collection. On Python 3.14.0 to 3.14.4 (the image's Ubuntu Python is 3.14.4) ``gc.collect(1)`` is one
+The young tick is ``gc.collect(1)`` only where that is a young collection. On Python 3.14.0 to 3.14.4 (Ubuntu 26.04's own; the image now pins a later CPython, web/Dockerfile) ``gc.collect(1)`` is one
 step of the incremental collector instead, and a step returns without collecting anything while the collector thinks it is ahead of its work: with the automatic collector
 off and an unfrozen heap of 100,000 objects or more, 200 such ticks in a row freed no cycle at all, so every cycle waited for the full collection, up to 10 minutes. A cycle
 that holds a socket (a finished greenlet's cache client, an exception's traceback, an unclosed streamed reply) kept its file descriptor that long; on the VPS on 11/23
