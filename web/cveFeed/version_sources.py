@@ -572,9 +572,10 @@ def store_readings(sub, probe_id, readings, port=0, now=None):
             continue
         observations.append(_observation(r, port))
     if observations:
+        stored_rows = list(ProbeObservation.objects.filter(project_id=project_id, host=host, probe=probe_id))
         before = {(o.kind, o.product, o.port): (o.version, (o.evidence or {}).get('range') if isinstance(o.evidence, dict) else None)
-                  for o in ProbeObservation.objects.filter(project_id=project_id, host=host, probe=probe_id)}
-        probes.record(project_id, sub.target_domain_id, host, probe_id, observations, now=now)
+                  for o in stored_rows}
+        probes.record(project_id, sub.target_domain_id, host, probe_id, observations, now=now, existing=stored_rows)
         stored += len(observations)
         changed = changed or any(before.get((o['kind'], o['product'], o['port'])) != (o['version'], o['evidence'].get('range'))
                                  for o in observations)
