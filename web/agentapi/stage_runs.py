@@ -821,10 +821,13 @@ def open_scan_ids(scan_ids=None):
 
 
 def prune(now=None, days=7):
-    """Delete ended runs older than ``days`` (the weekly maintenance)."""
+    """Delete ended runs older than ``days``. The weekly maintenance (``cveFeed.maintenance.prune_operational``) calls it with
+    CVENGINE_STAGE_RUN_RETENTION_DAYS. Deleted in id order, ``maintenance.DELETE_CHUNK`` ids per statement. An open run is never touched,
+    and nothing reads an ended run once it ended: the metrics read the last hour, the reaper and the adopter read open runs only."""
     from agentapi.models import StageRun
+    from cveFeed.maintenance import keyset_delete
     now = now or timezone.now()
-    return StageRun.objects.filter(state__in=('done', 'failed', 'cancelled'), finished_at__lt=now - timedelta(days=days)).delete()[0]
+    return keyset_delete(StageRun._base_manager.filter(state__in=('done', 'failed', 'cancelled'), finished_at__lt=now - timedelta(days=days)))
 
 
 # --- metrics -----------------------------------------------------------------------------------------------------------------------------

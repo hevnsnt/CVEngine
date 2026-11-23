@@ -2899,7 +2899,9 @@ def weekly_maintenance():
                           f'({", ".join(f"{k} {v:,}" for k, v in result["archived"].items() if v)}) into '
                           f'{os.path.basename(result["archive"])}' if archived else
                           'Weekly log maintenance: no log rows were past their retention')
-                 + (f'; {result["archives_removed"]} expired archive(s) deleted' if result['archives_removed'] else ''),
+                 + (f'; {result["archives_removed"]} expired archive(s) deleted' if result['archives_removed'] else '')
+                 + (f'; pruned {", ".join(f"{k} {v:,}" for k, v in result.get("pruned", {}).items() if v)}'
+                    if any(result.get('pruned', {}).values()) else ''),
                  archived=result['archived'], deleted=result['deleted'])
     return result
 
