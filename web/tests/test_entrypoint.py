@@ -193,7 +193,7 @@ def web_command(**env):
         stub.write_text('#!/bin/sh\necho "$@"\n')
         stub.chmod(0o755)
         environ = {k: v for k, v in os.environ.items() if not k.startswith('GUNICORN_') and k != 'DEBUG'}
-        environ.update(PATH=f'{tmp}:{os.environ["PATH"]}', **env)
+        environ.update(PATH=f'{tmp}:{os.environ["PATH"]}', CVENGINE_DB_ROLE_STATE=f'{tmp}/db-role', **env)
         out = subprocess.run(['bash', str(WEB_SCRIPT)], capture_output=True, text=True, env=environ, check=True).stdout
     return out.splitlines()
 
@@ -237,7 +237,7 @@ class BeatEntrypointTests(SimpleTestCase):
             sleep.write_text('#!/bin/sh\nexit 0\n')
             python.chmod(0o755)
             sleep.chmod(0o755)
-            env = {**os.environ, 'PATH': f'{temp}:{os.environ["PATH"]}', 'MIGRATION_EXIT': '1'}
+            env = {**os.environ, 'PATH': f'{temp}:{os.environ["PATH"]}', 'MIGRATION_EXIT': '1', 'CVENGINE_DB_ROLE_STATE': f'{temp}/db-role'}
             failed = subprocess.run(['bash', str(BEAT_SCRIPT), 'echo', 'beat-started'], capture_output=True, text=True, env=env)
             self.assertNotEqual(failed.returncode, 0)
             self.assertIn('attempt 60/60', failed.stdout)
