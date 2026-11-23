@@ -482,7 +482,8 @@ class StoredJqueryMatchTests(Fixture):
 	def test_a_rescan_that_carries_a_hit_rescores_and_is_not_paged(self):
 		Triage.objects.filter(match=self.match).update(validation_status='hit', validated_at=timezone.now(), status='triaged',
 														classification='confirmed')
-		later = Subdomain.objects.create(name=self.sub.name, target_domain=self.domain, scan_history=self.scan)
+		rescan = type(self.scan).objects.create(domain=self.domain, scan_type=self.scan.scan_type, scan_status=2, start_scan_date=timezone.now())
+		later = Subdomain.objects.create(name=self.sub.name, target_domain=self.domain, scan_history=rescan)  # a host is one row per scan
 		later.ip_addresses.add(self.ip)
 		twin = CVEMatch.objects.create(cve_entry=self.entry, subdomain=later, source=self.match.source, matched_product=self.match.matched_product,
 									   matched_version=self.match.matched_version, version_in_range=True, evidence=self.match.evidence)

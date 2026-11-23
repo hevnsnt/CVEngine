@@ -128,8 +128,9 @@ class ThreatSectionTests(Base):
 
     def test_cves_of_one_product_are_one_item_listing_their_ids(self):
         cves = [self.product_cve(f'CVE-2099-61{i}', 'PHP') for i in range(3)]
+        other = self.host('b.acme.test')  # a host is one row per scan
         for cve in cves:
-            for sub in (self.www, self.host('b.acme.test')):
+            for sub in (self.www, other):
                 self.hit(cve, sub, 'PHP')
         digest = self.digest()
         self.assertEqual(len(digest['threats']), 1)

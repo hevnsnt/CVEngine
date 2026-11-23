@@ -114,7 +114,7 @@ class RandomInventories(TestCase):
                 subs.append(Subdomain(name=rnd.choice(pool), target_domain=d, scan_history=scan, http_url=rnd.choice(['', '', 'https://x.invalid/'])))
         if rnd.random() < 0.5:
             subs.append(Subdomain(name='orphan', target_domain=None, scan_history=rnd.choice(scans) if scans else None))
-        Subdomain.objects.bulk_create(subs)
+        Subdomain.objects.bulk_create(subs, ignore_conflicts=True)  # a name drawn twice for one scan is one host (uniq_sub_scan_dom_name)
         subs = list(Subdomain.objects.order_by('id'))
         ips = [IpAddress.objects.create(address=f'10.0.0.{i}', is_cdn=(i == 3)) for i in range(5)]
         ports = [Port.objects.create(number=n, service_name=sv, protocol=pr, state=st) for n, sv, pr, st in (

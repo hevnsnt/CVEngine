@@ -48,7 +48,7 @@ class NotifyTests(TestCase):
 		fields.update(cve)
 		entry = CVEEntry.objects.create(**fields)
 		for i in range(count):
-			sub = Subdomain.objects.create(scan_history=scan, target_domain=self.domain, name=f'h{i}_x.example.test')
+			sub = Subdomain.objects.get_or_create(scan_history=scan, target_domain=self.domain, name=f'h{i}_x.example.test')[0]  # one row per scan
 			# a template hit: since 1.3.2 a match on its version alone is smoke on the host, never paged as fire
 			CVEMatch.objects.create(cve_entry=entry, subdomain=sub, scan_history=scan, confidence=0.9, version_in_range=True,
 									template_result='vulnerable')

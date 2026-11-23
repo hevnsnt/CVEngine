@@ -951,9 +951,11 @@ class HostTextSignatureTests(Base):
         provider = self.provider()
         scan = self.scan()
         matches = []
-        for n in range(4):
-            sub = Subdomain.objects.create(name=self.host, target_domain=self.domain, scan_history=scan)
-            matches.append(CVEMatch.objects.create(cve_entry=self.cve, subdomain=sub, matched_product='nginx', matched_version=f'1.21.{n}',
+        sub = Subdomain.objects.create(name=self.host, target_domain=self.domain, scan_history=scan)  # a host is one row per scan
+        for n in range(4):  # so the four rows are four CVEs of the host
+            cve = self.cve if not n else CVEEntry.objects.create(cve_id=f'CVE-2099-34{n}', cvss=self.cve.cvss, affected=self.cve.affected,
+                                                                 published_at=self.cve.published_at)
+            matches.append(CVEMatch.objects.create(cve_entry=cve, subdomain=sub, matched_product='nginx', matched_version=f'1.21.{n}',
                                                    source='port', version_in_range=None, evidence={'branch_unlisted': True}))
         with self.legacy_view():
             for m in matches:

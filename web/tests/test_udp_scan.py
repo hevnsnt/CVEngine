@@ -611,7 +611,7 @@ class GatingTests(UdpBase):
 		self.ip('192.0.2.1', cdn=True)
 		self.ip('192.0.2.2', name=False)  # attached to no host
 		self.ip('10.1.2.3')  # private
-		self.ip('127.0.0.1')  # always blocked
+		self.ip('127.0.0.1', name='lo.udp.test')  # always blocked (its own host: h1 is taken, a host is one row per scan)
 		self.ip('198.51.100.7', name='gone.udp.test')
 		HostExclusion.objects.create(org=self.org, host='gone.udp.test')
 		orphan = Domain.objects.create(name='orphan.test', insert_date=timezone.now())  # no project

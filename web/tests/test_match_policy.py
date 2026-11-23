@@ -243,7 +243,7 @@ class Fixture(TestCase):
 		return CVEEntry.objects.create(cve_id=entry.cve_id, cvss=9.8, published_at=timezone.now(), affected=entry.affected, **fields)
 
 	def tech(self, name):
-		tech = Technology.objects.create(name=name)
+		tech = Technology.objects.get_or_create(name=name)[0]  # names are unique
 		self.sub.technologies.add(tech)
 		return tech
 
