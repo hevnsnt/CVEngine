@@ -607,7 +607,10 @@ def ai_usage_get(request):
     days = request.GET.get('days', '7')
     if days not in ('1', '7', '30'):
         raise SettingsError(400, 'days must be 1, 7, or 30')
-    return snapshot(int(days))
+    cost = request.GET.get('cost', '1')
+    if cost not in ('0', '1'):
+        raise SettingsError(400, 'cost must be 0 or 1')
+    return snapshot(int(days), with_cost=cost == '1')  # ?cost=0 (the usage page): without cost_by_stage_day, which the page does not show
 
 
 def ai_usage_rate_put(request):
