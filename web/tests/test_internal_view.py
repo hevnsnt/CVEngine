@@ -156,7 +156,7 @@ class GraphTests(ViewBase):
         client.force_login(self.admin)
         nodes = {n['label']: n for n in client.get('/cve/api/graph').json()['nodes'] if n['kind'] == 'subdomain'}
         self.assertEqual((nodes['10.20.0.7']['internal'], nodes['10.20.0.7']['network']), (True, '10.20.0.0/24'))
-        self.assertFalse(nodes['203.0.113.7']['internal'])
+        self.assertFalse(nodes['203.0.113.7'].get('internal'))  # an outside host is sent without the key (views.compact_graph)
 
 
 class SearchTests(ViewBase):

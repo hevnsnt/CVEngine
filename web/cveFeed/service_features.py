@@ -298,26 +298,59 @@ _INDEX = {'checked': 0.0, 'stamp': None, 'value': {}}
 INDEX_CHECK = 60  # seconds between two looks at whether the CVE table or a detection record changed
 
 
+STAMP_KEY = 'cve:service-features-stamp'
+STAMP_SECONDS = 60  # how long every process shares one read of the stamp below
+
+
 def reset_index():
     _INDEX.update(checked=0.0, stamp=None, value={})
+    try:
+        from django.core.cache import cache
+        cache.delete(STAMP_KEY)
+    except Exception:  # noqa: BLE001 - a cache outage leaves nothing to forget
+        pass
+
+
+def _stamp():
+    """``(CVEs, newest CVE sync, detection records, newest record change)``: what ``index`` compares to know whether to read the CVEs again. The CVE half
+    is a pass over the whole catalogue (``synced_at`` has no index: 18,000 buffers and 150 to 330 ms on 59,000 CVEs), and every worker process asked it
+    once a minute for itself. It is now read once for all of them and shared through the cache for ``STAMP_SECONDS``, so a change to the catalogue or a
+    detection record reaches ``index`` within ``INDEX_CHECK + STAMP_SECONDS`` (two minutes; one before). ``reset_index`` forgets it. Without a cache it
+    is read every time, as before."""
+    from django.core.cache import cache
+    from django.db.models import Count, Max
+
+    from cveFeed.models import CVEDetection, CVEEntry
+    try:
+        got = cache.get(STAMP_KEY)
+    except Exception:  # noqa: BLE001 - a cache outage reads the database
+        got = None
+    if got is not None:
+        return tuple(got)
+    entries = CVEEntry.objects.aggregate(n=Count('id'), latest=Max('synced_at'))
+    detections = CVEDetection.objects.aggregate(n=Count('id'), latest=Max('updated_at'))
+    got = (entries['n'], entries['latest'], detections['n'], detections['latest'])
+    try:
+        cache.set(STAMP_KEY, got, STAMP_SECONDS)
+    except Exception:  # noqa: BLE001
+        pass
+    return got
 
 
 def index():
     """``{CVEEntry id: requirements}`` for every CVE that needs a feature: one query for the CVEs whose words name one
     (``detection_classes.FEATURE_PREFILTER``, then the rules themselves) and one for the people's detection records that state
     ``requires_features``. Cached per process, and read again when the CVE table or a detection record changed (looked at once every
-    ``INDEX_CHECK`` seconds)."""
+    ``INDEX_CHECK`` seconds, through the stamp every process shares: ``_stamp``)."""
     import time
 
-    from django.db.models import Count, Max, Q
+    from django.db.models import Q
 
     from cveFeed.detection_classes import FEATURE_PREFILTER
     from cveFeed.models import CVEDetection, CVEEntry
     if _INDEX['checked'] and time.monotonic() - _INDEX['checked'] < INDEX_CHECK:
         return _INDEX['value']
-    entries = CVEEntry.objects.aggregate(n=Count('id'), latest=Max('synced_at'))
-    detections = CVEDetection.objects.aggregate(n=Count('id'), latest=Max('updated_at'))
-    stamp = (entries['n'], entries['latest'], detections['n'], detections['latest'])
+    stamp = _stamp()
     if stamp == _INDEX['stamp']:
         _INDEX['checked'] = time.monotonic()
         return _INDEX['value']
