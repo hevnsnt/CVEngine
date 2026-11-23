@@ -62,19 +62,22 @@ FIX_LOOP = ('An agent that fixes things, such as one working in your code or on 
 
 def history(request):
     """The History table's context: the calls the viewer may read (``agentapi.mcp_log.visible_to``), filtered by the query string (tool,
-    outcome ok|failed, writes=1, key, user for an App Admin) and paged."""
+    outcome ok|failed|timeout, writes=1, key, user for an App Admin) and paged. ``timeout`` is the failed calls the database statement
+    timeout cut off (``mcp_log.TIMEOUT_ERROR``)."""
     from agentapi import mcp_log
     rows = mcp_log.visible_to(request.user)
     base = rows
     q = request.GET
     tool = (q.get('tool') or '').strip()[:64]
-    outcome = q.get('outcome') if q.get('outcome') in ('ok', 'failed') else ''
+    outcome = q.get('outcome') if q.get('outcome') in ('ok', 'failed', 'timeout') else ''
     writes = q.get('writes') == '1'
     key = (q.get('key') or '').strip()[:100]
     user = (q.get('user') or '').strip()[:150] if request.user.is_superuser else ''
     if tool:
         rows = rows.filter(tool=tool)
-    if outcome:
+    if outcome == 'timeout':
+        rows = rows.filter(ok=False, error__startswith=mcp_log.TIMEOUT_ERROR.split(':')[0] + ':')
+    elif outcome:
         rows = rows.filter(ok=outcome == 'ok')
     if writes:
         rows = rows.filter(writes=True)

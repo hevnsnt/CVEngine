@@ -107,7 +107,7 @@ BULK_ACTIONS = ('archive', 'restore', 'pin', 'unpin')
 def host_bulk(ctx, slug, hosts, action, reason=''):
     """Archive, restore, pin or unpin up to MAX_BULK_HOSTS hosts of one project in one call. Each host is independent (a pinned host
     that cannot be archived, or a name that is not in the project, never blocks the rest); returns {done, failed: [{host, error}]}."""
-    get_project(ctx, slug, write=True)  # the _all / audit-role / read-only-token gate comes before any body validation
+    project, _ = get_project(ctx, slug, write=True)  # the _all / audit-role / read-only-token gate comes before any body validation
     if action not in BULK_ACTIONS:
         raise ApiError(400, f'action must be one of {", ".join(BULK_ACTIONS)}')
     if not isinstance(hosts, list) or not hosts:
@@ -115,12 +115,16 @@ def host_bulk(ctx, slug, hosts, action, reason=''):
     if len(hosts) > MAX_BULK_HOSTS:
         raise ApiError(400, f'at most {MAX_BULK_HOSTS} hosts per call')
     done, failed = [], []
-    for host in dict.fromkeys(h for h in hosts if isinstance(h, str)):  # a repeated name is done once
+    wanted = list(dict.fromkeys(h for h in hosts if isinstance(h, str)))  # a repeated name is done once
+    # the project is resolved once for the call, and the newest row of every name is read in one query: each host asked both again (the access
+    # checks, and a case-insensitive name lookup that reads every host row of the project), up to 200 times
+    rows = _newest_rows(project, wanted)
+    for host in wanted:
         try:
             if action in ('pin', 'unpin'):
-                host_archive(ctx, slug, host, 'pin', pinned=action == 'pin')
+                _host_archive(ctx, project, slug, host, 'pin', pinned=action == 'pin', rows=rows)
             else:
-                host_archive(ctx, slug, host, action, reason=reason)
+                _host_archive(ctx, project, slug, host, action, reason=reason, rows=rows)
             done.append(host)
         except ApiError as e:
             failed.append({'host': host[:200], 'error': e.message})
@@ -132,12 +136,38 @@ def host_archive(ctx, slug, host, action, reason='', pinned=None):
     """Reversible project-scoped archive and owner pin; historical evidence is retained. Archiving takes the host as the Hosts page shows it: the
     other names of this project on its addresses are archived with it (``names``), and every open finding of them is closed (``findings_closed``).
     Restoring any of the names restores them all and reopens exactly what was closed (``findings_reopened``). See ``cveFeed.archive_closure``."""
+    project, _ = get_project(ctx, slug, write=True)
+    return _host_archive(ctx, project, slug, host, action, reason=reason, pinned=pinned)
+
+
+def _newest_rows(project, hosts):
+    """``{UPPER(name): newest Subdomain row}`` of the project for the valid names among ``hosts``, in one query: the row ``_host_archive`` takes for each,
+    matched the way ``name__iexact`` matches (``UPPER(name) = UPPER(%s)``). A name that is not valid is left out (its own call refuses it)."""
+    from django.db.models.functions import Upper
+
+    from startScan.models import Subdomain
+    names = set()
+    for host in hosts:
+        try:
+            names.add(clean_host(host).upper())
+        except ApiError:
+            continue
+    out = {}
+    if names:
+        for sub in Subdomain.objects.filter(target_domain__project=project).annotate(upper_name=Upper('name')).filter(upper_name__in=sorted(names)) \
+                .select_related('target_domain').order_by('-id'):
+            out.setdefault(sub.upper_name, sub)
+    return out
+
+
+def _host_archive(ctx, project, slug, host, action, reason='', pinned=None, rows=None):
+    """``host_archive`` for a project already resolved with write access. ``rows`` (``_newest_rows``): the newest row of each name, read once for a
+    whole bulk call; a name missing from it is not in the project."""
     from cveFeed.models import HostAssessment, HostState
     from cveFeed.exclusions import is_excluded
     from startScan.models import Subdomain
     from django.utils import timezone
 
-    project, _ = get_project(ctx, slug, write=True)
     name = clean_host(host)
     if action not in ('archive', 'restore', 'pin'):
         raise ApiError(400, 'unknown archive action')
@@ -145,7 +175,10 @@ def host_archive(ctx, slug, host, action, reason='', pinned=None):
         raise ApiError(409, 'host is excluded; an organization admin must remove the exclusion first')
     if not isinstance(reason, str) or len(reason.strip()) > MAX_REASON:
         raise ApiError(400, f'reason must be text of at most {MAX_REASON} characters')
-    sub = Subdomain.objects.filter(target_domain__project=project, name__iexact=name).select_related('target_domain').order_by('-id').first()
+    if rows is not None:
+        sub = rows.get(name.upper())
+    else:
+        sub = Subdomain.objects.filter(target_domain__project=project, name__iexact=name).select_related('target_domain').order_by('-id').first()
     if not sub:
         raise ApiError(404, 'host not found in this project')
     from cveFeed import archive_closure

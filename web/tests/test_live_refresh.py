@@ -391,7 +391,19 @@ class MembershipCacheTests(Fresh):
                 client.get(STATS)
             with mock.patch.dict(os.environ, {'CVENGINE_AUTH_CACHE_SECONDS': '0'}), CaptureQueriesContext(connection) as fresh:
                 client.get(STATS)
-        self.assertEqual(len(fresh) - len(cached), 2, 'the project memberships and the organization memberships (a third query reads the organizations\' projects)')
+        # The memberships are read once per request anyway (tenancy.snapshot: the MFA policy and the role need them), so for a project member the
+        # cached set saves nothing more; for an organization member it saves the read of the organizations' projects
+        self.assertEqual(len(fresh) - len(cached), 0)
+        member = User.objects.create_user('lc-org-member', password='x')
+        OrgMembership.objects.create(user=member, org=self.org_a, role='user')
+        client = client_for(member)
+        with steady_caches():
+            client.get(STATS)
+            with CaptureQueriesContext(connection) as cached:
+                client.get(STATS)
+            with mock.patch.dict(os.environ, {'CVENGINE_AUTH_CACHE_SECONDS': '0'}), CaptureQueriesContext(connection) as fresh:
+                client.get(STATS)
+        self.assertEqual(len(fresh) - len(cached), 1, 'the organizations\' projects')
 
     def test_removing_a_membership_takes_effect_on_the_next_poll(self):
         client = client_for(self.a1)

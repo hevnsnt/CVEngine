@@ -369,6 +369,7 @@ def _env_int(name, default):
 
 # A failure the scanned host caused, not the Sentinel: a task that failed with one of these says nothing about whether the Sentinel can do the kind, so it
 # neither adds to a streak nor breaks one. (A Sentinel that has the nmap_full tarpit handling reports such a host as a result; this is for one that does not.)
+FAIL_RECENT = 200  # a Sentinel's latest finished tasks the failure streaks are read from (``failing_kinds``, ``failing_kinds_many``)
 TARGET_CAUSED_ERRORS = ('bytes of output; the run was stopped',)
 
 
@@ -385,7 +386,7 @@ def failing_kinds(agent, now=None):
     now = now or timezone.now()
     window = timedelta(minutes=cooldown)
     recent = list(SentinelTask.objects.filter(agent=agent, status__in=('done', 'failed'), finished_at__gte=now - 4 * window)
-                  .order_by('-finished_at').values_list('kind', 'status', 'finished_at', 'error')[:200])
+                  .order_by('-finished_at').values_list('kind', 'status', 'finished_at', 'error')[:FAIL_RECENT])
     by_kind = {}
     for kind, status, finished, error in recent:
         if status == 'failed' and any(marker in (error or '') for marker in TARGET_CAUSED_ERRORS):
@@ -408,8 +409,9 @@ def _streaks(by_kind, streak, window, now):
 
 
 def failing_kinds_many(agents, now=None):
-    """``{agent id: failing_kinds(agent)}`` for a page of Sentinels in one query (the last ``FAIL_STREAK`` finished tasks of each kind of each Sentinel, a
-    failure the scanned host caused left out), where ``failing_kinds`` is one query per Sentinel."""
+    """``{agent id: failing_kinds(agent)}`` for many Sentinels in one query, where ``failing_kinds`` is one query per Sentinel. The same answer: each
+    Sentinel's 200 latest finished tasks of the window (``FAIL_RECENT``), a failure the scanned host caused left out after that cut, then the last
+    ``FAIL_STREAK`` of each kind. The rights of many Sentinels (the claim's peers, a capacity answer, the pages) are built with it."""
     from django.db.models import Window
     from django.db.models.functions import RowNumber
     streak, cooldown = _fail_settings()
@@ -418,16 +420,22 @@ def failing_kinds_many(agents, now=None):
         return {a.pk: {} for a in agents}
     now = now or timezone.now()
     window = timedelta(minutes=cooldown)
-    caused = Q()
-    for marker in TARGET_CAUSED_ERRORS:
-        caused |= Q(error__contains=marker)
-    rows = (SentinelTask.objects.filter(agent_id__in=ids, status__in=('done', 'failed'), finished_at__gte=now - 4 * window).exclude(Q(status='failed') & caused)
-            .annotate(rank=Window(RowNumber(), partition_by=[F('agent_id'), F('kind')], order_by=F('finished_at').desc()))
-            .values_list('agent_id', 'kind', 'status', 'finished_at', 'rank'))
+    rows = (SentinelTask.objects.filter(agent_id__in=ids, status__in=('done', 'failed'), finished_at__gte=now - 4 * window)
+            .annotate(rank=Window(RowNumber(), partition_by=[F('agent_id')], order_by=F('finished_at').desc()))
+            .filter(rank__lte=FAIL_RECENT).values_list('agent_id', 'kind', 'status', 'finished_at', 'error', 'rank'))
     by_agent = {}
-    for agent_id, kind, status, finished, rank in sorted((r for r in rows if r[4] <= streak), key=lambda r: (r[0], r[1], r[4])):
+    for agent_id, kind, status, finished, error, _rank in sorted(rows, key=lambda r: (r[0], r[5])):
+        if status == 'failed' and any(marker in (error or '') for marker in TARGET_CAUSED_ERRORS):
+            continue
         by_agent.setdefault(agent_id, {}).setdefault(kind, []).append((status, finished))
     return {a.pk: _streaks(by_agent.get(a.pk, {}), streak, window, now) for a in agents}
+
+
+def _rights(agents, now):
+    """``SentinelEff`` of each of ``agents``, their failure streaks read in one query (``failing_kinds_many``) instead of one each."""
+    agents = list(agents)
+    withheld = failing_kinds_many(agents, now) if agents else {}
+    return [SentinelEff(a, now, withheld.get(a.pk)) for a in agents]
 
 
 def prefer_defer_seconds():
@@ -885,6 +893,13 @@ def secret_refusal(eff, task):
     return None if eff.reads_secrets else SIGNED_IN
 
 
+def _projects_in_scope(user, scope, limit_projects):
+    """``agent_scope.project_slugs_in_scope``, inside ``sentinel_policy.shared_lookups`` read once per owner, scope and project limit (the Sentinels of one
+    owner with one scope, the usual fleet, share one answer for the call). Each caller gets its own copy."""
+    key = ('project-slugs', user.pk, json.dumps(scope, sort_keys=True, default=str), json.dumps(limit_projects, sort_keys=True, default=str))
+    return set(sentinel_policy.shared(key, lambda: scope_lib.project_slugs_in_scope(user, scope, limit_projects)))
+
+
 class SentinelEff:
     def __init__(self, agent, now, withheld=None):
         """``withheld`` is ``failing_kinds(agent, now)`` when the caller has read it for many Sentinels at once (``failing_kinds_many``)."""
@@ -906,7 +921,7 @@ class SentinelEff:
         if agent.kind == 'scanner':  # the per-kind slots auto-tuning chose for this Sentinel, for the kinds no administrator capped (sentinel_machine)
             self.kind_caps.update(sentinel_machine.tuned_kind_caps(agent, self.policy))
         self.preferred = {k for k, p in self.policy.items() if p['mode'] == 'prefer'}
-        self.projects = scope_lib.project_slugs_in_scope(token.user, agent.scope or {}, limits.get('projects')) if not self.problem else set()
+        self.projects = _projects_in_scope(token.user, agent.scope or {}, limits.get('projects')) if not self.problem else set()
         patterns = (agent.scope or {}).get('hosts') or []
         self.hosts = AssetFilter(patterns) if patterns else None
         self.max_concurrent = min(agent.max_concurrent, limits.get('max_concurrent') or broker.MAX_CONCURRENT_CAP)
@@ -1150,7 +1165,7 @@ def eligible_sentinels(project, kind, now=None, internal=False, live_only=False,
         agents = agents.filter(last_seen__gte=now - LIVE_WINDOW)
     agents = agents.select_related('token__user')[:CANDIDATES]
     with sentinel_policy.shared_lookups():
-        return [e for e in (SentinelEff(a, now) for a in agents)
+        return [e for e in _rights(agents, now)
                 if not e.problem and kind in e.caps and (not internal or INTERNAL_CAPABILITY in e.caps) and (e.credential_filter or not credential_work(kind))]
 
 
@@ -1188,7 +1203,7 @@ def _live_scanners(now):
     agents = (Agent.objects.filter(kind='scanner', status='active', token__revoked=False, last_seen__gte=now - LIVE_WINDOW)
               .select_related('token__user')[:CANDIDATES])
     with sentinel_policy.shared_lookups():
-        live = [e for e in (SentinelEff(a, now) for a in agents) if not e.problem and e.live]
+        live = [e for e in _rights(agents, now) if not e.problem and e.live]
     if memo is not None:
         memo['live'] = live
     return live
@@ -1201,7 +1216,7 @@ def _live_for(project, now):
         agents = (Agent.objects.filter(_covers(project.slug, project.org.slug if project.org_id else None), kind='scanner', status='active',
                                        token__revoked=False, last_seen__gte=now - LIVE_WINDOW).select_related('token__user')[:CANDIDATES])
         with sentinel_policy.shared_lookups():
-            return [e for e in (SentinelEff(a, now) for a in agents) if not e.problem and e.live]
+            return [e for e in _rights(agents, now) if not e.problem and e.live]
     key = ('project', project.pk)
     if key not in memo:
         org = project.org.slug if project.org_id else None
@@ -2092,9 +2107,7 @@ def _preferring(task, exclude_pk, now, memo):
                       .select_related('token__user')[:CANDIDATES])
         preferring = [a for a in candidates if task.kind in (a.capabilities or []) and sentinel_policy.prefers(a, task.kind, builtin=(a.pk == pk))]
         effs = memo.setdefault('effs', {})
-        for a in preferring:
-            if a.pk not in effs:
-                effs[a.pk] = SentinelEff(a, now)
+        effs.update((e.agent.pk, e) for e in _rights([a for a in preferring if a.pk not in effs], now))
         held = _holders([a.pk for a in preferring]) if preferring else ({}, {})
         memo[key] = [(effs[a.pk], held) for a in preferring]
     return memo[key]
@@ -2151,9 +2164,7 @@ def _peers(task, exclude_pk, now, memo):
                                                        status='active', token__revoked=False, last_seen__gte=now - LIVE_WINDOW).exclude(pk=exclude_pk)
                                   .select_related('token__user')[:CANDIDATES]) if task.kind in (a.capabilities or [])]
         effs = memo.setdefault('effs', {})
-        for a in candidates:
-            if a.pk not in effs:
-                effs[a.pk] = SentinelEff(a, now)
+        effs.update((e.agent.pk, e) for e in _rights([a for a in candidates if a.pk not in effs], now))
         held = _holders([a.pk for a in candidates]) if candidates else ({}, {})
         memo[key] = [(effs[a.pk], held) for a in candidates]
     return memo[key]
@@ -2319,10 +2330,14 @@ def next_task(ctx, body=None):
     with broker._waiter_slot(wait > 0, agent.token, exempt_instance=wait > 0 and is_builtin(agent)) as slot:
         deadline = deadline if slot else 0
         held = wait > 0 and not slot
+        first = True
         while True:
             now = timezone.now()
             broker._touch(agent, now)
-            reap_expired(now)
+            due = broker.poll_reap_due('sentinel:poll-reap')  # asked every round, so the first one's reaping holds the later ones off too
+            if due or first:  # the first round reaps as every call does; a later one at most every few seconds fleet wide
+                reap_expired(now)
+            first = False
             claimed, why = _try_claim(agent, kinds, now)
             if claimed or time.monotonic() >= deadline:
                 break
@@ -3618,20 +3633,70 @@ def result_notes(result):
 
 
 def task_brief(task):
+    return _brief(task, task.result, result_notes(task.result))
+
+
+def _brief(task, result, notes):
     agent = task.agent
     return {'id': task.pk, 'project': task.project.slug, 'scan_id': task.scan_id, 'kind': task.kind, 'status': task.status,
             'host': task.host, 'priority': task.priority, 'agent': {'id': agent.pk, 'name': agent.name} if agent else None,
             'attempts': task.attempts, 'max_attempts': task.max_attempts, 'lease_expires_at': svc._iso(task.lease_expires_at),
             'created': svc._iso(task.created_at), 'finished': svc._iso(task.finished_at), 'error': task.error,
-            'result': task.result or None, **result_notes(task.result)}
+            'result': result or None, **notes}
 
 
 LISTED_RESULT_MAX = 8192  # bytes of one task's result a list shows inline; a screenshot or a raw report is far larger (one web_screenshot result was 2.4 MB)
+LISTED_LOAD_MAX = 2 * LISTED_RESULT_MAX  # a listed result whose stored text is at most this is read and measured as before; a larger one is never read
+NOTE_KEYS = ('cuts', 'dropped_findings', 'dropped', 'templates_release', 'partial')  # the keys of a result ``result_notes`` and ``task_outcome`` read
+
+
+def _light(queryset, size=False):
+    """``queryset`` without the ``result`` column (megabytes for a screenshot, a raw report or nuclei evidence), with the keys of it a list shows
+    (``NOTE_KEYS``) read in SQL instead, and with ``size`` the length in bytes of its stored text. ``_noted`` gives a row's result back for those keys."""
+    from django.db.models import Func, IntegerField, TextField
+    from django.db.models.fields.json import KeyTransform
+    extra = {f'result_key_{key}': KeyTransform(key, 'result') for key in NOTE_KEYS}
+    if size:
+        extra['result_size'] = Func(Cast('result', TextField()), function='octet_length', output_field=IntegerField())
+    return queryset.defer('result').annotate(result_kind=Func('result', function='jsonb_typeof', output_field=CharField()), **extra)
+
+
+def _is_light(task):
+    return hasattr(task, 'result_kind') and 'result' in task.get_deferred_fields()
+
+
+def _noted(task):
+    """``task.result``, or for a row read through ``_light`` (its result not loaded) the part of it ``result_notes`` and ``task_outcome`` read."""
+    if not _is_light(task):
+        return task.result
+    if task.result_kind != 'object':
+        return None
+    keys = ((key, getattr(task, f'result_key_{key}')) for key in NOTE_KEYS)
+    return {key: value for key, value in keys if value is not None}
+
+
+def _listed(tasks):
+    """The rows of a task list read through ``_light(..., size=True)``, with the result of each one small enough to show (``LISTED_LOAD_MAX``) read in one
+    query; a larger one stays unread (``task_row`` says it was left out)."""
+    tasks = list(tasks)
+    small = [t.pk for t in tasks if t.result_size is not None and t.result_size <= LISTED_LOAD_MAX]
+    results = dict(SentinelTask._base_manager.filter(pk__in=small).values_list('id', 'result')) if small else {}
+    for task in tasks:
+        if task.result_size is None:
+            task.result = None
+        elif task.pk in results:
+            task.result = results[task.pk]
+    return tasks
 
 
 def task_row(task):
     """``task_brief`` for a list (a Sentinel's recent tasks, a project's task page): a result larger than ``LISTED_RESULT_MAX`` is left out and
-    said to be, so twenty rows stay a page and not megabytes; the task's own read (``get_sentinel_task``) still returns it whole."""
+    said to be, so twenty rows stay a page and not megabytes; the task's own read (``get_sentinel_task``) still returns it whole. A row read through
+    ``_listed`` whose stored result is larger than ``LISTED_LOAD_MAX`` was never loaded: it is left out with the size of its stored text."""
+    if _is_light(task):
+        row = _brief(task, None, result_notes(_noted(task)))
+        row['result'] = {'omitted': True, 'bytes': task.result_size, 'why': f'larger than {LISTED_RESULT_MAX} bytes; read the task itself for it'}
+        return row
     row = task_brief(task)
     if row['result'] is not None:
         size = len(json.dumps(row['result'], default=str))
@@ -3663,7 +3728,9 @@ def list_tasks(ctx, slug, params):
         qs = qs.filter(agent_id=svc._int_param(params['agent_id'], 'agent_id'))
     if params.get('scan_id'):
         qs = qs.filter(scan_id=svc._int_param(params['scan_id'], 'scan_id'))
-    return svc.paginate(qs.select_related('project__org', 'agent').order_by('-id'), params, task_row)
+    page = svc.paginate(_light(qs, size=True).select_related('project__org', 'agent').order_by('-id'), params, lambda task: task)
+    page['results'] = [task_row(t) for t in _listed(page['results'])]
+    return page
 
 
 def list_project_sentinels(ctx, slug):
@@ -3752,7 +3819,7 @@ def _live_task(task, allowed, **fields):
     row = {'id': task.pk, 'kind': task.kind, 'status': task.status, **fields}
     if allowed is not None and task.project_id not in allowed:
         return {**row, 'hidden': True, 'host': '', 'label': '', 'project': '', 'project_name': '', 'scan_id': None, 'error': ''}
-    notes = result_notes(task.result) if task.status == 'done' else {}
+    notes = result_notes(_noted(task)) if task.status == 'done' else {}
     return {**row, 'host': task.host, 'label': task_label(task), 'project': task.project.slug, 'project_name': task.project.name,
             'scan_id': task.scan_id, 'error': task.error, 'cut_notes': notes.get('cut_notes') or [], 'templates_release': notes.get('templates_release')}
 
@@ -3776,7 +3843,7 @@ def _live_overview(ctx):
     # unscoped on purpose: a Sentinel busy for another tenant is shown busy, its tasks redacted by _live_task rather than left out
     tasks = SentinelTask._base_manager.filter(agent_id__in=ids).select_related('project', 'agent')
     held, finished = {}, {}
-    for t in tasks.filter(status__in=SENTINEL_ACTIVE_STATUSES).order_by('claimed_at', 'id'):
+    for t in _light(tasks.filter(status__in=SENTINEL_ACTIVE_STATUSES)).order_by('claimed_at', 'id'):  # never the results: a card shows a few keys of them
         held.setdefault(t.agent_id, []).append(t)
     day = now - timedelta(hours=24)
     hour = now - timedelta(hours=1)
@@ -3795,7 +3862,7 @@ def _live_overview(ctx):
     from django.db.models import OuterRef
     newest = (SentinelTask._base_manager.filter(agent_id=OuterRef('pk'), status__in=('done', 'failed')).order_by('-finished_at', '-id').values('id')[:5])
     latest = {pk: got for pk, got in Agent.objects.filter(pk__in=ids).annotate(latest=ArraySubquery(newest)).values_list('pk', 'latest')}
-    by_id = {t.pk: t for t in tasks.filter(pk__in=[i for got in latest.values() for i in got])}
+    by_id = {t.pk: t for t in _light(tasks.filter(pk__in=[i for got in latest.values() for i in got]))}
     for agent_id, got in latest.items():
         finished[agent_id] = [by_id[i] for i in got if i in by_id]
     queued = _for_viewer(SentinelTask.objects.filter(status='queued'), ctx.user, allowed).count()
@@ -3926,7 +3993,7 @@ def task_outcome(task):
     stopped answering)`` or ``failed``."""
     error = (task.error or '').lower()
     if task.status == 'done':
-        return 'completed at its time budget (partial)' if (task.result or {}).get('partial') else 'completed'
+        return 'completed at its time budget (partial)' if (_noted(task) or {}).get('partial') else 'completed'
     if task.status == 'expired' and error.startswith(RELEASED.lower()):
         return 'released by the Sentinel'  # first: what follows is the Sentinel's own text, never read for anything else
     if 'cancelled by a person' in error:
@@ -3955,8 +4022,8 @@ def task_status_counts(agent_ids):
 def recent_tasks(agent, viewer=None):
     """The last 20 tasks of ``agent``, those of projects ``viewer`` may read when one is given."""
     rows = SentinelTask.objects.filter(agent=agent)
-    rows = (_for_viewer(rows, viewer) if viewer is not None else rows).select_related('project__org', 'agent').order_by('-id')[:20]
-    return [task_row(t) for t in rows]
+    rows = _light(_for_viewer(rows, viewer) if viewer is not None else rows, size=True).select_related('project__org', 'agent').order_by('-id')[:20]
+    return [task_row(t) for t in _listed(rows)]
 
 
 def cancel_task(ctx, slug, task_id):

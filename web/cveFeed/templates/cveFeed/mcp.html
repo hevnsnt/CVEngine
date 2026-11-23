@@ -55,7 +55,7 @@
       <label>Tool <select name="tool"><option value="">Any</option>{% for t in tools_seen %}<option value="{{ t }}"{% if t == filters.tool %} selected{% endif %}>{{ t }}</option>{% endfor %}</select></label>
       <label>Key <select name="key"><option value="">Any</option>{% for k in keys_seen %}<option value="{{ k }}"{% if k == filters.key %} selected{% endif %}>{{ k }}</option>{% endfor %}</select></label>
       {% if is_app_admin %}<label>User <select name="user"><option value="">Anyone</option>{% for u in users_seen %}<option value="{{ u }}"{% if u == filters.user %} selected{% endif %}>{{ u }}</option>{% endfor %}</select></label>{% endif %}
-      <label>Outcome <select name="outcome"><option value="">Any</option><option value="ok"{% if filters.outcome == 'ok' %} selected{% endif %}>Worked</option><option value="failed"{% if filters.outcome == 'failed' %} selected{% endif %}>Failed</option></select></label>
+      <label>Outcome <select name="outcome"><option value="">Any</option><option value="ok"{% if filters.outcome == 'ok' %} selected{% endif %}>Worked</option><option value="failed"{% if filters.outcome == 'failed' %} selected{% endif %}>Failed</option><option value="timeout"{% if filters.outcome == 'timeout' %} selected{% endif %}>Timed out</option></select></label>
       <label class="mcp-check"><input type="checkbox" name="writes" value="1"{% if filters.writes %} checked{% endif %}> Changes only</label>
       <button type="submit" class="btn sm">Show</button>{% if filtered %} <a class="btn ghost sm" href="{% url 'cve_mcp' %}#history">Clear</a>{% endif %}
     </form>

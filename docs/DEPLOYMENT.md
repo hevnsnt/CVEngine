@@ -20,6 +20,21 @@ The defaults below were measured on a 3000-target stack (3000 hosts, 18,000 find
 
 Changing a `POSTGRES_*` value recreates the `db` container once on the next update or `docker compose up -d` (a few seconds of downtime, no data change).
 
+## Sizing the database
+
+The `db` service starts with the values above whatever the host has, so a bigger host leaves memory unused and sorts spill to disk. Every value is a line in `.env`, and an unset line keeps today's value, so an update changes nothing until you set one. For a host with 12 GB of RAM that runs the whole stack:
+
+| Setting (`.env`) | Default | 12 GB host | Note |
+| --- | --- | --- | --- |
+| `POSTGRES_SHARED_BUFFERS` | `256MB` | `1GB` | PostgreSQL's own cache, reserved when the database starts. |
+| `POSTGRES_EFFECTIVE_CACHE_SIZE` | `768MB` | `4GB` | What the planner assumes the operating system caches; reserves nothing. |
+| `POSTGRES_WORK_MEM` | `4MB` | `16MB` | Per sort or hash step, per connection, not per query or per server: the web server alone has 2 workers of 8 threads (16 connections) and the workers add their own, so the busiest moment can use it many times over. Raise it when `pg_stat_database` shows many temporary files. |
+| `POSTGRES_MAINTENANCE_WORK_MEM` | `64MB` | `256MB` | Index builds and autovacuum. |
+| `DB_MEM_LIMIT` | none in `docker-compose.yml` | `4g` | The `db` container's ceiling, where an overlay compose file sets one (`mem_limit: "${DB_MEM_LIMIT:-...}"` for `db`); it must stay above the shared buffers plus the work memory in use. |
+| `POSTGRES_SHARED_PRELOAD_LIBRARIES` | empty | `pg_stat_statements` (optional) | Per query statistics. Run `CREATE EXTENSION IF NOT EXISTS pg_stat_statements;` once in the cvENGINE database after the restart. |
+
+Scale the first four with the memory the host can give the database. A changed value takes effect only when the database restarts: run `docker compose up -d db` (with the same `-f` files and `--env-file` as your other compose commands), which recreates the `db` container in a few seconds and keeps the data. These command line values take precedence over a value set with `ALTER SYSTEM` or in `postgresql.conf`, so move such a setting to `.env`.
+
 ## Ports
 
 | Port | Bound to | Service |
