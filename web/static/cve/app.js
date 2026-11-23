@@ -38,6 +38,8 @@ import { secretsPage } from "/staticfiles/cve/secrets.js";
 import { scoreList } from "/staticfiles/cve/score-detail.js";
 import { openSecret } from "/staticfiles/cve/secret-panel.js";
 import * as FG from "/staticfiles/cve/finding-groups-logic.js";
+import * as VG from "/staticfiles/cve/version-groups-logic.js";
+import { versionGroupsCard } from "/staticfiles/cve/version-groups.js";
 import * as CL from "/staticfiles/cve/closure-logic.js";
 import { changeDetail, authLabel, pathOf } from "/staticfiles/cve/change-text.js";
 import * as RT from "/staticfiles/cve/retest-logic.js";
@@ -2370,7 +2372,9 @@ function findingPage(mount, cfg) {
       pane.append(back, ...renderFinding(d, cfg.forKind ? cfg.forKind(kind) : cfg, row));
       if (FG.isGroup(row) && row.id === id && kind === "match") {
         // a group row opens its hottest member: say so, and that every host keeps its own status
-        back.after(el("p", "note group-note", `This row groups the same client-side library file ${FG.hostsText(row.group)} of ${row.group.registrable_domain} (${FG.statusSplit(row.group)}). Shown here: ${d.host}, the hottest of them. Each host keeps its own status, validation and history; open one from the host list on the row.`));
+        back.after(el("p", "note group-note", VG.isVersionGroup(row)
+          ? `This row groups ${FG.hostsText(row.group)}, all read as ${row.group.product} ${row.group.version} (${FG.statusSplit(row.group)}). ${row.group.note} Shown here: ${d.title || "the hottest"} on ${d.host}, the hottest of them. Each finding keeps its own status, validation and history; open one from the list on the row.`
+          : `This row groups the same client-side library file ${FG.hostsText(row.group)} of ${row.group.registrable_domain} (${FG.statusSplit(row.group)}). Shown here: ${d.host}, the hottest of them. Each host keeps its own status, validation and history; open one from the host list on the row.`));
       }
       if (validate) {
         if (location.hash.includes("&validate")) history.replaceState(null, "", `${location.pathname}${location.search}#${ALL ? `${project}:${key}` : key}`); // a reload must not run it again
@@ -4136,6 +4140,9 @@ const pages = {
           S.findings.append(line);
         });
       };
+      // the host's open CVE matches, one collapsed row per product version reading (nginx 1.31.1: 18 CVEs, upgrade to 1.31.9), each opening to its CVEs
+      if (h.cve_matches)
+        S.findings.append(versionGroupsCard({ base: baseOf(projectOf(h)), project: projectOf(h), host: h.host, names: [h.host, ...(h.aliases || [])], isCurrent: () => current === h.id }));
       findingLines("Open findings", (h.vulns || []).filter((v) => v.severity !== "info"), h.vuln_count);
       findingLines("Informational detections", (h.vulns || []).filter((v) => v.severity === "info"), h.info_count);
       // the validation and remediation work agents hold or wait for on this host
@@ -4311,24 +4318,22 @@ const pages = {
     const initial = (key, allowed) => (allowed.includes(wanted.get(key)) ? wanted.get(key) : null);
     const header = el("p", "note");
     mount.append(header);
-    // grouped by default: the same client-side library file (jQuery, Bootstrap, ...) on sibling hosts of one site is one row; "Show every host" lists each host's finding
-    let groupMode = wanted.get("group") === FG.EVERY_HOST ? FG.EVERY_HOST : FG.GROUPED;
+    // grouped by default: the CVE matches that rest on one product version reading of one host (nginx 1.31.1 on example.org and www.) are one row
+    // that opens to its CVEs; "One row per library file" keeps the older grouping (the same jQuery file on sibling hosts of one site); "Show every host"
+    // lists each host's finding on its own row. Grouping is display only: every finding keeps its own status, heat and history.
+    let groupMode = FG.MODES.includes(wanted.get("group")) ? wanted.get("group") : FG.BY_PRODUCT;
     const filtersNow = () => ({ type: type.value, severity: sev.value, status: status.value, host: q.value, ...(scope.value ? { internal: scope.value } : {}), ...(kev.value ? { kev: kev.value } : {}), ...(ai.value ? { ai: ai.value } : {}) });
     const params = () => FG.listParams(filtersNow(), groupMode);
-    const everyHost = el("button", "new-toggle every-host", "Show every host", {
-      type: "button",
-      "data-flag": "1",
-      "aria-pressed": String(groupMode === FG.EVERY_HOST),
-      title: "The same client-side library file (jQuery, Bootstrap, ...) on several hosts of one site is one row; servers, CMSs and everything else stay one row per host. Press to list every host's finding on its own row.",
-    });
-    const setGroupMode = (mode) => {
-      groupMode = mode === FG.EVERY_HOST ? FG.EVERY_HOST : FG.GROUPED;
-      everyHost.setAttribute("aria-pressed", String(groupMode === FG.EVERY_HOST));
-    };
-    everyHost.onclick = () => {
-      setGroupMode(groupMode === FG.EVERY_HOST ? FG.GROUPED : FG.EVERY_HOST);
+    const everyHost = select("Rows", [[FG.BY_PRODUCT, "One row per product version"], [FG.GROUPED, "One row per library file"], [FG.EVERY_HOST, "Show every host"]], () => {
+      setGroupMode(everyHost.value);
       reload();
+    });
+    everyHost.title = "One row per product version: the CVE matches that rest on one version reading of one host (all its names) are one row that opens to its CVEs. One row per library file: the same client-side library file on sibling hosts of one site is one row. Show every host: one row per finding.";
+    const setGroupMode = (mode) => {
+      groupMode = FG.MODES.includes(mode) ? mode : FG.BY_PRODUCT;
+      everyHost.value = groupMode;
     };
+    setGroupMode(groupMode);
     const countOf = (over) => async (key) => (await api("GET", `${base}/findings?${query({ ...params(), ...over(key), page_size: 0 })}`)).total;
     const q = searchBox("Filter by host", () => reload());
     q.value = wanted.get("host") || "";
@@ -4373,7 +4378,7 @@ const pages = {
       () => reload(),
     );
     const ALLOWED = { type: ["all", "cve", "scanner", "hygiene"], severity: ["all", "critical", "high", "medium", "low", "info"], status: ["actionable", "closed", "false_positive", ...RT.FILTERS.map(([key]) => key), "all"] };
-    const FINDING_DEFAULTS = { type: "all", severity: "all", status: "actionable", host: "", internal: "", kev: "", ai: "", group: FG.GROUPED };
+    const FINDING_DEFAULTS = { type: "all", severity: "all", status: "actionable", host: "", internal: "", kev: "", ai: "", group: FG.BY_PRODUCT };
     const setPicker = (p, key, value) => {
       p.value = value;
       p.node.querySelectorAll("button").forEach((b, i) => b.setAttribute("aria-pressed", String(ALLOWED[key][i] === value)));
@@ -4425,18 +4430,21 @@ const pages = {
       if (truncatedNote) header.append(" ", el("strong", "group-truncated", truncatedNote));
       if (truncated) header.append(` (the list shows the first ${count}; narrow the filters to see the rest)`);
     }
-    // a group row: how many hosts, their own statuses, and the hosts themselves (each opens its own finding here)
+    // a group row: how many hosts (or CVEs, grouped by product), their own statuses, and the members themselves (each opens its own finding here)
     const groupHosts = (f) => {
       const g = f.group;
-      const box = el("details", "group-hosts", null, { "data-keep-key": `group-hosts:${g.registrable_domain || f.id}` });
+      const byProduct = g.by === FG.BY_PRODUCT;
+      const box = el("details", "group-hosts", null, { "data-keep-key": `group-hosts:${byProduct ? g.id : g.registrable_domain || f.id}` });
       const heat = FG.heatSplit(g);
-      box.append(el("summary", "", `${FG.hostsText(g)} · ${FG.statusSplit(g)}${heat ? ` · ${heat}` : ""}`));
+      const triage = byProduct ? VG.triageText(g) : "";
+      box.append(el("summary", "", `${FG.hostsText(g)} · ${FG.statusSplit(g)}${heat ? ` · ${heat}` : ""}${triage ? ` · ${triage}` : ""}`));
+      if (byProduct) box.append(el("p", "note group-version-note", g.note));
       const list = el("ul", "group-members");
       FG.sortedMembers(g).forEach((m) => {
         const li = el("li");
         li.append(
           ...[
-            el("a", "", m.host, { href: `#${FG.memberHash(m, projectOf(f), ALL)}`, "data-finding-key": `match-${m.id}`, title: `Open the finding on ${m.host}` }),
+            el("a", "", byProduct ? VG.memberText(m) : m.host, { href: `#${FG.memberHash(m, projectOf(f), ALL)}`, "data-finding-key": `match-${m.id}`, title: byProduct ? `Open ${m.cve} on ${m.host}` : `Open the finding on ${m.host}` }),
             m.heat ? badge(m.heat, m.heat) : null,
             badge(String(m.status).replace(/_/g, " ")),
             m.classification ? badge(m.classification.replace(/_/g, " ")) : null,
@@ -4517,11 +4525,13 @@ const pages = {
       },
       row: (f) => ({
         heat: f.heat,
-        title: f.type === "cve" && projectOf(f) ? cveAnchor(projectOf(f), f.title, f.id) : f.title,
-        lead: [badge(f.severity, f.severity)],
-        meta: [badge(TYPE_LABEL[f.type] || f.type), FG.isGroup(f) ? badge(`${f.group.hosts} hosts`, "info") : null, f.internal ? internalBadge() : null, f.kev ? kevBadge(f.heat_capped) : null, f.type === "cve" ? heatWhy(f.heat_reason) : null, aiBadge(f.triage, { project: projectOf(f), kind: f.kind, id: f.id }), validationBadge(f.triage),
+        title: VG.isVersionGroup(f) ? VG.groupTitle(f.group) : f.type === "cve" && projectOf(f) ? cveAnchor(projectOf(f), f.title, f.id) : f.title,
+        lead: [badge(VG.isVersionGroup(f) ? f.group.severity : f.severity, VG.isVersionGroup(f) ? f.group.severity : f.severity)],
+        meta: [badge(TYPE_LABEL[f.type] || f.type), VG.isVersionGroup(f) ? badge(`${f.group.cves} CVEs`, "info") : FG.isGroup(f) ? badge(`${f.group.hosts} hosts`, "info") : null, f.internal ? internalBadge() : null, f.kev ? kevBadge(f.heat_capped) : null, f.type === "cve" ? heatWhy(f.heat_reason) : null, aiBadge(f.triage, { project: projectOf(f), kind: f.kind, id: f.id }), validationBadge(f.triage),
                !FG.isGroup(f) ? statusBadge(f) : null, agentTag(f.agent_task), projChip(f)],
-        notes: FG.isGroup(f)
+        notes: VG.isVersionGroup(f)
+          ? [rowLine(VG.joinNames(f.group.host_names || []), ""), groupHosts(f)]
+          : FG.isGroup(f)
           ? [rowLine(`${f.group.registrable_domain}`, f.note ? ` · ${f.note}` : ""), groupHosts(f), f.description || ""]
           : [rowLine(f.host ? hostLink(f.host, projectOf(f)) : "-", f.note ? ` · ${f.note}` : ""), f.description || ""],
       }),

@@ -226,6 +226,8 @@ class SharedIndexTests(FeatureCase):
         super().setUp()
 
     def new_process(self):
+        from django.core.cache import cache
+        cache.delete(service_features.STAMP_KEY)  # the table stamp is shared for STAMP_SECONDS: a changed table is looked at again
         service_features._INDEX.update(checked=0.0, stamp=None, value={}, seen=None, stated=None)
 
     def index(self):
@@ -258,6 +260,8 @@ class SharedIndexTests(FeatureCase):
         self.cve.title, self.cve.original_description = 'nginx resolver flaw', 'A crafted DNS response can crash the worker.'
         self.cve.save()
         service_features._INDEX['checked'] = 0.0  # the next look at the table is due
+        mock_cache = __import__('django.core.cache', fromlist=['cache']).cache
+        mock_cache.delete(service_features.STAMP_KEY)
         got, prefilter = self.index()
         self.assertNotIn(self.cve.pk, got)
         self.assertIn(self.other.pk, got)
@@ -281,6 +285,7 @@ class SharedIndexTests(FeatureCase):
         got, _ = self.index()
         self.assertIn(self.other.pk, got)
         record.delete()
+        __import__('django.core.cache', fromlist=['cache']).cache.delete(service_features.STAMP_KEY)
         service_features._INDEX['checked'] = 0.0
         got, _ = self.index()
         self.assertNotIn(self.other.pk, got)

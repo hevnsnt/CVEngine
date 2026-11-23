@@ -70,7 +70,7 @@
   async function poll() {
     try {
       const key = select.value;
-      const params = new URLSearchParams({project: document.body.dataset.slug || '_all'});
+      const params = new URLSearchParams({project: document.body.dataset.slug || '_all', info: '0'});  // this page draws no host hover card: leave it out
       if (key) params.set('domain', key);
       if (key === last) params.set('v', version);
       const response = await fetch('/cve/api/graph?' + params, {credentials: 'same-origin'});

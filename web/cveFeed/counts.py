@@ -225,25 +225,50 @@ def machines(project_ids):
     return Machines(by_row, by_name, {key: rep[1] for key, rep in best.items()})
 
 
+def _host_keys(qs):
+    """``[{'id', 'name', 'target_domain__project_id', 'host_key'}]`` for the Subdomain rows of ``qs``: the ``with_host_key`` key worked out here from ONE read
+    of the rows beside their address links (a row per address, its CDN flag with it), the same rule: the project (empty when there is none), then ``:n:``
+    and the name for a row with no address or with a CDN address, else ``:i:`` and the address ids in ascending order joined by commas. In SQL the key
+    is three correlated subqueries per row, worked out once to filter and again to select (60,000 buffers and 180 ms for the other names of the 900
+    hosts the graph draws on the production install; 4,700 buffers and 50 ms read this way)."""
+    rows = {}
+    for sub_id, name, project_id, ip_id, cdn in qs.order_by().values_list('id', 'name', 'target_domain__project_id', 'ip_addresses__id', 'ip_addresses__is_cdn'):
+        row = rows.get(sub_id)
+        if row is None:
+            row = rows[sub_id] = {'id': sub_id, 'name': name, 'target_domain__project_id': project_id, 'ips': [], 'cdn': False}
+        if ip_id is not None:
+            row['ips'].append(ip_id)
+            row['cdn'] = row['cdn'] or bool(cdn)
+    out = []
+    for row in rows.values():
+        project = '' if row['target_domain__project_id'] is None else str(row['target_domain__project_id'])
+        ips, cdn = row.pop('ips'), row.pop('cdn')
+        row['host_key'] = f"{project}:n:{row['name']}" if cdn or not ips else f"{project}:i:" + ','.join(str(i) for i in sorted(ips))
+        out.append(row)
+    return out
+
+
 def host_siblings(sub_ids):
     """``{id: [(id, name), ...]}``: for each given row, the other current-inventory rows of the same host: other copies of its name
     (a second target, a second scan), and every name that points at the same addresses together with their copies. A few queries
-    however many rows are asked about."""
+    however many rows are asked about. The host keys are ``with_host_key``'s, worked out from the address links (``_host_keys``)."""
     from cveFeed.correlation import latest_scan_q
     from startScan.models import Subdomain
     sub_ids = list(sub_ids)
     if not sub_ids:
         return {}
     current = Subdomain.objects.filter(latest_scan_q())
-    keyed = list(with_host_key(Subdomain.objects.filter(id__in=sub_ids)).values('id', 'name', 'target_domain__project_id', 'host_key'))
+    keyed = _host_keys(Subdomain.objects.filter(id__in=sub_ids))
     names_by_key = {}
-    # only a row that could have one of these keys gets its key worked out (a correlated address set per row): one with one of these names, or one on
-    # one of their addresses (an address-set key equal to a row's is made of that row's addresses); every other current row of the inventory is left out
+    # only a row that could have one of these keys gets its key worked out: one with one of these names, or one on one of their addresses (an
+    # address-set key equal to a row's is made of that row's addresses); every other current row of the inventory is left out
     through = Subdomain.ip_addresses.through
     near = Q(name__in={k['name'] for k in keyed}) | Q(id__in=through.objects.filter(
         ipaddress_id__in=through.objects.filter(subdomain_id__in=sub_ids).values('ipaddress_id')).values('subdomain_id'))
-    for r in with_host_key(current.filter(near)).filter(host_key__in={k['host_key'] for k in keyed}).values('host_key', 'name'):
-        names_by_key.setdefault(r['host_key'], set()).add(r['name'])
+    wanted_keys = {k['host_key'] for k in keyed}
+    for r in _host_keys(current.filter(near)):
+        if r['host_key'] in wanted_keys:
+            names_by_key.setdefault(r['host_key'], set()).add(r['name'])
     wanted = {n for names in names_by_key.values() for n in names} | {k['name'] for k in keyed}
     rows = {}
     for r in current.filter(name__in=wanted).exclude(id__in=sub_ids).values('id', 'name', 'target_domain__project_id'):

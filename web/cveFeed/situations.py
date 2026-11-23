@@ -633,9 +633,10 @@ def ranked(ids):
 WORST_AT_LEAST = {'all': MINOR, 'exposure': EXPOSURE, 'hygiene': HYGIENE, 'likely': LIKELY, 'proven': PROVEN}  # the ``tier`` filter: keep a situation whose worst tier is at least this
 
 
-def listing(ids, q='', page=1, size=50, tier='all'):
+def listing(ids, q='', page=1, size=50, tier='all', info=None):
     """The list answer: ``{count, page, page_size, state, hosts, last_scan_at, situations, results}``. ``state`` is ``attention`` (something needs you,
-    even when the search matches none of it), ``clear`` (hosts were scanned and nothing needs you) or ``unscanned`` (no host has been scanned)."""
+    even when the search matches none of it), ``clear`` (hosts were scanned and nothing needs you) or ``unscanned`` (no host has been scanned).
+    ``info``: ``{project id: (slug, name)}`` of ``ids`` when the caller has read them already (``_scope_info``)."""
     ids = list(ids)
     groups, hosts = ranked(ids)
     total = len(groups)
@@ -650,7 +651,7 @@ def listing(ids, q='', page=1, size=50, tier='all'):
         last = _last_scan(ids)
         out['last_scan_at'] = last.isoformat() if last else None
     if slice_:
-        info = _scope_info(ids)
+        info = _scope_info(ids) if info is None else info
         items = _read_items([g for _, g in slice_], LIST_ITEMS)
         for rank, g in slice_:
             out['results'].append(_row(g, _items_of(g, items), rank, *info.get(g['pid'], ('', '')), LIST_ITEMS))

@@ -2382,6 +2382,12 @@ section.internal[hidden]{display:none}
 .group-members li{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s-2);min-width:0}
 .group-members a{overflow-wrap:anywhere}
 .group-note{margin:var(--s-2) 0}
+.vg-group{margin-top:var(--s-1);font-size:var(--fs-1)}
+.vg-group>summary{cursor:pointer;display:flex;flex-wrap:wrap;align-items:center;gap:var(--s-2)}
+.vg-title{overflow-wrap:anywhere}
+.vg-members,.vg-singles{list-style:none;margin:var(--s-1) 0 0;padding:0;display:grid;gap:var(--s-1)}
+.vg-members li,.vg-singles li{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s-2);min-width:0}
+.vg-members a,.vg-singles a{overflow-wrap:anywhere}
 /* admin alerts (static/cve/alertbar.js, docs/AI-REVIEWER.md): each is a row of the status strip's Details */
 .scannerbar .ab-row{display:flex;gap:var(--s-3);align-items:flex-start;padding:var(--s-2) var(--s-3);background:var(--smoke-bg);color:var(--smoke-ink);box-shadow:inset 3px 0 0 var(--smoke)}
 .scannerbar .ab-critical{background:var(--fire-bg);color:var(--fire-ink);box-shadow:inset 3px 0 0 var(--fire)}
