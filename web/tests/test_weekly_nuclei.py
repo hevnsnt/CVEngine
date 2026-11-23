@@ -98,8 +98,8 @@ class WeeklyDeepNucleiTests(TestCase):
         if links:
             vuln.tags.set([VulnerabilityTags.objects.create(name=f'{name} tag {n}') for n in range(2)])
             vuln.references.add(VulnerabilityReference.objects.create(url=f'https://ref.test/{name}'))
-            vuln.cve_ids.add(CveId.objects.create(name=f'CVE-2026-{len(name):04d}'))
-            vuln.cwe_ids.add(CweId.objects.create(name='CWE-79'))
+            vuln.cve_ids.add(CveId.objects.get_or_create(name=f'CVE-2026-{len(name):04d}')[0])  # names are unique
+            vuln.cwe_ids.add(CweId.objects.get_or_create(name='CWE-79')[0])
         return vuln
 
     def _links(self, vuln):
