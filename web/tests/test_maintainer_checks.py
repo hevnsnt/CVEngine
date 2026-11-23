@@ -78,6 +78,48 @@ class MemoryCheckTests(SimpleTestCase):
         self.assertIn('largest lane is cve_feed at 2,100 MB', text)
         self.assertNotIn('web container', text)
 
+    def test_incident_lanes_restarting_with_low_memory_are_not_called_out_of_memory(self):
+        # the VPS on 11/23: all four lanes restarted 20 times together (the watchdog's R1 restarts of the celery container), each at 4 to 8% of 5,120 MB
+        last = 1_700_000_000
+        rows = [dict(lane(n, rss, 5120, restarts=20, last=last), last_restart={'at': last, 'last_rss_mb': rss})
+                for n, rss in (('discovery', 427.6), ('cve_feed', 254.9), ('validation_priority', 203.7), ('classic', 416.6))]
+        out = mc.memory(mem_signals(rows), watchdog_restarts={'count': 9, 'rules': ['R1'], 'last_at': last})
+        self.assertEqual(out['state'], 'problem')
+        self.assertEqual(out['title'], 'The worker lanes keep restarting')
+        self.assertNotIn('out of memory', out['title'] + out['detail'])
+        self.assertIn('All 4 worker lanes restarted 20 times in 24 hours together (last at 22:13 UTC), while using 4% to 8% of their 5,120 MB memory limit, '
+                      'so memory is not what stops them', out['detail'])
+        self.assertIn('the watchdog restarted the workers 9 times in 24 hours because a lane stopped answering (rule R1), last at 22:13 UTC', out['detail'])
+        self.assertNotIn('CELERY_MEM_LIMIT', out['detail'])
+        self.assertTrue(out['facts']['restarts_not_memory'])
+        self.assertEqual(out['facts']['watchdog_restarts_24h'], 9)
+        self.assertEqual({r['memory_cause'] for r in out['facts']['lanes']}, {False})
+
+    def test_one_lane_restarting_with_low_memory_keeps_restarting(self):
+        out = mc.memory(mem_signals([lane('classic', 400, 5120, restarts=4, last=1_700_000_000)]))
+        self.assertEqual(out['title'], 'A worker lane keeps restarting')
+        self.assertIn('The classic worker lane restarted 4 times in 24 hours (last at 22:13 UTC), while using 8% of its 5,120 MB memory limit', out['detail'])
+        self.assertNotIn('watchdog restarted', out['detail'])  # nothing known about the watchdog: nothing said
+
+    def test_a_restart_just_after_the_lane_filled_its_limit_is_still_memory(self):
+        row = dict(lane('classic', 300, 5120, restarts=4, last=1_700_000_000), last_restart={'at': 1_700_000_000, 'last_rss_mb': 4900})
+        out = mc.memory(mem_signals([row]))
+        self.assertEqual(out['title'], 'A container or worker lane is out of memory')
+        self.assertIn('classic worker lane restarted 4 times', out['detail'])
+        self.assertTrue(out['facts']['lanes'][0]['memory_cause'])
+
+    def test_an_oom_kill_beside_quiet_restarts_keeps_the_memory_title_and_no_verdict_on_the_restarts(self):
+        out = mc.memory(mem_signals([lane('cve_feed', 500, 4608, restarts=5, last=1_700_000_000)], [box('worker', 4450, 4608, kills=1)]))
+        self.assertEqual(out['title'], 'A container or worker lane is out of memory')
+        self.assertIn('cve_feed worker lane restarted 5 times in 24 hours', out['detail'])
+        self.assertNotIn('memory is not what stops', out['detail'])
+
+    def test_restarts_with_no_limit_to_compare_are_not_called_out_of_memory(self):
+        row = {'lane': 'classic', 'state': 'known', 'rss_mb': 400, 'limit_mb': None, 'percent_of_limit': None, 'restarts_24h': 6, 'last_restart': None}
+        out = mc.memory(mem_signals([row]))
+        self.assertEqual(out['title'], 'A worker lane keeps restarting')
+        self.assertIn('no memory reading against a limit points at memory', out['detail'])
+
     def test_incident_web_container_at_its_one_gib_limit(self):
         out = mc.memory(mem_signals([lane(rss=200)], [box('web', 1010, 1024), box('worker', 900, 4608)]))
         self.assertEqual(out['state'], 'problem')
@@ -210,6 +252,21 @@ class IntegrationTests(Base):
     def checks(self, **signals):
         with patched_signals(**signals):
             return {c['code']: c for c in reviewer.ops_checks()}
+
+    def test_the_memory_check_names_the_worker_restarts_the_watchdog_carried_out(self):
+        from cveFeed.models import WatchdogEvent
+        now = timezone.now()
+        carried = 'The host carried it out. restart-celery done at 14:26:49Z'
+        WatchdogEvent.objects.create(rule='R1', level='action', action='restart-celery', result=carried, at=now - timedelta(hours=2))
+        WatchdogEvent.objects.create(rule='R1', level='action', action='restart-celery', result=carried, at=now - timedelta(hours=1))
+        WatchdogEvent.objects.create(rule='R1', level='action', action='restart-celery', result='Asked the host to carry it out.', at=now - timedelta(hours=1))
+        WatchdogEvent.objects.create(rule='R1', level='info', action='restart-celery', result='The host did not carry it out because of its own limit', at=now)
+        WatchdogEvent.objects.create(rule='R1', level='action', action='restart-celery', result=carried, at=now - timedelta(hours=30))
+        self.assertEqual(reviewer._watchdog_restarts(now), {'count': 2, 'rules': ['R1'], 'last_at': (now - timedelta(hours=1)).timestamp()})
+        rows = [lane(n, 400, 5120, restarts=20, last=1_700_000_000) for n in ('discovery', 'cve_feed', 'validation_priority', 'classic')]
+        memory = self.checks(**mem_signals(rows))['memory']
+        self.assertEqual(memory['title'], 'The worker lanes keep restarting')
+        self.assertIn('the watchdog restarted the workers 2 times in 24 hours because a lane stopped answering (rule R1)', memory['detail'])
 
     def test_the_three_checks_exist_and_are_in_the_code_list(self):
         found = self.checks()

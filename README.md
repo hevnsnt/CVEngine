@@ -98,6 +98,7 @@ cvENGINE runs the best open-source security tools. The scanner image pins each t
 | **Discovery** | [bbot](https://github.com/blacklanternsecurity/bbot) | Subdomain, address and asset discovery, streamed into the inventory as it runs |
 | | [baddns](https://github.com/blacklanternsecurity/baddns) | Dangling DNS and subdomain takeover candidates, run inside bbot |
 | | [crt.sh](https://crt.sh) | Certificate transparency lookups that catch new names between scans |
+| | [Cert Spotter](https://sslmate.com/ct_search_api/) | The second certificate transparency source, asked when crt.sh cannot answer |
 | **Inventory and fingerprinting** | [naabu](https://github.com/projectdiscovery/naabu) | A sweep of all 65,535 TCP ports of each address |
 | | [Nmap](https://nmap.org) | Service, version and OS fingerprints, reviewed scripts, and a slow UDP exposure scan |
 | | [Nuclei](https://github.com/projectdiscovery/nuclei) | A technology pass that names what each web host runs |

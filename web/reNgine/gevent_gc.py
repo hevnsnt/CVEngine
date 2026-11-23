@@ -13,10 +13,17 @@ collected, at a fixed rhythm, and the collector never starts inside a switch. ``
 What the timer walks is kept small, because a collection stops every greenlet of the process (the 30 s timer used to walk every object the worker holds: about 300,000 right
 after start, 0.1 s on a fast core and seconds on a starved one, in each of the four lanes). Once the worker has finished loading (celery's ``worker_ready``: Django, every task
 module and the caches are imported), the timer greenlet runs one full collection and then ``gc.freeze()``: the start-up objects move to the permanent generation, which no
-collection looks at. After that a tick collects only the young generations (``gc.collect(1)``), and a full collection (``gc.collect()``, of everything not frozen) runs every
+collection looks at. After that a tick collects only the young generations (``gc.collect(1)``, see below), and a full collection (``gc.collect()``, of everything not frozen) runs every
 ``FULL_EVERY`` ticks, so a cycle that outlived two young collections is still freed, a few minutes later. Frozen objects are never re-frozen and never unfrozen: a second
 freeze would move whatever the worker holds by then, cycles that have become garbage among it included, out of the collector's reach for good, and the start-up objects of a
 worker are not garbage until the process ends (a cycle among them that is dropped later is freed by reference counting or stays, which is a few kilobytes, not growth).
+The young tick is ``gc.collect(1)`` only where that is a young collection. On Python 3.14.0 to 3.14.4 (the image's Ubuntu Python is 3.14.4) ``gc.collect(1)`` is one
+step of the incremental collector instead, and a step returns without collecting anything while the collector thinks it is ahead of its work: with the automatic collector
+off and an unfrozen heap of 100,000 objects or more, 200 such ticks in a row freed no cycle at all, so every cycle waited for the full collection, up to 10 minutes. A cycle
+that holds a socket (a finished greenlet's cache client, an exception's traceback, an unclosed streamed reply) kept its file descriptor that long; on the VPS on 11/23
+the classic lane reached its limit of 1,024 (``OSError: [Errno 24] Too many open files``, see ``reNgine/gevent_cache.py``), and a lane that cannot open a connection
+answers no ping and writes no heartbeat. There the tick is ``gc.collect(0)``, the young generation, which frees those cycles every 30 s (``YOUNG_GENERATION``).
+CPython 3.14.5 went back to the generational collector, where ``gc.collect(1)`` is a young collection again.
 Each tick publishes its timing (the last and the worst collection of the lane) for the system status (``reNgine/lane_memory.py``).
 Installed only in a process whose sockets gevent has patched (a gevent worker): the web server, beat, the tests and management commands keep Python's own.
 """
@@ -24,6 +31,7 @@ import gc
 import json
 import logging
 import os
+import sys
 import time
 
 logger = logging.getLogger(__name__)
@@ -34,6 +42,17 @@ SLOW_SECONDS = 1.0  # a collection this long is worth a line in the log...
 SLOW_LOG_EVERY = 600  # ...but not more than one line this often (a starved host makes every collection slow; the status has the numbers)
 GC_KEY = 'lane_gc:'  # cache key prefix, one per lane: what the timer last published (read by reNgine.lane_memory.report)
 GC_KEEP_SECONDS = 3600
+
+
+
+def young_generation(version=None):
+    """The generation a young tick collects: 1 (the two young generations), except on the Pythons whose ``gc.collect(1)`` is a step of the incremental collector
+    (3.14.0 to 3.14.4), where a step may collect nothing, so the tick collects generation 0, the young objects."""
+    version = tuple(sys.version_info[:3] if version is None else version)
+    return 0 if (3, 14, 0) <= version < (3, 14, 5) else 1
+
+
+YOUNG_GENERATION = young_generation()
 
 _state = {'ticks': 0, 'frozen': False, 'collections': 0, 'last_s': None, 'last_full_s': None, 'worst_s': 0.0, 'freeze_s': None, 'slow_logged_at': None, 'slow_skipped': 0,
           'loaded': None}
@@ -87,7 +106,7 @@ def freeze_after_load():
 def tick():
     """One timer tick: young generations only, except every ``FULL_EVERY``th, which is a full collection of what is not frozen."""
     _state['ticks'] += 1
-    took = collect_once(2 if _state['ticks'] % FULL_EVERY == 0 else 1)
+    took = collect_once(2 if _state['ticks'] % FULL_EVERY == 0 else YOUNG_GENERATION)
     publish()
     return took
 

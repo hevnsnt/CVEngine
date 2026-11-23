@@ -107,7 +107,7 @@ Each of those names is an import of the library's value, never a copy.
 
 Correlation, triage, validation, the CVE feeds (`intel.py`, `distro_sync.py`), the work conductor and its fairness rules,
 bug-bounty gates, exclusions and range safety, tenancy, persistence, reports (`report_pdf.py`), integrations (runZero, Tailscale
-API, mail, bounty), and the passive third-party lookups (`ctmonitor.py` for crt.sh, `archive_urls.py` for the Internet Archive),
+API, mail, bounty), and the passive third-party lookups (`ctmonitor.py` for crt.sh and Cert Spotter, `archive_urls.py` for the Internet Archive),
 which send nothing to the target and need no vantage point.
 
 ### Open items from the inventory

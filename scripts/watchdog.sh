@@ -118,9 +118,34 @@ if [ "$(wc -l <"$ACTIONS_LOG" 2>/dev/null || echo 0)" -gt 500 ]; then tail -n 20
 
 if ! layout; then answer failed "could not work out the Compose layout (see the log on the host)"; exit 0; fi
 recreate() { timeout -k 10 300 "${COMPOSE[@]}" up -d --no-deps --force-recreate "$@" >>"$LOG" 2>&1 </dev/null 6>&- 9>&-; }
+# Before the workers are recreated: a lane is restarted because it stopped answering, and recreating the container drops the only log that could say
+# why. Ask each Celery worker to print the stack of every thread (faulthandler on SIGUSR2, web/reNgine/lane_stacks.py; it runs even while the lane is
+# stuck in C code), then keep the end of the log beside this one (the previous copy as .1). Best effort and bounded: the restart goes ahead whatever happens here.
+STACKS_PY='import os, signal
+for p in os.listdir("/proc"):
+    if not p.isdigit() or int(p) == os.getpid():
+        continue
+    try:
+        args = open("/proc/%s/cmdline" % p, "rb").read().split(b"\0")
+    except OSError:
+        continue
+    if b"reNgine.tasks" in args and b"worker" in args:
+        try:
+            os.kill(int(p), signal.SIGUSR2)
+        except OSError:
+            pass'
+keep_celery_log() {
+  local out="$STATE/celery-before-restart.log"
+  timeout -k 5 20 "${COMPOSE[@]}" exec -T celery python3 -c "$STACKS_PY" >>"$LOG" 2>&1 </dev/null 6>&- 9>&- || log "act: could not ask the workers for their stacks"
+  sleep "${CVENGINE_WATCHDOG_STACK_WAIT:-3}"
+  [ -f "$out" ] && mv -f "$out" "$out.1"
+  timeout -k 5 30 "${COMPOSE[@]}" logs --no-color --timestamps --tail 1500 celery >"$out" 2>&1 </dev/null 6>&- 9>&- || log "act: could not keep the celery log"
+  log "act: kept the end of the celery log in $out"
+}
 rc=0
 case $action in
   restart-celery)
+    keep_celery_log
     # the built-in scanner and the Tailscale sidecar have a network of their own: recreating celery leaves them as they are
     recreate celery || rc=$?;;
   restart-celery-beat) recreate celery-beat || rc=$?;;

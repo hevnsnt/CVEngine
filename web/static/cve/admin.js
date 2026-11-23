@@ -867,13 +867,30 @@ async function timingsTab(panel) {
       ),
     );
   });
+  // a lookup crt.sh cannot answer asks Cert Spotter instead (cveFeed/ctmonitor.py)
+  const fallback = el("input", "", null, {
+    type: "checkbox",
+    "aria-label": "CT fallback source",
+  });
+  fallback.checked = !!t.ct_fallback_source;
+  const fallbackLabel = el("label", "", " CT fallback source (Cert Spotter)");
+  fallbackLabel.prepend(fallback);
+  card.append(
+    field(
+      "Certificate transparency",
+      fallbackLabel,
+      t.ct_fallback_forced_off
+        ? "Off on this server: CVENGINE_CT_FALLBACK turns it off whatever this box says."
+        : "When crt.sh cannot answer, ask Cert Spotter (a few lookups an hour) so new hosts are still found.",
+    ),
+  );
+  if (t.ct_watch_status) card.append(el("p", "note", t.ct_watch_status));
   card.append(
     button("Save timings", async () => {
-      await api(
-        "PUT",
-        `${A}/timings`,
-        Object.fromEntries(fields.map(([k]) => [k, inputs[k].value])),
-      );
+      await api("PUT", `${A}/timings`, {
+        ...Object.fromEntries(fields.map(([k]) => [k, inputs[k].value])),
+        ct_fallback_source: fallback.checked,
+      });
       toast("Timings saved");
     }),
   );

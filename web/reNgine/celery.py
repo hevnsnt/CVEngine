@@ -33,11 +33,19 @@ gevent_pidbox.install()
 from reNgine import gevent_db
 
 gevent_db.install()
+# Every greenlet of a gevent worker uses one Django cache client, not one Redis connection per task (reNgine/gevent_cache.py)
+from reNgine import gevent_cache
+
+gevent_cache.install()
 
 # The garbage collector runs on a timer, not inside a greenlet switch (reNgine/gevent_gc.py)
 from reNgine import gevent_gc
 
 gevent_gc.install()
+# A lane that stops answering prints every thread's stack on SIGUSR2, which the watchdog sends before it restarts the workers (reNgine/lane_stacks.py)
+from reNgine import lane_stacks
+
+lane_stacks.install()
 app.autodiscover_tasks()
 # Each lane records its memory and the tasks it held it after (reNgine/lane_memory.py), shown in the system status
 from reNgine import lane_memory

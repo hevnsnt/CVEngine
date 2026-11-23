@@ -872,7 +872,20 @@ def installed_templates_version():
 # Every code ops_checks can return, in the order it computes them. The snapshot sends it to the reviewer container, which builds the model's answer
 # format from it; tests/test_ai_prompts.py holds it equal to the codes written in ops_checks and to the container's fallback copy.
 OPS_CODES = ('sentinels_idle', 'workers_down', 'nuclei_templates', 'sentinel_errors', 'sentinel_waiting', 'sentinels_offline', 'scan_errors', 'system',
-             'generated_templates', 'ai_errors', 'memory', 'queue_starvation', 'sentinel_claims_refused', 'ai_budget', 'triage_backlog')
+             'generated_templates', 'ai_errors', 'memory', 'queue_starvation', 'sentinel_claims_refused', 'ai_budget', 'triage_backlog', 'ct_watch_stalled')
+
+
+def _watchdog_restarts(now):
+    """What the watchdog's own events say it did to the workers in the 24 hours before ``now``: ``{'count', 'rules', 'last_at'}`` of the worker restarts the host
+    carried out for it (R1, a lane that stopped answering; R2, a lane that took no work). None when the events cannot be read: the memory check then says
+    nothing about the watchdog."""
+    try:
+        from cveFeed.models import WatchdogEvent
+        rows = list(WatchdogEvent.objects.filter(at__gte=now - timedelta(hours=24), level='action', action='restart-celery',
+                                                 result__startswith='The host carried it out').values_list('rule', 'at'))
+    except Exception:  # noqa: BLE001 - a reading for the text, never a reason to fail the checks
+        return None
+    return {'count': len(rows), 'rules': sorted({r for r, _ in rows}), 'last_at': max(at for _, at in rows).timestamp() if rows else None}
 
 
 def _check(code, state, title, detail, facts=None, actions=(), severity=None):
@@ -1174,7 +1187,7 @@ def ops_checks(now=None, templates_release=None, _out=None):
     # the maintainer's checks (cveFeed/maintainer_checks.py): what the signals say about memory, starved queues and refused claims. A part that could not be read is
     # no verdict ('unknown'): it neither raises an alert nor resolves one.
     work = _starvation_inputs(now, bool((system.get('work') or {}).get('paused')), fleet['live_sentinels'])
-    checks.append(_check('memory', **maintainer_checks.memory(signals)))
+    checks.append(_check('memory', **maintainer_checks.memory(signals, _watchdog_restarts(now))))
     checks.append(_check('queue_starvation', **maintainer_checks.queue_starvation(signals, work)))
     checks.append(_check('sentinel_claims_refused', **maintainer_checks.claim_refusals(signals)))
     checks.append(_check('ai_budget', **maintainer_checks.ai_budget(signals)))  # an AI cap used up stops that work silently otherwise
@@ -1213,6 +1226,16 @@ def ops_checks(now=None, templates_release=None, _out=None):
     problems = [str(p)[:300] for p in (status.get('problems') or [])][:20]
     checks.append(_check('system', 'problem' if problems else 'ok', 'cvENGINE reports problems' if problems else 'cvENGINE reports no problems',
                          '\n'.join(problems), {'problems': problems}))
+
+    # the certificate transparency watch: no source answered for hours while lookups were attempted. Nothing attempted (no target to watch,
+    # the sweep idle or scanning paused, a restart) is ok: there is nothing to judge
+    from cveFeed import ct_health
+    try:
+        ct = ct_health.stalled_check(now)
+        checks.append(_check('ct_watch_stalled', ct['state'], ct['title'], ct['detail'], ct['facts'], severity='warning'))
+    except Exception:  # noqa: BLE001 - a read problem is no verdict
+        logger.debug('ct watch check: could not read the lookup rollup', exc_info=True)
+        checks.append(_check('ct_watch_stalled', 'unknown', 'Certificate transparency watch not read', '', {}))
 
     # AI-written templates are validated by the system (cveFeed.templatevalidate), never by a person: only a real problem it cannot fix itself is reported
     from cveFeed import templatevalidate
