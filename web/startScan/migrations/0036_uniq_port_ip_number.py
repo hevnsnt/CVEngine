@@ -9,7 +9,7 @@ CONSTRAINT = 'uniq_port_ip_number_proto'
 
 def merge_duplicate_ports(apps, schema_editor):
     """One port row per (address, number, protocol). Each port row is linked to one address (``IpAddress.ports``), but nothing kept a second
-    row of the same port of the same address out: the duplicates are copies ``0007_deshare_ports`` made of a row bbot once shared between
+    row of the same port of the same address out: the duplicates are copies ``0007_deshare_ports`` made of a row the discovery once shared between
     addresses, for an address that already had its own row of that port, and two writers that store the same new port at the same moment
     leave two rows too. Each address's lookups already read the oldest row (by number, then id).
 

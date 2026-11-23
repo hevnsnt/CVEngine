@@ -1,6 +1,6 @@
 """Storing new Port rows without duplicates. A port row belongs to one address (``Port.ip_address``, the address ``IpAddress.ports`` links it
 to), and ``uniq_port_ip_number_proto`` keeps one row per (address, number, protocol). Every writer looks the address's ports up first and
-inserts only what it did not find; two writers that find the same new port at the same moment (a bbot batch and an nmap report of one
+inserts only what it did not find; two writers that find the same new port at the same moment (a discovery batch and a port scan report of one
 address) both insert it, the database refuses the second, and that writer uses the first one's row instead."""
 from django.db import IntegrityError, transaction
 
