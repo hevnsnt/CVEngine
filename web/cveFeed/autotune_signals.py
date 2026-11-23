@@ -341,8 +341,9 @@ def lane_memory(now):
 
 def starve(now):
     """Queued discovery scans: how many, and how long the oldest has waited (None when none waits), for the assessment share (``autotune_policy.STARVE_SECONDS``)."""
-    from startScan.models import ScanHistory
-    queued = ScanHistory.objects.filter(scan_status=-1)
+    from datetime import datetime, timezone as dt_timezone
+    from cveFeed import counts
+    queued = counts.waiting_scans(now=datetime.fromtimestamp(now, tz=dt_timezone.utc))  # a queued row nothing will start (counts.stuck_queued_q) is no wait
     since = queued.order_by('start_scan_date').values_list('start_scan_date', flat=True).first()
     return {'scans_queued': queued.count(), 'scan_age_s': int(max(0, now - since.timestamp())) if since else None}
 

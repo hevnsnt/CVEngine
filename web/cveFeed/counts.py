@@ -105,6 +105,55 @@ def queued_scans(qs=None):
     return (ScanHistory.objects.all() if qs is None else qs).filter(scan_status=-1)
 
 
+# A queued scan that nothing will ever start. A host pipeline row (cveFeed.discovery.run_host_pipeline) is created queued and marked running by the
+# same worker task a moment later, so one still queued after PIPELINE_QUEUED_GRACE lost that task (a restart or update killed it in between). Any
+# other queued scan (a discovery waiting for a discovery worker, an internal scan) waits in the broker, and the reaper sends a lost one again
+# (reaper.redispatch_queued_scans), so one still queued after queued_scan_limit() hours is a row nothing advances.
+PIPELINE_QUEUED_GRACE = timedelta(minutes=30)
+QUEUED_SCAN_HOURS = 48
+
+
+def queued_scan_limit():
+    """How long a queued scan may wait before it counts as stuck: CVENGINE_SCAN_QUEUED_HOURS, else 48 hours."""
+    import os
+    try:
+        return timedelta(hours=max(1, int(os.environ.get('CVENGINE_SCAN_QUEUED_HOURS', ''))))
+    except ValueError:
+        return timedelta(hours=QUEUED_SCAN_HOURS)
+
+
+def stuck_queued_q(now=None, limit=None):
+    """The queued scans that nothing will start (see PIPELINE_QUEUED_GRACE above). ``limit``: ``queued_scan_limit()`` when the caller already read it."""
+    from cveFeed.discovery import HOST_PIPELINE_TASK
+    now = now or timezone.now()
+    return Q(scan_status=-1) & (Q(tasks__contains=[HOST_PIPELINE_TASK], start_scan_date__lt=now - PIPELINE_QUEUED_GRACE)
+                                | Q(start_scan_date__lt=now - (limit or queued_scan_limit())))
+
+
+def waiting_scans(qs=None, now=None):
+    """The queued scans that really wait for a worker: ``queued_scans`` without the stuck rows (``stuck_queued_q``). This is the queue a starvation verdict
+    and the assessment share read; a stuck row waits for nothing, and the reaper closes it (reaper.expire_stuck_queued)."""
+    queued = queued_scans(qs)
+    return queued.exclude(pk__in=queued.filter(stuck_queued_q(now)).values('pk'))
+
+
+def queued_scan_split(now=None):
+    """``{'waiting', 'oldest_waiting_age_seconds', 'stuck', 'stuck_ids', 'oldest_stuck_age_seconds'}``: the queued scans that wait for a worker and the
+    ones nothing will start, with the age of the oldest of each (None when there is none) and the ids of the oldest ten stuck rows."""
+    from django.db.models import Count, Min
+    now = now or timezone.now()
+    stuck_q = stuck_queued_q(now)
+    queued = queued_scans()
+    got = queued.aggregate(total=Count('id'), stuck=Count('id', filter=stuck_q), oldest_stuck=Min('start_scan_date', filter=stuck_q))
+    oldest_waiting = waiting_scans(now=now).order_by('start_scan_date').values_list('start_scan_date', flat=True).first()
+
+    def age(at):
+        return int(max(0, (now - at).total_seconds())) if at else None
+    return {'waiting': got['total'] - got['stuck'], 'oldest_waiting_age_seconds': age(oldest_waiting), 'stuck': got['stuck'],
+            'stuck_ids': list(queued.filter(stuck_q).order_by('id').values_list('id', flat=True)[:10]) if got['stuck'] else [],
+            'oldest_stuck_age_seconds': age(got['oldest_stuck'])}
+
+
 def with_host_key(qs):
     """Annotate Subdomain rows with ``host_key``: the identity of the machine behind the name, so names that point at the same
     addresses are one host. The key is the project plus the sorted set of the row's IP addresses; a row with no address, or with an

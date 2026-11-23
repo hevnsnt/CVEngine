@@ -114,8 +114,10 @@ TOOLS = [
     # -- Platform -----------------------------------------------------------------------------------------------------------------------------------
     tool('ubuntu', 'Ubuntu', 'https://ubuntu.com', 'platform', '26.04', 'Free software, each package under its own license', 'The base of the server and Sentinel images',
          where='both', pins=[('web/Dockerfile', r'(?m)^FROM ubuntu:([0-9.]+)$'), (SENTINEL_DOCKERFILE, r'(?m)^FROM ubuntu:([0-9.]+)@')]),
-    tool('python', 'Python', 'https://www.python.org', 'platform', 'distribution package', 'PSF License', 'The runtime of the server, the Sentinel client and the AI reviewer '
-         '(the reviewer image is python:3.13-slim-bookworm)', where='both'),
+    tool('python', 'Python', 'https://www.python.org', 'platform', '3.14.10', 'PSF License', 'The runtime of the server image (python-build-standalone, pinned: 3.14.0 to 3.14.4 '
+         'had the incremental garbage collector that crashed the workers)', where='server', pins=[('web/Dockerfile', r'ARG PYTHON_VERSION=([0-9.]+)')]),
+    tool('python-sentinel', 'Python (Sentinel and reviewer)', 'https://www.python.org', 'platform', 'distribution package', 'PSF License',
+         'The runtime of the Sentinel client and the AI reviewer (the reviewer image is python:3.13-slim-bookworm)', where='sentinel'),
     tool('django', 'Django', 'https://www.djangoproject.com', 'platform', '6.0.10', 'BSD-3-Clause', 'The web framework and its REST framework',
          where='server', pins=[('web/requirements.txt', r'(?m)^Django==([0-9.]+)')]),
     tool('celery', 'Celery', GH + 'celery/celery', 'platform', '5.7.0', 'BSD-3-Clause', 'The task queue (with kombu, amqp, billiard and vine) and its beat scheduler',
