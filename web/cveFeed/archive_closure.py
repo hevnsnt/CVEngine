@@ -38,17 +38,20 @@ from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 
-from cveFeed.closure import AUTOMATIC, prepend_note
+from cveFeed.closure import AUTOMATIC, NOTE_MAX, prepend_note
 
 logger = logging.getLogger(__name__)
 
 ARCHIVED = AUTOMATIC + ' the host was archived'  # every archive closure's note starts with this (the marker)
 GONE = AUTOMATIC + ' the host is no longer in the current inventory'  # a closure because the host left the inventory (``close_gone``)
 PREFIXES = (ARCHIVED, GONE)  # the closures this module makes, and reopens
+HOST_CLOSED = AUTOMATIC + ' the host '  # what both of them start with
 REOPENED = 'Reopened automatically: the host was restored'
 RETURNED = 'Reopened automatically: the host is back in the current inventory'
 BY_ARCHIVE, BY_RESTORE, BY_GONE = 'host_archive', 'host_restore', 'host_gone'  # the ``by`` of the audit events
 MAX_GONE = 500  # gone host names one ``close_gone`` pass closes
+GONE_EVERY = 3600  # seconds between two ``close_gone`` passes of a project from its hygiene runs (``close_gone_due``)
+FINISHED = (0, 2, 3)  # failed, success, aborted: the scans whose end can change what is gone
 LIVE = ('open', 'in_progress')  # the statuses an archive closes; a closed finding is left as it is
 KINDS = ('match', 'vulnerability', 'hygiene')
 MAX_ROWS = 5000  # rows of each kind one host's closure or reopening touches
@@ -205,27 +208,53 @@ def close_host(project_id, host, *, user=None, who='', why='', when=None, aliase
     return _close(project_id, name, names, closure_note(name, when, who=who, why=why), BY_ARCHIVE, user, 'the host was archived')
 
 
+def _close_kind(kind, qs, project_id, line, by, user, now):
+    """Close the live rows of one kind (``qs``, already live and of these names) in keyset batches of ``BATCH``, at most ``MAX_ROWS``: each batch
+    is one locking read of the ids, one UPDATE that puts ``line`` on top of the note, and one INSERT of the audit events. Rows used to be loaded
+    whole and written back with a CASE per row. A note too long to keep whole under the line goes through ``prepend_note`` row by row, as before."""
+    from django.db.models import Case, F, TextField, Value, When
+    from django.db.models.functions import Concat, Length
+    from cveFeed.models import FindingAuditEvent
+    model = qs.model
+    room = NOTE_MAX - len(line) - 1  # the longest note that fits whole under the line (closure.prepend_note keeps it as it is)
+    after = {'status': 'fixed', 'note': line, 'by': by}
+    closed, last = 0, 0
+    while closed < MAX_ROWS:
+        size = min(BATCH, MAX_ROWS - closed)
+        batch = list(qs.filter(pk__gt=last).select_for_update(of=('self',)).order_by('pk')
+                     .values_list('pk', 'remediation_status', Length('remediation_note'))[:size])
+        if not batch:
+            break
+        last = batch[-1][0]
+        fits = [pk for pk, _status, length in batch if (length or 0) <= room]
+        if fits:
+            model._base_manager.filter(pk__in=fits).update(
+                remediation_status='fixed', remediation_by=None, remediation_updated_at=now,
+                remediation_note=Case(When(remediation_note='', then=Value(line)), default=Concat(Value(line + '\n'), F('remediation_note')),
+                                      output_field=TextField()))
+        if len(fits) < len(batch):  # a person's note below is never cut (closure.prepend_note)
+            rows = list(model._base_manager.filter(pk__in=[pk for pk, *_ in batch if pk not in set(fits)]).only('pk', *_FIELDS))
+            for row in rows:
+                row.remediation_status, row.remediation_by, row.remediation_updated_at = 'fixed', None, now
+                row.remediation_note = prepend_note(line, row.remediation_note)
+            model._base_manager.bulk_update(rows, list(_FIELDS), batch_size=BATCH)
+        FindingAuditEvent.objects.bulk_create([FindingAuditEvent(project_id=project_id, finding_kind=kind, finding_id=pk, event='status', actor=user,
+                                                                 before={'status': status}, after=after) for pk, status, _length in batch],
+                                              batch_size=BATCH)
+        closed += len(batch)
+        if len(batch) < size:
+            break
+    return closed
+
+
 def _close(project_id, name, names, line, by, user, why):
     """Close the live findings of ``names`` in the project with ``line`` as the first line of the note (see ``close_host``)."""
     from cveFeed import activity
-    from cveFeed.models import FindingAuditEvent
     now = timezone.now()
     done = dict.fromkeys(KINDS, 0)
     with transaction.atomic():
         for kind, qs in _querysets(project_id, names).items():
-            rows = _locked(_live(kind, qs))
-            if not rows:
-                continue
-            events = []
-            for row in rows:
-                before = row.remediation_status
-                row.remediation_status, row.remediation_by, row.remediation_updated_at = 'fixed', None, now
-                row.remediation_note = prepend_note(line, row.remediation_note)  # a person's note below is never cut (closure.prepend_note)
-                events.append(FindingAuditEvent(project_id=project_id, finding_kind=kind, finding_id=row.pk, event='status', actor=user,
-                                                before={'status': before}, after={'status': 'fixed', 'note': line, 'by': by}))
-            type(rows[0])._base_manager.bulk_update(rows, list(_FIELDS), batch_size=BATCH)
-            FindingAuditEvent.objects.bulk_create(events, batch_size=BATCH)
-            done[kind] = len(rows)
+            done[kind] = _close_kind(kind, _live(kind, qs), project_id, line, by, user, now)
         if any(done.values()):
             _after_write(project_id, names)
             total = sum(done.values())
@@ -234,59 +263,144 @@ def _close(project_id, name, names, line, by, user, why):
     return done
 
 
-def reopen_host(project_id, host, *, user=None, when=None, prefixes=PREFIXES, line=None):
-    """Reopen what archiving ``host`` closed in project ``project_id`` (its aliases' findings included, whatever their addresses are now): each to
-    the status it had before, its own note kept. Idempotent. Returns ``{kind: n reopened}``."""
+def _reopen_sources(project_id, mine):
+    """``{kind: queryset}``: the findings of the project that ``mine`` selects, as a reopening reads them (a scanner finding of the bare host too)."""
+    from cveFeed.models import CVEMatch, HygieneFinding
+    from startScan.models import Vulnerability
+    return {
+        'match': CVEMatch._base_manager.filter(mine, subdomain__target_domain__project_id=project_id),
+        'vulnerability': Vulnerability._base_manager.filter(mine).filter(Q(subdomain__target_domain__project_id=project_id)
+                                                                          | Q(subdomain__isnull=True, target_domain__project_id=project_id)),
+        'hygiene': HygieneFinding.objects.filter(mine, domain__project_id=project_id),
+    }
+
+
+def closed_host(note, prefixes=PREFIXES):
+    """The host the first line of ``note`` names when that line is a closure of this module (one of ``prefixes``), ending ``(name).``, else None.
+    The same test as ``reopen_host``'s note pattern, read in Python so one read serves every host of a scan."""
+    first = (note or '').split('\n', 1)[0]
+    if not first.startswith(prefixes) or not first.endswith(').'):
+        return None
+    cut = first.rfind(' (')
+    return first[cut + 2:-2] if cut >= 0 else None
+
+
+def _reopen(project_id, planned, user):
+    """Reopen the locked rows of ``planned`` (``{kind: [(row, host, line)]}``): each to the status it had before (its audit event), ``line`` on top
+    of its own note. One audit event per row and one activity line per host. Returns ``{host: {kind: n}}``."""
     from cveFeed import activity, host_resolver
     from cveFeed.models import CVEMatch, FindingAuditEvent, HygieneFinding
     from startScan.models import Vulnerability
+    done, lines = {}, {}
+    touched = set()
+    for kind, items in planned.items():
+        if not items:
+            continue
+        rows = [row for row, _host, _line in items]
+        earlier = {}
+        for finding_id, before in (FindingAuditEvent.objects.filter(project_id=project_id, finding_kind=kind, finding_id__in=[r.pk for r in rows],
+                                                                   event='status', after__by__in=(BY_ARCHIVE, BY_GONE))
+                                   .order_by('finding_id', '-created_at', '-id').values_list('finding_id', 'before')):
+            earlier.setdefault(finding_id, (before or {}).get('status'))
+        events = []
+        for row, host, line in items:
+            status = earlier.get(row.pk) if earlier.get(row.pk) in LIVE else 'open'
+            rest = row.remediation_note.split('\n', 1)[1] if '\n' in row.remediation_note else ''
+            row.remediation_status, row.remediation_by, row.remediation_updated_at = status, None, timezone.now()
+            row.remediation_note = prepend_note(line, rest)
+            events.append(FindingAuditEvent(project_id=project_id, finding_kind=kind, finding_id=row.pk, event='status', actor=user,
+                                            before={'status': 'fixed'}, after={'status': status, 'note': line, 'by': BY_RESTORE}))
+            done.setdefault(host, dict.fromkeys(KINDS, 0))[kind] += 1
+            lines[host] = line
+            touched.add(host)
+        type(rows[0])._base_manager.bulk_update(rows, list(_FIELDS), batch_size=BATCH)
+        FindingAuditEvent.objects.bulk_create(events, batch_size=BATCH)
+        if kind == 'hygiene':
+            touched |= {host_resolver.base_name(h) for h in HygieneFinding.objects.filter(pk__in=[r.pk for r in rows]).values_list('host', flat=True)}
+        else:
+            model = CVEMatch if kind == 'match' else Vulnerability
+            touched |= {n.lower() for n in model._base_manager.filter(pk__in=[r.pk for r in rows], subdomain__isnull=False)
+                        .values_list('subdomain__name', flat=True)}
+    if done:
+        _after_write(project_id, touched)
+        for host, counts in done.items():
+            total, line = sum(counts.values()), lines[host]
+            activity.log('remediation', f'{total} finding{"s" if total != 1 else ""} on {host} reopened: {line[len("Reopened automatically: "):].rstrip(".")}',
+                         project=project_id, host=host, after='open', **{k: v for k, v in counts.items() if v})
+    return done
+
+
+def reopen_host(project_id, host, *, user=None, when=None, prefixes=PREFIXES, line=None):
+    """Reopen what archiving ``host`` closed in project ``project_id`` (its aliases' findings included, whatever their addresses are now): each to
+    the status it had before, its own note kept. Idempotent. Returns ``{kind: n reopened}``."""
     name = host.lower().rstrip('.')
     when = when or timezone.now()
     day = timezone.localtime(when).date().isoformat()
     line = line or f'{REOPENED} on {day}.'
     first_line = r'^(' + '|'.join(re.escape(p) for p in prefixes) + r')[^\n]* \(' + re.escape(name) + r'\)\.(\n|$)'
     mine = Q(remediation_status='fixed', remediation_by__isnull=True, remediation_note__regex=first_line)
-    sources = {
-        'match': CVEMatch._base_manager.filter(mine, subdomain__target_domain__project_id=project_id),
-        'vulnerability': Vulnerability._base_manager.filter(mine).filter(Q(subdomain__target_domain__project_id=project_id)
-                                                                          | Q(subdomain__isnull=True, target_domain__project_id=project_id)),
-        'hygiene': HygieneFinding.objects.filter(mine, domain__project_id=project_id),
-    }
-    done = dict.fromkeys(KINDS, 0)
-    touched = {name}
     with transaction.atomic():
-        for kind, qs in sources.items():
-            rows = _locked(qs)
-            if not rows:
-                continue
-            earlier = {}
-            for finding_id, before in (FindingAuditEvent.objects.filter(project_id=project_id, finding_kind=kind, finding_id__in=[r.pk for r in rows],
-                                                                       event='status', after__by__in=(BY_ARCHIVE, BY_GONE))
-                                       .order_by('finding_id', '-created_at', '-id').values_list('finding_id', 'before')):
-                earlier.setdefault(finding_id, (before or {}).get('status'))
-            events = []
-            for row in rows:
-                status = earlier.get(row.pk) if earlier.get(row.pk) in LIVE else 'open'
-                rest = row.remediation_note.split('\n', 1)[1] if '\n' in row.remediation_note else ''
-                row.remediation_status, row.remediation_by, row.remediation_updated_at = status, None, timezone.now()
-                row.remediation_note = prepend_note(line, rest)
-                events.append(FindingAuditEvent(project_id=project_id, finding_kind=kind, finding_id=row.pk, event='status', actor=user,
-                                                before={'status': 'fixed'}, after={'status': status, 'note': line, 'by': BY_RESTORE}))
-            type(rows[0])._base_manager.bulk_update(rows, list(_FIELDS), batch_size=BATCH)
-            FindingAuditEvent.objects.bulk_create(events, batch_size=BATCH)
-            done[kind] = len(rows)
-            if kind == 'hygiene':
-                touched |= {host_resolver.base_name(h) for h in HygieneFinding.objects.filter(pk__in=[r.pk for r in rows]).values_list('host', flat=True)}
+        planned = {kind: [(row, name, line) for row in _locked(qs)] for kind, qs in _reopen_sources(project_id, mine).items()}
+        done = _reopen(project_id, planned, user)
+    return done.get(name, dict.fromkeys(KINDS, 0))
+
+
+def reopen_scan(project_id, restored=(), seen=()):
+    """What a finished scan reopens (``changes``), from one read of the project's host closures per kind: what archiving each host of ``restored``
+    closed (``reopen_host``: the scan lifted its archive), then what closed as gone for the names of ``seen`` (every host the scan holds) that are
+    back (``reopen_returned``). The same rows, statuses and notes as ``reopen_host`` once per restored host and then ``reopen_returned``, which ran
+    three regular expression reads per restored host and three more reads per scan. One transaction. Returns ``{host: {kind: n}}``."""
+    from cveFeed import host_resolver
+    restored = {h.lower().rstrip('.') for h in restored if h}
+    wanted = {host_resolver.normalize(n) for n in seen if n}
+    if not restored and not wanted:
+        return {}
+    day = timezone.localdate().isoformat()
+    back, returned = f'{REOPENED} on {day}.', f'{RETURNED} on {day}.'
+    closed_by_host = Q(remediation_status='fixed', remediation_by__isnull=True, remediation_note__startswith=HOST_CLOSED)
+    read = {}
+    for kind, qs in _reopen_sources(project_id, closed_by_host).items():
+        read[kind] = sorted(qs.values_list('pk', 'remediation_note', 'host' if kind == 'hygiene' else 'subdomain__name'))
+    gone = set()  # the names whose findings closed as gone (reopen_returned): a hygiene row's host without its port, a host row's name
+    for kind, rows in read.items():
+        for _pk, note, own in rows:
+            if own and note.startswith(GONE):
+                gone.add(host_resolver.base_name(own) if kind == 'hygiene' else host_resolver.normalize(own))
+    back_again = gone & wanted
+    plan = {}
+    for kind, rows in read.items():
+        taken = {}
+        for pk, note, _own in rows:
+            host = closed_host(note)
+            if host in restored:
+                line = back
+            elif host in back_again and note.startswith(GONE):
+                line = returned
             else:
-                model = CVEMatch if kind == 'match' else Vulnerability
-                touched |= {n.lower() for n in model._base_manager.filter(pk__in=[r.pk for r in rows], subdomain__isnull=False)
-                            .values_list('subdomain__name', flat=True)}
-        if any(done.values()):
-            _after_write(project_id, touched)
-            total = sum(done.values())
-            activity.log('remediation', f'{total} finding{"s" if total != 1 else ""} on {name} reopened: {line[len("Reopened automatically: "):].rstrip(".")}',
-                         project=project_id, host=name, after='open', **{k: v for k, v in done.items() if v})
-    return done
+                continue
+            if taken.get(host, 0) >= MAX_ROWS:  # as reopen_host: at most MAX_ROWS rows of each kind per host
+                continue
+            taken[host] = taken.get(host, 0) + 1
+            plan.setdefault(kind, {})[pk] = (host, line)
+    if not plan:
+        return {}
+    with transaction.atomic():
+        planned = {}
+        for kind, wanted_rows in plan.items():
+            rows = list(_model(kind)._base_manager.filter(pk__in=list(wanted_rows), remediation_status='fixed', remediation_by__isnull=True)
+                        .select_for_update(of=('self',)).only('pk', *_FIELDS).order_by('pk'))  # capped per host above
+            planned[kind] = []
+            for row in rows:  # read again under the lock: a row a person or another run changed meanwhile is left alone
+                host, line = wanted_rows[row.pk]
+                if closed_host(row.remediation_note, PREFIXES if line == back else (GONE,)) == host:
+                    planned[kind].append((row, host, line))
+        return _reopen(project_id, planned, None)
+
+
+def _model(kind):
+    from cveFeed.models import CVEMatch, HygieneFinding
+    from startScan.models import Vulnerability
+    return {'match': CVEMatch, 'vulnerability': Vulnerability, 'hygiene': HygieneFinding}[kind]
 
 
 def reopen_quietly(project_id, host, user=None):
@@ -359,6 +473,22 @@ def close_gone(project_ids=None, apply=True):
     return out
 
 
+def close_gone_due(project_id):
+    """Whether a hygiene run of project ``project_id`` runs ``close_gone`` now. It recomputed the whole project on every hygiene run of every target
+    (the daily sweep queues up to 500 of them on the queue the work conductor runs on), and its answer only changes when a scan of the project
+    finishes or as time passes: so at most once per ``GONE_EVERY`` seconds, and again as soon as another scan of the project has finished. A
+    cache that cannot answer lets it run."""
+    from django.core.cache import cache
+    from django.db.models import Count, Max
+    from startScan.models import ScanHistory
+    try:
+        mark = ScanHistory.objects.filter(domain__project_id=project_id, scan_status__in=FINISHED).aggregate(n=Count('id'), top=Max('id'))
+        return bool(cache.add(f'cvengine:close-gone:{project_id}:{mark["n"]}:{mark["top"]}', 1, timeout=GONE_EVERY))
+    except Exception:  # noqa: BLE001 - run it, as before
+        logger.exception('could not read the close_gone throttle of project %s', project_id)
+        return True
+
+
 def close_gone_quietly(project_ids):
     """``close_gone`` for a pipeline (the hygiene run): never raises."""
     try:
@@ -369,26 +499,14 @@ def close_gone_quietly(project_ids):
 
 
 def reopen_returned(project_id, names):
-    """The names among ``names`` that are back in the project's inventory and had their findings closed as gone: reopen those (``RETURNED``)."""
-    from cveFeed import host_resolver
-    from cveFeed.models import CVEMatch, HygieneFinding
-    from startScan.models import Vulnerability
-    wanted = {host_resolver.normalize(n) for n in names}
-    if not wanted:
+    """The names among ``names`` that are back in the project's inventory and had their findings closed as gone: reopen those (``RETURNED``).
+    Returns how many findings reopened."""
+    try:
+        done = reopen_scan(project_id, (), names)
+    except Exception:  # the next scan that reports a finding again reopens it
+        logger.exception('could not reopen the findings of hosts back in project %s', project_id)
         return 0
-    gone = Q(remediation_status='fixed', remediation_by__isnull=True, remediation_note__startswith=GONE)
-    closed = {host_resolver.base_name(h) for h in HygieneFinding.objects.filter(gone, domain__project_id=project_id).values_list('host', flat=True)}
-    for model in (CVEMatch, Vulnerability):
-        closed |= {host_resolver.normalize(n) for n in model._base_manager.filter(gone, subdomain__target_domain__project_id=project_id)
-                   .values_list('subdomain__name', flat=True).distinct()}
-    day = timezone.localdate().isoformat()
-    total = 0
-    for name in sorted(closed & wanted):
-        try:
-            total += sum(reopen_host(project_id, name, prefixes=(GONE,), line=f'{RETURNED} on {day}.').values())
-        except Exception:  # the next scan that reports a finding again reopens it
-            logger.exception('could not reopen the findings of %s, back in project %s', name, project_id)
-    return total
+    return sum(sum(counts.values()) for counts in done.values())
 
 
 def _archived_by(state):

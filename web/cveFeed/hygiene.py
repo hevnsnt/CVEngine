@@ -795,7 +795,8 @@ def run_hygiene(domain_id, now=None, hosts=None):
                            and (cleartext_ok or not check.startswith('cleartext_')) and (flood_ok or not check.startswith('portflood_')), live_cnames=True, across_targets=True, unanswered=unanswered)
     if project:  # the open findings of a host that left the current inventory close (cveFeed.archive_closure.close_gone; they reopen when it is back)
         from cveFeed import archive_closure
-        archive_closure.close_gone_quietly([project])
+        if archive_closure.close_gone_due(project):  # once per project per hour, or after a scan of it finished: not once per target
+            archive_closure.close_gone_quietly([project])
     if project:  # a redirect alias's copy of what its target host has is folded into the target's row (cveFeed.finding_lifecycle)
         from cveFeed import finding_lifecycle
         names = {finding_lifecycle.host_name(f.host or domain.name) for f in found} | {host for host, _port in targets}
