@@ -303,15 +303,14 @@ def reset_index():
 
 
 def index():
-    """``{CVEEntry id: requirements}`` for every CVE that needs a feature: one query for the CVEs whose words name one
-    (``detection_classes.FEATURE_PREFILTER``, then the rules themselves) and one for the people's detection records that state
+    """``{CVEEntry id: requirements}`` for every CVE that needs a feature: the CVEs whose words name one (``detection_classes.FEATURE_PREFILTER``
+    tested in Python over id ranges, see ``_worded``, then the rules themselves) and one query for the people's detection records that state
     ``requires_features``. Cached per process, and read again when the CVE table or a detection record changed (looked at once every
     ``INDEX_CHECK`` seconds)."""
     import time
 
-    from django.db.models import Count, Max, Q
+    from django.db.models import Count, Max
 
-    from cveFeed.detection_classes import FEATURE_PREFILTER
     from cveFeed.models import CVEDetection, CVEEntry
     if _INDEX['checked'] and time.monotonic() - _INDEX['checked'] < INDEX_CHECK:
         return _INDEX['value']
@@ -323,15 +322,116 @@ def index():
         return _INDEX['value']
     # a person's record only (source manual): the rules' own value is the rule below, and a model's answer never sets one (detection.merge_strategies)
     stated = dict(CVEDetection.objects.filter(source='manual', strategy__has_key='requires_features').values_list('cve_entry_id', 'strategy'))
-    words = Q(title__iregex=FEATURE_PREFILTER) | Q(original_description__iregex=FEATURE_PREFILTER) | Q(summary__iregex=FEATURE_PREFILTER)
     out = {}
-    for pk, title, description, summary in CVEEntry.objects.filter(words | Q(pk__in=list(stated))).values_list(
-            'pk', 'title', 'original_description', 'summary').iterator(chunk_size=500):
+    for pk, title, description, summary in _worded(stated):
         found = _from_words(title, description or summary, _stated(stated.get(pk)))
         if found:
             out[pk] = found
     _INDEX.update(checked=time.monotonic(), stamp=stamp, value=out)
     return out
+
+
+# The CVEs whose words pass the prefilter.
+# The prefilter is a Postgres regular expression (``detection_classes.FEATURE_PREFILTER``). Run in the database over the three text columns
+# of every CVE it cost 27 s of database time per build on 59k CVEs (the regex engine walks every alternative at every position), and every
+# process builds its own index. The same selection is made here in Python instead, in id ranges of ``WORDS_CHUNK`` rows: a plain substring
+# test for literal words every match must contain (``_needles``) drops most rows, and the regex, translated to Python, decides the rest.
+# The rows picked are the same ones the database regex picked (tests/test_service_features_net.py proves it against Postgres).
+
+try:
+    from re import _constants as _sre, _parser as _sre_parse  # Python 3.11 and later
+except ImportError:  # pragma: no cover
+    import sre_constants as _sre
+    import sre_parse as _sre_parse
+
+WORDS_CHUNK = 2000
+_GAP = '\0'
+_WORDS = {'pattern': None, 'regex': None, 'needles': None}
+# The only letters outside ASCII that a case-insensitive match pairs with an ASCII one (dotted capital I, dotless i, long s, Kelvin sign). They
+# are folded before the substring test, so the test never drops a row the regex would take (tests/test_service_features_net.py checks the list).
+_FOLD = {0x130: 'i', 0x131: 'i', 0x17F: 's', 0x212A: 'k'}
+
+
+def _python_regex(pattern):
+    """The Postgres prefilter as a Python regex: ``\\m`` and ``\\M`` (start and end of a word) are the only Postgres-only escapes it uses."""
+    return re.compile(pattern.replace(r'\m', r'(?<!\w)(?=\w)').replace(r'\M', r'(?<=\w)(?!\w)'), re.IGNORECASE)
+
+
+def _alternatives(items, cap=64):
+    """Every literal spelling of a parsed regex sequence, with ``_GAP`` where it matches something that is not a fixed character."""
+    sre = _sre
+    out = {''}
+    for op, av in items:
+        if op is sre.LITERAL:
+            got = {chr(av)}
+        elif op is sre.IN and len(av) <= 4 and all(kind is sre.LITERAL for kind, _ in av):
+            got = {chr(value) for _, value in av}
+        elif op is sre.SUBPATTERN:
+            got = _alternatives(av[-1], cap)
+        elif op is sre.BRANCH:
+            got = set().union(*(_alternatives(branch, cap) for branch in av[1]))
+        elif op in (sre.MAX_REPEAT, sre.MIN_REPEAT) and av[1] == 1:
+            got = _alternatives(av[2], cap) | ({''} if av[0] == 0 else set())
+        else:  # a word boundary, a wide class, an open repeat: never part of a needle
+            got = {_GAP}
+        out = {a + b for a in out for b in got}
+        if len(out) > cap:
+            out = {_GAP}
+    return out
+
+
+def _needles(regex):
+    """Lower-case ASCII words such that every match of ``regex`` contains one of them, or None when that cannot be read from it (then
+    every row goes to the regex)."""
+    try:
+        spellings = _alternatives(_sre_parse.parse(regex.pattern))
+    except Exception:
+        return None
+    found = set()
+    for spelling in spellings:
+        best = max(spelling.split(_GAP), key=len).lower()
+        if len(best) < 2 or not best.isascii():
+            return None
+        found.add(best)
+    return tuple(sorted(n for n in found if not any(other != n and other in n for other in found)))
+
+
+def _prefilter():
+    from cveFeed.detection_classes import FEATURE_PREFILTER
+    if _WORDS['pattern'] != FEATURE_PREFILTER:
+        regex = _python_regex(FEATURE_PREFILTER)
+        _WORDS.update(pattern=FEATURE_PREFILTER, regex=regex, needles=_needles(regex))
+    return _WORDS['regex'], _WORDS['needles']
+
+
+def _passes(texts, regex, needles):
+    """Whether any of ``texts`` matches ``regex``. Text that holds none of ``needles`` cannot match and skips the regex."""
+    texts = [t for t in texts if t]
+    if not texts:
+        return False
+    if needles is not None:
+        joined = '\n'.join(texts)
+        low = (joined if joined.isascii() else joined.translate(_FOLD)).lower()
+        if not any(n in low for n in needles):
+            return False
+    return any(regex.search(t) for t in texts)
+
+
+def _worded(stated):
+    """``(pk, title, original_description, summary)`` of every CVE whose words pass the prefilter, and of every CVE in ``stated``, read
+    in id order by ranges (no server-side cursor held across the walk)."""
+    from cveFeed.models import CVEEntry
+    regex, needles = _prefilter()
+    last = 0
+    while True:
+        rows = list(CVEEntry.objects.filter(pk__gt=last).order_by('pk')
+                    .values_list('pk', 'title', 'original_description', 'summary')[:WORDS_CHUNK])
+        for row in rows:
+            if row[0] in stated or _passes(row[1:], regex, needles):
+                yield row
+        if len(rows) < WORDS_CHUNK:
+            return
+        last = rows[-1][0]
 
 
 # --- what the host's readings say -------------------------------------------------------------------------------------------------------
