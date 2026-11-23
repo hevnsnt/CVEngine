@@ -223,6 +223,10 @@ class Subdomain(models.Model):
 			# a name matched without case (archive closures, a host's group of names): 0030
 			models.Index(Upper('name'), name='sub_upper_name_idx'),
 		]
+		constraints = [
+			# one row per host in a scan (migration 0031 merged the duplicates); rows without a scan are not covered (NULLs differ)
+			models.UniqueConstraint(fields=['scan_history', 'target_domain', 'name'], name='uniq_sub_scan_dom_name'),
+		]
 
 	def __str__(self):
 		return str(self.name)
@@ -393,6 +397,9 @@ class VulnerabilityTags(models.Model):
 	id = models.AutoField(primary_key=True)
 	name = models.CharField(max_length=100)
 
+	class Meta:
+		constraints = [models.UniqueConstraint(fields=['name'], name='uniq_vulntag_name')]  # migration 0033 merged the duplicates
+
 	def __str__(self):
 		return self.name
 
@@ -409,6 +416,9 @@ class CveId(models.Model):
 	id = models.AutoField(primary_key=True)
 	name = models.CharField(max_length=100)
 
+	class Meta:
+		constraints = [models.UniqueConstraint(fields=['name'], name='uniq_cveid_name')]  # migration 0034 merged the duplicates
+
 	def __str__(self):
 		return self.name
 
@@ -416,6 +426,9 @@ class CveId(models.Model):
 class CweId(models.Model):
 	id = models.AutoField(primary_key=True)
 	name = models.CharField(max_length=100)
+
+	class Meta:
+		constraints = [models.UniqueConstraint(fields=['name'], name='uniq_cweid_name')]  # migration 0035 merged the duplicates
 
 	def __str__(self):
 		return self.name
@@ -554,6 +567,12 @@ class Technology(models.Model):
 	# Both follow from the name and are kept in step by save(), so the database can filter on them.
 	version = models.CharField(max_length=200, blank=True, default='')
 	category = models.CharField(max_length=40, blank=True, default='', db_index=True)  # 'web server', 'language', 'cms', ...
+
+	class Meta:
+		constraints = [
+			# one row per exact name (migration 0032 merged the duplicates); spellings in another case stay apart (cveFeed.tech_rows)
+			models.UniqueConstraint(fields=['name'], name='uniq_technology_name'),
+		]
 
 	def save(self, *args, **kwargs):
 		from cveFeed.correlation import split_name_version

@@ -270,7 +270,7 @@ class FindingParityTests(Base):
 			v = Vulnerability.objects.create(name=label, severity=4, source='nuclei', subdomain=self.sub, target_domain=self.domain,
 											 scan_history=self.scan, open_status=True)
 			for n in names:
-				v.cve_ids.add(CveId.objects.create(name=n))
+				v.cve_ids.add(CveId.objects.get_or_create(name=n)[0])  # names are unique
 			ids[v.pk] = label
 		sub = Subdomain.objects.prefetch_related('vulnerability_set__cve_ids', 'vulnerability_set__tags', 'vulnerability_set__triage').get(pk=self.sub.pk)
 		py = {r['id']: r['temp'] for r in services._heat_reasons(sub) if r['kind'] == 'finding'}

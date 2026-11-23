@@ -593,7 +593,7 @@ def link_technologies(scan, probed):
     """Record what each host's front page says it runs (see cvengine_scanner.fingerprint) as the host's technologies in this scan, so the
     correlation engine reads a PHP version from an X-Powered-By header like any other detected technology. Only the root page of a
     host speaks for the host; a name already on the host is confirmed (its link's time, source ``route``: cveFeed.tech_links). Returns the number of links added."""
-    from cveFeed import tech_links
+    from cveFeed import tech_links, tech_rows
     from startScan.models import Subdomain, Technology
     names = {}
     for url, result in probed.items():
@@ -609,7 +609,7 @@ def link_technologies(scan, probed):
         techs = []
         for name in sorted(names.get(sub.name.lower(), ())):
             if name not in cache:
-                cache[name] = Technology.objects.filter(name=name).first() or Technology.objects.create(name=name)
+                cache[name] = Technology.objects.filter(name=name).first() or tech_rows.create(name)
             techs.append(cache[name])
         added += tech_links.link_host(sub, techs, tech_links.ROUTE)  # source route; a name the host already has is confirmed (its link's time)
     return added

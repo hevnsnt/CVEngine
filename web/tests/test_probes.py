@@ -3,13 +3,14 @@ from unittest import mock
 from urllib.parse import urlsplit
 
 from django.test import SimpleTestCase, TestCase
+from django.utils import timezone
 
 from cvengine_scanner import flags as scan_flags
 from cvengine_scanner.probes import version_probes
 
 from cveFeed import port_inventory, probes
 from cveFeed.models import ProbeObservation, ServiceRun
-from startScan.models import IpAddress, Port, Subdomain, Technology
+from startScan.models import IpAddress, Port, ScanHistory, Subdomain, Technology
 from tests import probe_scanner
 from tests.fake_scanner import FakeScanner, assert_ran_nowhere_locally
 from tests.test_route_auth import RouteFixture
@@ -248,8 +249,9 @@ class RecordingTests(RouteFixture, TestCase):
 
     def test_known_observations_are_carried_onto_a_fresh_scan_row(self):
         self.run_one({probes.PROBE_PATH: page(404, body=NGINX_404)})
-        fresh = Subdomain.objects.create(name='www.rt.test', target_domain=self.domain, scan_history=self.scan_obj)
-        self.assertEqual(probes.apply_known(self.scan_obj), 1)
+        later = ScanHistory.objects.create(domain=self.domain, scan_type=self.scan_obj.scan_type, start_scan_date=timezone.now())  # a host is one row per scan
+        fresh = Subdomain.objects.create(name='www.rt.test', target_domain=self.domain, scan_history=later)
+        self.assertEqual(probes.apply_known(later), 1)
         self.assertTrue(fresh.technologies.filter(name='nginx:1.24.0').exists())
 
     def test_observations_of_one_project_never_reach_another(self):

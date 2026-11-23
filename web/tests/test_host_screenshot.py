@@ -85,7 +85,8 @@ class HostScreenshotThumbnailTests(HostScreenshotTests):
 		Image.new('RGB', size, (200, 30, 30)).save(full, fmt)
 
 	def _sub(self, rel):
-		return Subdomain.objects.create(scan_history=self.scan_a, target_domain=self.domain_a, name='www.a.example', screenshot_path=rel)
+		return Subdomain.objects.update_or_create(scan_history=self.scan_a, target_domain=self.domain_a, name='www.a.example',  # one row per scan
+												  defaults={'screenshot_path': rel})[0]
 
 	def _get(self, sub, query='?size=thumb', **headers):
 		with self.settings(MEDIA_ROOT=self.media_root):

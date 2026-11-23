@@ -88,7 +88,7 @@ class HostContextsBatchTests(ContextFixture, TestCase):
         self.subs = list(Subdomain.objects.filter(scan_history=self.scan_obj).order_by('name'))
         now = timezone.now()
         for n, sub in enumerate(self.subs):
-            sub.technologies.add(Technology.objects.create(name=f'nginx:1.{n}'), Technology.objects.create(name='WordPress'))
+            sub.technologies.add(Technology.objects.create(name=f'nginx:1.{n}'), Technology.objects.get_or_create(name='WordPress')[0])  # names are unique
             RouteAuth.objects.create(project=self.project, domain=self.domain, host=sub.name, url=f'https://{sub.name}/', path='/', auth_state='open',
                                      http_status=200, title='Hi', evidence={'server': 'nginx', 'headers': {'server': 'nginx'}})
             for i in range(3):

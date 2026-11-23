@@ -639,17 +639,22 @@ def seed_from_scan(scan, source):
     from cveFeed.exclusions import excluded_names
     banned = excluded_names(scan.domain.project_id, names_only=True)  # an excluded host is never copied back into the inventory
     originals = [o for o in originals if o.name.lower().rstrip('.') not in banned]
-    copies = Subdomain.objects.bulk_create([
-        Subdomain(scan_history=scan, target_domain=scan.domain, **{f: getattr(o, f) for f in fields}) for o in originals])
+    # a host the scan already has (this copy run a second time by a resumed stage, or the host stored by another writer) is kept, not
+    # stored twice (the unique constraint uniq_sub_scan_dom_name): the copy's links go onto that row
+    Subdomain.objects.bulk_create([
+        Subdomain(scan_history=scan, target_domain=scan.domain, **{f: getattr(o, f) for f in fields}) for o in originals], ignore_conflicts=True)
+    rows = dict(Subdomain.objects.filter(scan_history=scan, target_domain=scan.domain, name__in={o.name for o in originals})
+                .order_by('-id').values_list('name', 'id'))  # the oldest row of a name wins
+    copies = [(rows[o.name], o) for o in originals if o.name in rows]
     ips, techs = Subdomain.ip_addresses.through, Subdomain.technologies.through
-    ips.objects.bulk_create([ips(subdomain_id=c.pk, ipaddress_id=ip.pk) for c, o in zip(copies, originals)
-                             for ip in o.ip_addresses.all()])
+    ips.objects.bulk_create([ips(subdomain_id=c, ipaddress_id=ip.pk) for c, o in copies
+                             for ip in o.ip_addresses.all()], ignore_conflicts=True)
     # a copied link keeps where it came from (its source, the CPE its reading named, when it was seen: cveFeed.tech_links)
     meta = {(r.subdomain_id, r.technology_id): r for r in techs.objects.filter(subdomain_id__in=[o.pk for o in originals])}
-    techs.objects.bulk_create([techs(subdomain_id=c.pk, technology_id=t.pk, **({'source': was.source, 'cpe': was.cpe, 'observed_at': was.observed_at}
-                                                                            if (was := meta.get((o.pk, t.pk))) else {}))
-                               for c, o in zip(copies, originals) for t in o.technologies.all()])
-    return len(copies)
+    techs.objects.bulk_create([techs(subdomain_id=c, technology_id=t.pk, **({'source': was.source, 'cpe': was.cpe, 'observed_at': was.observed_at}
+                                                                          if (was := meta.get((o.pk, t.pk))) else {}))
+                               for c, o in copies for t in o.technologies.all()], ignore_conflicts=True)
+    return len(originals)
 
 
 def reuse_discovery(scan, source, parent):

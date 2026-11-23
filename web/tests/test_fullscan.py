@@ -142,7 +142,7 @@ class SelectionTests(FullScanBase):
 		self.ip('192.0.2.1', cdn=True)
 		self.ip('192.0.2.2', name=False)  # attached to no host
 		self.ip('10.1.2.3')  # private
-		self.ip('127.0.0.1')  # always blocked
+		self.ip('127.0.0.1', name='lo.fs.test')  # always blocked (its own host: h1 is taken, a host is one row per scan)
 		orphan = Domain.objects.create(name='orphan.test', insert_date=timezone.now())  # no project
 		lonely = IpAddress.objects.create(address='192.0.2.9')
 		sub = Subdomain.objects.create(scan_history=self.scan, target_domain=orphan, name='x.orphan.test')
