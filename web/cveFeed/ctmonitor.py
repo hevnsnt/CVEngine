@@ -469,11 +469,13 @@ def _fetch_certspotter(domain, timeout=CERTSPOTTER_TIMEOUT, sleep=time.sleep):
 
 def _note(source, outcome, domain, names=0, new=0, error=''):
     """One lookup outcome of one source: ``ok`` (with the names it gave and the hosts that were new), ``failed`` or ``busy``. Logged, so a
-    working monitor is visible in the worker log too."""
+    working monitor is visible in the worker log too, and counted in ``cveFeed.ct_health``."""
     if outcome == 'ok':
         logger.info('ct watch: %s answered for %s: %s name(s), %s new host(s)', source, domain, names, new)
     elif outcome == 'failed':
         logger.info('ct watch: %s lookup for %s failed: %s', source, domain, error)
+    from cveFeed import ct_health
+    ct_health.record(source, outcome, names=names, new=new, error=error)  # the daily rollup per source: System status, Settings, the stalled notice
 
 
 def lookup(domain, sleep=None):

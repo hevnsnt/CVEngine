@@ -884,6 +884,7 @@ async function timingsTab(panel) {
         : "When crt.sh cannot answer, ask Cert Spotter (a few lookups an hour) so new hosts are still found.",
     ),
   );
+  if (t.ct_watch_status) card.append(el("p", "note", t.ct_watch_status));
   card.append(
     button("Save timings", async () => {
       await api("PUT", `${A}/timings`, {

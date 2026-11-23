@@ -546,8 +546,13 @@ TIMING_SWITCHES = ('ct_fallback_source',)  # on or off: a lookup crt.sh cannot a
 def timings_get(request, actor):
     t = SystemTimings.current()
     from cveFeed import ctmonitor
+    from cveFeed import ct_health
+    try:
+        ct_line = ct_health.summary()['line']  # how the watch is doing: two small reads of the daily rollup
+    except Exception:  # noqa: BLE001 - the timings page must open whatever the rollup says
+        ct_line = ''
     return {**{k: getattr(t, k) for k in TIMING_LIMITS}, **{k: bool(getattr(t, k)) for k in TIMING_SWITCHES}, 'limits': TIMING_LIMITS,
-            'ct_fallback_forced_off': not ctmonitor.fallback_enabled() and bool(t.ct_fallback_source)}
+            'ct_fallback_forced_off': not ctmonitor.fallback_enabled() and bool(t.ct_fallback_source), 'ct_watch_status': ct_line}
 
 
 def apply_timings(t):

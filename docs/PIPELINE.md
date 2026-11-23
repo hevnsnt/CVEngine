@@ -42,6 +42,8 @@ Between discoveries every target domain is checked against public certificate tr
 
 **Turning the fallback off.** Settings, Timings, **CT fallback source** (on by default), or `CVENGINE_CT_FALLBACK=0` in `.env`, which turns it off whatever the page says. Off, only crt.sh is asked, as before.
 
+**Is it working?** Every lookup is counted for its source in a daily rollup (`CtLookupDay`, `cveFeed/ct_health.py`: lookups ok with the names they gave and the hosts that were new, failed with the last error, and held back by pacing; one row per source and day, kept 30 days), and the worker log has a line for each answer. Settings, Timings shows it under the switch, for example *Certificate Transparency: last successful lookup 4 minutes ago (crt.sh), 12 lookups ok, 3 failed, 0 new hosts today*, and `get_system_status` carries the same figures and line as `system.ct_watch`. The operations check `ct_watch_stalled` ([AI-REVIEWER.md](AI-REVIEWER.md#operations-check-in-detail)) raises a warning when lookups were attempted in the last 3 hours and no source answered one, and clears when one does.
+
 ### Inventory details
 
 - **Port discovery.** By default [naabu](https://github.com/projectdiscovery/naabu) sweeps all 65,535 TCP ports of each address (SYN, 1,000 packets a second) and nmap fingerprints only the open ports it found plus ports already known open. If naabu is off (`CVENGINE_NAABU=0`), missing, fails, or sees more than 500 open ports on one address, nmap falls back to the top 1,000 ports plus 37 high-risk ones.

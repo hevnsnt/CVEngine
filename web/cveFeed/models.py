@@ -211,6 +211,28 @@ class IntelSource(models.Model):
         return self.name
 
 
+class CtLookupDay(models.Model):
+    """One day of one certificate transparency source's lookups for the standalone watch (cveFeed.ct_health): how many answered, failed or
+    were held by pacing, the names they gave and the hosts that were new. One row per source and UTC day, kept ``ct_health.KEEP_DAYS``."""
+    day = models.DateField()
+    source = models.CharField(max_length=20)
+    ok = models.PositiveIntegerField(default=0, db_default=0)
+    failed = models.PositiveIntegerField(default=0, db_default=0)
+    busy = models.PositiveIntegerField(default=0, db_default=0)
+    names = models.PositiveIntegerField(default=0, db_default=0)
+    new_hosts = models.PositiveIntegerField(default=0, db_default=0)
+    last_ok_at = models.DateTimeField(null=True, blank=True)
+    last_attempt_at = models.DateTimeField(null=True, blank=True)
+    last_failed_at = models.DateTimeField(null=True, blank=True)
+    last_error = models.CharField(max_length=300, blank=True, default="", db_default="")
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["day", "source"], name="ctlookupday_day_source_uniq")]
+
+    def __str__(self):
+        return f"{self.day} {self.source}"
+
+
 class CVEMatch(models.Model):
     """A discovered asset matched to a cve.now entry.
 

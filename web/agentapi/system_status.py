@@ -867,7 +867,15 @@ def _system_probes(user):
         Probe('live_cache', lambda p, n, d: _live_cache(n), db=False),
         Probe('tools', lambda p, n, d: _tools()),
         Probe('finding_hosts', lambda p, n, d: _finding_hosts(p)),
+        Probe('ct_watch', lambda p, n, d: _ct_watch()),
     ]
+
+
+def _ct_watch():
+    """The certificate transparency watch per source (``cveFeed.ct_health``): today's lookups ok, failed and held back, the hosts they found,
+    the last success and its source, and ``line``, the sentence the Timings page shows. A stall is the ``ct_watch_stalled`` notice, not a problem here."""
+    from cveFeed import ct_health
+    return ct_health.summary()
 
 
 def _finding_hosts(problems):
@@ -957,6 +965,7 @@ def _system(user, problems, notes, run=None):
     out['live_cache'] = take('live_cache')
     out['tools'] = take('tools')
     out['finding_hosts'] = take('finding_hosts')
+    out['ct_watch'] = take('ct_watch')
     out['timings'] = run.timings()
     problem = _template_problem((out['tools'] or {}).get('nuclei_templates') or {})
     if problem:
