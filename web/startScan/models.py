@@ -4,7 +4,7 @@ from django.contrib.auth.models import User
 from django.contrib.postgres.fields import ArrayField
 from django.db import models
 from django.db.models import Value
-from django.db.models.functions import Coalesce, MD5 as Md5, Upper
+from django.db.models.functions import Coalesce, Lower, MD5 as Md5, Upper
 from django.utils import timezone
 from reNgine.definitions import (CELERY_TASK_STATUSES,
 								 NUCLEI_REVERSE_SEVERITY_MAP)
@@ -222,6 +222,8 @@ class Subdomain(models.Model):
 			models.Index(fields=['target_domain', '-score'], name='sub_domain_score_idx'),
 			# a name matched without case (archive closures, a host's group of names): 0030
 			models.Index(Upper('name'), name='sub_upper_name_idx'),
+			# a name looked up in lower case within a project (cveFeed.manual_only, run for every host a sweep considers): 0036
+			models.Index(Lower('name'), name='sub_lower_name_idx'),
 		]
 		constraints = [
 			# one row per host in a scan (migration 0031 merged the duplicates); rows without a scan are not covered (NULLs differ)
