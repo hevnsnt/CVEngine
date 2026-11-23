@@ -425,7 +425,7 @@ class QueryCeilingTests(World):
             views.clear_stats_cache()
             with CaptureQueriesContext(connection) as ctx:
                 client.get('/cve/api/stats')
-        self.assertLessEqual(len(ctx), 50, len(ctx))  # one walk (47 measured: the whole-inventory collapse is now a few set-based reads, not one big statement), once per scope per ten seconds, not once per tab
+        self.assertLessEqual(len(ctx), 54, len(ctx))  # one walk (53 measured: the whole-inventory collapse is now a few set-based reads, not one big statement, and each statement over the current hosts reads the current scan ids first, cveFeed.current_scans), once per scope per ten seconds, not once per tab
 
     def test_graph_live_warm_poll_costs_the_floor(self):
         client = client_for(self.a1)

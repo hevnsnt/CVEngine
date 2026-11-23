@@ -13,7 +13,7 @@ class Migration(migrations.Migration):
     atomic = False
 
     dependencies = [
-        ('startScan', '0028_subdomain_technology_source'),
+        ('startScan', '0029_scan_done_indexes'),
     ]
 
     operations = [
