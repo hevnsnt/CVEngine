@@ -109,6 +109,50 @@ class ScanRetentionTests(TestCase):
         self.assertTrue(Vulnerability.objects.filter(pk=finding.pk).exists())
         self.assertTrue(CVEMatch.objects.filter(pk=match.pk).exists())
 
+    def test_the_engine_s_own_closures_are_not_work_and_a_person_s_still_is(self):
+        # an archive or gone closure, a duplicate fold or an automatic reopening of a finding used to keep its scan for good
+        from cveFeed import archive_closure, finding_lifecycle
+        old, _ = self.history(8)
+        user = User.objects.create_user('person', password='x')
+        cve = CVEEntry.objects.create(cve_id='CVE-2099-9', cvss=7.5, title='t', published_at=self.now)
+        archived = Vulnerability.objects.create(name='Closed by archive', severity=3, scan_history=old[0], target_domain=self.domain, remediation_status='fixed',
+                                                remediation_note=f'{archive_closure.ARCHIVED} automatically on 2026-01-02 (www.ret.example).')
+        FindingAuditEvent.objects.create(project=self.project, finding_kind='vulnerability', finding_id=archived.pk, event='status',
+                                         before={'status': 'open'}, after={'status': 'fixed', 'by': archive_closure.BY_ARCHIVE})
+        gone = CVEMatch.objects.create(cve_entry=cve, subdomain=old[1].subdomain_set.first(), scan_history=old[1], remediation_status='fixed',
+                                       remediation_note=f'{archive_closure.GONE}, last seen 2026-01-02 (www.ret.example).')
+        FindingAuditEvent.objects.create(project=self.project, finding_kind='match', finding_id=gone.pk, event='status',
+                                         before={'status': 'open'}, after={'status': 'fixed', 'by': archive_closure.BY_GONE})
+        Vulnerability.objects.create(name='Duplicate', severity=2, scan_history=old[2], target_domain=self.domain, open_status=False,
+                                     remediation_note=finding_lifecycle.duplicate_note('scanner finding', 1, 'same template'))
+        Vulnerability.objects.create(name='Reopened', severity=2, scan_history=old[3], target_domain=self.domain,
+                                     remediation_note=f'{archive_closure.RETURNED} on 2026-01-03.\n{archive_closure.GONE} (www.ret.example).')
+        # a person's work: a status they set (the engine closed it later), a note under an engine line, an audit event they made
+        person_set = Vulnerability.objects.create(name='Set by a person', severity=2, scan_history=old[4], target_domain=self.domain,
+                                                  remediation_status='accepted_risk', remediation_by=user,
+                                                  remediation_note='Closed automatically: the AI reviewer agreed.')
+        kept_note = Vulnerability.objects.create(name='A note under the closure', severity=2, scan_history=old[5], target_domain=self.domain,
+                                                 remediation_status='fixed',
+                                                 remediation_note=f'{archive_closure.ARCHIVED} on 2026-01-02 by bob (www.ret.example).\nTicket OPS-7')
+        scan_retention.run(self.now, days=180)
+        # old[6] and old[7] are among the domain's newest three; the engine-only scans go, the person's stay
+        self.assertEqual({old[0].id, old[1].id, old[2].id, old[3].id} & self.ids(), set())
+        self.assertTrue({old[4].id, old[5].id, old[6].id, old[7].id} <= self.ids())
+        self.assertTrue(Vulnerability.objects.filter(pk__in=[person_set.pk, kept_note.pk]).count() == 2)
+
+    def test_an_audit_event_a_person_made_on_an_engine_closed_finding_keeps_its_scan(self):
+        from cveFeed import archive_closure
+        old, _ = self.history(5)
+        user = User.objects.create_user('archiver', password='x')
+        closed = Vulnerability.objects.create(name='Closed by a person archive', severity=3, scan_history=old[0], target_domain=self.domain,
+                                              remediation_status='fixed',
+                                              remediation_note=f'{archive_closure.ARCHIVED} on 2026-01-02 by archiver (www.ret.example).')
+        FindingAuditEvent.objects.create(project=self.project, finding_kind='vulnerability', finding_id=closed.pk, event='status', actor=user,
+                                         before={'status': 'open'}, after={'status': 'fixed', 'by': archive_closure.BY_ARCHIVE})
+        scan_retention.run(self.now, days=180)
+        self.assertIn(old[0].id, self.ids())  # the event names a person
+        self.assertNotIn(old[1].id, self.ids())
+
     def test_one_domain_does_not_protect_or_expose_another(self):
         other = Domain.objects.create(name='other.example', project=self.project, insert_date=timezone.now())
         theirs = [self.scan(age=OLD + timedelta(days=i), domain=other, names=('www.other.example',)) for i in range(2)]

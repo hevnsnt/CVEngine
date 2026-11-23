@@ -311,6 +311,66 @@ class RestoreReopensTests(Base):
         self.assertEqual(out, f'Closed automatically: x.\n{note}')
 
 
+    def test_a_finished_scan_reopens_restored_and_returned_hosts_from_one_read(self):
+        # three regular expression reads per restored host and three more per scan before; now the same rows from one read of each kind
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+        from cveFeed import changes
+        archive_closure.close_host(self.a1.pk, HOST, why=archive_closure.WHY_UNRESOLVED)
+        archive_closure._close(self.a1.pk, LOOKALIKE, [LOOKALIKE], archive_closure.gone_note(LOOKALIKE, timezone.now()), archive_closure.BY_GONE, None,
+                               'the host is no longer in the current inventory')
+        self.m_lookalike.refresh_from_db()
+        self.assertEqual(self.m_lookalike.remediation_status, 'fixed')
+        twin_match = self.twins[self.a2.slug][0]
+        archive_closure.close_host(self.a2.pk, HOST, why=archive_closure.WHY_GONE)
+        with CaptureQueriesContext(connection) as one:
+            changes._reopen_restored(self.a1.pk, [HOST], seen=[HOST, LOOKALIKE, 'other.example.test'])
+        m_open, m_progress, m_fp, m_look, v_orphan, h_cert = self.fresh(self.m_open, self.m_progress, self.m_fp, self.m_lookalike, self.v_orphan, self.h_cert)
+        self.assertEqual((m_open.remediation_status, m_progress.remediation_status, m_fp.remediation_status), ('open', 'in_progress', 'false_positive'))
+        self.assertTrue(m_open.remediation_note.startswith(archive_closure.REOPENED))
+        self.assertTrue(m_progress.remediation_note.endswith('\nTicket OPS-12'))
+        self.assertEqual((v_orphan.remediation_status, h_cert.remediation_status), ('open', 'open'))
+        self.assertEqual(m_look.remediation_status, 'open')  # closed as gone, back in this scan
+        self.assertTrue(m_look.remediation_note.startswith(archive_closure.RETURNED))
+        self.assertEqual(FindingAuditEvent.objects.filter(finding_kind='match', finding_id=m_look.pk, after__by=archive_closure.BY_RESTORE).count(), 1)
+        twin_match.refresh_from_db()
+        self.assertEqual(twin_match.remediation_status, 'fixed')  # another project's closure is never touched
+        # nothing left to reopen: the same few reads, however many hosts the scan restored
+        with CaptureQueriesContext(connection) as few:
+            changes._reopen_restored(self.a1.pk, [HOST], seen=[HOST])
+        with CaptureQueriesContext(connection) as many:
+            changes._reopen_restored(self.a1.pk, [HOST] + [f'h{i}.example.test' for i in range(20)], seen=[HOST, LOOKALIKE])
+        self.assertEqual(len(few.captured_queries), len(many.captured_queries))
+        self.assertLessEqual(len(many.captured_queries), 3)
+        self.assertLess(len(one.captured_queries), 40)
+
+    def test_a_restored_host_wins_over_a_gone_closure_of_the_same_name(self):
+        archive_closure._close(self.a1.pk, HOST, [HOST], archive_closure.gone_note(HOST, timezone.now()), archive_closure.BY_GONE, None, 'gone')
+        out = archive_closure.reopen_scan(self.a1.pk, [HOST], [HOST])
+        self.m_open.refresh_from_db()
+        self.assertEqual(self.m_open.remediation_status, 'open')
+        self.assertTrue(self.m_open.remediation_note.startswith(archive_closure.REOPENED))  # as reopen_host ran first before
+        self.assertEqual(out[HOST]['match'], 2)
+        self.assertEqual(archive_closure.reopen_returned(self.a1.pk, [HOST]), 0)  # idempotent
+
+    def test_closing_writes_in_batches_and_keeps_the_cap(self):
+        extra = [self.match(self.host, cve=f'CVE-2099-71{i:02d}') for i in range(5)]
+        with mock.patch.object(archive_closure, 'BATCH', 2):
+            out = archive_closure.close_host(self.a1.pk, HOST)
+        self.assertEqual(out['match'], 7)  # open, in progress and five more, in four batches of at most two
+        for row in self.fresh(self.m_open, self.m_progress, *extra):
+            self.assertEqual((row.remediation_status, row.remediation_by_id), ('fixed', None))
+            self.assertTrue(row.remediation_note.startswith(archive_closure.ARCHIVED))
+        self.assertEqual(self.m_progress.remediation_note.split('\n', 1)[1], 'Ticket OPS-12')
+        self.assertNotIn('\n', self.m_open.remediation_note)  # no note before: the line alone
+        events = FindingAuditEvent.objects.filter(finding_kind='match', after__by=archive_closure.BY_ARCHIVE)
+        self.assertEqual(events.count(), 7)
+        self.assertEqual(events.get(finding_id=self.m_progress.pk).before, {'status': 'in_progress'})
+        archive_closure.reopen_host(self.a1.pk, HOST)
+        with mock.patch.object(archive_closure, 'BATCH', 2), mock.patch.object(archive_closure, 'MAX_ROWS', 3):
+            self.assertEqual(archive_closure.close_host(self.a1.pk, HOST)['match'], 3)  # at most MAX_ROWS rows of each kind per host
+
+
 class NextScanTests(Base):
     """The sticky-fixed rules keep a person's fixed status across scans; they keep an archive closure only while the host is archived."""
 
