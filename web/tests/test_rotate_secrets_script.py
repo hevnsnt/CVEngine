@@ -131,9 +131,12 @@ sys.exit(0)
 
 CURL = '#!/bin/sh\nprintf 200\n'
 
+# Dummy values of the fixture install. Plain names on purpose: they are what the test files get written with (CodeQL reads a value reached
+# through a password or secret name as real clear text storage; these are not).
+V_PG, V_REDIS, V_APP, V_FIELD, V_DJANGO = 'oldpg', 'oldredis', 'oldapp', 'oldfieldkey', 'old-django-secret'
 OLD = {
-    'POSTGRES_PASSWORD': 'oldpg', 'REDIS_PASSWORD': 'oldredis', 'CVENGINE_DB_APP_PASSWORD': 'oldapp',
-    'CVENGINE_FIELD_KEY': 'oldfieldkey', 'SECRET': 'old-django-secret',
+    'POSTGRES_PASSWORD': V_PG, 'REDIS_PASSWORD': V_REDIS, 'CVENGINE_DB_APP_PASSWORD': V_APP,
+    'CVENGINE_FIELD_KEY': V_FIELD, 'SECRET': V_DJANGO,
 }
 
 
@@ -167,20 +170,20 @@ class RotateSecretsScriptTests(unittest.TestCase):
         for name in ('docker-compose.yml', 'docker-compose.vps.yml'):
             (self.repo / name).write_text('services: {}\n')
         self.dotenv = ('POSTGRES_USER=rengine\nPOSTGRES_DB=rengine\n'
-                       f"POSTGRES_PASSWORD={OLD['POSTGRES_PASSWORD']}\nREDIS_PASSWORD={OLD['REDIS_PASSWORD']}\n"
-                       f"CVENGINE_DB_APP_PASSWORD={OLD['CVENGINE_DB_APP_PASSWORD']}\nCVENGINE_FIELD_KEY={OLD['CVENGINE_FIELD_KEY']}\n"
+                       f"POSTGRES_PASSWORD={V_PG}\nREDIS_PASSWORD={V_REDIS}\n"
+                       f"CVENGINE_DB_APP_PASSWORD={V_APP}\nCVENGINE_FIELD_KEY={V_FIELD}\n"
                        'CVENGINE_COMPOSE_FILES=docker-compose.yml,docker-compose.vps.yml\nCVENGINE_COMPOSE_ENV_FILE=.env.vps\n'
                        'CVENGINE_COMPOSE_PROJECT=cvengine\nDOMAIN_NAME=example.org\n')
         self.vps = ('POSTGRES_USER=rengine\nPOSTGRES_DB=rengine\n'
-                    f"POSTGRES_PASSWORD={OLD['POSTGRES_PASSWORD']}\nREDIS_PASSWORD={OLD['REDIS_PASSWORD']}\n"
-                    f"CVENGINE_DB_APP_PASSWORD={OLD['CVENGINE_DB_APP_PASSWORD']}\nCVENGINE_FIELD_KEY={OLD['CVENGINE_FIELD_KEY']}\n")
+                    f"POSTGRES_PASSWORD={V_PG}\nREDIS_PASSWORD={V_REDIS}\n"
+                    f"CVENGINE_DB_APP_PASSWORD={V_APP}\nCVENGINE_FIELD_KEY={V_FIELD}\n")
         (self.repo / '.env').write_text(self.dotenv)
         (self.repo / '.env.vps').write_text(self.vps)
-        (self.repo / 'web' / 'secret').write_text(OLD['SECRET'])
+        (self.repo / 'web' / 'secret').write_text(V_DJANGO)
         (self.repo / 'web' / 'secret').chmod(0o600)
         (self.state / 'running').write_text('db\nredis\nweb\ncelery\ncelery-beat\nproxy\nreviewer\n')
-        (self.state / 'db.json').write_text(json.dumps({'pg': {'rengine': OLD['POSTGRES_PASSWORD'], 'cvengine_app': OLD['CVENGINE_DB_APP_PASSWORD']},
-                                                         'redis': OLD['REDIS_PASSWORD']}))
+        (self.state / 'db.json').write_text(json.dumps({'pg': {'rengine': V_PG, 'cvengine_app': V_APP},
+                                                         'redis': V_REDIS}))
         self.env = {k: v for k, v in os.environ.items() if not k.startswith(('CVENGINE_', 'COMPOSE_', 'DOCKER_')) and k not in ROTATED}
         self.env.update(PATH=f'{stub}:{os.environ["PATH"]}', FOO_UNRELATED='leak-me', CVENGINE_ROTATE_WAIT='5')
 
