@@ -1705,6 +1705,23 @@ def answering_decision(alert):
     return TuningDecision.objects.filter(created_at__gte=alert.first_seen, signals__alerts__contains=[alert.code]).order_by('-created_at', '-pk').values_list('pk', flat=True).first()
 
 
+def answering_decisions(alerts):
+    """``{alert id: answering_decision(alert)}`` for many alerts in one statement (one ``LIMIT 1`` branch per alert of a check, joined by ``UNION ALL``)
+    instead of one query each: the alert strip polls ``open_alerts`` and an install with six check alerts open asked six queries per poll."""
+    from django.db.models import F, IntegerField, Value
+
+    from cveFeed.models import TuningDecision
+    alerts = [a for a in alerts if a.code in OPS_CODES]
+    out = {a.pk: None for a in alerts}
+    if len(alerts) <= 1:
+        return {a.pk: answering_decision(a) for a in alerts}
+    branches = [TuningDecision.objects.filter(created_at__gte=a.first_seen, signals__alerts__contains=[a.code]).order_by('-created_at', '-pk')
+                .annotate(alert=Value(a.pk, output_field=IntegerField()), decision=F('pk')).values_list('alert', 'decision')[:1] for a in alerts]
+    for alert_pk, decision_pk in branches[0].union(*branches[1:], all=True):
+        out[alert_pk] = decision_pk
+    return out
+
+
 def open_alerts(user=None, now=None):
     """The open alerts an App Admin sees: not resolved, and not dismissed unless the problem changed since (``dismissal_holds``: what it says
     changed after the hold, or its severity rose)."""
@@ -1714,6 +1731,7 @@ def open_alerts(user=None, now=None):
     rows = [a for a in rows if not dismissal_holds(a.dismissed_at, a.dismissed_digest, a.digest, a.severity, now)]
     from cveFeed import fleet
     facts = fleet.fleet_facts() if any(a.ai_detail for a in rows) else {}
+    decisions = answering_decisions(rows)
     out = []
     for a in rows:
         ai_detail = usable_note(a.ai_detail, min_words=DIAGNOSIS_MIN_WORDS)  # a row stored before filler was refused is not shown either
@@ -1725,7 +1743,7 @@ def open_alerts(user=None, now=None):
             detail = f'Not re-checked for {maintainer_checks.span(age.total_seconds())}, so this may no longer be true. {detail}'
         out.append({'id': a.pk, 'code': a.code, 'severity': a.severity, 'title': a.title, 'detail': detail, 'ai_detail': ai_detail, 'stale': stale,
                     'age_minutes': int(age.total_seconds() // 60), 'ai_model': a.ai_model if ai_detail else '', 'first_seen': a.first_seen.isoformat(), 'last_seen': a.last_seen.isoformat(),
-                    'decision_id': answering_decision(a)})
+                    'decision_id': decisions.get(a.pk)})
     return out
 
 

@@ -1554,13 +1554,14 @@ def waiting_tasks(now=None, planner=True):
     return (rows if planner else rows.exclude(priority=PLANNER_PRIORITY)).count()
 
 
-def planner_capacity(kinds, now=None):
+def planner_capacity(kinds, now=None, queued=True):
     """What the work planner needs to know about the Sentinels, in a fixed number of queries: ``{'live', 'free_total', 'held_total', 'queued_total',
     'queued_planner', 'queued': {kind: n}, 'agents': [...], 'kinds': {kind: {'sentinels', 'slots', 'free'}}}``. A kind's ``sentinels`` are the live
     Sentinels that may take it (``SentinelEff.caps``: declared, not denied by policy, not withheld after repeated failures, and a contract version that can
     run it, ``sentinel_contract.can_run``); ``slots`` their concurrency for it (a per-kind cap narrows it) and ``free`` the part of it not held now. The built-in
     scanner is the last resort: while an external Sentinel can take a kind it adds nothing to that kind (as ``capacity_state`` counts). Call it inside
-    ``memoised_rights`` when several answers are wanted together."""
+    ``memoised_rights`` when several answers are wanted together. ``queued=False`` leaves the queue out (two queries fewer: ``queued_total``, ``queued_planner``
+    and ``queued`` are then 0, 0 and empty), for a caller that only says what is live and busy (the Overview's Sentinel line)."""
     now = now or timezone.now()
     live = _live_scanners(now)
     held, held_kind = {}, {}
@@ -1568,10 +1569,10 @@ def planner_capacity(kinds, now=None):
                                    .values_list('agent_id', 'kind').annotate(n=Count('id'))):
         held[agent_id] = held.get(agent_id, 0) + n
         held_kind[(agent_id, task_kind)] = n
-    queued = {}
+    queued_by_kind = {}
     fresh = SentinelTask.objects.filter(status='queued', created_at__gte=now - max(queued_ttl(k) for k in SentinelTask.KINDS))
-    for task_kind, n in fresh.order_by().values_list('kind').annotate(n=Count('id')):
-        queued[task_kind] = n
+    for task_kind, n in (fresh.order_by().values_list('kind').annotate(n=Count('id')) if queued else ()):
+        queued_by_kind[task_kind] = n
     out_kinds = {}
     for kind in kinds:
         able = [e for e in live if kind in e.caps and not (builtin_only_kind(kind) and not e.builtin)]
@@ -1590,7 +1591,7 @@ def planner_capacity(kinds, now=None):
             free += room
         out_kinds[kind] = {'sentinels': len(able), 'slots': slots, 'free': free}
     return {'live': len(live), 'free_total': sum(max(0, e.max_concurrent - held.get(e.agent.pk, 0)) for e in live), 'held_total': sum(held.values()),
-            'queued_total': sum(queued.values()), 'queued_planner': fresh.filter(priority=PLANNER_PRIORITY).count(), 'queued': queued,
+            'queued_total': sum(queued_by_kind.values()), 'queued_planner': fresh.filter(priority=PLANNER_PRIORITY).count() if queued else 0, 'queued': queued_by_kind,
             'agents': [{'id': e.agent.pk, 'name': e.agent.name, 'slots': e.max_concurrent, 'held': held.get(e.agent.pk, 0), 'builtin': e.builtin} for e in live],
             'kinds': out_kinds}
 
