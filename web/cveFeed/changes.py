@@ -145,12 +145,11 @@ def _current_states(scan):
 
 def _reopen_restored(project, hosts, seen=()):
     """A scan found these archived hosts again and lifted their archive: what archiving them closed is open again (cveFeed.archive_closure), for this
-    scan's own results to confirm or close. So is what closed when a host of ``seen`` (every host the scan holds) had left the inventory."""
+    scan's own results to confirm or close. So is what closed when a host of ``seen`` (every host the scan holds) had left the inventory. One read
+    of the project's host closures for all of them (``archive_closure.reopen_scan``), not three per restored host."""
     from cveFeed import archive_closure
-    for host in hosts:
-        archive_closure.reopen_quietly(project, host)
     try:
-        archive_closure.reopen_returned(project, seen)
+        archive_closure.reopen_scan(project, hosts, seen)
     except Exception:  # a finding reported again by a later scan or check reopens by itself
         logger.exception('could not reopen the findings of hosts back in the inventory of project %s', project)
 

@@ -202,13 +202,42 @@ class GoneClosureTests(Base):
         self.ftp.refresh_from_db()
         self.assertEqual(self.ftp.remediation_status, 'accepted_risk')
 
+    def fresh_cache(self):
+        """An in-memory cache of the test's own, for the close_gone throttle: never the shared one another run may have filled."""
+        from django.core.cache.backends.locmem import LocMemCache
+        cache = LocMemCache(f'close-gone-{self.id()}', {})
+        cache.clear()
+        return mock.patch('django.core.cache.cache', cache)
+
     def test_the_hygiene_run_closes_them(self):
         from cveFeed import hygiene
         review = {'infos': {}, 'mail_hosts': [], 'mail': {}, 'unknown_tls': set(), 'unknown_mail': set()}
-        with mock.patch.object(hygiene, '_remote_review', return_value=(review, False)), mock.patch('cveFeed.triage.triage_hygiene'):
+        with mock.patch.object(hygiene, '_remote_review', return_value=(review, False)), mock.patch('cveFeed.triage.triage_hygiene'), \
+                self.fresh_cache():
             hygiene.run_hygiene(self.domain.pk)
         self.ftp.refresh_from_db()
         self.assertNotEqual((self.ftp.status, self.ftp.remediation_status), ('open', 'open'))  # resolved by the run or closed as gone: not open
+
+
+    def test_the_hygiene_runs_of_a_project_close_gone_hosts_once_until_a_scan_finishes(self):
+        # every hygiene run of every target recomputed the whole project: up to 500 a day from the sweep alone
+        from cveFeed import hygiene
+        review = {'infos': {}, 'mail_hosts': [], 'mail': {}, 'unknown_tls': set(), 'unknown_mail': set()}
+        with mock.patch.object(hygiene, '_remote_review', return_value=(review, False)), mock.patch('cveFeed.triage.triage_hygiene'), \
+                self.fresh_cache(), mock.patch.object(archive_closure, 'close_gone_quietly') as closer:
+            hygiene.run_hygiene(self.domain.pk)
+            hygiene.run_hygiene(self.domain.pk)
+            self.assertEqual(closer.call_count, 1)
+            self.assertEqual(closer.call_args.args, ([self.project.pk],))
+            self.scan(timezone.now())  # a scan of the project finished: what is gone may have changed
+            hygiene.run_hygiene(self.domain.pk)
+            self.assertEqual(closer.call_count, 2)
+            hygiene.run_hygiene(self.domain.pk)
+            self.assertEqual(closer.call_count, 2)
+
+    def test_the_gone_closure_runs_when_the_cache_cannot_answer(self):
+        with mock.patch('django.core.cache.cache.add', side_effect=ConnectionError('down')):
+            self.assertTrue(archive_closure.close_gone_due(self.project.pk))
 
 
 class SituationTests(Base):

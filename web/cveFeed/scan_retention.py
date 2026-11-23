@@ -9,7 +9,10 @@ the inventory tables only grew. A scan older than ``CVENGINE_SCAN_HISTORY_RETENT
   scans after it are what every listing, count and match reads;
 * it is one of the newest ``KEEP_LATEST`` scans of its domain, whatever their age (a domain scanned rarely keeps its last few);
 * a person worked on something in it: a finding with a remediation status other than open, a note, an assignee, a comment or an
-  audit event (including a change later reverted to open).
+  audit event (including a change later reverted to open). The engine's own closures and reopenings are not a person's work
+  (``_engine_q``): a status set with nobody in ``remediation_by`` and a note that is only the engine's lines (``closure.ENGINE_LINES``: an
+  archive or gone closure, a duplicate or alias fold, a fixed version read, an automatic reopening), and an audit event the engine wrote
+  (no actor, an ``after.by`` marker). They used to count, so one archive or gone closure of a host kept every old scan that held it for good.
 
 The work is done in small steps (one scan per transaction) inside a time budget, so a large backlog is cleared over several runs and no run
 holds a long lock. IP addresses, ports and technologies that only the deleted scans used are left in place."""
@@ -17,6 +20,8 @@ import logging
 import os
 import time
 from datetime import timedelta
+from functools import reduce
+from operator import or_
 
 from django.db import transaction
 from django.db.models import Q
@@ -44,14 +49,27 @@ def retention_days(environ=None):
     return max(MIN_DAYS, days)
 
 
+def _engine_q():
+    """The rows whose note is only the engine's: it starts with one of its lines (``closure.ENGINE_LINES``) and no later line is a person's.
+    A person's text below an engine line (a note kept under an archive closure) still counts as work."""
+    from cveFeed.closure import ENGINE_LINES
+    starts = reduce(or_, (Q(remediation_note__startswith=line) for line in ENGINE_LINES))
+    other_line = r'\n(?!(' + '|'.join(ENGINE_LINES) + r'))'  # the lines hold letters, spaces and colons only: nothing to escape
+    return starts & ~Q(remediation_note__regex=other_line)
+
+
 def _worked(model, kind, scan_field):
-    """Lazy scan-id subquery for findings with any human work, including audit history later reverted to open."""
+    """Lazy scan-id subquery for findings with any human work, including audit history later reverted to open. The engine's own closures
+    are not work (see the module text)."""
     from django.db.models import Exists, OuterRef
     from cveFeed.models import FindingAuditEvent, FindingComment
     comments = FindingComment.objects.filter(finding_kind=kind, finding_id=OuterRef('pk'))
-    audit = FindingAuditEvent.objects.filter(finding_kind=kind, finding_id=OuterRef('pk'))
+    audit = (FindingAuditEvent.objects.filter(finding_kind=kind, finding_id=OuterRef('pk'))
+             .exclude(actor__isnull=True, after__has_key='by'))  # the engine's own events: no actor, and its ``by`` marker
+    engine = _engine_q()
+    by_person = Q(remediation_by__isnull=False) | ~engine
     return (model.objects.filter(**{f'{scan_field}__isnull': False})
-            .filter(~Q(remediation_status='open') | ~Q(remediation_note='') | Q(assignee__isnull=False)
+            .filter(~Q(remediation_status='open') & by_person | ~Q(remediation_note='') & ~engine | Q(assignee__isnull=False)
                     | Q(Exists(comments)) | Q(Exists(audit)))
             .values(scan_field))
 
