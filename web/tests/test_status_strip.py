@@ -28,7 +28,7 @@ class StatusStripTests(SimpleTestCase):
 
     def test_the_strip_is_forty_pixels_with_a_count_and_a_details_button(self):
         self.assertIn('.sb-strip{display:flex;align-items:center;gap:var(--s-3);height:40px', CSS)
-        self.assertIn('`${items.length} notices`', STRIP)
+        self.assertIn('`${total} notices`', STRIP)  # every notice, also the alerts folded behind "N more alerts" (statusstrip-logic.js noticeCount)
         self.assertIn('"Details"', STRIP)
         self.assertIn('"aria-expanded"', STRIP)
         self.assertIn('details.hidden = !open', STRIP)
