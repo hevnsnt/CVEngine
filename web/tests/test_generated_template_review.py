@@ -238,7 +238,9 @@ class ReviewReportTests(World):
         self.assertFalse(error, data)
         self.assertEqual(len(data['hits']), 2)
         self.assertEqual(call(self.t_root_ro, 'GET', f'/api/v1/generated-templates/{self.tmpl.pk}/review')[0], 200)
-        error, _ = tool_call(self.t_root, 'review_generated_template', {'id': self.tmpl.pk, 'verdict': 'retire', 'reason': 'x'})
+        error, message = tool_call(self.t_root, 'review_generated_template', {'id': self.tmpl.pk, 'verdict': 'retire', 'reason': 'x'})
+        self.assertTrue(error)
+        self.assertIn('unknown argument(s): reason, verdict', message)  # refused, not silently ignored
         self.tmpl.refresh_from_db()
         self.assertEqual(self.tmpl.status, 'valid')  # the read tool takes no verdict
 

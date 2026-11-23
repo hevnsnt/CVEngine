@@ -6,7 +6,8 @@ and how long it took. Never the result: a result is the data itself, and the log
 
 Left out: the heartbeats (``agent_heartbeat``, ``sentinel_heartbeat``), which an agent sends every minute and which change nothing, and a long poll
 for work that came back with none (``get_next_task``, ``get_next_sentinel_task``), which a waiting agent repeats all day. A poll that hands out a
-task, and any call that fails, is kept.
+task, and any call that fails, is kept: one cut off by the database statement timeout as ``TIMEOUT_ERROR`` and one that crashed as
+``INTERNAL_ERROR`` (the traceback stays in the server log).
 
 Recording never fails a call: a database error here is logged and the agent still gets its answer."""
 import json
@@ -19,6 +20,9 @@ POLLS = frozenset(('get_next_task', 'get_next_sentinel_task'))
 STRING_CHARS = 200  # each argument string is cut to this
 ARGUMENT_CHARS = 2000  # the whole argument record, as JSON
 PROJECT_KEYS = ('slug', 'project', 'project_slug')
+# the error kept for a call that never answered normally: the History's Timed out filter matches the first one's prefix
+TIMEOUT_ERROR = 'timeout: the database statement ran past the web limit (CVENGINE_WEB_STATEMENT_TIMEOUT_MS)'
+INTERNAL_ERROR = 'internal error'
 
 
 def worth_keeping(tool, ok, result):

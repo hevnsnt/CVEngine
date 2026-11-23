@@ -619,17 +619,27 @@ def _http_check(url, signature, unattended=True):
     return _check('http_head', 'HTTP banner check (HEAD, GET only if HEAD is refused)', argv, shlex.join(argv), url, url, signature, 15, url=url, unattended=bool(unattended))
 
 
+def _prefetched(sub):
+    """Whether ``sub`` carries what ``_probe_plan`` reads of it already (``host_context.prefetch_hosts``, its target_domain): read again otherwise."""
+    cache = getattr(sub, '_prefetched_objects_cache', None) or {}
+    return (sub is not None and 'target_domain' in sub._state.fields_cache and all(k in cache for k in ('technologies', 'ip_addresses', 'waf'))
+            and all('ports' in (getattr(ip, '_prefetched_objects_cache', None) or {}) for ip in cache['ip_addresses']))
+
+
 def _probe_plan(finding, evidence):
     """The version and identity probes for a CVE match: the matched product's own lead first (a version-less match, or a version a probe
-    can confirm or refute), then the host's other unversioned products. Chosen by rule, with no AI."""
+    can confirm or refute), then the host's other unversioned products. Chosen by rule, with no AI. Inside ``run_validation``'s read of one
+    finding the host was just read with its addresses, ports, technologies and WAF rows, and its context (with the edge) was built from the
+    same rows: both are used instead of reading them again."""
     from cveFeed import host_context, probes
     from startScan.models import Subdomain
-    sub = Subdomain.objects.filter(pk=finding.subdomain_id).prefetch_related('technologies', 'ip_addresses__ports', 'waf').select_related(
-        'target_domain').first()
+    sub = finding.subdomain if _prefetched(getattr(finding, 'subdomain', None)) else Subdomain.objects.filter(pk=finding.subdomain_id).prefetch_related(
+        'technologies', 'ip_addresses__ports', 'waf').select_related('target_domain').first()
     lead = {'name': finding.matched_product, 'source': finding.source}
     if finding.source == 'port' and evidence.get('port') and evidence.get('ip'):
         lead.update(ip=evidence['ip'], port=evidence['port'])
-    edge = host_context.edge_for(sub, sub.target_domain.project_id)['fronted']
+    context = (triage._CONTEXT_MEMO.get() or {}).get(sub.pk) if sub is not None else None
+    edge = context['edge']['fronted'] if context and 'edge' in context else host_context.edge_for(sub, sub.target_domain.project_id)['fronted']
     if finding.matched_version:
         # the version is stated, and nmap_sv or the front page already re-read it: only the probes that tell look-alike products apart add anything
         return probes.plan_for_host(sub, [lead], edge_fronted=edge, wanted=probes.IDENTITY_PROBES)
@@ -1611,30 +1621,48 @@ def ran_today(project_id=None):
     return budget.reserved if budget else _legacy_ran_today(project_id)
 
 
+class _Refused(Exception):
+    """A cap of ``_reserve_validation_check`` is reached: rolls back the half of the reservation already made."""
+
+
 def _reserve_validation_check(project_id):
     """Reserve global/project capacity atomically before each actual check.
 
-    The global validation-day row serializes workers. Failures and worker loss
-    consume capacity; no network work runs inside the transaction. An accounting
-    database failure propagates before the runner, so reservations fail closed.
+    Each day row is raised by one conditional UPDATE (``reserved < cap``), the
+    project row first and the global row last, in one short transaction: the
+    global row is locked only from its own UPDATE to the commit, never across a
+    read and a write, and a second worker that waits on it reads the committed
+    count again before it adds its own (PostgreSQL re-checks the condition on
+    the row it waited for), so the caps hold exactly. When a cap is reached the
+    transaction rolls back and neither row moves. The day rows are created only
+    when an UPDATE found none (the first check of the day), seeded as before.
+    Failures and worker loss consume capacity; no network work runs inside the
+    transaction. An accounting database failure propagates before the runner,
+    so reservations fail closed.
     """
     from django.db import transaction
+    from django.db.models import F
     from cveFeed.models import ValidationBudget
     day = _today().date()
-    with transaction.atomic():
-        global_budget, _ = ValidationBudget.objects.get_or_create(
-            day=day, scope='global', defaults={'reserved': _legacy_ran_today})
-        global_budget = ValidationBudget.objects.select_for_update().get(pk=global_budget.pk)
-        project_budget, _ = ValidationBudget.objects.get_or_create(
-            day=day, scope=f'project:{project_id}', defaults={'reserved': lambda: _legacy_ran_today(project_id)})
-        if (global_budget.reserved >= cap('VALIDATE_MAX_PER_DAY')
-                or project_budget.reserved >= cap('VALIDATE_MAX_PER_PROJECT_DAY')):
-            return False
-        global_budget.reserved += 1
-        project_budget.reserved += 1
-        global_budget.save(update_fields=['reserved'])
-        project_budget.save(update_fields=['reserved'])
-    return True
+    limits = ((f'project:{project_id}', cap('VALIDATE_MAX_PER_PROJECT_DAY')), ('global', cap('VALIDATE_MAX_PER_DAY')))
+    for attempt in range(2):
+        try:
+            with transaction.atomic():
+                for scope, limit in limits:
+                    if not ValidationBudget.objects.filter(day=day, scope=scope, reserved__lt=limit).update(reserved=F('reserved') + 1):
+                        raise _Refused
+            return True
+        except _Refused:
+            if attempt:
+                return False
+            # a row may be missing (the first check of the day): the global row first, then the project row, each seeded with the
+            # upgrade-day count, as the first reservation always made them
+            rows = {'global': ValidationBudget.objects.get_or_create(day=day, scope='global', defaults={'reserved': _legacy_ran_today})[0],
+                    limits[0][0]: ValidationBudget.objects.get_or_create(day=day, scope=limits[0][0],
+                                                                         defaults={'reserved': lambda: _legacy_ran_today(project_id)})[0]}
+            if any(rows[scope].reserved >= limit for scope, limit in limits):
+                return False  # a cap is reached (a count never goes down within its day)
+    return False
 
 
 LIBRARY_READ = 'library_read'  # the step kind of cvENGINE's own read of a library's served file (``library_step``); never a runnable check
@@ -1760,7 +1788,8 @@ def _adopt(row, check):
     """The step a sibling finding (the same host and evidence, another scan's row) already recorded for this check, when the ledger says
     it ran recently: so a second row does not run the check again nor lose the result."""
     from cveFeed.models import Triage
-    for other in Triage.objects.filter(project_id=row.project_id, host=row.host, signature=row.signature).exclude(pk=row.pk):
+    for other in (Triage.objects.filter(project_id=row.project_id, host=row.host, signature=row.signature).exclude(pk=row.pk)
+                  .only('validation_steps', 'validation_evidence', 'validation_status', 'validated_at')):  # what is adopted: not the other JSON
         for step in other.validation_steps or []:
             if (step.get('kind'), step.get('target')) == (check['kind'], check['target']):
                 row.validation_steps = [s for s in (row.validation_steps or []) if (s.get('kind'), s.get('target')) != (
@@ -1771,6 +1800,29 @@ def _adopt(row, check):
                 row.validation_status, row.validated_at = rollup(row.validation_steps), other.validated_at
                 return True
     return False
+
+
+def _read_finding(row, unattended=True):
+    """``(finding, subject)`` for one Triage row, read fresh for it: ``(None, None)`` when its finding is gone, ``(finding, None)`` when the
+    finding's current signature is no longer the row's. The finding is described the way ``triage.track`` describes a chunk (``triage._prime``:
+    the host context, the evidence port and the standing in one read per table), and ``subject_for`` reuses the host it read (addresses, ports,
+    technologies, WAF rows, the edge) instead of reading it twice more. Nothing read here is kept past this row: a check run on this row, or on
+    an earlier one, changes what the next row's host context says."""
+    token = triage._CONTEXT_MEMO.set({})
+    finding = None
+    try:
+        findings = triage.load_findings([row])
+        if not findings:
+            return None, None
+        finding = findings[0]
+        triage._prime(findings)
+        if triage.effective_signature(triage.describe(finding), row.review_nonce) != row.signature:
+            return finding, None
+        return finding, subject_for(row, finding, unattended=unattended)
+    finally:
+        if finding is not None:
+            finding.__dict__.pop('_worked_on', None)  # read for this description only, as ``triage.track`` does: a later has_standing asks again
+        triage._CONTEXT_MEMO.reset(token)
 
 
 def run_validation(project_id, triage_ids, scan_id=None, runners=None, template_for=None, selected_kinds=None, unattended=True, budget_seconds=None):
@@ -1817,13 +1869,11 @@ def run_validation(project_id, triage_ids, scan_id=None, runners=None, template_
             handled += 1
             if row.next_attempt_at and row.next_attempt_at > now:
                 continue
-            findings = triage.load_findings([row])
-            if not findings:
+            finding, subject = _read_finding(row, unattended)
+            if finding is None:
                 continue
-            finding = findings[0]
-            if triage.effective_signature(triage.describe(finding), row.review_nonce) != row.signature:
+            if subject is None:
                 continue  # the evidence moved since: triage resets the row and validation follows the new signature
-            subject = subject_for(row, finding, unattended=unattended)
             if row.host and row.host.strip().lower().rstrip('.') in narrowed:  # held only under a target that is now exactly one host (=example.com)
                 row.validation_status, row.validation_steps = 'skipped_blocked', [{
                     'kind': 'scope', 'label': 'scope check', 'display': '', 'target': row.host, 'ran_at': now.isoformat(),

@@ -11,8 +11,9 @@ the inventory tables only grew. A scan older than ``CVENGINE_SCAN_HISTORY_RETENT
 * a person worked on something in it: a finding with a remediation status other than open, a note, an assignee, a comment or an
   audit event (including a change later reverted to open).
 
-The work is done in small steps (one scan per transaction) inside a time budget, so a large backlog is cleared over several runs and no run
-holds a long lock. IP addresses, ports and technologies that only the deleted scans used are left in place."""
+The work is done in small steps (one scan at a time, the rows under it in bounded batches of their own transactions, see
+``cveFeed.bounded_delete``) inside a time budget, so a large backlog is cleared over several runs and no run holds a long lock. IP
+addresses, ports and technologies that only the deleted scans used are left in place."""
 import logging
 import os
 import time
@@ -96,23 +97,25 @@ def run(now=None, days=None, dry_run=False, budget_seconds=DEFAULT_BUDGET_SECOND
     if days is None:
         return {'days': None, 'scans': 0, 'complete': True}
     now = now or timezone.now()
-    started, deleted, skipped, kept = clock(), 0, set(), worked_scans()
+    from cveFeed import bounded_delete
+    started, deleted, last, kept = clock(), 0, 0, worked_scans()
     while True:
-        batch = list(candidates(now, days, kept).exclude(pk__in=skipped).order_by('id').values_list('id', 'domain_id')[:200])
+        # keyset on id: every candidate up to ``last`` was deleted, kept as one of its domain's newest or (dry run) counted
+        batch = list(candidates(now, days, kept).filter(pk__gt=last).order_by('id').values_list('id', 'domain_id')[:200])
         if not batch:
             return {'days': days, 'scans': deleted, 'complete': True}
+        last = batch[-1][0]
         newest = _newest({domain_id for _, domain_id in batch})
         eligible = [pk for pk, _ in batch if pk not in newest]
-        skipped.update(pk for pk, _ in batch if pk in newest)
         if dry_run:
             deleted += len(eligible)
-            skipped.update(eligible)  # counted once
             if len(batch) < 200:
                 return {'days': days, 'scans': deleted, 'complete': True}
             continue
         for pk in eligible:
             if clock() - started > budget_seconds:
                 return {'days': days, 'scans': deleted, 'complete': False}
+            bounded_delete.drain_below(ScanHistory, [pk])  # its hosts, findings, matches and activity, a bounded batch per transaction
             with transaction.atomic():
                 ScanHistory.objects.filter(pk=pk).delete()
             deleted += 1
