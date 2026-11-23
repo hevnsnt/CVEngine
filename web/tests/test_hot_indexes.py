@@ -73,6 +73,33 @@ class DetectionProgressUsesItsIndexTests(TestCase):
         self.assertEqual((got['cves'], got['rules'], got['ai'], got['manual']), (5, 1, 1, 1))
 
 
+class StatedFeaturesUseTheFilledIndexTests(TestCase):
+    """``service_features.index`` reads the people's records that state ``requires_features``. The key test alone has no index, so it read the
+    ``strategy`` JSON of every detection (about 1.1 s at 59,000 rows on production, each time the CVE table changed); the same rows are never empty,
+    and saying so lets the partial index of the non-empty records serve it (0.06 ms)."""
+
+    def setUp(self):
+        from cveFeed import service_features
+        service_features.reset_index()
+        self.addCleanup(service_features.reset_index)
+
+    def test_the_read_uses_the_index_of_the_records_that_have_checks(self):
+        from cveFeed import service_features
+        self.assertIn('cvedetection_source_filled_idx', plan(service_features.stated_records()))
+
+    def test_the_same_records_are_read(self):
+        from cveFeed import service_features
+        rows = (('manual', {'summary': 's', 'requires_features': {'http2': True}}), ('manual', {'summary': 's'}), ('manual', {}),
+                ('rules', {'summary': 's', 'requires_features': {'http2': True}}), ('ai', {'requires_features': {'http2': True}}))
+        made = []
+        for i, (source, strategy) in enumerate(rows):
+            entry = CVEEntry.objects.create(cve_id=f'CVE-2099-6{i:03d}', cvss=5.0, published_at=timezone.now(), affected=[])
+            made.append(CVEDetection.objects.create(cve_entry=entry, source=source, strategy=strategy))
+        before = set(CVEDetection.objects.filter(source='manual', strategy__has_key='requires_features').values_list('pk', flat=True))
+        self.assertEqual(before, {made[0].pk})
+        self.assertEqual(set(service_features.stated_records().values_list('pk', flat=True)), before)
+
+
 class IndexMigrationsAreConcurrentTests(TestCase):
     def test_both_index_migrations_build_concurrently_outside_a_transaction(self):
         """Review 621 defect 6: a large-table index is built CONCURRENTLY in a non-atomic migration, so an upgrade never blocks the feed or the Sentinels."""

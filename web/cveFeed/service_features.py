@@ -302,6 +302,15 @@ def reset_index():
     _INDEX.update(checked=0.0, stamp=None, value={})
 
 
+def stated_records():
+    """The detection records in which a person states ``requires_features``: a person's record only (source manual), because the rules' own value
+    is the rule in ``index`` and a model's answer never sets one (detection.merge_strategies). A record that states it is never empty, so the
+    ``exclude`` keeps the same rows and lets the partial index ``cvedetection_source_filled_idx`` (source, non-empty strategy) serve the read: the
+    key test alone has no index and read the ``strategy`` JSON of every detection (a sequential scan of about 1.1 s at 59,000 rows)."""
+    from cveFeed.models import CVEDetection
+    return CVEDetection.objects.filter(source='manual', strategy__has_key='requires_features').exclude(strategy={})
+
+
 def index():
     """``{CVEEntry id: requirements}`` for every CVE that needs a feature: one query for the CVEs whose words name one
     (``detection_classes.FEATURE_PREFILTER``, then the rules themselves) and one for the people's detection records that state
@@ -321,8 +330,7 @@ def index():
     if stamp == _INDEX['stamp']:
         _INDEX['checked'] = time.monotonic()
         return _INDEX['value']
-    # a person's record only (source manual): the rules' own value is the rule below, and a model's answer never sets one (detection.merge_strategies)
-    stated = dict(CVEDetection.objects.filter(source='manual', strategy__has_key='requires_features').values_list('cve_entry_id', 'strategy'))
+    stated = dict(stated_records().values_list('cve_entry_id', 'strategy'))
     words = Q(title__iregex=FEATURE_PREFILTER) | Q(original_description__iregex=FEATURE_PREFILTER) | Q(summary__iregex=FEATURE_PREFILTER)
     out = {}
     for pk, title, description, summary in CVEEntry.objects.filter(words | Q(pk__in=list(stated))).values_list(
