@@ -94,7 +94,8 @@ if (mount) {
   async function load() {
     const current = ++requestNumber;
     try {
-      const data = await api("GET", `/cve/api/settings/ai/usage?days=${days.value}`);
+      // cost=0: the cost by stage and day (most of the answer) is for API callers; nothing on this page draws it
+      const data = await api("GET", `/cve/api/settings/ai/usage?days=${days.value}&cost=0`);
       if (current !== requestNumber || !mount.isConnected) return;
       // the blocks are built aside and handed to renderKeepingState: what the person opened, scrolled or typed in the last draw stays, and a block whose
       // markup did not change is not touched (static/cve/keep-state.js)

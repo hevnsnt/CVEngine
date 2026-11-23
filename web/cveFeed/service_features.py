@@ -305,14 +305,45 @@ INDEX_CACHE_TTL = 7 * 24 * 3600
 INDEX_FULL_SCAN = 5000
 
 
+STAMP_KEY = 'cve:service-features-stamp'
+STAMP_SECONDS = 60  # how long every process shares one read of the stamp below
+
+
 def reset_index():
     """Forget the index, this process's copy and the shared one: the next ``index()`` builds it from the whole table."""
     from django.core.cache import cache
     _INDEX.update(checked=0.0, stamp=None, value={}, seen=None, stated=None)
     try:
         cache.delete(INDEX_CACHE_KEY)
+        cache.delete(STAMP_KEY)
     except Exception:
         logger.warning('could not clear the shared service feature index', exc_info=True)
+
+
+def _stamp():
+    """``(CVEs, newest CVE sync, detection records, newest record change)``: what ``index`` compares to know whether to read the CVEs again. The CVE half
+    is a pass over the whole catalogue (``synced_at`` has no index: 18,000 buffers and 150 to 330 ms on 59,000 CVEs), and every worker process asked it
+    once a minute for itself. It is now read once for all of them and shared through the cache for ``STAMP_SECONDS``, so a change to the catalogue or a
+    detection record reaches ``index`` within ``INDEX_CHECK + STAMP_SECONDS`` (two minutes; one before). ``reset_index`` forgets it. Without a cache it
+    is read every time, as before."""
+    from django.core.cache import cache
+    from django.db.models import Count, Max
+
+    from cveFeed.models import CVEDetection, CVEEntry
+    try:
+        got = cache.get(STAMP_KEY)
+    except Exception:  # noqa: BLE001 - a cache outage reads the database
+        got = None
+    if got is not None:
+        return tuple(got)
+    entries = CVEEntry.objects.aggregate(n=Count('id'), latest=Max('synced_at'))
+    detections = CVEDetection.objects.aggregate(n=Count('id'), latest=Max('updated_at'))
+    got = (entries['n'], entries['latest'], detections['n'], detections['latest'])
+    try:
+        cache.set(STAMP_KEY, got, STAMP_SECONDS)
+    except Exception:  # noqa: BLE001
+        pass
+    return got
 
 
 def _seen():
@@ -371,14 +402,11 @@ def index():
     import time
 
     from django.core.cache import cache
-    from django.db.models import Count, Max
 
     from cveFeed.models import CVEDetection, CVEEntry
     if _INDEX['checked'] and time.monotonic() - _INDEX['checked'] < INDEX_CHECK:
         return _INDEX['value']
-    entries = CVEEntry.objects.aggregate(n=Count('id'), latest=Max('synced_at'))
-    detections = CVEDetection.objects.aggregate(n=Count('id'), latest=Max('updated_at'))
-    stamp = (entries['n'], entries['latest'], detections['n'], detections['latest'])
+    stamp = _stamp()
     if stamp == _INDEX['stamp']:
         _INDEX['checked'] = time.monotonic()
         return _INDEX['value']
