@@ -51,7 +51,7 @@ class Migration(migrations.Migration):
     ``DROP INDEX CONCURRENTLY IF EXISTS uniq_sub_scan_dom_name;`` and ``migrate`` again."""
 
     atomic = False
-    dependencies = [('startScan', '0028_subdomain_technology_source')]
+    dependencies = [('startScan', '0029_scan_done_indexes')]
 
     operations = [
         migrations.RunPython(merge_duplicate_hosts, migrations.RunPython.noop, atomic=True),
