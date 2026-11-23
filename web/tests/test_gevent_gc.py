@@ -247,3 +247,53 @@ class FrozenStartupTests(SimpleTestCase):
     def test_publishing_never_fails_the_timer(self):
         with mock.patch.object(lane_memory, 'lane_name', return_value='classic'), mock.patch('django.core.cache.cache.set', side_effect=OSError('redis down')):
             gevent_gc.publish()
+
+
+class YoungTickTests(SimpleTestCase):
+    """On Python 3.14.0 to 3.14.4 ``gc.collect(1)`` is a step of the incremental collector, which may collect nothing: the young tick collects generation 0 there."""
+
+    def setUp(self):
+        self.was_enabled = gc.isenabled()
+        self.addCleanup(lambda: gc.enable() if self.was_enabled else gc.disable())
+        _fresh_state(self)
+        gc.disable()
+
+    def test_the_generation_of_a_young_tick_follows_the_python_version(self):
+        for version, generation in (((3, 12, 3), 1), ((3, 13, 7), 1), ((3, 14, 0), 0), ((3, 14, 4), 0), ((3, 14, 5), 1), ((3, 15, 0), 1)):
+            self.assertEqual(gevent_gc.young_generation(version), generation, version)
+        self.assertEqual(gevent_gc.YOUNG_GENERATION, gevent_gc.young_generation())
+
+    def test_a_young_tick_collects_the_young_generation_and_a_full_tick_everything(self):
+        with mock.patch.object(gc, 'collect', return_value=0) as collect, mock.patch.object(gevent_gc, 'publish'):
+            gevent_gc.tick()
+            gevent_gc._state['ticks'] = gevent_gc.FULL_EVERY - 1
+            gevent_gc.tick()
+        self.assertEqual([c.args[0] for c in collect.call_args_list], [gevent_gc.YOUNG_GENERATION, 2])
+
+    def test_every_young_tick_frees_the_sockets_left_in_cycles_beside_a_large_live_heap(self):
+        # the classic lane's shape: an unfrozen heap the worker holds, and sockets dropped inside reference cycles between two ticks. With gc.collect(1) on
+        # Python 3.14.4 none of them was freed for 200 ticks in a row, so each socket waited for the full collection, up to 10 minutes.
+        import os
+        import socket
+
+        class Holder:
+            pass
+
+        def fds():
+            return len(os.listdir('/proc/self/fd')) if os.path.isdir('/proc/self/fd') else 0
+
+        gevent_gc.freeze_after_load()
+        live = [{'i': i} for i in range(150_000)]  # noqa: F841 - held on purpose
+        start = fds()
+        worst = 0
+        with mock.patch.object(gevent_gc, 'publish'):
+            for _ in range(30):
+                for _ in range(5):
+                    h = Holder()
+                    h.sock, h.me = socket.socket(), h
+                    del h
+                gevent_gc._state['ticks'] = 0  # young ticks only
+                gevent_gc.tick()
+                worst = max(worst, fds() - start)
+        if start:
+            self.assertLessEqual(worst, 5)
