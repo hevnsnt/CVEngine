@@ -165,14 +165,16 @@ def containers(now=None, client=None):
 # --- queues -------------------------------------------------------------------------------------------------------------------------
 
 def _oldest_db():
-    """How long the oldest queued scan, host assessment and Sentinel task has waited, from the database, one row each. Reused for a minute."""
+    """How long the oldest queued scan (one that waits for a worker, ``counts.waiting_scans``), host assessment and Sentinel task has waited, from the
+    database, one row each. Reused for a minute."""
     from agentapi.models import SentinelTask
     from cveFeed.models import HostAssessment
-    from startScan.models import ScanHistory
+    from cveFeed import counts
     now = timezone.now()
     out = {}
     with _bounded():
-        for name, query, field in (('scan', ScanHistory.objects.filter(scan_status=-1).order_by('id'), 'start_scan_date'),
+        # the scans that wait for a worker: a queued row nothing will start (counts.stuck_queued_q) is not a wait, and the reaper closes it
+        for name, query, field in (('scan', counts.waiting_scans(now=now).order_by('id'), 'start_scan_date'),
                                    ('assessment', HostAssessment.objects.filter(status='queued').order_by('created_at'), 'created_at'),
                                    ('sentinel_task', SentinelTask.objects.filter(status='queued').order_by('created_at'), 'created_at')):
             try:

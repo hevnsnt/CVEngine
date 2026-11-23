@@ -162,8 +162,11 @@ def redispatch_queued_scans(now=None, live=None):
         return 0
     client = getattr(resources.get_store(), 'r', None)
     queued = 0
+    from cveFeed.discovery import HOST_PIPELINE_TASK
+    # a host pipeline row is started by the task that created it and cannot be sent again as a discovery (that would scan the whole target instead of
+    # its few hosts); one left queued is closed by expire_stuck_queued
     for scan in ScanHistory.objects.filter(scan_status=QUEUED, start_scan_date__lt=now - timedelta(minutes=REDISPATCH_SCAN_AFTER_MINUTES)
-                                           ).select_related('domain').order_by('id')[:50]:
+                                           ).exclude(tasks__contains=[HOST_PIPELINE_TASK]).select_related('domain').order_by('id')[:50]:
         if scan.id in live or scan.celery_ids:
             continue
         key = f'cvengine:scan:redispatch:{scan.pk}'
@@ -219,6 +222,49 @@ def expire_orphaned_running(now=None, live=None):
         if n:
             counts['HostAssessment'] = n
     return counts
+
+
+def expire_stuck_queued(now=None, found=None):
+    """Close the queued scans nothing will ever start (``counts.stuck_queued_q``): a host pipeline row whose task stopped between creating it and starting it,
+    or any queued scan older than ``counts.queued_scan_limit()``. A row is closed only when the broker can say that no message for it exists anywhere
+    (``broker_recovery.live_tasks``: its scan id and its Celery ids are in no queue, unacknowledged hold or worker) and no open stage run carries it; when that
+    cannot be told nothing is closed. While scanning is paused a queued scan waits on purpose and is left alone. A closed row is marked failed (queued may
+    become failed in ``state_machines.SCAN``) with the reason in its error, the way ``expire_orphaned_running`` closes a stalled one; it is never deleted,
+    so it may still become a success if its task turns up after all. Its stage rows still queued are marked failed with it. ``found`` (``(task ids, scan
+    ids)``) is injectable for tests. Returns ``[(scan id, reason)]`` of the rows closed."""
+    from agentapi import stage_runs
+    from cveFeed import counts
+    from cveFeed.discovery import HOST_PIPELINE_TASK, QUEUED
+    from cveFeed.scan_control import pause_requested
+    from reNgine.state_machines import FAILED, SCAN
+    from startScan.models import ScanActivity, ScanHistory
+    if pause_requested():  # waiting on purpose
+        return []
+    now = now or timezone.now()
+    if found is None:
+        from cveFeed import broker_recovery
+        found = broker_recovery.live_tasks()
+    if found is None:
+        return []
+    live_ids, live_scans = found
+    limit = counts.queued_scan_limit()
+    hours = int(limit.total_seconds() // 3600)
+    rows = list(ScanHistory.objects.filter(counts.stuck_queued_q(now, limit)).only('pk', 'celery_ids', 'tasks', 'start_scan_date').order_by('id')[:200])
+    carried = stage_runs.open_scan_ids([s.pk for s in rows]) if rows else set()
+    closed = []
+    for scan in rows:
+        if scan.pk in live_scans or set(scan.celery_ids or []) & live_ids or scan.pk in carried:
+            continue
+        queued_at = scan.start_scan_date.strftime('%Y-%m-%d %H:%M UTC')
+        if HOST_PIPELINE_TASK in (scan.tasks or []):
+            reason = (f'expired: queued since {queued_at}; the worker task that creates and starts this host pipeline stopped before it started it '
+                      '(a restart or update), so nothing will ever start it')
+        else:
+            reason = f'expired: still queued after {hours} hours (since {queued_at}) and no worker message for it remains, so nothing will ever start it'
+        if SCAN.move(ScanHistory.objects.filter(pk=scan.pk), FAILED, only_from=(QUEUED,), stop_scan_date=now, error_message=reason[:290]):
+            SCAN.move(ScanActivity.objects.filter(scan_of_id=scan.pk), FAILED, only_from=(QUEUED,), field='status', time=now)
+            closed.append((scan.pk, reason))
+    return closed
 
 
 def reap(now=None):

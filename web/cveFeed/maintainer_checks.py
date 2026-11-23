@@ -222,18 +222,36 @@ def memory(signals, watchdog_restarts=None):
 
 def queue_starvation(signals, work):
     """Work of one kind waiting far longer than its normal while the workers are busy with another kind. ``work`` is what ``ops_checks`` counted:
-    ``{paused, scans_queued, assessments_running, assessments_queued, sentinel_kinds: [{kind, queued, oldest_age_seconds, typical_wait_seconds, busy_with}]}``
-    (a number it could not count is ``None``)."""
+    ``{paused, scans_queued, scans_oldest_age_seconds, scans_stuck: {count, ids, oldest_age_seconds}, assessments_running, assessments_queued,
+    sentinel_kinds: [{kind, queued, oldest_age_seconds, typical_wait_seconds, busy_with}]}`` (a number it could not count is ``None``).
+
+    Only a scan that waits for a worker can be starved. A queued row that nothing will ever start (``counts.stuck_queued_q``: a host pipeline whose task
+    stopped before it started it, or a scan queued longer than ``counts.queued_scan_limit()``) is not waiting for the workers the assessments hold, so it
+    never makes this a problem and never yields the advice to give scans more room: lowering the assessment batch would not start it. Those rows are
+    named in the facts and the text, and the reaper closes them (``reaper.expire_stuck_queued``)."""
     work = work or {}
     queues = (signals or {}).get('queues')
     oldest = (queues.get('oldest_queued') if _known(queues) else None) or {}
     scan = oldest.get('scan') if isinstance(oldest.get('scan'), dict) and oldest['scan'].get('state') == 'known' else None
+    if 'scans_oldest_age_seconds' in work and work.get('scans_queued') is not None:  # counted with the stuck rows left out, fresher than the signal
+        scan = {'state': 'known', 'queued': bool(work['scans_queued']), 'age_seconds': work['scans_oldest_age_seconds']}
     facts = {'not_read': [], 'thresholds': {'scan_seconds': SCAN_STARVED_SECONDS, 'sentinel_seconds': SENTINEL_STARVED_SECONDS, 'sentinel_factor': SENTINEL_STARVED_FACTOR,
                                               'busy_minutes': SENTINEL_BUSY_MINUTES}}
     issues = []
     read = 0
     if work.get('paused'):
         return {'state': 'ok', 'title': 'Scanning is paused', 'detail': '', 'facts': {**facts, 'paused': True}}
+    stuck = work.get('scans_stuck') if isinstance(work.get('scans_stuck'), dict) and work['scans_stuck'].get('count') else None
+    stuck_text = ''
+    if stuck:
+        facts['stuck_scans'] = {'count': stuck['count'], 'ids': list(stuck.get('ids') or []), 'oldest_age_seconds': stuck.get('oldest_age_seconds')}
+        shown = ', '.join(f'#{i}' for i in (stuck.get('ids') or [])[:10]) + (', ...' if stuck['count'] > len(stuck.get('ids') or []) else '')
+        age = f", the oldest queued {span(stuck['oldest_age_seconds'])} ago" if stuck.get('oldest_age_seconds') is not None else ''
+        stuck_text = (f"{_plural(stuck['count'], 'queued scan')} ({shown}{age}) {'are rows' if stuck['count'] != 1 else 'is a row'} that nothing will start "
+                      '(a host pipeline whose worker stopped before starting it, or a scan queued longer than any real wait), not scans waiting for a worker, '
+                      'so they are not counted here and giving scans more room would not start them. The reaper marks such a row failed with the reason '
+                      'every 15 minutes once the broker confirms that no task holds it; if they stay, the broker or the workers could not be asked '
+                      '(`docker compose logs celery` shows the reap_stuck_jobs runs)')
     running, queued = work.get('assessments_running'), work.get('assessments_queued')
     if scan is None or running is None or queued is None:
         facts['not_read'].append('scan queue')
@@ -270,9 +288,13 @@ def queue_starvation(signals, work):
     if not read:
         return unknown('neither the scan queue nor the Sentinel queue could be read, so nothing can be said about work waiting')
     if not issues:
-        return {'state': 'ok', 'title': 'No work is starved', 'detail': '', 'facts': facts}
-    text = '. '.join(i[0].upper() + i[1:] for i in issues[:3])
-    return {'state': 'problem', 'title': 'Work of one kind is waiting while workers do another', 'detail': text + '.', 'facts': facts}
+        # stuck rows alone are not starvation: an ok verdict (an open starvation alert would let the tuning lower the assessment share for them), with the
+        # rows named so the text is still true
+        return {'state': 'ok', 'title': 'No work is starved', 'detail': (stuck_text[0].upper() + stuck_text[1:] + '.') if stuck_text else '', 'facts': facts}
+    text = '. '.join(i[0].upper() + i[1:] for i in issues[:3]) + '.'
+    if stuck_text:
+        text += ' Apart from these, ' + stuck_text + '.'
+    return {'state': 'problem', 'title': 'Work of one kind is waiting while workers do another', 'detail': text, 'facts': facts}
 
 
 # --- claims refused by the rate limiter ----------------------------------------------------------------------------------------------

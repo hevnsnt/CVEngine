@@ -141,8 +141,8 @@ def over_share():
         limit = share_limit()
         if limit is None or slots_held() < limit:
             return False
-        from startScan.models import ScanHistory
-        return ScanHistory.objects.filter(scan_status=-1).exists()
+        from cveFeed import counts
+        return counts.waiting_scans().exists()  # a queued row nothing will start (counts.stuck_queued_q) waits for no slot
     except Exception:  # noqa: BLE001
         logger.debug('assessment share: could not be checked, so not limited', exc_info=False)
         return False
