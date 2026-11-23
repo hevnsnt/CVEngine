@@ -12,7 +12,8 @@
 #                                      update.sh --sentinels), else empty. With an answer it is applied; without one the automatic default applies: the host-size
 #                                      rule, and a scanner is never removed (an unattended update asks nothing and blocks on nothing).
 #   cvengine_fit_review COMPOSE...     (called by cvengine_fit_run) scripts/host-review.py --apply: settings that do not fit this host (a leftover
-#                                      DISCOVERY_CONCURRENCY pin, a container ceiling below what its service needs) are put right, backed up and logged
+#                                      DISCOVERY_CONCURRENCY pin, a container ceiling below what its service needs, Postgres memory settings still at
+#                                      the small shipped defaults) are put right, backed up and logged
 #   cvengine_fit_budget COMPOSE...     after the containers started: do the memory limits add up to more than 90 percent of the host?
 #
 # CVENGINE_HOST_MEM_MB overrides the host's memory (the tests and rehearsals fake a small host with it; nothing else sets it).
@@ -151,16 +152,20 @@ cvengine_fit_externals() {  # COMPOSE...: how many Sentinels of the owner's own 
 }
 
 cvengine_fit_review() {  # COMPOSE...: put right the settings that do not fit this host (scripts/host-review.py), never fail an update
-  local out line fixed=0
+  # CV_FIT_NO_DB_RESTART=1: the caller does not restart the database (scripts/apply-scanner-plan.sh), so the Postgres sizes are left for the next update.
+  # An update does: `up -d --no-deps db` recreates the db container once when its command line (these settings) changed.
+  local out line fixed=0 pg=0
   [[ -f scripts/host-review.py ]] && command -v python3 >/dev/null 2>&1 || return 0
-  out=$(python3 scripts/host-review.py --apply --compose-args "$@" 2>&1) || { _cv_fit_say "The host review could not run, so no setting was checked against this host."; return 0; }
+  out=$(python3 scripts/host-review.py --apply ${CV_FIT_NO_DB_RESTART:+--no-db-restart} --compose-args "$@" 2>&1) || { _cv_fit_say "The host review could not run, so no setting was checked against this host."; return 0; }
   while IFS= read -r line; do
     case $line in
       Fixed:*|Warning:*|*"was backed up first"*) _cv_fit_say "$line" ;;
     esac
     [[ $line != Fixed:* ]] || fixed=1
+    [[ $line != "Fixed: Postgres settings changed"* ]] || pg=1
   done <<<"$out"
   [[ $fixed == 0 ]] || cv_fit_short="${cv_fit_short:+$cv_fit_short; }settings that did not fit this host were put right (see the update log)"
+  [[ $pg == 0 ]] || cv_fit_short="$cv_fit_short; Postgres settings changed, the database restarts once during this update"
   return 0
 }
 

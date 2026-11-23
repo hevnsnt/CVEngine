@@ -22,7 +22,7 @@ Changing a `POSTGRES_*` value recreates the `db` container once on the next upda
 
 ## Sizing the database
 
-The `db` service starts with the values above whatever the host has, so a bigger host leaves memory unused and sorts spill to disk. Every value is a line in `.env`, and an unset line keeps today's value, so an update changes nothing until you set one. For a host with 12 GB of RAM that runs the whole stack:
+The `db` service starts with the values above whatever the host has, so a bigger host leaves memory unused and sorts spill to disk. Every value is a line in `.env`. An update sizes the first four for the host by itself (the host review's postgres rule, below): it raises only a value that is not set or still the default, never lowers one, and keeps them inside the database's container ceiling. A value you set is yours and is left. For a host with 12 GB of RAM that runs the whole stack:
 
 | Setting (`.env`) | Default | 12 GB host | Note |
 | --- | --- | --- | --- |
@@ -33,7 +33,18 @@ The `db` service starts with the values above whatever the host has, so a bigger
 | `DB_MEM_LIMIT` | none in `docker-compose.yml` | `4g` | The `db` container's ceiling, where an overlay compose file sets one (`mem_limit: "${DB_MEM_LIMIT:-...}"` for `db`); it must stay above the shared buffers plus the work memory in use. |
 | `POSTGRES_SHARED_PRELOAD_LIBRARIES` | empty | `pg_stat_statements` (optional) | Per query statistics. Run `CREATE EXTENSION IF NOT EXISTS pg_stat_statements;` once in the cvENGINE database after the restart. |
 
-Scale the first four with the memory the host can give the database. A changed value takes effect only when the database restarts: run `docker compose up -d db` (with the same `-f` files and `--env-file` as your other compose commands), which recreates the `db` container in a few seconds and keeps the data. These command line values take precedence over a value set with `ALTER SYSTEM` or in `postgresql.conf`, so move such a setting to `.env`.
+Scale the first four with the memory the host can give the database.
+
+**What the update writes.** The host review (`scripts/host-review.py`, the postgres rule) reads the memory the database can really use: its container ceiling (`DB_MEM_LIMIT` or a `mem_limit` in an overlay, after the limits rule raised one below its floor), else its share of the host after the other containers' ceilings. From that:
+
+| Setting | Written |
+| --- | --- |
+| `POSTGRES_SHARED_BUFFERS` | a quarter of that memory rounded down to 128MB, at most `2GB`, never below `256MB` |
+| `POSTGRES_EFFECTIVE_CACHE_SIZE` | the host's memory after the other containers' ceilings, at least what the database may use, at most 55 percent of the host |
+| `POSTGRES_WORK_MEM` | `16MB` from 3 GB, `8MB` from 1.5 GB, else left at `4MB` |
+| `POSTGRES_MAINTENANCE_WORK_MEM` | `256MB` from 3 GB, `128MB` from 1.5 GB, else left at `64MB` |
+
+Before it writes, it checks that shared buffers, plus work memory for 4 sort steps on each of 24 busy connections (the web server's 16 threads and the workers), plus one maintenance job fit in 90 percent of that memory, and takes smaller values until they do: the kernel kills a database that reaches its ceiling. If your own values do not fit, it says so and changes nothing. The production host this was written for (12 GB, the database held to `2g`) gets `512MB`, `3328MB`, `8MB` and `128MB`; `DB_MEM_LIMIT=4g` gets `1GB`, `16MB` and `256MB`. Each value goes into the env file Compose reads, with a comment line, after a backup (`<file>.cvengine-review-<time>`), and the update log says *Postgres settings changed, the database restarts once during this update*: the update's `docker compose up -d --no-deps db` recreates the container because its command line changed. A second run changes nothing. **Settings, Sentinels, Which scanners run** does not restart the database, so it leaves the values for the next update. The review never writes `DB_MEM_LIMIT` for this; raise the ceiling yourself and the next update sizes up a value it wrote. A changed value takes effect only when the database restarts: run `docker compose up -d db` (with the same `-f` files and `--env-file` as your other compose commands), which recreates the `db` container in a few seconds and keeps the data. These command line values take precedence over a value set with `ALTER SYSTEM` or in `postgresql.conf`, so move such a setting to `.env`.
 
 ## Ports
 
@@ -239,7 +250,7 @@ A `SCANNER_MEM_LIMIT` you set, or any `CVENGINE_BUILTIN_SCANNER`, is never chang
 
 **Updating on a small host.** The same under-7-GB rule decides one more thing about the Update button: the cold build of the server image needs about 2 GB and the workers keep the memory they grew to, so on such a host the updater stops `celery` and the built-in `scanner` for the build and starts them again right after it (`web`, `db`, `redis` and `proxy` stay up; `CVENGINE_UPDATE_STOP_CELERY=0` turns it off). It also checks the disk first (about 14 GB free for the first update to 1.4; `CVENGINE_UPDATE_MIN_FREE_MB` replaces the figure) and closes scans that are stuck "running" with no worker instead of waiting for them. All three are automatic and need no terminal: [UPDATES.md](UPDATES.md#small-hosts-disk-memory-and-stuck-scans). If you update by hand with `scripts/update.sh`, none of them applies: check `df -h "$(docker info -f '{{.DockerRootDir}}')"`, and on a small host run `docker compose stop celery scanner` before `docker compose build` and `docker compose start celery scanner` after it.
 
-**The host review** runs before anything is stopped, on every way of updating (`scripts/host-review.py`, called by `cvengine_fit_review` in `scripts/host-fit.sh`): a leftover `DISCOVERY_CONCURRENCY` pin below 4 is removed, and a database or web ceiling below what it needs on this host is raised, each with a backup and a line in the update log. See [UPGRADE.md](UPGRADE.md). Run it by hand with `python3 scripts/host-review.py` (report only) or `--apply`.
+**The host review** runs before anything is stopped, on every way of updating (`scripts/host-review.py`, called by `cvengine_fit_review` in `scripts/host-fit.sh`): a leftover `DISCOVERY_CONCURRENCY` pin below 4 is removed, a database or web ceiling below what it needs on this host is raised, and the database's memory settings still at their small defaults are sized for the memory it can use ([Sizing the database](#sizing-the-database); the database then restarts once during the update), each with a backup and a line in the update log. See [UPGRADE.md](UPGRADE.md). Run it by hand with `python3 scripts/host-review.py` (report only) or `--apply`.
 
 **The budget check** runs at the end of every update, after the containers started. It adds up the memory limits of the project's running containers and compares the sum with the host: under 90 percent it prints one line, over it prints *Memory warning* with the sum, the largest container and the setting that lowers it (`CELERY_MEM_LIMIT`, `SCANNER_MEM_LIMIT`, `WEB_MEM_LIMIT`, `BEAT_MEM_LIMIT`, `REVIEWER_MEM_LIMIT`, `DB_MEM_LIMIT`). Limits are ceilings, so a sum over the host is a risk, not a failure, and the update does not fail on it. On a 4.5 GB host with the defaults the workers' 4 GB is the largest: lower `CELERY_MEM_LIMIT` (look at what the workers really use with `docker stats` first), or choose **Use my own Sentinels only** to free the scanner's.
 
