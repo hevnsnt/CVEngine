@@ -727,3 +727,24 @@ class SameVerdictTests(SimpleTestCase):
         for case in hostile:
             with self.subTest(case=case['name']):
                 self.assertTrue(ai_checks.external_problem(case['template']).startswith('template not validated: '))
+
+
+class DraftProjectsTests(Base):
+    def test_each_project_is_read_once_however_many_matches_it_has(self):
+        """The projects a draft may be checked for: each owner once, oldest first, read as one row per project (DISTINCT), not one per match."""
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+        from cveFeed.models import CVEMatch
+        from dashboard.models import Org, Project
+        from startScan.models import Subdomain
+        from targetApp.models import Domain
+        CVEMatch.objects.create(cve_entry=self.cve, subdomain=self.subs[1])
+        CVEMatch.objects.create(cve_entry=self.cve, subdomain=Subdomain.objects.create(name='old.rt.test', target_domain=self.domain))
+        other = Project.objects.create(name='DP', slug='dp-other', insert_date=timezone.now(), org=Org.objects.create(name='DP', slug='dp-other'))
+        elsewhere = Domain.objects.create(name='dp.test', project=other, insert_date=timezone.now())
+        CVEMatch.objects.create(cve_entry=self.cve, subdomain=Subdomain.objects.create(name='a.dp.test', target_domain=elsewhere))
+        with CaptureQueriesContext(connection) as seen:
+            owners = ai_checks.draft_projects(TEMPLATE)
+        self.assertEqual(owners, sorted([self.project.pk, other.pk]))
+        self.assertTrue(any('DISTINCT' in q['sql'] and 'cveFeed_cvematch' in q['sql'] for q in seen))
+        self.assertEqual(ai_checks.draft_projects('id: nothing-like-it'), [])

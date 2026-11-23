@@ -221,8 +221,12 @@ def due(limit=PACKET_LIMIT, now=None):
     """Up to ``limit`` ``(triage, review_key)`` pairs to review now: open findings whose current key has no review, hottest first (``_due_in``).
     Each project with open findings gets an equal share of the batch (what one has too little of goes to the others), so a large project
     cannot take the whole of the daily cap while another has work."""
+    from django.db.models import Exists, OuterRef
     from cveFeed.models import Triage
-    projects = sorted(Triage.objects.filter(open_q()).exclude(kind='route_auth').order_by().values_list('project_id', flat=True).distinct())
+    from dashboard.models import Project
+    # one EXISTS per project, which stops at the project's first open finding, where a DISTINCT read every Triage row through the open check
+    open_here = Triage.objects.filter(open_q(), project_id=OuterRef('pk')).exclude(kind='route_auth')
+    projects = list(Project.objects.filter(Exists(open_here)).order_by('pk').values_list('pk', flat=True))
     now = now or timezone.now()
     picked, active = [], list(projects)
     while active and len(picked) < limit:
@@ -259,20 +263,21 @@ def heat_rank_expr():
 def _due_in(project_id, limit, now):
     """``due`` for one project, hottest first: the finding's heat (``heat_rank_expr``: fire, a KEV or exploited CVE on the host, before smoke and
     ice), then its kind (CVE matches first), then the newest. The open findings are read in pages of WINDOW in that order until ``limit`` are found
-    or none are left, so a finding is reached however many reviewed ones come before it."""
+    or none are left, so a finding is reached however many reviewed ones come before it.
+
+    The first page is one sorted read of WINDOW rows. When it is full and does not hold ``limit`` findings to hand out, the ids of the remaining
+    open findings are read once, in the same order, and walked as a cursor: each later page loads its WINDOW rows by id. The heat sort runs at
+    most twice a call, where paging by OFFSET re-ran the joins and the sort of the whole open set for every page."""
     from django.db.models import Case, IntegerField, Value, When
     from cveFeed.models import Triage
     rank = Case(*[When(kind=k, then=Value(v)) for k, v in KIND_ORDER.items()], default=Value(9), output_field=IntegerField())
-    qs = (Triage.objects.filter(open_q(), project_id=project_id).exclude(kind='route_auth').annotate(heat_rank=heat_rank_expr(), kind_rank=rank)
-          .order_by('-heat_rank', 'kind_rank', '-last_seen', '-id')
-          .only('id', 'kind', 'project_id', 'host', 'evidence_key', 'signature'))
+    base = (Triage.objects.filter(open_q(), project_id=project_id).exclude(kind='route_auth')
+            .only('id', 'kind', 'project_id', 'host', 'evidence_key', 'signature'))
+    qs = base.annotate(heat_rank=heat_rank_expr(), kind_rank=rank).order_by('-heat_rank', 'kind_rank', '-last_seen', '-id')
     picked = []
-    offset = 0
-    while len(picked) < limit:
-        rows = list(qs[offset:offset + WINDOW])
-        if not rows:
-            break
-        offset += WINDOW
+    rows = list(qs[:WINDOW])  # the first page
+    rest = None  # the ordered ids after the first page, read once when a second page is needed
+    while rows and len(picked) < limit:
         fingerprints = _fingerprints({(t.project_id, t.host) for t in rows})
         seen_all = _reviewed(rows, fingerprints)
         for triage in rows:
@@ -285,6 +290,18 @@ def _due_in(project_id, limit, now):
             picked.append((triage.pk, key))
             if len(picked) >= limit:
                 break
+        if len(picked) >= limit:
+            break
+        if rest is None:
+            if len(rows) < WINDOW:
+                break  # the first page held every open finding
+            first = {t.pk for t in rows}
+            rest = [pk for pk in qs.values_list('pk', flat=True) if pk not in first]
+        rows = []
+        while rest and not rows:
+            chunk, rest = rest[:WINDOW], rest[WINDOW:]
+            by_pk = {t.pk: t for t in base.filter(pk__in=chunk)}  # still open when read, as a re-sorted page was
+            rows = [by_pk[pk] for pk in chunk if pk in by_pk]
     return picked
 
 
@@ -899,6 +916,28 @@ def _restart_q(since):
     return None if q is None else Q(status='expired') & q
 
 
+def _recent_waits(kinds, now):
+    """``{kind: [(created_at, claimed_at), ...]}``: the newest ``WAIT_SAMPLE`` tasks of each kind created in the last day that a Sentinel claimed,
+    in one query for every kind. A task is claimed after it is created, so a claim in the last day bounds the read on the claimed tasks index
+    (``sentineltask_claimed_idx``), where a read per kind ordered by id walked the whole table back for a kind with few recent tasks."""
+    from django.db.models import F, Window
+    from django.db.models.functions import RowNumber
+    from agentapi.models import SentinelTask
+    if not kinds:
+        return {}
+    since = now - timedelta(days=1)
+    rows = (SentinelTask.objects.filter(kind__in=kinds, claimed_at__gte=since, created_at__gte=since)
+            .annotate(nth=Window(RowNumber(), partition_by=[F('kind')], order_by=F('id').desc())).filter(nth__lte=WAIT_SAMPLE)
+            .values_list('kind', 'created_at', 'claimed_at'))
+    out = {}
+    for kind, created, claimed in rows:
+        out.setdefault(kind, []).append((created, claimed))
+    return out
+
+
+WAIT_SAMPLE = 200  # the claimed tasks of a kind its typical wait is read from
+
+
 def _starvation_inputs(now, paused, live):
     """What ``maintainer_checks.queue_starvation`` needs besides the signals, counted here: the host assessments running and queued, the scans queued, and per
     Sentinel task kind the oldest queued task, what that kind normally waits (the median over its last 200 claimed tasks of the day) and the other kinds the
@@ -918,9 +957,10 @@ def _starvation_inputs(now, paused, live):
         if live:
             recent = SentinelTask.objects.filter(claimed_at__gte=now - timedelta(minutes=maintainer_checks.SENTINEL_BUSY_MINUTES)).values_list('kind', flat=True).distinct()
             claimed_lately = set(recent)
-            for row in SentinelTask.objects.filter(status='queued').values('kind').annotate(n=Count('id'), oldest=Min('created_at'))[:30]:
-                waits = sorted((c - k).total_seconds() for k, c in SentinelTask.objects.filter(kind=row['kind'], claimed_at__isnull=False, created_at__gte=now - timedelta(days=1))
-                               .order_by('-id').values_list('created_at', 'claimed_at')[:200])
+            queued = list(SentinelTask.objects.filter(status='queued').values('kind').annotate(n=Count('id'), oldest=Min('created_at'))[:30])
+            recent_waits = _recent_waits([row['kind'] for row in queued], now)
+            for row in queued:
+                waits = sorted((c - k).total_seconds() for k, c in recent_waits.get(row['kind'], ()))
                 kinds.append({'kind': row['kind'], 'queued': row['n'], 'oldest_age_seconds': int(max(0, (now - row['oldest']).total_seconds())),
                               'typical_wait_seconds': int(waits[len(waits) // 2]) if waits else None, 'busy_with': sorted(claimed_lately - {row['kind']})})
         out['sentinel_kinds'] = kinds

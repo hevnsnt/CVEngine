@@ -135,6 +135,36 @@ def _shared_inputs(project_ids):
         return None
 
 
+def _scoped_shared_inputs(project_ids):
+    """``_shared_inputs`` of these projects, read under a tenancy scope of exactly them (``tenancy.scope``), so the reads that are instance wide when
+    nothing scopes them (``inventory_counts.current_rows``: every finished scan, every target and every current host; the web hosts of every project) read
+    these projects' rows only. A project's numbers are its own rows' in either case: the rows are shared by every caller who may see the project, whatever
+    scope counted them. The scope is narrowed, never widened: ``project_ids`` are among the projects the caller may see."""
+    from tenancy import scope
+    ids = set(project_ids)
+    current = scope.current_allowed()
+    tokens = scope.set_scope(ids if current is None else ids & set(current), scope.current_user())
+    try:
+        return _shared_inputs(sorted(ids))
+    finally:
+        scope.reset_scope(tokens)
+
+
+def _uncached_ids(projects, seconds):
+    """The ids of ``projects`` (the first is the one being counted) whose row is not in the cache: those the shared numbers are read for. A row that a
+    renewal would keep is counted with them too (one more project in the grouped reads, never a missing one)."""
+    from django.core.cache import cache
+    ids = {projects[0].id}
+    for project in projects[1:]:
+        try:
+            held = cache.get(_row_keys(project)[0]) if seconds else None
+        except Exception:  # noqa: BLE001 - a cache outage only means counting it
+            held = None
+        if held is None:
+            ids.add(project.id)
+    return ids
+
+
 def _project_row(project, shared=None):
     from cveFeed import counts, subdir_apps, wpscan_scan
     from cveFeed.stats_history import compute_snapshot
@@ -281,7 +311,7 @@ def _projects_partial(ctx, deadline=None):
     from agentapi.services import _allowed_ids
     from dashboard.models import Project
 
-    seconds, rows, waiting, shared = _cache_seconds(), [], [], False
+    seconds, rows, waiting, shared, shared_ids = _cache_seconds(), [], [], False, set()
     projects = list(Project.objects.filter(id__in=list(_allowed_ids(ctx.user))).order_by('name')[:MAX_PROJECTS])
     fingerprint = []  # read at most once per call, and before the first count of it
 
@@ -289,7 +319,7 @@ def _projects_partial(ctx, deadline=None):
         if not fingerprint:
             fingerprint.append(_row_fingerprint())
         return fingerprint[0]
-    for project in projects:
+    for index, project in enumerate(projects):
         key, last_key = _row_keys(project)
         row = None
         if seconds:
@@ -309,9 +339,10 @@ def _projects_partial(ctx, deadline=None):
                     from agentapi import status_probes
                     status_probes._bound_database(left)
                 before = now_fp() if seconds else None  # the inputs as they are before this count starts
-                if shared is False:  # the first project that is not cached: the numbers every project shares are read once, for all of them
-                    shared = _shared_inputs([p.id for p in projects])
-                row = _project_row(project, shared)
+                if shared is False:  # the first project that is not cached: the numbers the projects share are read once, for every one still to count
+                    shared_ids = _uncached_ids(projects[index:], seconds)
+                    shared = _scoped_shared_inputs(shared_ids)
+                row = _project_row(project, shared if project.id in shared_ids else None)
             except Exception:  # noqa: BLE001 - a row that does not fit the time left is counted in the background, the rest still answer
                 if deadline is None:
                     raise
@@ -373,7 +404,7 @@ def warm_project_rows(project_ids, token=None):
     try:
         before = _row_fingerprint() if seconds else None  # the inputs as they are before the counts start
         try:
-            shared = _short_transaction(lambda: _shared_inputs(list(project_ids)))
+            shared = _short_transaction(lambda: _scoped_shared_inputs(project_ids))
         except Exception:  # noqa: BLE001
             logger.warning('status: the shared counts could not be read in the warm-up; each project counts for itself', exc_info=True)
             shared = None

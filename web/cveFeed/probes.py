@@ -834,7 +834,7 @@ def run_for_scan(scan_id, force=False):
     stats = {'hosts': 0, 'probes': 0, 'versions': 0, 'reused': reused, 'errors': 0}
     subs = Subdomain.objects.filter(scan_history=scan, name__in=allowed).prefetch_related('technologies', 'ip_addresses__ports', 'waf')
     due = []
-    needed = features_needed(project, {s.name for s in subs})
+    needed = features_needed(project, set(subs.values_list('name', flat=True)))  # the names only: the loop below reads the rows and their prefetches once
     for sub in subs.select_related('target_domain').order_by('name'):
         leads = leads_for(sub) + unidentified_port_leads(sub)
         todo = {}
