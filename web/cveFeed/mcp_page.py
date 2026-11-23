@@ -83,16 +83,40 @@ def history(request):
     if user:
         rows = rows.filter(username=user)
     page = Paginator(rows.order_by('-at', '-id'), PAGE_SIZE).get_page(q.get('page'))
-    choices = base.order_by()
     return {
         'calls': page, 'total': page.paginator.count,
         'filters': {'tool': tool, 'outcome': outcome, 'writes': writes, 'key': key, 'user': user},
         'filtered': bool(tool or outcome or writes or key or user),
-        'tools_seen': sorted(set(choices.values_list('tool', flat=True).distinct()[:200])),
-        'keys_seen': sorted({k or '(browser)' for k in choices.values_list('token_name', flat=True).distinct()[:200]}),
-        'users_seen': sorted(set(choices.values_list('username', flat=True).distinct()[:200])) if request.user.is_superuser else [],
+        **_choices(request.user, base),
         'query': _query_without_page(q),
     }
+
+
+CHOICES_SECONDS = 60  # how long the filter menus of one viewer are kept: three DISTINCT reads of the whole call log (an App Admin's) per page view
+
+
+def _choices(user, base):
+    """The filter menus (tools, keys and, for an App Admin, users seen in the calls ``user`` may read), kept ``CHOICES_SECONDS`` per viewer: the
+    menus list what was seen, so a value a minute late only shows in the menu later; the table itself is read on every view."""
+    from django.core.cache import cache
+
+    def read():
+        choices = base.order_by()
+        return {'tools_seen': sorted(set(choices.values_list('tool', flat=True).distinct()[:200])),
+                'keys_seen': sorted({k or '(browser)' for k in choices.values_list('token_name', flat=True).distinct()[:200]}),
+                'users_seen': sorted(set(choices.values_list('username', flat=True).distinct()[:200])) if user.is_superuser else []}
+    key = f'cve:mcp-choices:{user.pk}:{int(bool(user.is_superuser))}'  # per viewer: what one may read is never another's menu
+    try:
+        got = cache.get(key)
+    except Exception:  # noqa: BLE001 - a cache outage reads them directly
+        return read()
+    if got is None:
+        got = read()
+        try:
+            cache.set(key, got, CHOICES_SECONDS)
+        except Exception:  # noqa: BLE001
+            pass
+    return got
 
 
 def _query_without_page(q):
