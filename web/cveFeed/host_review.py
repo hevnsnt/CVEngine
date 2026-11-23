@@ -547,6 +547,14 @@ def mode_of(project):
     return mode if mode in ('auto', 'recommend', 'off') else 'recommend'
 
 
+def modes_of(projects):
+    """``[(project, mode_of(project))]`` for many projects, with one read of their settings rows instead of one per project."""
+    from cveFeed.models import ProjectSettings
+    projects = list(projects)
+    stored = dict(ProjectSettings.objects.filter(project__in=[p.pk for p in projects]).values_list('project_id', 'host_review_mode'))
+    return [(p, mode if (mode := stored.get(p.pk) or 'recommend') in ('auto', 'recommend', 'off') else 'recommend') for p in projects]
+
+
 def _day_start(now):
     return now.replace(hour=0, minute=0, second=0, microsecond=0)
 

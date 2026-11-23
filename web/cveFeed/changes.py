@@ -155,6 +155,16 @@ def _reopen_restored(project, hosts, seen=()):
         logger.exception('could not reopen the findings of hosts back in the inventory of project %s', project)
 
 
+def _reset_unresolved(project, hosts):
+    """The archived hosts a scan found again with a scannable address start a fresh never-resolved streak (cveFeed.unresolved_archive), as a
+    restore by a person or by the daily rediscovery does: a streak left over from before the archive would make the next daily review archive
+    the host again and close its findings again, and the next scan restore it, every day. Only these rows: a streak a recheck is counting on
+    a host still in the inventory is left alone."""
+    from cveFeed.models import HostState
+    for part in _chunks(hosts):
+        HostState.objects.filter(project_id=project, host__in=part).update(unresolved_first_at=None, unresolved_last_at=None, unresolved_checks=0)
+
+
 def _record_baseline(scan, project, current, now):
     from cveFeed import activity
     from cveFeed.models import HostState
@@ -184,6 +194,7 @@ def _record_baseline(scan, project, current, now):
                                                                       'inactive_absent_checks',
                                                                       'archived_at', 'archive_reason', 'archive_check_status'],
                                           batch_size=CHUNK)
+        _reset_unresolved(project, restored)
     _reopen_restored(project, restored, current)
     activity.log('changes', f'Baseline recorded for {scan.domain.name}: {len(current)} hosts', project=project, scan_id=scan.id)
     scoring.rescore_quietly(project, list(current), scan_id=scan.id)
@@ -375,6 +386,7 @@ def record_scan_changes(scan_id, resolver=None, checker=None, tcp_checker=None):
             HostState.objects.filter(project_id=project, host__in=part).update(
                 last_seen=now, scan=scan, inactive_first_absent_at=None,
                 inactive_last_absent_at=None, inactive_absent_checks=0)
+        _reset_unresolved(project, restored)
 
     _reopen_restored(project, restored, current)
     counts = {}

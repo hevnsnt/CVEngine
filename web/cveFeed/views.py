@@ -299,20 +299,56 @@ def _running_scans(ScanHistory):
     return running_scans(ScanHistory.objects.all())
 
 
-def tier_counts():
-    """fire / smoke / ice over every stored CVE, counted by the database (see cveFeed.threat.classify_threat_tier)."""
-    from cveFeed.threat import fire_tier_q, hot_tier_q
-    total, n_fire, n_hot = (CVEEntry.objects.count(), CVEEntry.objects.filter(fire_tier_q()).count(),
-                            CVEEntry.objects.filter(hot_tier_q()).count())
-    return {FIRE: n_fire, SMOKE: n_hot - n_fire, ICE: total - n_hot}
+TIER_COUNTS_SECONDS = 30  # the catalogue's tier counts are the same for every scope: one count of it is shared this long by all of them
+
+
+def _catalog_counts():
+    """``{'total', 'fire', 'hot'}`` over every stored CVE: one pass over the catalogue for the three counts.
+
+    The catalogue belongs to no project, so the answer is the same for every scope, and the headline snapshot of each scope used to count it
+    again (four whole-catalogue counts per scope every ten seconds). It is kept ``TIER_COUNTS_SECONDS`` under a key of the heat policy (which
+    decides the tiers), the live screen's revision (``bump_stats_revision`` drops it with the snapshots) and the newest CVE id (a new CVE
+    shows at once). Without a cache it is counted every time, as before."""
+    from django.core.cache import cache
+    from django.db.models import Count, Max
+    from cveFeed.threat import fire_tier_q, heat_policy, hot_tier_q
+    policy = heat_policy()
+
+    def count():
+        return CVEEntry.objects.aggregate(total=Count('id'), fire=Count('id', filter=fire_tier_q(policy=policy)),
+                                          hot=Count('id', filter=hot_tier_q(policy=policy)))
+    key = f"cve:catalog-counts:{policy}:{snapshot_cache.revision()}:{CVEEntry.objects.aggregate(m=Max('id'))['m']}"
+    try:
+        got = cache.get(key)
+    except Exception:  # noqa: BLE001 - a cache outage counts directly
+        return count()
+    if got is None:
+        got = count()
+        try:
+            cache.set(key, got, TIER_COUNTS_SECONDS)
+        except Exception:  # noqa: BLE001
+            pass
+    return got
+
+
+def tier_counts(catalog=None):
+    """fire / smoke / ice over every stored CVE, counted by the database (see cveFeed.threat.classify_threat_tier). ``catalog``: what
+    ``_catalog_counts`` returned, when the caller already read it."""
+    got = catalog or _catalog_counts()
+    return {FIRE: got['fire'], SMOKE: got['hot'] - got['fire'], ICE: got['total'] - got['hot']}
 
 
 def live_scan_counts():
     """Running and queued scans, and the background jobs in progress under finished scan records, read fresh on every poll (they are cheap and
     the first thing a person watches). The running window (a settings lookup) is read once for all three."""
+    from django.db.models import Count, Q
     from cveFeed import counts
+    from startScan.models import ScanHistory
     window = counts.running_window()
-    return {'scans_running': counts.running_scans(window=window).count(), 'scans_queued': counts.queued_scans().count(),
+    # running and queued in one read of ScanHistory, as counts.running_scans and counts.queued_scans define them
+    scans = ScanHistory.objects.aggregate(running=Count('id', filter=Q(scan_status=1, start_scan_date__gte=timezone.now() - window)),
+                                          queued=Count('id', filter=Q(scan_status=-1)))
+    return {'scans_running': scans['running'], 'scans_queued': scans['queued'],
             'scans_background_running': counts.background_running(window=window).count()}
 
 
@@ -341,7 +377,8 @@ def stats_payload():
     from cveFeed import counts, internal_view
     from startScan.models import Vulnerability
     from targetApp.models import Domain
-    tiers = tier_counts()
+    catalog = _catalog_counts()
+    tiers = tier_counts(catalog)
     # the inventory is collapsed to one row per host ONCE; the host counts, the exposed count and the internal share are all read from those ids
     # (each used to collapse it again). While a snapshot is being built the ids are shared with the other snapshots of the scope (counts.snapshot_rep_ids)
     reps = counts.reps_of(counts.snapshot_rep_ids())
@@ -358,7 +395,7 @@ def stats_payload():
         'hosts_live': host_counts['live'],
         **live_scan_counts(),
         'tiers': {FIRE: tiers[FIRE], SMOKE: tiers[SMOKE], ICE: tiers[ICE]},
-        'cves': CVEEntry.objects.count(),
+        'cves': catalog['total'],
         'matches': counts.exposed_matches().count(),
         # the same matches as the Findings list draws them grouped: one script on sibling hosts is one row (cveFeed.finding_groups).
         # 'matches' stays the per-host count it always was; this is the number beside it that says how many distinct findings that is
@@ -1315,10 +1352,13 @@ def node_detail(node_id):
         c = CVEEntry.objects.filter(pk=int(rest)).first()
         if not c:
             return None
-        hosts = list(CVEMatch.objects.filter(cve_entry=c).exclude(ai_verdict='not_affected')
-                     .select_related('subdomain__target_domain__project'))
-        slugs = sorted({m.subdomain.target_domain.project.slug for m in hosts if m.subdomain and m.subdomain.target_domain_id
-                        and m.subdomain.target_domain.project_id})
+        matches = CVEMatch.objects.filter(cve_entry=c).exclude(ai_verdict='not_affected')
+        # a CVE common enough can match thousands of hosts: the card lists the first NODE_CVE_HOSTS and says how many more the matches page holds
+        hosts = list(matches.exclude(subdomain=None).select_related('subdomain__target_domain__project').order_by('id')[:NODE_CVE_HOSTS + 1])
+        more = matches.exclude(subdomain=None).count() - NODE_CVE_HOSTS if len(hosts) > NODE_CVE_HOSTS else 0
+        hosts = hosts[:NODE_CVE_HOSTS]
+        slugs = sorted(set(matches.filter(subdomain__target_domain__project__isnull=False).order_by()
+                           .values_list('subdomain__target_domain__project__slug', flat=True).distinct()))
         where = slugs[0] if len(slugs) == 1 else ALL_PROJECTS if slugs else ''
         return {'kind': 'cve', 'title': c.cve_id, 'link': f'/cve/{quote(where)}/matches/?cve={quote(c.cve_id)}' if where else '',
                 'link_label': 'Open the matches', 'rows': _kv(
@@ -1326,8 +1366,12 @@ def node_detail(node_id):
             ('KEV', 'yes' if c.kev else ''), ('Exploit-DB', 'yes' if c.exploit_db else ''),
             ('Matched hosts', [(m.subdomain.name, _host_href(m.subdomain.target_domain.project.slug, m.subdomain.name)
                                 if m.subdomain.target_domain_id and m.subdomain.target_domain.project_id else '')
-                               for m in hosts if m.subdomain]))}
+                               for m in hosts if m.subdomain]),
+            ('More matched hosts', f'{more} more on the matches page' if more > 0 else ''))}
     return None
+
+
+NODE_CVE_HOSTS = 50  # hosts a CVE node's card lists; the rest are on the matches page it links to
 
 
 SEVERITY_LABEL = {-1: 'unknown', 0: 'info', 1: 'low', 2: 'medium', 3: 'high', 4: 'critical'}
@@ -1428,6 +1472,9 @@ def cached_discovery_counts(params=()):
                                    hot={'params': params, 'args': {}})['payload']
 
 
+DISCOVERY_AFTER_MAX = 200
+
+
 @require_GET
 @project_scoped
 def api_discovery(request):
@@ -1436,15 +1483,18 @@ def api_discovery(request):
     from startScan.models import ScanHistory
     scan_id = request.GET.get('scan', '')
     if scan_id.isdigit():
-        scan = ScanHistory.objects.filter(id=int(scan_id)).select_related('domain', 'scan_type').first()
+        scan = ScanHistory.objects.filter(id=int(scan_id)).select_related('domain__project', 'scan_type').first()
     else:
-        qs = ScanHistory.objects.select_related('domain', 'scan_type')
+        qs = ScanHistory.objects.select_related('domain__project', 'scan_type')
         scan = _running_scans(qs.model).order_by('-id').first() or qs.order_by('-id').first()
     if not scan:
         return snapshot_cache.respond_payload(request, {'scan': None, 'events': [], 'counts': {}})
     after = request.GET.get('after', '')
     events = DiscoveryEvent.objects.filter(scan=scan)
-    events = events.filter(id__gt=int(after)) if after.isdigit() and int(after) else events.order_by('-id')[:60]  # after=0 is no cursor: the tail, not every event of the scan
+    # after=0 is no cursor: the tail, not every event of the scan. A cursor gets at most DISCOVERY_AFTER_MAX of the newest events past it (a tab that slept
+    # through a large scan used to be sent every event since): the ticker keeps only its last 100 lines, so what it draws is the same
+    events = (events.filter(id__gt=int(after)).order_by('-id')[:DISCOVERY_AFTER_MAX] if after.isdigit() and int(after)
+              else events.order_by('-id')[:60])
     events = sorted(events, key=lambda e: e.id)
     # The counts describe the same picture the graph above the ticker draws (every live host of the project, not only this
     # scan's own rows), so they read as a total of what's on screen rather than just this run's contribution.

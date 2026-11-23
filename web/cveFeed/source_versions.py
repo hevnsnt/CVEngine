@@ -824,11 +824,11 @@ def store_reported(project_id, domain_id, host, probe, readings, provider, repor
     if not project_id or not domain_id or not host:
         return False
     observations = [_reported_observation(r, provider, reported_at, port=port, undated=undated) for r in readings if r]
-    rows = ProbeObservation.objects.filter(project_id=project_id, host=host, probe=probe)
+    rows = list(ProbeObservation.objects.filter(project_id=project_id, host=host, probe=probe))
     before = {(o.kind, o.product, o.port): (o.version, (o.evidence or {}).get('reported_at')) for o in rows}
     changed = False
     if observations:
-        probes.record(project_id, domain_id, host, probe, observations, now=now)
+        probes.record(project_id, domain_id, host, probe, observations, now=now, existing=rows)
         changed = any(before.get((o['kind'], o['product'], o['port'])) != (o['version'], o['evidence']['reported_at']) for o in observations)
     if replace:
         keep = {(o['kind'], o['product'], o['port']) for o in observations}
@@ -888,6 +888,11 @@ def refresh_runzero(sub, configured=None, now=None):
     if sub.target_domain_id is None:
         return False
     readings = runzero_host_readings(sub, configured)
+    known = getattr(sub, '_derived_probes', None)  # the probes the host has rows of, read for the whole scan (version_sources.prefetch_derived)
+    if known is not None:
+        if not readings and RUNZERO_PROBE not in known:
+            return False  # nothing to store and no row to drop: the answer store_reported would give
+        known.add(RUNZERO_PROBE)
     return store_reported(sub.target_domain.project_id, sub.target_domain_id, sub.name, RUNZERO_PROBE, readings, RUNZERO_PROVIDER, '',
                           replace=True, now=now)
 

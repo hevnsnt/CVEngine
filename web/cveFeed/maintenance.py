@@ -6,6 +6,9 @@ every model call, and nothing else removes them. Once a week the rows older than
 object per line, into ``cvengine-logs-<time>.tar.gz`` under the archive directory, and are deleted only after that file is
 complete on disk. Archives older than CVENGINE_LOG_ARCHIVE_DAYS are removed. The default directory is on the scan-results
 volume, in a dot-folder no project media path can name, so only a superuser can download it through the media view.
+
+The same run prunes operational tables that had no other delete path (``prune_operational``): ended StageRuns, old input guard strikes and
+bans that are over, expired login sessions and old finished host assessments, in bounded id batches and without an archive.
 """
 import datetime
 import json
@@ -105,6 +108,103 @@ def _delete_routine_audit(qs):
     return deleted
 
 
+def keyset_delete(qs, chunk=None, keep=frozenset()):
+    """Delete the rows of ``qs`` in primary key order, at most ``chunk`` (default DELETE_CHUNK) ids per statement, each page read after the
+    last id seen, so a long backlog is never scanned again from the start. Ids in ``keep`` are skipped. Returns how many rows of ``qs.model``
+    were deleted."""
+    chunk = chunk or DELETE_CHUNK
+    model = qs.model
+    deleted, last = 0, None
+    while True:
+        page = qs if last is None else qs.filter(pk__gt=last)
+        ids = list(page.order_by('pk').values_list('pk', flat=True)[:chunk])
+        if not ids:
+            return deleted
+        doomed = [pk for pk in ids if pk not in keep]
+        if doomed:
+            deleted += model._base_manager.filter(pk__in=doomed).delete()[1].get(model._meta.label, 0)
+        last = ids[-1]
+
+
+# Operational tables that had no delete path: (retention setting, default days). Nothing is archived for them: they are engine bookkeeping, and
+# the audit log keeps what a person did (bans, disabled accounts).
+OPERATIONAL_RETENTION = {
+    'StageRun': ('CVENGINE_STAGE_RUN_RETENTION_DAYS', 30),
+    'AbuseStrike': ('CVENGINE_ABUSE_RETENTION_DAYS', 90),
+    'HostAssessment': ('CVENGINE_HOST_ASSESSMENT_RETENTION_DAYS', 90),
+}
+
+
+def _cutoff(name, now):
+    setting, default = OPERATIONAL_RETENTION[name]
+    return now - datetime.timedelta(days=_days(setting, default))
+
+
+def prune_stage_runs(now):
+    """Ended StageRuns past the retention. A run tied to a scan also goes with the scan; a sweep's run (no scan) had no other way out."""
+    from agentapi import stage_runs
+    setting, default = OPERATIONAL_RETENTION['StageRun']
+    return stage_runs.prune(now, days=_days(setting, default))
+
+
+def prune_abuse(now):
+    """Input guard strikes and bans that can no longer do anything. A strike counts only inside ``input_guard.WINDOW`` (15 minutes), so one older
+    than the retention is history only. A ban goes when it is over: an address ban whose ``expires_at`` passed more than the retention ago, or a
+    ban an admin lifted that was made more than the retention ago. A ban with no expiry that is not lifted (a disabled account, a manual block)
+    is kept for as long as it is in force."""
+    from django.db.models import Q
+
+    from dashboard.models import AbuseBan, AbuseStrike
+    cutoff = _cutoff('AbuseStrike', now)
+    return (keyset_delete(AbuseStrike.objects.filter(created_at__lt=cutoff)),
+            keyset_delete(AbuseBan.objects.filter(Q(expires_at__lt=cutoff) | Q(lifted=True, created_at__lt=cutoff))))
+
+
+def prune_sessions(now):
+    """Expired login sessions (what ``manage.py clearsessions`` does, in bounded batches). The session store never reads a row past its
+    ``expire_date`` (``reNgine.hashed_sessions``), so it is dead weight."""
+    from django.contrib.sessions.models import Session
+    return keyset_delete(Session.objects.filter(expire_date__lt=now))
+
+
+def prune_host_assessments(now):
+    """Finished host assessments past the retention, except the ones something still reads: the newest of each host in its project (the top-up
+    orders hosts by their latest assessment, ``coverage_topup.stalest_hosts``, and ``latest_host_assessment`` shows it) and the ones a HostState
+    names as the check behind its archive decision (``archive_assessment``). A queued or running one is never touched."""
+    from django.db.models import Max, Q
+
+    from cveFeed.host_assessment import ACTIVE
+    from cveFeed.models import HostAssessment, HostState
+    cutoff = _cutoff('HostAssessment', now)
+    rows = HostAssessment._base_manager
+    old = (rows.exclude(status__in=ACTIVE)
+           .filter(Q(finished_at__lt=cutoff) | Q(finished_at__isnull=True, created_at__lt=cutoff)))
+    if not old.exists():
+        return 0
+    # read once, as two grouped scans, rather than a correlated subquery per row (no index leads on the host)
+    keep = set(rows.order_by().values('project_id', 'host').annotate(top=Max('id')).values_list('top', flat=True))
+    keep.update(HostState._base_manager.filter(archive_assessment__isnull=False).values_list('archive_assessment_id', flat=True))
+    return keyset_delete(old, keep=keep)
+
+
+def prune_operational(now):
+    """Prune the operational tables (``OPERATIONAL_RETENTION`` and expired sessions). One table failing is logged and does not stop the others
+    or the rest of the maintenance; it is tried again next week. Returns {table: rows deleted} for the tables that ran."""
+    out = {}
+    steps = (('StageRun', prune_stage_runs), ('Abuse', prune_abuse), ('Session', prune_sessions), ('HostAssessment', prune_host_assessments))
+    for name, step in steps:
+        try:
+            result = step(now)
+        except Exception:  # noqa: BLE001 - housekeeping only
+            logger.exception('pruning %s failed', name)
+            continue
+        if name == 'Abuse':
+            out['AbuseStrike'], out['AbuseBan'] = result
+        else:
+            out[name] = result
+    return out
+
+
 def prune_archives(directory, now):
     keep = datetime.timedelta(days=_days('CVENGINE_LOG_ARCHIVE_DAYS', 365))
     removed = 0
@@ -160,4 +260,4 @@ def run(now=None):
     return {'archive': path, 'archived': archived, 'deleted': deleted, 'archives_removed': prune_archives(directory, now),
             'agent_tasks_deleted': agent_broker.prune_tasks(now), 'sentinel_tasks_deleted': sentinel_broker.prune_tasks(now),
             'sentinel_enrollments_deleted': sentinel_broker.prune_enrollments(now),
-            'reports_removed': report_export.prune_expired(now)}
+            'reports_removed': report_export.prune_expired(now), 'pruned': prune_operational(now)}

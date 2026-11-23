@@ -151,6 +151,10 @@ def _at_pages(host, source, urls):
     return out
 
 
+_PHPINFO_TITLE = r'phpinfo\(\)\s*$'
+_PHPINFO_PATH = r'/[^/?#]*phpinfo[^/?#]*\.php([?#]|$)'
+
+
 def discovered_pages(sub):
     """``{entry id: [URL]}``: the pages a scan already found on ``sub`` that a ``discovered`` entry reads. A phpinfo page is one a template
     check reported (a finding whose template is one the ``phpinfo`` entry's exposure names as its twin, or this stage's own finding), or one
@@ -163,12 +167,55 @@ def discovered_pages(sub):
     urls = list(Vulnerability.objects.filter(target_domain__project_id=sub.target_domain.project_id, subdomain__name=sub.name, open_status=True,
                                              template_id__in=templates).exclude(http_url__isnull=True)
                 .order_by('-id').values_list('http_url', flat=True)[:10])
-    urls += list(EndPoint.objects.filter(subdomain=sub, http_status=200, page_title__iregex=r'phpinfo\(\)\s*$')
+    urls += list(EndPoint.objects.filter(subdomain=sub, http_status=200, page_title__iregex=_PHPINFO_TITLE)
                  .order_by('-id').values_list('http_url', flat=True)[:10])
-    urls += list(EndPoint.objects.filter(subdomain=sub, http_status=200, http_url__iregex=r'/[^/?#]*phpinfo[^/?#]*\.php([?#]|$)')
+    urls += list(EndPoint.objects.filter(subdomain=sub, http_status=200, http_url__iregex=_PHPINFO_PATH)
                  .order_by('-id').values_list('http_url', flat=True)[:10])
     urls = [u.split('#', 1)[0].split('?', 1)[0] for u in urls if isinstance(u, str) and u]
     return {source.id: list(dict.fromkeys(urls))} if urls else {}
+
+
+PAGES_CHUNK = 2000  # names or Subdomain ids per query of ``discovered_pages_for``
+
+
+def discovered_pages_for(subs):
+    """``{Subdomain id: discovered_pages(sub)}`` for every one of ``subs``: the same answer ``discovered_pages`` gives each host, read with three
+    queries per project (and per ``PAGES_CHUNK`` hosts), not three per host. A host with nothing found maps to ``{}``."""
+    from startScan.models import EndPoint, Vulnerability
+    out = {sub.pk: {} for sub in subs}
+    source = catalogue.BY_ID.get('phpinfo')
+    subs = [sub for sub in subs if getattr(sub, 'target_domain_id', None) is not None]
+    if source is None or not subs:
+        return out
+    templates = list(source.exposure.twins) + [source.exposure.template]
+    by_project = {}
+    for sub in subs:
+        by_project.setdefault(sub.target_domain.project_id, []).append(sub)
+    vuln_urls, title_urls, path_urls = {}, {}, {}
+    for project_id, group in by_project.items():
+        names = sorted({sub.name for sub in group})
+        for start in range(0, len(names), PAGES_CHUNK):
+            rows = (Vulnerability.objects.filter(target_domain__project_id=project_id, subdomain__name__in=names[start:start + PAGES_CHUNK], open_status=True,
+                                                 template_id__in=templates).exclude(http_url__isnull=True)
+                    .order_by('-id').values_list('subdomain__name', 'http_url'))
+            for name, url in rows:
+                got = vuln_urls.setdefault((project_id, name), [])
+                if len(got) < 10:
+                    got.append(url)
+        ids = sorted({sub.pk for sub in group})
+        for start in range(0, len(ids), PAGES_CHUNK):
+            chunk = ids[start:start + PAGES_CHUNK]
+            for found, extra in ((title_urls, {'page_title__iregex': _PHPINFO_TITLE}), (path_urls, {'http_url__iregex': _PHPINFO_PATH})):
+                for sub_id, url in (EndPoint.objects.filter(subdomain_id__in=chunk, http_status=200, **extra)
+                                    .order_by('-id').values_list('subdomain_id', 'http_url')):
+                    got = found.setdefault(sub_id, [])
+                    if len(got) < 10:
+                        got.append(url)
+    for sub in subs:
+        urls = vuln_urls.get((sub.target_domain.project_id, sub.name), []) + title_urls.get(sub.pk, []) + path_urls.get(sub.pk, [])
+        urls = [u.split('#', 1)[0].split('?', 1)[0] for u in urls if isinstance(u, str) and u]
+        out[sub.pk] = {source.id: list(dict.fromkeys(urls))} if urls else {}
+    return out
 
 
 def host_products(sub, ports):
@@ -218,6 +265,7 @@ def plan(project_id, subdomains, unattended=False):
     subdomains = list(subdomains)
     from cveFeed import source_versions
     source_versions.prefetch(subdomains)  # the hosts' stored readings (Shodan leads among them) in one query, not one per host
+    admitted = []
     for sub in subdomains:
         name = sub.name.lower().rstrip('.')
         if normalize(sub.name) in banned or name in archived or gate.refusal(project_id, sub.name, unattended=unattended):
@@ -227,8 +275,11 @@ def plan(project_id, subdomains, unattended=False):
             continue  # the name points at an address a scanner must never be used on
         if any(gate.refusal(project_id, a, unattended=unattended, derived=True) for a in addresses):
             continue
+        admitted.append((sub, name))
+    pages = discovered_pages_for([sub for sub, _name in admitted])  # the admitted hosts' discovered pages in a few queries, not three per host
+    for sub, name in admitted:
         ports = [p for _a, p in _ports(sub)]
-        reads = wanted(name, host_products(sub, ports), ports, route_auth.web_bases(sub), discovered_pages(sub))
+        reads = wanted(name, host_products(sub, ports), ports, route_auth.web_bases(sub), pages[sub.pk])
         if not reads:
             continue
         entry = out.setdefault(name, {'subs': [], 'reads': []})
@@ -300,7 +351,12 @@ def run_for_scan(scan_id, force=False, dispatch=None):
     scan = ScanHistory.objects.select_related('domain__project').get(pk=scan_id)
     project = scan.domain.project
     summary = {'hosts': 0, 'asked': 0, 'readings': 0, 'exposed': 0, 'waiting': 0}
-    for sub in Subdomain.objects.filter(scan_history=scan).select_related('target_domain', 'scan_history').prefetch_related('technologies', 'ip_addresses__ports'):
+    subs = list(Subdomain.objects.filter(scan_history=scan).select_related('target_domain', 'scan_history').prefetch_related('technologies', 'ip_addresses__ports'))
+    try:
+        prefetch_derived(subs)  # which hosts have stored readings at all: one query for the scan, not one per probe and host
+    except Exception:  # noqa: BLE001 - without it every host reads its own rows, as before
+        logger.exception('could not read the stored version readings of scan %s at once', scan.pk)
+    for sub in subs:
         try:
             summary['readings'] += len(refresh_host(sub))
         except Exception:  # noqa: BLE001 - one host's stored data never stops the stage
@@ -516,9 +572,10 @@ def store_readings(sub, probe_id, readings, port=0, now=None):
             continue
         observations.append(_observation(r, port))
     if observations:
+        stored_rows = list(ProbeObservation.objects.filter(project_id=project_id, host=host, probe=probe_id))
         before = {(o.kind, o.product, o.port): (o.version, (o.evidence or {}).get('range') if isinstance(o.evidence, dict) else None)
-                  for o in ProbeObservation.objects.filter(project_id=project_id, host=host, probe=probe_id)}
-        probes.record(project_id, sub.target_domain_id, host, probe_id, observations, now=now)
+                  for o in stored_rows}
+        probes.record(project_id, sub.target_domain_id, host, probe_id, observations, now=now, existing=stored_rows)
         stored += len(observations)
         changed = changed or any(before.get((o['kind'], o['product'], o['port'])) != (o['version'], o['evidence'].get('range'))
                                  for o in observations)
@@ -598,6 +655,11 @@ def _store_derived(sub, probe_id, found, now):
     """Store ``found`` (``[(port, reading)]``) under ``probe_id`` and drop that probe's rows the host no longer gives. Returns whether a reading
     is new, changed or gone."""
     from cveFeed.models import ProbeObservation
+    known = getattr(sub, '_derived_probes', None)  # the probes the host has rows of, read for the whole scan (``prefetch_derived``)
+    if known is not None and probe_id in derived_probes():  # a probe the prefetch did not read is always read here
+        if not found and probe_id not in known:
+            return False  # nothing to store and no row of the probe to drop: the answer the read below would give
+        known.add(probe_id)  # rows of the probe may exist from here on
     by_port, kept, changed = {}, set(), False
     for port, r in found:
         by_port.setdefault(port, []).append(r)
@@ -609,6 +671,31 @@ def _store_derived(sub, probe_id, found, now):
             row.delete()  # derived from what the host shows now: gone when that is gone
             changed = True
     return changed
+
+
+def derived_probes():
+    """The probes ``refresh_host`` stores and drops rows of for a host (``_store_derived`` and ``source_versions.refresh_runzero``)."""
+    from cveFeed import source_versions
+    return (PASSIVE_PROBE, SNMP_PROBE, source_versions.NMAP_PROBE, source_versions.WEBSERVER_PROBE, source_versions.NTLM_PROBE,
+            source_versions.RUNZERO_PROBE, source_versions.RECOG_PROBE)
+
+
+def prefetch_derived(subs):
+    """Give each of ``subs`` ``_derived_probes``: the probes of ``derived_probes`` the host has a stored row of, read in one query (per
+    ``PAGES_CHUNK`` names) instead of one per probe and host. Rows of one name share the set, so a reading stored for one is seen by the next.
+    ``refresh_host`` then skips the read for a probe the host has no row of and no reading for, where it would find nothing to drop."""
+    from cveFeed.models import ProbeObservation
+    subs = [s for s in subs if getattr(s, 'target_domain_id', None) is not None]
+    held = {(s.target_domain.project_id, s.name.lower().rstrip('.')): set() for s in subs}
+    projects, names = {key[0] for key in held}, sorted({key[1] for key in held})
+    for start in range(0, len(names), PAGES_CHUNK):
+        rows = (ProbeObservation.objects.filter(project_id__in=projects, host__in=names[start:start + PAGES_CHUNK], probe__in=derived_probes())
+                .values_list('project_id', 'host', 'probe').distinct())
+        for project_id, host, probe in rows:
+            if (project_id, host) in held:
+                held[(project_id, host)].add(probe)
+    for s in subs:
+        s._derived_probes = held[(s.target_domain.project_id, s.name.lower().rstrip('.'))]
 
 
 def snmp_readings(sub, ports=None):
