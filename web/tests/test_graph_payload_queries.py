@@ -427,7 +427,7 @@ class GraphEndpointTests(TestCase):
         tokens = scope.set_scope({project.id})
         try:
             cache.clear()
-            expected = old_graph_payload()
+            expected = views.compact_graph(old_graph_payload())  # sent as compact_graph leaves it (tests/test_graph_payload_size.py)
         finally:
             scope.reset_scope(tokens)
         self.assertEqual(payload, expected)

@@ -72,21 +72,27 @@ def cache_read_share(totals):
     return round((totals['cache_read'] or 0) / total, 4) if total else None
 
 
-def cost_by_stage_day(days=7, provider='anthropic'):
+COST_ROWS_MAX = 1000  # rows of ``cost_by_stage_day`` the usage API sends at most (30 days of 13 stages and 2 models is about 320)
+
+
+def cost_by_stage_day(days=7, provider='anthropic', rates=None, limit=None):
     """The cost view: one row per (day, stage, model) of the ledger, newest day first: calls, failed calls, input, output, cache-read and
     cache-write tokens, ``cache_read_share`` and ``list_usd`` at the price entered on the usage page (None when there is none). Only calls
-    with token counts are priced; ``unpriced_calls`` counts the rest. Read-only; one grouped query."""
+    with token counts are priced; ``unpriced_calls`` counts the rest. Read-only; one grouped query. ``rates``: every ``AIPriceRate`` by
+    ``(provider, model)`` when the caller already read them. ``limit``: at most this many rows, the newest days first."""
     from cveFeed.models import AIPriceRate, AIUsage
 
     cutoff = timezone.now() - timedelta(days=days)
-    db_rates = {(r.provider, r.model): r for r in AIPriceRate.objects.filter(provider=provider)}
+    db_rates = rates if rates is not None else {(r.provider, r.model): r for r in AIPriceRate.objects.filter(provider=provider)}
     grouped = (AIUsage.objects.filter(provider=provider, started_at__gte=cutoff)
                .annotate(day=TruncDate('started_at')).values('day', 'stage', 'model', 'actual_model')
                .annotate(calls=Count('id'), failed=Count('id', filter=Q(status='failed')),
                          missing=Count('id', filter=Q(input_tokens__isnull=True) | Q(output_tokens__isnull=True)),
                          input=Sum('input_tokens'), output=Sum('output_tokens'),
                          cache_read=Sum('cache_read_tokens'), cache_write=Sum('cache_write_tokens'))
-               .order_by('-day', 'stage', 'model'))
+               .order_by('-day', 'stage', 'model', 'actual_model'))
+    if limit is not None:
+        grouped = grouped[:limit]
     rows = []
     for g in grouped:
         model = g['actual_model'] or g['model']
@@ -98,7 +104,10 @@ def cost_by_stage_day(days=7, provider='anthropic'):
     return rows
 
 
-def snapshot(days=7):
+def snapshot(days=7, with_cost=True):
+    """What the AI usage page shows over the last ``days``. ``with_cost``: also ``cost_by_stage_day`` (at most ``COST_ROWS_MAX`` rows, newest days first,
+    and ``cost_by_stage_day_has_more`` when there were more). The page never reads it and asks without it (``?cost=0``): two of the grouped reads,
+    and most of the answer (35 KB of 55 at 7 days on the production install), are left out."""
     from dashboard.models import AIProviderSettings
     from cveFeed.models import AIPriceRate, AIUsage
 
@@ -184,6 +193,10 @@ def snapshot(days=7):
               'responding' if last_success and last_success.started_at >= recent_cutoff else
               'last_verified_over_24h_ago' if verified and cfg.verified_at < recent_cutoff else
               'verified_at_setup' if verified else 'no_recent_activity')
+    extra = {}
+    if with_cost:
+        rows = cost_by_stage_day(days, rates={key: rate for key, rate in rates.items() if key[0] == 'anthropic'}, limit=COST_ROWS_MAX + 1)
+        extra = {'cost_by_stage_day': rows[:COST_ROWS_MAX], 'cost_by_stage_day_has_more': len(rows) > COST_ROWS_MAX}
     return {'connected': bool(cfg and cfg.enabled), 'provider': cfg.provider if cfg else None,
             'configured_model': cfg.model or None if cfg else None,
             'verified_model': cfg.verified_model or None if verified else None,
@@ -198,7 +211,7 @@ def snapshot(days=7):
             'priced_attempts': priced_attempts,
             'unknown_cost_attempts': unknown_cost_attempts, 'models': models,
             'daily': [{'day': _iso(d['day']), 'attempts': d['attempts'], 'errors': d['errors']} for d in daily],
-            'stages': stages, 'recent': recent, 'templates': _templates(), 'cost_by_stage_day': cost_by_stage_day(days),
+            'stages': stages, 'recent': recent, 'templates': _templates(), **extra,
             'rates': [{'provider': r.provider, 'model': r.model, 'input_per_million_usd': str(r.input_per_million_usd),
                        'output_per_million_usd': str(r.output_per_million_usd), 'cache_read_per_million_usd':
                        str(r.cache_read_per_million_usd) if r.cache_read_per_million_usd is not None else None,

@@ -93,6 +93,9 @@ class CVEEntry(models.Model):
             models.Index(fields=["kev"], name="cvefeed_kev_idx"),
             models.Index(fields=["cvss"], name="cvefeed_cvss_idx"),
             models.Index(fields=["published_at"], name="cvefeed_pub_idx"),
+            # the CVE explorer's order (cve_explorer.search): newest first, undated last, then by id. The index above is ascending with nulls last,
+            # so it cannot give this order and the list sorted the whole catalogue for every page (migration 0192)
+            models.Index(models.F("published_at").desc(nulls_last=True), models.F("id").desc(), name="cvefeed_pub_id_desc_idx"),
         ]
 
     def __str__(self):

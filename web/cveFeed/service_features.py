@@ -294,43 +294,144 @@ def requirements(cve):
     return index().get(cve.pk, {})
 
 
-_INDEX = {'checked': 0.0, 'stamp': None, 'value': {}}
+_INDEX = {'checked': 0.0, 'stamp': None, 'value': {}, 'seen': None, 'stated': None}
 INDEX_CHECK = 60  # seconds between two looks at whether the CVE table or a detection record changed
+# The last built index, shared by every process (web workers, Celery workers): {stamp, value, seen, stated}. It is only ever a starting point: a
+# process that takes it re-reads every CVE whose synced_at differs from the one it was built from (``_refresh``), so it is never staler than the
+# per-process copy. Nothing here depends on who asks (public CVE text and the people's detection records), so it is the same for every caller.
+INDEX_CACHE_KEY = 'service_features:index:v1'
+INDEX_CACHE_TTL = 7 * 24 * 3600
+# A refresh that has to read more CVEs than this reads them by the prefilter over the whole table instead of by an id list.
+INDEX_FULL_SCAN = 5000
+
+
+STAMP_KEY = 'cve:service-features-stamp'
+STAMP_SECONDS = 60  # how long every process shares one read of the stamp below
 
 
 def reset_index():
-    _INDEX.update(checked=0.0, stamp=None, value={})
+    """Forget the index, this process's copy and the shared one: the next ``index()`` builds it from the whole table."""
+    from django.core.cache import cache
+    _INDEX.update(checked=0.0, stamp=None, value={}, seen=None, stated=None)
+    try:
+        cache.delete(INDEX_CACHE_KEY)
+        cache.delete(STAMP_KEY)
+    except Exception:
+        logger.warning('could not clear the shared service feature index', exc_info=True)
 
 
-def index():
-    """``{CVEEntry id: requirements}`` for every CVE that needs a feature: one query for the CVEs whose words name one
-    (``detection_classes.FEATURE_PREFILTER``, then the rules themselves) and one for the people's detection records that state
-    ``requires_features``. Cached per process, and read again when the CVE table or a detection record changed (looked at once every
-    ``INDEX_CHECK`` seconds)."""
-    import time
+def _stamp():
+    """``(CVEs, newest CVE sync, detection records, newest record change)``: what ``index`` compares to know whether to read the CVEs again. The CVE half
+    is a pass over the whole catalogue (``synced_at`` has no index: 18,000 buffers and 150 to 330 ms on 59,000 CVEs), and every worker process asked it
+    once a minute for itself. It is now read once for all of them and shared through the cache for ``STAMP_SECONDS``, so a change to the catalogue or a
+    detection record reaches ``index`` within ``INDEX_CHECK + STAMP_SECONDS`` (two minutes; one before). ``reset_index`` forgets it. Without a cache it
+    is read every time, as before."""
+    from django.core.cache import cache
+    from django.db.models import Count, Max
 
-    from django.db.models import Count, Max, Q
-
-    from cveFeed.detection_classes import FEATURE_PREFILTER
     from cveFeed.models import CVEDetection, CVEEntry
-    if _INDEX['checked'] and time.monotonic() - _INDEX['checked'] < INDEX_CHECK:
-        return _INDEX['value']
+    try:
+        got = cache.get(STAMP_KEY)
+    except Exception:  # noqa: BLE001 - a cache outage reads the database
+        got = None
+    if got is not None:
+        return tuple(got)
     entries = CVEEntry.objects.aggregate(n=Count('id'), latest=Max('synced_at'))
     detections = CVEDetection.objects.aggregate(n=Count('id'), latest=Max('updated_at'))
-    stamp = (entries['n'], entries['latest'], detections['n'], detections['latest'])
-    if stamp == _INDEX['stamp']:
-        _INDEX['checked'] = time.monotonic()
-        return _INDEX['value']
-    # a person's record only (source manual): the rules' own value is the rule below, and a model's answer never sets one (detection.merge_strategies)
-    stated = dict(CVEDetection.objects.filter(source='manual', strategy__has_key='requires_features').values_list('cve_entry_id', 'strategy'))
+    got = (entries['n'], entries['latest'], detections['n'], detections['latest'])
+    try:
+        cache.set(STAMP_KEY, got, STAMP_SECONDS)
+    except Exception:  # noqa: BLE001
+        pass
+    return got
+
+
+def _seen():
+    """``{CVEEntry id: synced_at}`` of the whole table, ``synced_at`` as whole microseconds since the epoch (exact, and compact in the shared copy),
+    worked out by the database so that the 59,000 values cost no Python date arithmetic."""
+    from django.db.models import BigIntegerField, Value
+    from django.db.models.functions import Cast, Coalesce, Extract
+
+    from cveFeed.models import CVEEntry
+    micros = Coalesce(Cast(Extract('synced_at', 'epoch') * Value(1_000_000), BigIntegerField()), Value(0))
+    return dict(CVEEntry.objects.order_by().annotate(at=micros).values_list('pk', 'at').iterator(chunk_size=5000))
+
+
+def _refresh(base, stated):
+    """``(value, seen)``: the index for the CVE table as it is now, from ``base`` (an earlier build: value, seen, stated; or None).
+
+    The prefilter (``detection_classes.FEATURE_PREFILTER``, a PostgreSQL ``~*`` over title, description and summary) costs about 0.5 ms a row, about
+    30 s over a table of 59,000 CVEs, and every process paid it on its first call and again each time any CVE was saved (``synced_at`` moves
+    hourly). A CVE's requirements only change with its own words (every writer of them moves ``synced_at``) or a person's record about it, so
+    only the CVEs whose ``synced_at`` or record differs from ``base`` are read again: one narrow read of every id and ``synced_at`` (about
+    0.1 s), then the prefilter over the changed rows alone. Without a base the prefilter runs over the whole table, as it always did."""
+    from django.db.models import Q
+
+    from cveFeed.detection_classes import FEATURE_PREFILTER
+    from cveFeed.models import CVEEntry
+    seen = _seen()
+    if base is None:
+        changed = None
+        out = {}
+    else:
+        old_seen, old_stated = base['seen'], base['stated']
+        changed = {pk for pk, at in seen.items() if old_seen.get(pk) != at}
+        changed |= {pk for pk in set(stated) | set(old_stated) if stated.get(pk) != old_stated.get(pk)}
+        changed &= seen.keys()
+        out = {pk: v for pk, v in base['value'].items() if pk in seen and pk not in changed}
+        if not changed:
+            return out, seen
+        if len(changed) > INDEX_FULL_SCAN:
+            changed, out = None, {}
     words = Q(title__iregex=FEATURE_PREFILTER) | Q(original_description__iregex=FEATURE_PREFILTER) | Q(summary__iregex=FEATURE_PREFILTER)
-    out = {}
-    for pk, title, description, summary in CVEEntry.objects.filter(words | Q(pk__in=list(stated))).values_list(
-            'pk', 'title', 'original_description', 'summary').iterator(chunk_size=500):
+    qs = CVEEntry.objects.filter(words | Q(pk__in=list(stated)))
+    if changed is not None:
+        qs = CVEEntry.objects.filter(pk__in=list(changed)).filter(words | Q(pk__in=[pk for pk in stated if pk in changed]))
+    for pk, title, description, summary in qs.order_by().values_list('pk', 'title', 'original_description', 'summary').iterator(chunk_size=500):
         found = _from_words(title, description or summary, _stated(stated.get(pk)))
         if found:
             out[pk] = found
-    _INDEX.update(checked=time.monotonic(), stamp=stamp, value=out)
+    return out, seen
+
+
+def index():
+    """``{CVEEntry id: requirements}`` for every CVE that needs a feature: the CVEs whose words name one (``detection_classes.FEATURE_PREFILTER``,
+    then the rules themselves) and the ones a person's detection record states ``requires_features`` for. Cached per process and shared between
+    processes (``INDEX_CACHE_KEY``), and brought up to date when the CVE table or a detection record changed (looked at once every
+    ``INDEX_CHECK`` seconds) by reading only the CVEs that changed (``_refresh``)."""
+    import time
+
+    from django.core.cache import cache
+
+    from cveFeed.models import CVEDetection, CVEEntry
+    if _INDEX['checked'] and time.monotonic() - _INDEX['checked'] < INDEX_CHECK:
+        return _INDEX['value']
+    stamp = _stamp()
+    if stamp == _INDEX['stamp']:
+        _INDEX['checked'] = time.monotonic()
+        return _INDEX['value']
+    base = _INDEX if _INDEX['seen'] is not None else None
+    if base is None:
+        try:
+            shared = cache.get(INDEX_CACHE_KEY)
+        except Exception:
+            logger.warning('could not read the shared service feature index', exc_info=True)
+            shared = None
+        if isinstance(shared, dict) and {'stamp', 'value', 'seen', 'stated'} <= shared.keys():
+            if shared['stamp'] == stamp:
+                _INDEX.update(checked=time.monotonic(), stamp=stamp, value=shared['value'], seen=shared['seen'], stated=shared['stated'])
+                return shared['value']
+            base = shared
+    # a person's record only (source manual): the rules' own value is the rule below, and a model's answer never sets one (detection.merge_strategies).
+    # Such a record is never empty, so the partial index of filled records (cvedetection_source_filled_idx) finds them: 1.3 s to 2 ms on the live table.
+    stated = dict(CVEDetection.objects.filter(source='manual', strategy__has_key='requires_features').exclude(strategy={})
+                  .values_list('cve_entry_id', 'strategy'))
+    out, seen = _refresh(base, stated)
+    _INDEX.update(checked=time.monotonic(), stamp=stamp, value=out, seen=seen, stated=stated)
+    try:
+        cache.set(INDEX_CACHE_KEY, {'stamp': stamp, 'value': out, 'seen': seen, 'stated': stated}, INDEX_CACHE_TTL)
+    except Exception:
+        logger.warning('could not share the service feature index', exc_info=True)
     return out
 
 
