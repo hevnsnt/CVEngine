@@ -793,22 +793,29 @@ def event(rule, level, observation='', action='', result='', **detail):
 
 
 def notice(rule, severity, title, detail, **facts):
-    """Open (or update) the one notice of this rule for App Admins (an AdminAlert, code ``watchdog_<rule>``). Never raises."""
+    """Open (or update) the one notice of this rule for App Admins (an AdminAlert, code ``watchdog_<rule>``). Never raises. Its digest is the
+    severity and the title without the numbers and times in it (``reviewer.plain_text``), and a dismissal is kept as the operations alerts keep
+    theirs (``reviewer.dismissal_holds``, ``reviewer.carried_dismissal``)."""
     try:
         import hashlib
 
+        from cveFeed import reviewer
         from cveFeed.models import AdminAlert
         code = 'watchdog_' + rule.lower()
-        digest = hashlib.sha1(f'{severity}|{title}'.encode()).hexdigest()[:20]
+        digest = hashlib.sha1(f'{severity}|{reviewer.plain_text(title)}'.encode()).hexdigest()[:20]
         now = timezone.now()
         alert = AdminAlert.objects.filter(code=code, resolved_at__isnull=True).first()
         if alert is None:
-            AdminAlert.objects.create(code=code, severity=severity, title=title[:200], detail=detail[:4000], facts=facts, digest=digest, first_seen=now, last_seen=now)
+            AdminAlert.objects.create(code=code, severity=severity, title=title[:200], detail=detail[:4000], facts=facts, digest=digest, first_seen=now, last_seen=now,
+                                      **reviewer.carried_dismissal(code, digest, severity, now))
         else:
+            fields = ['severity', 'title', 'detail', 'facts', 'digest', 'last_seen']
+            if reviewer.restamp_dismissal(alert, digest, hashlib.sha1(f'{severity}|{title}'.encode()).hexdigest()[:20]):
+                fields.append('dismissed_digest')
             alert.severity, alert.title, alert.detail, alert.facts, alert.last_seen = severity, title[:200], detail[:4000], facts, now
             if alert.digest != digest:
                 alert.digest = digest  # a dismissed notice returns when what it says changes
-            alert.save(update_fields=['severity', 'title', 'detail', 'facts', 'digest', 'last_seen'])
+            alert.save(update_fields=fields)
     except Exception:  # noqa: BLE001
         logger.warning('watchdog: could not write a notice', exc_info=True)
 

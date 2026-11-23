@@ -145,6 +145,8 @@ def _heartbeat(ctx, body=None):
     running = _clean_running(body)  # refused before anything is stored
     out = broker.heartbeat(ctx, body)
     _renew_token(ctx.token)
+    from cveFeed import reviewer
+    reviewer.sentinel_heard()  # a "no live Sentinel" alert ends with the first heartbeat, not at the next half-hourly check (a cache gate: one query a minute at most)
     if running is not None:
         ended = _end_unreported(out['agent']['id'], running)
         if ended:

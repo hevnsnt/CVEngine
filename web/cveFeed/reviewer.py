@@ -982,6 +982,29 @@ def _starvation_inputs(now, paused, live):
     return out
 
 
+ALERT_UPDATE_GRACE = timedelta(minutes=15)  # after an update ends, no Sentinel live yet is the restart, not an outage: the liveness checks give no verdict this long
+
+
+def after_update(now=None):
+    """Whether an update is running or ended less than ``ALERT_UPDATE_GRACE`` ago (``scan_control.update_window``, the window the broker keeps
+    Sentinel leases by). The web and the database restart at the end of an update and the Sentinels are heard again within a minute or two, so a
+    check that ran in between and found no live Sentinel is no verdict ('unknown'): it neither opens an alert nor resolves one."""
+    from cveFeed import scan_control
+    now = now or timezone.now()
+    started, ended, grace = scan_control.update_window()
+    if started is None:
+        return False
+    if ended is None or ended < started:
+        return now - started < scan_control.OPEN_WINDOW_MAX
+    return now - ended < ALERT_UPDATE_GRACE or (grace is not None and now < grace)
+
+
+def _restarting(code, title, facts=None):
+    """No verdict on ``code`` (``after_update``): it would be raised only because no Sentinel has been heard from since the update restarted the server."""
+    return _check(code, 'unknown', title, 'An update restarted the server moments ago and no Sentinel has been heard from since; they are heard again within a minute or two.',
+                  facts or {})
+
+
 def ops_checks(now=None, templates_release=None, _out=None):
     """The operations checks (docs/AI-REVIEWER.md), from ``system_status`` and the database. ``templates_release`` is the newest
     nuclei-templates release the reviewer container read from GitHub, ``{tag, published_at}``, when it has one."""
@@ -1055,6 +1078,8 @@ def ops_checks(now=None, templates_release=None, _out=None):
     from agentapi.models import Agent
     from cveFeed import fleet as fleet_lib
     fleet = fleet_lib.fleet_facts(now)
+    # no Sentinel heard from yet, right after an update restarted the server: the checks that would raise only for that give no verdict
+    restarting = not fleet['live_sentinels'] and after_update(now)
     not_waiting = ~sentinel_broker.waiting_q() & ~Q(error='cancelled by a person')  # a task that expired waiting for a free slot is back-pressure, counted below, and one a person cancelled is no failure
     who = _who()
     ended = SentinelTask.objects.annotate(who=who).filter(not_waiting, status__in=('failed', 'expired'), finished_at__gte=six)
@@ -1081,7 +1106,9 @@ def ops_checks(now=None, templates_release=None, _out=None):
     several = [g for g in groups if g['n'] >= SENTINEL_FAILED_PROBLEM]
     overall = bool(several) and (not fleet['live_sentinels'] or not completed or share >= SENTINEL_ERROR_SHARE)
     bad = sorted({id(g): g for g in own + (several if overall else [])}.values(), key=lambda g: -g['n'])[:10]
-    if bad:
+    if bad and restarting and not own and not (several and (not completed or share >= SENTINEL_ERROR_SHARE)):
+        checks.append(_restarting('sentinel_errors', 'Sentinel tasks are failing'))
+    elif bad:
         samples = {}
         for g in bad[:5]:
             err = (counted.filter(who=g['who'], kind=g['kind']).exclude(error='').order_by('-finished_at').values_list('error', flat=True).first())
@@ -1101,7 +1128,9 @@ def ops_checks(now=None, templates_release=None, _out=None):
     held_rows = SentinelTask.objects.filter(sentinel_broker.waiting_q(), finished_at__gte=six)
     held = list(held_rows.values('kind').annotate(n=Count('id')).order_by('-n')[:10])
     waited = sum(r['n'] for r in held)
-    if waited >= SENTINEL_FAILED_PROBLEM:
+    if waited >= SENTINEL_FAILED_PROBLEM and restarting:
+        checks.append(_restarting('sentinel_waiting', 'Sentinel tasks are waiting for a free slot'))
+    elif waited >= SENTINEL_FAILED_PROBLEM:
         recent = held_rows.filter(finished_at__gte=now - timedelta(hours=3)).count()
         earlier = waited - recent
         queued_now = SentinelTask.objects.filter(status='queued').count()
@@ -1162,7 +1191,9 @@ def ops_checks(now=None, templates_release=None, _out=None):
     if not fleet['live_sentinels']:
         gone = list(Agent.objects.filter(kind='scanner', status='active', token__revoked=False, last_seen__gte=now - timedelta(days=7))
                     .order_by('name').values_list('name', flat=True)[:10])
-        if gone:
+        if gone and restarting:
+            checks.append(_restarting('sentinels_offline', 'No Sentinel is live', {'silent': gone}))
+        elif gone:
             checks.append(_check('sentinels_offline', 'problem', 'No Sentinel is live',
                                  f"No Sentinel has been heard from lately, so no scan work is being done. Registered and approved, but silent: {', '.join(gone)}. "
                                  'Check that the Sentinel is running and can reach this server (the Sentinels page shows when each was last seen).',
@@ -1193,7 +1224,8 @@ def ops_checks(now=None, templates_release=None, _out=None):
     # AI-written templates are validated by the system (cveFeed.templatevalidate), never by a person: only a real problem it cannot fix itself is reported
     from cveFeed import templatevalidate
     stuck = templatevalidate.problem(now)
-    checks.append(_check('generated_templates', 'warning' if stuck else 'ok',
+    waiting_for_restart = bool(stuck) and restarting and (stuck.get('facts') or {}).get('live_sentinels') == 0  # only because no Sentinel is heard from yet
+    checks.append(_check('generated_templates', 'unknown' if waiting_for_restart else 'warning' if stuck else 'ok',
                          stuck['title'] if stuck else 'AI-written nuclei templates are validated automatically',
                          stuck['detail'] if stuck else '', stuck['facts'] if stuck else {}))
 
@@ -1224,29 +1256,125 @@ def ops_checks(now=None, templates_release=None, _out=None):
     return checks
 
 
-def _meaning(value):
-    """What a fact says apart from how big it is: names, switches and states stay, a count is only "there is one". A dismissed alert comes back
-    when the problem changes (another Sentinel or kind, a state turning true), not because one more task waited or failed."""
-    if isinstance(value, bool) or value is None or isinstance(value, str):
+# the numbers and times inside a sentence: a clock time or a date ("{{time:2026-11-23T14:21:35Z}}", "15:43 UTC"), a span ("14 minutes",
+# "an hour"), and any other run of digits ("12 open findings")
+_TIME_TEXT = re.compile(r'\{\{time:[^}]*\}\}|\b\d{4}-\d{2}-\d{2}(?:[T ]\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?'
+                        r'|\b\d{1,2}:\d{2}(?::\d{2})?(?:\s*UTC\b)?')
+_SPAN_TEXT = re.compile(r'\b(?:\d[\d,.]*|an?)\s+(?:second|minute|hour|day|week)s?\b', re.I)
+_NUMBER_TEXT = re.compile(r'\d(?:[\d,.]*\d)?')
+
+
+def plain_text(text):
+    """A sentence without its numbers and times: each becomes ``#``. A word without a space (a kind, a name, a state) is kept exactly, because
+    another name is another problem; a sentence that only says a bigger number or a later time is the same problem."""
+    if not isinstance(text, str) or ' ' not in text:
+        return text
+    return _NUMBER_TEXT.sub('#', _SPAN_TEXT.sub('#', _TIME_TEXT.sub('#', text)))
+
+
+def _meaning(value, plain=True):
+    """What a fact says apart from how big it is: names, switches and states stay, a count is only "there is one", and a sentence keeps its
+    words without its numbers and times (``plain_text``). A dismissed alert comes back when the problem changes (another Sentinel or kind, a
+    state turning true, another problem line), not because one more task waited or failed, or a sentence says "14 minutes" instead of "13".
+    ``plain=False`` is the reading before sentences lost their numbers (``_legacy_digest``)."""
+    if isinstance(value, str):
+        return plain_text(value) if plain else value
+    if isinstance(value, bool) or value is None:
         return value
     if isinstance(value, (int, float)):
         return '#'
     if isinstance(value, dict):
-        return {str(k): _meaning(v) for k, v in value.items()}
+        return {str(k): _meaning(v, plain) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
-        return sorted((_meaning(v) for v in value), key=lambda v: json.dumps(v, sort_keys=True, default=str))
+        return sorted((_meaning(v, plain) for v in value), key=lambda v: json.dumps(v, sort_keys=True, default=str))
     return str(value)
 
 
-def _digest(check):
-    keep = {k: _meaning(v) for k, v in (check.get('facts') or {}).items() if k not in ('last_errors', 'last_messages', 'hours_since_refresh', 'done_2h', 'completed', 'queued_now', 'live_sentinels', 'slots',
-                                                                                    'restart_cut', 'waited_earlier', 'waited_recent', 'growing')}
+_DIGEST_SKIP = ('last_errors', 'last_messages', 'hours_since_refresh', 'done_2h', 'completed', 'queued_now', 'live_sentinels', 'slots',
+                'restart_cut', 'waited_earlier', 'waited_recent', 'growing')
+
+
+def _digest(check, plain=True):
+    keep = {k: _meaning(v, plain) for k, v in (check.get('facts') or {}).items() if k not in _DIGEST_SKIP}
     return hashlib.sha1(json.dumps([check['code'], check['state'], keep], sort_keys=True, default=str).encode()).hexdigest()
+
+
+def _legacy_digest(check):
+    """The digest as it was made before sentences lost their numbers: an alert stored then and dismissed is moved over to the new digest
+    (``restamp_dismissal``) instead of coming back once only because the way of reading it changed."""
+    return _digest(check, plain=False)
+
+
+# Dismissals.
+# A dismissal stores the digest it was given for, and in front of it the severity the alert had then (one letter: never a hex digit, so a
+# digest stored before the letter is still read as it was). The letter is what lets a rise from warning to critical end the hold below.
+ALERT_DISMISS_HOLD = timedelta(hours=4)    # a dismissal holds this long whatever the digest does (workload churn), unless the severity rises
+ALERT_REOPEN_CARRY = timedelta(hours=6)    # a check that resolved and comes back within this keeps the dismissal of its last alert
+_SEVERITY_MARK = {'info': 'I', 'warning': 'W', 'critical': 'C'}
+_MARK_SEVERITY = {v: k for k, v in _SEVERITY_MARK.items()}
+
+
+def dismissal_mark(severity, digest):
+    """What ``dismissed_digest`` holds for a dismissal of an alert of ``severity`` whose digest is ``digest`` (fits the 40 characters)."""
+    return _SEVERITY_MARK.get(severity, 'W') + (digest or '')[:39]
+
+
+def _marked(stored):
+    """``(severity or None, digest part)`` of a stored ``dismissed_digest``; a value stored before the severity letter has no severity."""
+    stored = stored or ''
+    if stored[:1] in _MARK_SEVERITY:
+        return _MARK_SEVERITY[stored[0]], stored[1:]
+    return None, stored
+
+
+def _same_digest(stored, digest):
+    severity, part = _marked(stored)
+    if severity is None:
+        return part == (digest or '')
+    return part == (digest or '')[:39]
+
+
+def dismissal_holds(dismissed_at, dismissed_digest, digest, severity, now):
+    """Whether a dismissal still hides an alert whose digest and severity are now ``digest`` and ``severity``: while what it says is what was
+    dismissed (the digest), and for ``ALERT_DISMISS_HOLD`` after the dismissal whatever the digest does, unless the severity rose since (a
+    warning turning critical). After the hold a changed digest brings the alert back, as before."""
+    if not dismissed_at:
+        return False
+    if _same_digest(dismissed_digest, digest):
+        return True
+    if now - dismissed_at >= ALERT_DISMISS_HOLD:
+        return False
+    was, _part = _marked(dismissed_digest)
+    return SEVERITY_RANK.get(severity, 1) <= SEVERITY_RANK.get(was or severity, 1)
+
+
+def carried_dismissal(code, digest, severity, now):
+    """The dismissal a NEW alert of ``code`` takes over from the last alert of that code, as ``{dismissed_at, dismissed_by, dismissed_digest}``,
+    or ``{}``: when that alert was resolved less than ``ALERT_REOPEN_CARRY`` ago and its dismissal would still hide the new one
+    (``dismissal_holds``). A check that flaps from a problem to ok and back opens a new row each time, and a person who dismissed it is not
+    asked again for the same problem."""
+    from cveFeed.models import AdminAlert
+    last = AdminAlert.objects.filter(code=code).order_by('-id').only('resolved_at', 'dismissed_at', 'dismissed_by', 'dismissed_digest').first()
+    if (last is None or last.resolved_at is None or last.resolved_at < now - ALERT_REOPEN_CARRY
+            or not dismissal_holds(last.dismissed_at, last.dismissed_digest, digest, severity, now)):
+        return {}
+    return {'dismissed_at': last.dismissed_at, 'dismissed_by_id': last.dismissed_by_id, 'dismissed_digest': last.dismissed_digest}
+
+
+def restamp_dismissal(alert, digest, legacy):
+    """When the stored digest of a dismissed alert is the old reading (``legacy``) of the same facts whose new reading is ``digest``, move the
+    dismissal to the new digest. Returns whether it changed ``dismissed_digest``."""
+    if not alert.dismissed_at or alert.digest == digest or alert.digest != legacy or not _same_digest(alert.dismissed_digest, alert.digest):
+        return False
+    was, _part = _marked(alert.dismissed_digest)
+    alert.dismissed_digest = dismissal_mark(was or alert.severity, digest)
+    return True
 
 
 def sync_alerts(checks, now=None):
     """Open, refresh or resolve one ``AdminAlert`` per check code: a check that is not ``ok`` keeps its alert open (with the newest facts),
-    an ``ok`` one resolves it. Returns ``{opened, resolved}``."""
+    an ``ok`` one resolves it. A new alert of a check that resolved lately keeps the dismissal of the last one (``carried_dismissal``).
+    Returns ``{opened, resolved}``."""
     from cveFeed.models import AdminAlert
     now = now or timezone.now()
     opened = resolved = 0
@@ -1263,13 +1391,62 @@ def sync_alerts(checks, now=None):
         digest = _digest(check)
         if alert is None:
             AdminAlert.objects.create(code=check['code'], severity=check['severity'], title=check['title'][:200], detail=check['detail'][:4000],
-                                      facts=check['facts'], digest=digest, first_seen=now, last_seen=now)
+                                      facts=check['facts'], digest=digest, first_seen=now, last_seen=now,
+                                      **carried_dismissal(check['code'], digest, check['severity'], now))
             opened += 1
         else:
+            fields = ['severity', 'title', 'detail', 'facts', 'digest', 'last_seen']
+            if restamp_dismissal(alert, digest, _legacy_digest(check)):
+                fields.append('dismissed_digest')
             alert.severity, alert.title, alert.detail, alert.facts, alert.digest, alert.last_seen = (
                 check['severity'], check['title'][:200], check['detail'][:4000], check['facts'], digest, now)
-            alert.save(update_fields=['severity', 'title', 'detail', 'facts', 'digest', 'last_seen'])
+            alert.save(update_fields=fields)
     return {'opened': opened, 'resolved': resolved}
+
+
+HEARD_GATE_KEY = 'cvengine:reviewer:sentinel-heard'
+HEARD_GATE_SECONDS = 60  # a Sentinel heartbeat looks for a "no live Sentinel" alert to resolve at most this often, install wide
+
+
+def sentinel_heard(now=None):
+    """A Sentinel heartbeat arrived: resolve at once the open alerts that say no Sentinel is live (``sentinels_offline``, and a
+    ``generated_templates`` alert raised only because none was live), when a Sentinel is live now and, for the templates, one can run the checks.
+    The operations checks run every 30 minutes, so without this such an alert outlives the restart that raised it by up to half an hour. At most
+    one alert query per ``HEARD_GATE_SECONDS`` (a cache gate in front of it); the other checks and every other resolution rule are unchanged.
+    Returns how many alerts it resolved. Never raises: a heartbeat must not fail for it."""
+    try:
+        if not cache.add(HEARD_GATE_KEY, 1, HEARD_GATE_SECONDS):
+            return 0
+        from django.db import transaction
+        with transaction.atomic():  # a savepoint: a failed read here never breaks the heartbeat's own transaction
+            return _resolve_heard(now)
+    except Exception:  # noqa: BLE001
+        logger.warning('could not resolve the alerts a Sentinel heartbeat answers', exc_info=True)
+        return 0
+
+
+def _resolve_heard(now):
+    """``sentinel_heard`` past its gate: one query for the open alerts, and the fleet only when one of them is open."""
+    from cveFeed.models import AdminAlert
+    rows = [a for a in AdminAlert.objects.filter(code__in=('sentinels_offline', 'generated_templates'), resolved_at__isnull=True)
+            if a.code == 'sentinels_offline' or (a.facts or {}).get('live_sentinels') == 0]
+    if not rows:
+        return 0
+    from cveFeed import fleet as fleet_lib
+    now = now or timezone.now()
+    if not fleet_lib.fleet_facts(now)['live_sentinels']:
+        return 0
+    done = []
+    for a in rows:
+        if a.code == 'generated_templates':
+            from agentapi import sentinel_dispatch
+            from reNgine.resources import ScannerUnavailable
+            try:
+                sentinel_dispatch.nuclei_validate_ready(None)
+            except ScannerUnavailable:
+                continue  # a Sentinel is live but none runs template checks: the alert still says something true
+        done.append(a.pk)
+    return AdminAlert.objects.filter(pk__in=done, resolved_at__isnull=True).update(resolved_at=now) if done else 0
 
 
 def run_ops_checks(now=None):
@@ -1512,17 +1689,17 @@ def answering_decision(alert):
     return TuningDecision.objects.filter(created_at__gte=alert.first_seen, signals__alerts__contains=[alert.code]).order_by('-created_at', '-pk').values_list('pk', flat=True).first()
 
 
-def open_alerts(user=None):
-    """The open alerts an App Admin sees: not resolved, and not dismissed unless the problem changed since."""
+def open_alerts(user=None, now=None):
+    """The open alerts an App Admin sees: not resolved, and not dismissed unless the problem changed since (``dismissal_holds``: what it says
+    changed after the hold, or its severity rose)."""
     from cveFeed.models import AdminAlert
     rows = list(AdminAlert.objects.filter(resolved_at__isnull=True).order_by('-last_seen', '-id')[:20])  # a tiebreak: the alerts of one check run share a time, and the order must not change from one read to the next
+    now = now or timezone.now()
+    rows = [a for a in rows if not dismissal_holds(a.dismissed_at, a.dismissed_digest, a.digest, a.severity, now)]
     from cveFeed import fleet
     facts = fleet.fleet_facts() if any(a.ai_detail for a in rows) else {}
     out = []
-    now = timezone.now()
     for a in rows:
-        if a.dismissed_at and a.dismissed_digest == a.digest:
-            continue
         ai_detail = usable_note(a.ai_detail, min_words=DIAGNOSIS_MIN_WORDS)  # a row stored before filler was refused is not shown either
         if ai_detail and fleet.contradicts_fleet(ai_detail, facts):  # advice stored before this guard keeps only the sentences the facts do not contradict
             ai_detail = usable_note(fleet.without_contradictions(ai_detail, facts), min_words=DIAGNOSIS_MIN_WORDS)
@@ -1541,6 +1718,6 @@ def dismiss_alert(alert_id, user, now=None):
     alert = AdminAlert.objects.filter(pk=alert_id, resolved_at__isnull=True).first()
     if alert is None:
         return False
-    alert.dismissed_at, alert.dismissed_by, alert.dismissed_digest = now or timezone.now(), user, alert.digest
+    alert.dismissed_at, alert.dismissed_by, alert.dismissed_digest = now or timezone.now(), user, dismissal_mark(alert.severity, alert.digest)
     alert.save(update_fields=['dismissed_at', 'dismissed_by', 'dismissed_digest'])
     return True

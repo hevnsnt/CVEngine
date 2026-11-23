@@ -741,7 +741,7 @@ class OpsTests(Fixture):
         reviewer.sync_alerts(self.checks(system='problem'))
         self.assertEqual([a['code'] for a in reviewer.open_alerts()], ['system'])
         alert = AdminAlert.objects.get(code='system', resolved_at__isnull=True)
-        reviewer.dismiss_alert(alert.pk, self.admin)
+        reviewer.dismiss_alert(alert.pk, self.admin, now=timezone.now() - reviewer.ALERT_DISMISS_HOLD - timedelta(minutes=1))  # dismissed before the hold (cveFeed.reviewer.dismissal_holds)
         self.assertEqual(reviewer.open_alerts(), [])
         changed = self.checks(system='problem')
         changed[2]['facts'] = {'problems': ['the cache does not answer']}  # a different problem; a count moving inside the same one does not bring it back (AM-10)
