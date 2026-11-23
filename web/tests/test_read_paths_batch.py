@@ -46,10 +46,16 @@ class Inventory(TestCase):
             for n in rng.sample([22, 80, 443, 8080, 3306], rng.randint(0, 4)):
                 ip.ports.add(Port.objects.create(number=n, state=rng.choice(['open', 'open', '', 'closed'])))
         cls.subs = []
+        seen = set()
         for i in range(120):
             k = rng.randrange(5)
             name = rng.choice([cls.domains[k].name, f'www.{cls.domains[k].name}', f'h{rng.randrange(40)}.{cls.domains[k].name}', f'shared{rng.randrange(5)}.rp.test'])
-            sub = Subdomain.objects.create(name=name, target_domain=cls.domains[k], scan_history=rng.choice([scans[k], None]), score=rng.randrange(100))
+            scan = rng.choice([scans[k], None])
+            score = rng.randrange(100)
+            if scan is not None and (scan.pk, k, name) in seen:
+                continue  # a host is one row per scan and target now (uniq_sub_scan_dom_name)
+            seen.add((scan.pk if scan else None, k, name))
+            sub = Subdomain.objects.create(name=name, target_domain=cls.domains[k], scan_history=scan, score=score)
             sub.ip_addresses.add(*rng.sample(ips, rng.randint(0, 3)))
             cls.subs.append(sub)
         for sub in cls.subs[:40]:
