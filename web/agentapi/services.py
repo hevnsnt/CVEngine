@@ -4246,14 +4246,15 @@ def _agent_task_annotations():
 
 def _matches_qs(project, current_ids=None, counting=False):
     """``current_ids``: the ids of the current inventory's hosts when the caller has them already (``cveFeed.inventory_counts``), so the current-scans filter is not
-    evaluated again inside the statement. ``counting``: only the rows that count (scope and current inventory), none of what a list row shows (related rows, comment
+    evaluated again inside the statement; the ``host`` filter reads them first too (``_current_named_ids``). They are passed as one array parameter (``_id_array``),
+    not one placeholder per id. ``counting``: only the rows that count (scope and current inventory), none of what a list row shows (related rows, comment
     and agent task subqueries, order): a caller that groups and counts never reads them, and building them is most of what such a count costs in Python."""
     from django.db.models import Q
 
     from cveFeed.correlation import latest_scan_q
     from cveFeed.models import CVEMatch
     qs = _scoped(CVEMatch.objects.all(), project, 'subdomain__target_domain__project').filter(
-        latest_scan_q('subdomain__') if current_ids is None else Q(subdomain_id__in=current_ids))
+        latest_scan_q('subdomain__') if current_ids is None else Q(subdomain__id__in_array=_id_array(current_ids)))
     if counting:
         return qs
     qs = qs.select_related('cve_entry', 'subdomain', 'triage__verdict', 'triage__heat_override_by', 'remediation_by', 'assignee') \
@@ -4262,9 +4263,25 @@ def _matches_qs(project, current_ids=None, counting=False):
     return qs.select_related('subdomain__target_domain__project') if _is_all(project) else qs.select_related('subdomain__target_domain')
 
 
+def _current_named_ids(project, text):
+    """The ids of the current inventory's hosts (``latest_scan_q``) in ``project`` whose name contains ``text`` (case-insensitive): the rows the ``host``
+    filter of the CVE match and Findings lists keeps, for ``_matches_qs(current_ids=...)``. Two small statements: the hosts named (every stored copy), then
+    the current ones among them. In one statement with the matches, the name filter made the planner expect a row or two, so it tested the newer-copy rule
+    of ``latest_scan_q`` once per match row and rebuilt that rule's window over every finished scan each time: 26 to 59 s for one host on the live install
+    (6.7 million buffers), past the web statement timeout. Given the named ids, the planner knows how many rows the rule runs over (about 0.1 s for 19,867
+    copies). The rows are the same; the list keeps its own name filter as well."""
+    from cveFeed.correlation import latest_scan_q
+    from startScan.models import Subdomain
+    named = list(_scoped(Subdomain.objects.all(), project, 'target_domain__project').filter(name__icontains=text)
+                 .order_by().values_list('pk', flat=True))
+    if not named:
+        return []
+    return list(Subdomain.objects.filter(id__in_array=_id_array(named)).filter(latest_scan_q()).order_by().values_list('pk', flat=True))
+
+
 def list_matches(ctx, slug, params):
     project, _ = get_project(ctx, slug)
-    qs = _matches_qs(project)
+    qs = _matches_qs(project, _current_named_ids(project, params['host']) if params.get('host') else None)
     if params.get('status') == 'closed':  # any closing status: fixed, accepted_risk or false_positive
         from cveFeed.counts import CLOSED
         qs = qs.filter(remediation_status__in=CLOSED)
@@ -4365,7 +4382,9 @@ def _finding_sources(project, params, current_ids=None, counting=False):
                     When(cve_entry__cvss__gte=4.0, then=Value(2)), default=Value(1), output_field=IntegerField())
     sources = {}
     if wanted in ('all', 'cve'):
-        qs = _matches_qs(project, current_ids, counting).annotate(heat_rank=match_heat_rank_expr(), sev=cve_band, **({} if counting else {'when': F('created_at')}))
+        # the host filter reads the current hosts it names first (``_current_named_ids``): the same rows, without the per-row plan a name filter caused
+        named = _current_named_ids(project, params['host']) if params.get('host') and current_ids is None else current_ids
+        qs = _matches_qs(project, named, counting).annotate(heat_rank=match_heat_rank_expr(), sev=cve_band, **({} if counting else {'when': F('created_at')}))
         if kev:
             qs = qs.filter(cve_entry__kev=True)
         if status == 'actionable':

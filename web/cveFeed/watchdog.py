@@ -761,12 +761,21 @@ def sentinel_watchdog_notice(now):
         return 0
 
 
+def _save_state(state):
+    """Write what a tick changes on a state row: every column but the rule's name and its switch, which only a person sets (``set_enabled``), so a
+    tick that read the row before a person switched the rule never writes the old switch back."""
+    state.save(update_fields=[f.name for f in state._meta.concrete_fields if f.name not in ('id', 'rule', 'enabled')])
+
+
 def _states():
+    """The state row of the watchdog and of each rule, read in one query (a row that does not exist yet is created)."""
     from cveFeed.models import WatchdogState
-    out = {}
-    for code in [ALL] + [r.code for r in RULES]:
-        out[code], _ = WatchdogState.objects.get_or_create(rule=code)
-    return out
+    codes = [ALL] + [r.code for r in RULES]
+    out = WatchdogState.objects.in_bulk(codes, field_name='rule')
+    for code in codes:
+        if code not in out:
+            out[code], _ = WatchdogState.objects.get_or_create(rule=code)
+    return {code: out[code] for code in codes}
 
 
 def event(rule, level, observation='', action='', result='', **detail):
@@ -1093,7 +1102,7 @@ def _process_host_result(ctx):
                 state.actions = list(state.actions or [])[:-1]
                 event(rule.code, 'info', action=result.get('action', ''), result='The host stood aside: ' + detail + ' It is asked again when the stack is free.', request=result['id'])
                 _set(state, 'standing_down', 'The host stood aside: ' + detail)
-                state.save()
+                _save_state(state)
                 continue
             limit = host_limit(result)
             if limit:  # the host's own limit said no: nothing was tried, so nothing failed and nothing counts
@@ -1106,7 +1115,7 @@ def _process_host_result(ctx):
                 event(rule.code, 'info', action=result.get('action', ''), result='The host did not carry it out because of its own limit: ' + detail + ' Held, not a failed fix.', request=result['id'])
                 _set(state, 'held', text)
                 _hold_notice(rule, ctx, text)
-                state.save()
+                _save_state(state)
                 continue
             v = {**v, 'host_id': '', 'host_done_at': done.isoformat()}
             state.verify = v
@@ -1116,13 +1125,13 @@ def _process_host_result(ctx):
                     r5 = ctx.states['R5']
                     requested = datetime.fromisoformat(v['requested_at']).timestamp() if v.get('requested_at') else done.timestamp()
                     r5.data = {**(r5.data or {}), 'workers_recreated_before': max(requested, (r5.data or {}).get('workers_recreated_before') or 0)}
-                    r5.save()
+                    _save_state(r5)
                 state.verify_due = done + timedelta(seconds=rule.verify)
                 event(rule.code, 'action', action=result.get('action', ''), result='The host carried it out. ' + detail, request=result['id'])
             else:
                 state.verify_due = ctx.now  # check at once: the host refused or failed
                 event(rule.code, 'problem', action=result.get('action', ''), result='The host did not carry it out: ' + detail, request=result['id'])
-            state.save()
+            _save_state(state)
     clear_request_if_done(result)
 
 
@@ -1308,8 +1317,8 @@ def _tick(now, probes, out):
     if killed() or all_state.enabled is False:
         for rule in RULES:
             _set(states[rule.code], 'off', 'Switched off.' + (' (CVENGINE_WATCHDOG=0)' if killed() else ''))
-            states[rule.code].save()
-        all_state.save()
+            _save_state(states[rule.code])
+        _save_state(all_state)
         out['skipped'] = 'switched off'
         return out
     snap = snapshot.collect(probes)
@@ -1328,11 +1337,11 @@ def _tick(now, probes, out):
             _set(states[rule.code], 'unknown', 'The rule failed to run (see the web log).')
         if (states[rule.code].verify or {}) != before and states[rule.code].verify:
             out['acted'].append(rule.code)
-        states[rule.code].save()
+        _save_state(states[rule.code])
     snap['stand_down'] = stand
     all_state.data = {**(all_state.data or {}), 'snapshot': json.loads(snapshot.dumps(snap))}
     all_state.status, all_state.status_text = 'ok', 'Ticking.'
-    all_state.save()
+    _save_state(all_state)
     try:
         client = probes.redis() if probes else snapshot.Probes().redis()
         client.set('cvengine:watchdog:snapshot', snapshot.dumps(snap), ex=300)

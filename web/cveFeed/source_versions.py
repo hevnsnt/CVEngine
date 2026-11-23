@@ -888,6 +888,11 @@ def refresh_runzero(sub, configured=None, now=None):
     if sub.target_domain_id is None:
         return False
     readings = runzero_host_readings(sub, configured)
+    known = getattr(sub, '_derived_probes', None)  # the probes the host has rows of, read for the whole scan (version_sources.prefetch_derived)
+    if known is not None:
+        if not readings and RUNZERO_PROBE not in known:
+            return False  # nothing to store and no row to drop: the answer store_reported would give
+        known.add(RUNZERO_PROBE)
     return store_reported(sub.target_domain.project_id, sub.target_domain_id, sub.name, RUNZERO_PROBE, readings, RUNZERO_PROVIDER, '',
                           replace=True, now=now)
 
