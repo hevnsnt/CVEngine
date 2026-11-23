@@ -1322,18 +1322,26 @@ def pause_failing_kinds(mode, now_dt):
     for agent in Agent.objects.filter(kind='scanner', status='active'):
         stored = ((agent.managed_settings or {}).get('pauses') or {}).get('value') or {}
         active = sentinel_policy.active_pauses(agent, now_dt)
+        window = now_dt - timedelta(hours=PAUSE_WINDOW_HOURS)
+        # the tasks this Sentinel finished in the window, read once (each kind's own start is never earlier than the window), where every kind
+        # took two or three queries of its own
+        finished = {}
+        for kind, status, at in (SentinelTask.objects.filter(agent=agent, finished_at__gte=window, status__in=('done', 'failed'))
+                                 .values_list('kind', 'status', 'finished_at')):
+            finished.setdefault(kind, []).append((status, at))
         for kind in SentinelTask.KINDS:
             if kind in active:
                 continue
             ended = sentinel_policy._until(stored.get(kind) or {}) if isinstance(stored.get(kind), dict) else None
-            since = max(now_dt - timedelta(hours=PAUSE_WINDOW_HOURS), ended) if ended else now_dt - timedelta(hours=PAUSE_WINDOW_HOURS)
-            rows = SentinelTask.objects.filter(agent=agent, kind=kind, finished_at__gte=since, status__in=('done', 'failed'))
-            if rows.filter(status='done').exists() or rows.filter(status='failed').count() < PAUSE_FAILURES:
+            since = max(window, ended) if ended else window
+            statuses = [status for status, at in finished.get(kind, ()) if at >= since]
+            failed = statuses.count('failed')
+            if 'done' in statuses or failed < PAUSE_FAILURES:
                 continue
             from cveFeed.models import TuningDecision
             earlier = TuningDecision.objects.filter(setting=f'sentinel_pause:{kind}', signals__agent_id=agent.pk, created_at__gte=now_dt - timedelta(days=1)).count()
             hours = PAUSE_HOURS[min(earlier, len(PAUSE_HOURS) - 1)]
-            reason = f'{kind} failed {rows.filter(status="failed").count()} times in a row on {agent.name} and finished none'
+            reason = f'{kind} failed {failed} times in a row on {agent.name} and finished none'
             try:
                 until = sentinel_policy.pause(agent, kind, hours, reason, by='auto-tuning', now=now_dt)
             except sentinel_policy.PauseRefused as exc:
