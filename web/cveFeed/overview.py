@@ -6,8 +6,9 @@
 - ``status``: a pill (Needs you now, Watch, All clear), one headline sentence and one short paragraph under it. Both are **templates filled from counts**,
   never written by a model: the number of hosts with a proven finding, with likely findings and with high-hygiene items (``situations``), the top threat of the week
   that reaches a host (``report_threats``) and how many hosts were exposed a week ago and now (``stats_history`` snapshots, the live count for today);
-- ``kpis``: four tiles (exposed hosts, needs action, critical findings open, mean time to fix) with a 7-day change and a 14-day series. Exposed hosts is the live
-  count when the caller passes it (``live``); the others are the daily snapshots' (``StatsSnapshot``: counting them live is the walk over every finding that
+- ``kpis``: four tiles (externally facing hosts, needs attention, critical findings open, mean time to fix) with a 7-day change and a 14-day series. Externally
+  facing hosts and needs attention are live when the caller passes them (``live``; ``build`` always passes the needs figure, the hosts of the ranking that need a
+  person soon, the email report's own number); the others are the daily snapshots' (``StatsSnapshot``: counting them live is the walk over every finding that
   once overloaded the server), each saying which day it is as of;
 - ``threats``: this week's digest, grouped by product, with the hosts counted over the whole group (the same hosts in four CVEs are four hosts, not sixteen), and
   for each count a link to the Hosts page that lists exactly the hosts it counts (``host_links``: their names, never a looser search unless they are too many);
@@ -97,11 +98,14 @@ def _snapshot_days(ids, today):
     """``{date: {...}}`` summed over the projects, from the daily snapshots of the last three weeks (one query)."""
     from cveFeed.models import StatsSnapshot
     first = today - timedelta(days=SPARK_DAYS + WINDOW_DAYS)
-    rows = StatsSnapshot._base_manager.filter(project_id__in=list(ids), date__gte=first).values_list(
-        'date', 'hosts', 'exposed_hosts', 'open_findings', 'cve_matches', 'fixed', 'mean_days_to_fix')
-    days = {}
-    for date, hosts, exposed, open_findings, matches, fixed, mean in rows:
+    ids = list(ids)
+    rows = StatsSnapshot._base_manager.filter(project_id__in=ids, date__gte=first).values_list(
+        'date', 'project_id', 'hosts', 'exposed_hosts', 'open_findings', 'cve_matches', 'fixed', 'mean_days_to_fix', 'needs_hosts')
+    days, needs_of = {}, {}
+    for date, pid, hosts, exposed, open_findings, matches, fixed, mean, needs in rows:
         d = days.setdefault(date, {'hosts': 0, 'exposed': 0, 'critical': 0, 'high': 0, 'fire': 0, 'smoke': 0, 'fixed': 0, 'weighted': 0.0})
+        if needs is not None:
+            needs_of.setdefault(date, {})[pid] = needs
         open_findings, matches = open_findings or {}, matches or {}
         d['hosts'] += hosts or 0
         d['exposed'] += exposed or 0
@@ -112,8 +116,10 @@ def _snapshot_days(ids, today):
         if mean is not None and fixed:
             d['fixed'] += fixed
             d['weighted'] += mean * fixed
-    for d in days.values():
-        d['needs'] = d['fire'] + d['smoke']
+    for day, d in days.items():
+        # the hosts that need attention, only for a day every project of the scope has the figure: a partial sum would compare unlike things (as the email does)
+        have = needs_of.get(day, {})
+        d['needs'] = sum(have.values()) if ids and len(have) == len(set(ids)) else None
         d['mttf'] = round(d['weighted'] / d['fixed'], 2) if d['fixed'] else None
     return days
 
@@ -128,14 +134,16 @@ def _series(m, ref):
     return [m[d] for d in sorted(m) if ref - timedelta(days=SPARK_DAYS - 1) <= d <= ref]
 
 
-def _baseline(m, ref):
+def _baseline(m, ref, young=True):
     """``(date, value)`` of the day to compare with: the newest figure at or before a week before ``ref``, else the oldest one there is (a young install compares with
-    its first day), ``(None, None)`` when there is nothing before ``ref``."""
+    its first day; not with ``young=False``, the email report's rule: no figure a week back is no comparison), ``(None, None)`` when there is nothing before ``ref``."""
     want = ref - timedelta(days=WINDOW_DAYS)
     before = [d for d in m if d <= want]
     if before:
         d = max(before)
         return d, m[d]
+    if not young:
+        return None, None
     older = [d for d in m if d < ref]
     if older:
         d = min(older)
@@ -150,11 +158,11 @@ def _delta_text(delta, digits=0):
     return f"{'▲' if delta > 0 else '▼'} {shown}"
 
 
-def _tile(key, label, m, ref, note, unit='', digits=0, compare=False):
+def _tile(key, label, m, ref, note, unit='', digits=0, compare=False, young=True):
     """One tile from the figure's ``{date: value}`` map and the day it is read at (``ref``, None when there is no figure). ``compare``: the foot says "slower than"
-    rather than "since" (a mean time to fix has no count to be "since")."""
+    rather than "since" (a mean time to fix has no count to be "since"). ``young``: see ``_baseline``."""
     value = m[ref] if ref else None
-    base_day, base = _baseline(m, ref) if ref else (None, None)
+    base_day, base = _baseline(m, ref, young) if ref else (None, None)
     delta = None if value is None or base is None else round(value - base, 1 if digits else 0)
     if delta is not None and not digits:
         delta = int(delta)
@@ -171,7 +179,8 @@ def _tile(key, label, m, ref, note, unit='', digits=0, compare=False):
 
 
 def kpis(ids, live=None, now=None):
-    """The four tiles (see the module text). ``live``: ``{'hosts', 'exposed_hosts'}`` of today: the exposed tile reads them as today's figure, the series included."""
+    """The four tiles (see the module text). ``live``: ``{'hosts', 'exposed_hosts', 'needs'}`` of today: the exposed tile reads the first two and the needs tile the
+    last as today's figure, the series included (``needs`` is ``host_counts(...)['needs']``, the number the email report's "Needs attention" says)."""
     now = now or timezone.now()
     today = timezone.localdate(now)
     days = _snapshot_days(ids, today)
@@ -184,8 +193,11 @@ def kpis(ids, live=None, now=None):
     ref = max(exposed, default=None)
     tiles = [_tile('exposed', 'Externally facing hosts', exposed, ref, f'of {hosts[ref]:,} hosts' if ref in hosts and hosts[ref] else '')]
     needs = _metric(days, 'needs')
+    if live.get('needs') is not None:
+        needs[today] = live['needs']
     ref = max(needs, default=None)
-    tiles.append(_tile('needs', 'Needs action (Fire + Smoke)', needs, ref, f"{days[ref]['fire']:,} Fire, {days[ref]['smoke']:,} Smoke" if ref else ''))
+    tiles.append(_tile('needs', 'Needs attention', needs, ref, f"host{'' if needs[ref] == 1 else 's'} to look at" if ref else 'hosts to look at',
+                       young=False))  # compared only with a day a week back, as the email compares with the week's start: the two never say different changes
     critical = _metric(days, 'critical')
     ref = max(critical, default=None)
     tiles.append(_tile('critical', 'Critical findings open', critical, ref, f"{days[ref]['high']:,} high" if ref else ''))
@@ -342,14 +354,24 @@ def _project_breakdown(keys, names):
     return [{'project': names.get(pid, ''), 'n': n, '_pid': pid} for pid, n in sorted(by.items(), key=lambda kv: (-kv[1], names.get(kv[0], '')))]
 
 
+def _entry_title(product, e):
+    title = _short_title(e)
+    if product and title and product.lower() not in title.lower():
+        return f'{product}: {title}'
+    return title or product or (e.get('cve_ids') or [''])[0]
+
+
 def _group_title(product, entries):
+    """The card's title, the same words on the Overview and in the email (both build their groups here). A count in it is a count of CVEs: "PHP: four critical
+    flaws" only when each entry is one CVE, so the number equals the CVEs listed under it. A group holding a briefing (several CVEs, or none) is titled by its
+    leading entry, the first that reaches a host by version, "plus N more advisories" for the rest, never a count of entries that reads as a count of flaws."""
     n = len(entries)
     if n == 1:
-        e = entries[0]
-        title = _short_title(e)
-        if product and title and product.lower() not in title.lower():
-            return f'{product}: {title}'
-        return title or product or (e.get('cve_ids') or [''])[0]
+        return _entry_title(product, entries[0])
+    if not all(len(e.get('cve_ids') or []) == 1 for e in entries) or len({c for e in entries for c in e['cve_ids']}) != n:
+        lead = next((e for e in entries if e.get('matched') or e.get('confirmed')), entries[0])
+        more = n - 1
+        return f"{_entry_title(product, lead)}, plus {more:,} more advisor{'y' if more == 1 else 'ies'}"
     cvss = [e['cvss'] for e in entries if e.get('cvss') is not None]
     kev = sum(1 for e in entries if e.get('kev_added') or 'CISA KEV' in ' '.join(e.get('badges') or []))
     if cvss and all(c >= 9.0 for c in cvss) and len(cvss) == n:
@@ -739,9 +761,9 @@ def build(ids, live=None, now=None, label=''):
     slugs = {p['id']: p['slug'] for p in projects}
     label = label or (names[ids[0]] if len(ids) == 1 and ids[0] in names else 'your projects')
     groups, hosts = situations.ranked(ids)
-    tiles = kpis(ids, live, now)
-    threats = _cached_threats(ids, label, names, now, slugs)
     counts = host_counts(groups)
+    tiles = kpis(ids, {**(live or {}), 'needs': counts['needs']}, now)  # the needs tile is the ranking's own count, live: the email's "Needs attention"
+    threats = _cached_threats(ids, label, names, now, slugs)
     status = status_block(hosts, counts, situations.last_scan(ids) if hosts else None, now, next((g for g in threats['groups'] if g['matched']), None),
                           next(k for k in tiles if k['key'] == 'exposed'))
     return {'status': status, 'kpis': tiles, 'threats': threats, 'fix_first': _fix_first(ids, groups, hosts), 'what_changed': what_changed(ids, tiles, now),

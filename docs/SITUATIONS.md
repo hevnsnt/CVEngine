@@ -67,7 +67,7 @@ To keep the words the same in a row (which carries 12 findings) and in the detai
 
 `/cve/<project>/situations/` (and `/cve/_all/situations/`). One row per host, two lines: the rank, the host, the counts (`2 proven`, `1 likely`, `1 high hygiene`, `3 exposed`, `4 minor`) and an **internal** badge; then the headline and the first action. Click a row (or press Enter on it) to open it in place: the narrative, why it ranks there, and its findings, each linking to the pane that already shows it (Findings, Hygiene, Secrets), with **Open the host**. A host with more findings than a row carries offers **Show all**.
 
-- **Search** matches any name of a host. **Filters, Show** keeps the situations whose worst tier is at least proven, likely, high hygiene or exposed.
+- **Search** matches any name of a host. **Filters, Show** keeps the situations whose worst tier is at least proven, likely, high hygiene or exposed. A link can preselect it with `?tier=proven`, `likely`, `hygiene` or `exposure`: the Overview's **Needs attention** tile opens `?tier=hygiene`, the hosts it counts.
 - **Load more** pages on, 30 rows at a time, like the other lists.
 - Three different empty states, from the server's `state`, never from the rows: **Nothing needs you** (hosts were scanned and nothing open needs a person; not drawn while the list is still loading), **Nothing has been scanned yet** (no host has been scanned: add a target), and, when a search or filter matches nothing, a plain line saying so.
 

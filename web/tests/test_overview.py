@@ -230,6 +230,35 @@ class ThreatGroupTests(SimpleTestCase):
         self.assertEqual(folded[2]['detail'], 'CVSS 9.8 · 0 hosts')
         self.assertTrue(folded[2]['title'].endswith('…') and len(folded[2]['title']) <= overview.FOLDED_TITLE + 1)
 
+    def test_a_briefing_of_several_cves_is_titled_by_itself_and_never_counted_as_one_flaw(self):
+        ids = ['CVE-2026-126714', 'CVE-2026-129289', 'CVE-2026-115560', 'CVE-2026-129481', 'CVE-2026-109619', 'CVE-2026-129496', 'CVE-2026-129474', 'CVE-2026-129182']
+        briefing = entry(ids[0], source='zero_wire', matched={'1:i:ocean'}, unknown={'1:n:dalio'}, kev_added=None,
+                         badges=['Cloudflare Zero Wire', 'CISA KEV', 'CVSS 9.2', 'Public exploit'], cve_ids=ids)
+        briefing['title'] = 'phpAfterShell and six other PHP critical flaws'
+        product_only = entry('CVE-0000-0', source='zero_wire', unknown={'1:n:dalio', '1:n:other'}, kev_added=None, badges=['Cloudflare Zero Wire'], cve_ids=[])
+        product_only['title'] = 'WordPress 7.1.5: Template Part flaw'
+        # the Overview groups every entry that reaches a host; the email only what is found on one by version (report_digest._threats): one function titles both
+        (dash,) = overview.threat_groups([briefing, product_only], self.names, False)[0]
+        (mail,) = overview.threat_groups([e for e in (briefing, product_only) if e['matched'] or e['confirmed']], self.names, False)[0]
+        self.assertEqual(mail['title'], 'phpAfterShell and six other PHP critical flaws')
+        self.assertEqual(dash['title'], 'phpAfterShell and six other PHP critical flaws, plus 1 more advisory')
+        self.assertNotIn('two', dash['title'])
+        for g in (dash, mail):
+            self.assertEqual(g['cve_ids'], ids)  # the same eight CVEs under the same leading title
+            self.assertEqual(g['badges'][0]['text'], '8 CVEs · CVSS 9.2')
+            self.assertEqual(g['matched'], 1)
+            self.assertIn({'text': 'CISA KEV', 'kind': 'kev'}, g['badges'])
+        self.assertEqual((dash['product_only'], mail['product_only']), (2, 1))
+
+    def test_a_title_that_counts_counts_the_cves_listed(self):
+        e = [entry('CVE-2026-1', matched={'1:i:1'}), entry('CVE-2026-2', matched={'1:i:1'}, cvss=7.5, kev_added=None, badges=[]), entry('CVE-2026-3', unknown={'1:n:a'}, cvss=8.0)]
+        (g,) = overview.threat_groups(e, self.names, False)[0]
+        self.assertEqual(g['title'], 'PHP: three flaws, worst CVSS 9.2, 2 known exploited')
+        self.assertEqual(len(g['cve_ids']), 3)
+        twice = [entry('CVE-2026-1', matched={'1:i:1'}), entry('CVE-2026-1', matched={'1:i:2'})]  # one CVE in two entries is one flaw, not two
+        (g,) = overview.threat_groups(twice, self.names, False)[0]
+        self.assertEqual((g['title'], g['cve_ids']), ('PHP: a flaw, plus 1 more advisory', ['CVE-2026-1']))
+
     def test_a_group_with_hosts_that_only_run_the_product_stays_a_card(self):
         groups, folded = overview.threat_groups([entry('CVE-2026-1', unknown={'1:n:a'})], self.names, False)
         self.assertEqual((len(groups), folded), (1, []))
@@ -344,7 +373,7 @@ class TileTests(TestCase):
             d = today - timedelta(days=14 - i)
             for p, k in ((cls.a, 1), (cls.b, 2)):
                 StatsSnapshot.objects.create(project=p, date=d, hosts=100 * k, exposed_hosts=i * k, open_findings={'critical': 10 * k + i, 'high': 5 * k}, cve_matches={'fire': k, 'smoke': i * k},
-                                             fixed=k * 2, mean_days_to_fix=1.0 * k + (0.1 * i if k == 2 else 0))
+                                             fixed=k * 2, mean_days_to_fix=1.0 * k + (0.1 * i if k == 2 else 0), needs_hosts=k + i)
 
     def tiles(self, ids=None, **kw):
         return {t['key']: t for t in overview.kpis(ids or [self.a.pk, self.b.pk], now=NOW, **kw)}
@@ -358,8 +387,10 @@ class TileTests(TestCase):
         self.assertEqual(t['exposed']['foot'], 'since last Saturday · of 300 hosts')
         self.assertEqual(len(t['exposed']['series']), 14)
         self.assertEqual(t['exposed']['series'][-1], 42)
-        self.assertEqual(t['needs']['value'], 3 + 14 * 3)
-        self.assertEqual(t['needs']['foot'], 'since last Saturday · 3 Fire, 42 Smoke')
+        self.assertEqual(t['needs']['label'], 'Needs attention')  # the email's tile, in the same words
+        self.assertEqual(t['needs']['value'], (1 + 14) + (2 + 14))  # hosts, from needs_hosts: never the Fire + Smoke match count
+        self.assertEqual(t['needs']['delta'], 14 * 2 - 7 * 2)
+        self.assertEqual(t['needs']['foot'], 'since last Saturday · hosts to look at')
         self.assertEqual(t['critical']['value'], (10 + 14) + (20 + 14))
         self.assertEqual(t['critical']['foot'], 'since last Saturday · 15 high')
 
@@ -391,7 +422,35 @@ class TileTests(TestCase):
         t = self.tiles(live={'hosts': 321, 'exposed_hosts': 99})['exposed']
         self.assertEqual((t['value'], t['delta'], t['foot']), (99, 99 - 21, 'since last Saturday · of 321 hosts'))
         self.assertEqual(t['series'][-1], 99)
-        self.assertEqual(self.tiles(live={'hosts': 321, 'exposed_hosts': 99})['needs']['value'], 45)  # the others stay the snapshot's
+        self.assertEqual(self.tiles(live={'hosts': 321, 'exposed_hosts': 99})['needs']['value'], 31)  # the others stay the snapshot's
+
+    def test_the_live_needs_figure_is_today_and_a_stale_snapshot_of_today_does_not_change_it(self):
+        StatsSnapshot.objects.filter(date=date(2026, 11, 21)).update(needs_hosts=500)  # written when the inventory was different
+        t = self.tiles(live={'needs': 5})['needs']
+        self.assertEqual((t['value'], t['as_of'], t['series'][-1]), (5, '2026-11-21', 5))
+        self.assertEqual((t['delta'], t['since'], t['tone']), (5 - (8 + 9), '2026-11-14', 'better'))
+        self.assertEqual(self.tiles(live={'needs': 1})['needs']['foot'], 'since last Saturday · host to look at')
+
+    def test_a_day_some_project_has_no_needs_figure_for_is_never_compared(self):
+        StatsSnapshot.objects.filter(project=self.b, date=date(2026, 11, 14)).update(needs_hosts=None)  # recorded for A only
+        StatsSnapshot.objects.filter(project=self.b, date=date(2026, 11, 13)).delete()  # no row for B at all
+        t = self.tiles(live={'needs': 20})['needs']
+        self.assertEqual((t['since'], t['delta']), ('2026-11-12', 20 - (6 + 7)))  # the newest day both projects have, never A's half of the 14th
+        self.assertNotIn(1 + 7, t['series'])  # a partial sum is not a point of the line either
+        self.assertEqual(len(t['series']), 12)
+
+    def test_no_needs_history_gives_no_change(self):
+        StatsSnapshot.objects.update(needs_hosts=None)
+        t = self.tiles(live={'needs': 4})['needs']
+        self.assertEqual((t['value'], t['delta'], t['delta_text'], t['since'], t['foot']), (4, None, '', None, 'hosts to look at'))
+        self.assertEqual(self.tiles()['needs']['value'], None)  # no live figure and no snapshot figure: nothing to show
+
+    def test_a_young_history_of_the_needs_figure_is_not_compared(self):
+        StatsSnapshot.objects.filter(date__lt=date(2026, 11, 19)).update(needs_hosts=None)  # kept since the 19th only
+        t = self.tiles(live={'needs': 5})['needs']
+        self.assertEqual((t['delta'], t['since'], t['foot']), (None, None, 'hosts to look at'))  # the email says no comparison yet either
+        self.assertEqual(t['series'], [3 + 2 * 12, 3 + 2 * 13, 5])
+        self.assertEqual(self.tiles()['exposed']['since'], '2026-11-14')  # the other tiles are untouched
 
     def test_a_young_install_compares_with_its_first_day(self):
         StatsSnapshot.objects.filter(date__lt=date(2026, 11, 19)).delete()
@@ -482,6 +541,16 @@ class SummaryTests(Fixture):
         self.assertEqual(data['status']['headline'], '1 host has a confirmed vulnerability, and 2 more likely have one and need review.')
         self.assertEqual(data['status']['pill'], 'Needs you now')
         self.assertEqual(ff['total'], len(situations.ranked([self.pa.pk])[0]))
+
+    def test_the_needs_tile_is_the_rankings_count_of_hosts_live(self):
+        ids = [self.pa.pk]
+        StatsSnapshot.objects.filter(project=self.pa, date=timezone.localdate()).update(needs_hosts=40)  # a stale row of today
+        data = self.build(ids)
+        t = next(k for k in data['kpis'] if k['key'] == 'needs')
+        self.assertEqual((t['label'], t['value']), ('Needs attention', overview.needs_hosts(ids)))
+        self.assertEqual(t['value'], data['fix_first']['needs'])  # the Fix first count and the status sentence read the same ranking
+        self.assertEqual(t['value'], 4)  # proven.sa.test, the two PHP hosts (likely) and cert.sa.test (high hygiene), not the stale 40 of today's row
+        self.assertIsNone(t['delta'])  # no earlier day holds the figure
 
     def test_what_changed(self):
         lines = {l['key']: l for l in self.build()['what_changed']['lines']}
