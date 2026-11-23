@@ -28,6 +28,7 @@ import re
 
 from django.db import IntegrityError, transaction
 from django.db.models import Q
+from django.db.models.fields.json import KeyTransform
 from django.utils import timezone
 
 from cveFeed.closure import AUTOMATIC, CLOSED, prepend_note
@@ -475,6 +476,19 @@ def _split_port(host):
     return (name, sep + port) if sep and port.isdigit() else (host, '')
 
 
+HOSTS_CHUNK = 500  # host names per pattern in ``_hosts_q``
+
+
+def _hosts_q(names):
+    """A filter on ``host`` that keeps every row whose host is one of ``names`` (lower case), alone or with a port (``name:443``): the rows
+    whose ``_split_port`` name is in ``names``, matched without case, so only those rows are read."""
+    names = sorted(names)
+    q = Q(pk__in=[])
+    for i in range(0, len(names), HOSTS_CHUNK):
+        q |= Q(host__iregex=r'^(%s)(:[0-9]+)?$' % '|'.join(re.escape(n) for n in names[i:i + HOSTS_CHUNK]))
+    return q
+
+
 def host_name(host):
     """The host name of a hygiene finding's host (``name`` or ``name:port``), lower case."""
     return _split_port((host or '').lower())[0]
@@ -509,8 +523,9 @@ def fold_aliases(project_id, names=None, apply=True, now=None):
             if keeper:
                 fold.setdefault((keeper, host), []).append(row.pk)
         out['vulnerability'] = sum(len(ids) for ids in fold.values())
-        hyg = HygieneFinding.objects.filter(domain__project_id=project_id).only(
-            'id', 'host', 'check_name', 'evidence', 'status', 'remediation_status', 'remediation_note', 'remediation_by', 'assignee')
+        hyg = HygieneFinding.objects.filter(_hosts_q(targets | set(aliases)), domain__project_id=project_id).only(
+            'id', 'host', 'check_name', 'status', 'remediation_status', 'remediation_note', 'remediation_by', 'assignee').annotate(
+            not_after=KeyTransform('not_after', 'evidence'))  # the one key of the evidence read here, not the whole JSON
         target_rows, alias_rows = {}, []
         for row in hyg.order_by('id'):
             name, port = _split_port(row.host.lower())
@@ -525,7 +540,7 @@ def fold_aliases(project_id, names=None, apply=True, now=None):
             if keeper is None:
                 continue
             if row.check_name.startswith('tls_'):
-                mine, theirs = (row.evidence or {}).get('not_after'), (keeper.evidence or {}).get('not_after')
+                mine, theirs = row.not_after, keeper.not_after
                 if mine != theirs:
                     continue  # another certificate: the alias's own finding
             hfold.setdefault((keeper.pk, host), []).append(row.pk)
