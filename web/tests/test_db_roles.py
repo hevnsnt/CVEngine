@@ -2,8 +2,11 @@
 scripts that generate its password, the compose files' data network and log rotation, and the docs. The grants against a real database are
 in tests/test_db_app_role_grants.py."""
 import importlib
+import io
+import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -231,6 +234,151 @@ class ChooseTests(SimpleTestCase):
         self.assertIn('CVENGINE_DB_APP_PASSWORD', reason)
 
 
+class OwnerFallbackTests(SimpleTestCase):
+    """The application containers have no owner password. The gate (manage.py db_app_role gate, run by the migrate service before they start)
+    refuses to start them when the app role cannot be used, unless CVENGINE_DB_ALLOW_OWNER_FALLBACK=1, which is then the only way they get it."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: subprocess.run(['rm', '-rf', str(self.tmp)]))
+        self.file = self.tmp / 'password'
+
+    def gate(self, works=('cvengine_app', 'cvengine'), ensure_error=None, **env):
+        environ = {**ENV, 'POSTGRES_PASSWORD': 'ownerpw', 'CVENGINE_DB_OWNER_FALLBACK_FILE': str(self.file), 'CVENGINE_DB_ROLE': 'owner', **env}
+        for key, value in env.items():
+            if value is None:
+                environ.pop(key)
+        tried, ensured = [], []
+
+        def connect(environ, user, password):
+            tried.append((user, password))
+            if user in works:
+                return mock.Mock()
+            raise RuntimeError(f'FATAL:  password authentication failed for user "{user}"\nmore')
+
+        def ensure_role(name, password):
+            ensured.append((name, password))
+            if ensure_error:
+                raise db_roles.RoleError(ensure_error)
+
+        ok, role, lines = db_roles.gate(environ, connect=connect, ensure_role=ensure_role)
+        return ok, role, lines, tried, ensured
+
+    def fix_line(self, lines):
+        fixes = [line for line in lines if line.startswith('Fix:')]
+        self.assertEqual(len(fixes), 1, lines)
+        return fixes[0]
+
+    def test_a_working_app_role_passes_and_removes_any_old_fallback_file(self):
+        self.file.write_text('ownerpw\n')
+        ok, role, lines, tried, ensured = self.gate()
+        self.assertEqual((ok, role), (True, 'app'))
+        self.assertEqual(ensured, [('cvengine_app', 'apppw')])  # created and granted first, as the owner
+        self.assertEqual(tried, [('cvengine_app', 'apppw')])  # then it must log in itself
+        self.assertFalse(self.file.exists())
+        self.assertFalse([line for line in lines if 'ownerpw' in line])
+
+    def test_a_role_that_cannot_log_in_fails_loudly_with_the_one_line_fix(self):
+        ok, role, lines, _, _ = self.gate(works=('cvengine',))
+        self.assertEqual((ok, role), (False, None))
+        self.assertIn('cvengine_app cannot log in (FATAL:  password authentication failed for user "cvengine_app")', lines[0])
+        self.assertIn('not started with the owner password', lines[0])
+        fix = self.fix_line(lines)
+        self.assertIn('CVENGINE_DB_ALLOW_OWNER_FALLBACK=1', fix)
+        self.assertNotIn('\n', fix)
+        self.assertFalse(self.file.exists())
+
+    def test_an_empty_app_password_fails_with_its_fix_and_never_tries_the_owner(self):
+        for missing in ({'CVENGINE_DB_APP_PASSWORD': ''}, {'CVENGINE_DB_APP_PASSWORD': None}):
+            ok, role, lines, tried, ensured = self.gate(**missing)
+            self.assertEqual((ok, role, tried, ensured), (False, None, [], []))
+            self.assertIn('CVENGINE_DB_APP_PASSWORD is empty', lines[0])
+            self.assertIn('cvengine_ensure_db_app_password', self.fix_line(lines))
+            self.assertFalse(self.file.exists())
+
+    def test_an_empty_app_user_is_no_longer_a_silent_way_back_to_the_owner(self):
+        ok, _, lines, _, _ = self.gate(CVENGINE_DB_APP_USER='')
+        self.assertFalse(ok)
+        self.assertIn('delete the line CVENGINE_DB_APP_USER=', self.fix_line(lines))
+        ok, _, lines, _, _ = self.gate(CVENGINE_DB_APP_USER='cvengine')
+        self.assertFalse(ok)
+        self.assertIn('CVENGINE_DB_APP_USER', self.fix_line(lines))
+
+    def test_a_role_that_cannot_be_created_fails_with_its_fix(self):
+        ok, _, lines, tried, _ = self.gate(ensure_error='the owner role cvengine may not create roles (it needs SUPERUSER or CREATEROLE)')
+        self.assertFalse(ok)
+        self.assertEqual(tried, [])
+        self.assertIn('could not be created or granted', lines[0])
+        self.assertIn('CREATEROLE', self.fix_line(lines))
+
+    def test_only_the_explicit_switch_hands_the_owner_password_over(self):
+        for value in ('0', 'yes', 'true', ' ', ''):
+            ok, _, _, _, _ = self.gate(works=('cvengine',), CVENGINE_DB_ALLOW_OWNER_FALLBACK=value)
+            self.assertFalse(ok, value)
+            self.assertFalse(self.file.exists(), value)
+        ok, role, lines, _, _ = self.gate(works=('cvengine',), CVENGINE_DB_ALLOW_OWNER_FALLBACK='1')
+        self.assertEqual((ok, role), (True, 'owner'))
+        self.assertIn('WARNING', lines[0])
+        self.assertIn('OWNER role cvengine', lines[0])
+        self.assertIn('remove CVENGINE_DB_ALLOW_OWNER_FALLBACK', self.fix_line(lines))
+        self.assertEqual(self.file.read_text(), 'ownerpw\n')
+        self.assertEqual(self.file.stat().st_mode & 0o777, 0o600)
+        # the app role works again: the next gate takes the password back out of the application's reach, even with the switch still on
+        ok, role, _, _, _ = self.gate(CVENGINE_DB_ALLOW_OWNER_FALLBACK='1')
+        self.assertEqual((ok, role), (True, 'app'))
+        self.assertFalse(self.file.exists())
+
+    def test_the_switch_also_covers_a_missing_app_password(self):
+        ok, role, _, _, _ = self.gate(CVENGINE_DB_APP_PASSWORD='', CVENGINE_DB_ALLOW_OWNER_FALLBACK='1')
+        self.assertEqual((ok, role), (True, 'owner'))
+        self.assertEqual(self.file.read_text(), 'ownerpw\n')
+
+    def test_the_switch_fails_loudly_when_the_password_cannot_be_handed_over(self):
+        ok, _, lines, _, _ = self.gate(works=('cvengine',), CVENGINE_DB_ALLOW_OWNER_FALLBACK='1',
+                                       CVENGINE_DB_OWNER_FALLBACK_FILE=str(self.tmp / 'missing' / 'password'))
+        self.assertFalse(ok)
+        self.assertIn('db_owner_fallback', self.fix_line(lines))
+
+    def app_container(self, **env):
+        """resolve() as in web, celery or celery-beat: POSTGRES_PASSWORD is empty (docker-compose.yml blanks it)."""
+        return resolve(POSTGRES_PASSWORD='', CVENGINE_DB_OWNER_FALLBACK_FILE=str(self.file), **env)
+
+    def test_the_application_has_no_owner_password_without_the_fallback_file(self):
+        got = self.app_container(CVENGINE_DB_APP_PASSWORD='')
+        self.assertEqual((got['role'], got['password']), ('owner', ''))
+        self.assertEqual(db_roles.owner_password({'POSTGRES_PASSWORD': '', 'CVENGINE_DB_OWNER_FALLBACK_FILE': str(self.file)}), '')
+        self.assertEqual(self.app_container()['role'], 'app')
+
+    def test_with_the_fallback_file_the_owner_role_works_in_the_application(self):
+        self.file.write_text('ownerpw\n')
+        got = self.app_container(CVENGINE_DB_APP_PASSWORD='')
+        self.assertEqual((got['role'], got['user'], got['password']), ('owner', 'cvengine', 'ownerpw'))
+        (role, _), tried, _ = ChooseTests.run_choose(self, {'cvengine'}, POSTGRES_PASSWORD='', CVENGINE_DB_OWNER_FALLBACK_FILE=str(self.file))
+        self.assertEqual(role, 'owner')
+        self.assertIn(('cvengine'), tried)
+
+    def test_settings_get_the_fallback_password_only_in_process(self):
+        self.file.write_text('ownerpw\n')
+        env = {**ENV, 'POSTGRES_PASSWORD': '', 'CVENGINE_DB_APP_PASSWORD': '', 'CVENGINE_DB_OWNER_FALLBACK_FILE': str(self.file)}
+        with mock.patch.dict(os.environ, env, clear=False):
+            db_roles.resolve(os.environ, ['gunicorn'], state_file=None)
+            self.assertEqual(os.environ['POSTGRES_PASSWORD'], 'ownerpw')  # what settings.py reads for the owner role
+        plain = dict(env)
+        db_roles.resolve(plain, ['gunicorn'], state_file=None)
+        self.assertEqual(plain['POSTGRES_PASSWORD'], '')  # a dict that is not the process environment is never written
+
+    def test_the_command_exits_non_zero_when_the_gate_fails(self):
+        from django.core.management import call_command
+        with mock.patch.object(db_roles, 'gate', return_value=(False, None, ['db_app_role: ERROR: x', 'Fix: y'])), \
+                self.assertRaises(SystemExit) as raised:
+            call_command('db_app_role', 'gate', stdout=io.StringIO(), stderr=io.StringIO())
+        self.assertEqual(raised.exception.code, 1)
+        out = io.StringIO()
+        with mock.patch.object(db_roles, 'gate', return_value=(True, 'app', ['db_app_role: fine'])):
+            call_command('db_app_role', 'gate', stdout=out, stderr=io.StringIO())
+        self.assertIn('fine', out.getvalue())
+
+
 class AppRuntimeSqlTests(SimpleTestCase):
     """Every privilege-bearing statement the application runs at run time (not in migrations) is covered by the grants. When this fails, a
     new kind of statement was added: decide whether the app role may run it, extend grant_statements if so, and list it here."""
@@ -284,7 +432,8 @@ class ComposeTests(SimpleTestCase):
             self.assertEqual(self.networks(services['db']), {'data_network'}, name)
             self.assertEqual(self.networks(services['redis']), {'data_network'}, name)
             on_it = sorted(n for n, s in services.items() if 'data_network' in self.networks(s))
-            self.assertEqual(on_it, sorted(['db', 'redis', *APP_SERVICES]), name)
+            self.assertEqual(on_it, sorted(['db', 'redis', 'migrate', *APP_SERVICES]), name)
+            self.assertEqual(self.networks(services['migrate']), {'data_network'}, name)
             self.assertIn('data_network', self.load(name)['networks'])
 
     def test_the_reviewer_keeps_reaching_web_and_nothing_with_a_database(self):
@@ -330,11 +479,83 @@ class ComposeTests(SimpleTestCase):
             for service, spec in services.items():
                 env = spec.get('environment') or []
                 keys = {item.split('=', 1)[0] for item in env} if isinstance(env, list) else set(env)
-                if service in APP_SERVICES:
+                if service in (*APP_SERVICES, 'migrate'):
                     self.assertIn('CVENGINE_DB_APP_USER=${CVENGINE_DB_APP_USER-cvengine_app}', env, f'{name} {service}')
                     self.assertIn('CVENGINE_DB_APP_PASSWORD=${CVENGINE_DB_APP_PASSWORD:-}', env, f'{name} {service}')
                 else:
                     self.assertFalse({'CVENGINE_DB_APP_USER', 'CVENGINE_DB_APP_PASSWORD'} & keys, f'{name} {service}')
+
+    def env_of(self, spec):
+        env = spec.get('environment') or []
+        if isinstance(env, dict):
+            return {k: '' if v is None else str(v) for k, v in env.items()}
+        return dict(item.split('=', 1) if '=' in item else (item, '') for item in env)
+
+    def test_no_long_running_service_gets_the_owner_password(self):
+        # Only db (the server itself) and the one-off migrate service may have POSTGRES_PASSWORD. env_file: .env hands every line of .env to a
+        # service, POSTGRES_PASSWORD and DJANGO_SUPERUSER_PASSWORD included, so a service that reads .env must blank both in `environment:`, which
+        # Compose lets win over env_file.
+        for name in self.FILES:
+            for service, spec in self.load(name)['services'].items():
+                if service in ('db', 'migrate'):
+                    continue
+                env = self.env_of(spec)
+                where = f'{name} {service}'
+                self.assertFalse(env.get('POSTGRES_PASSWORD'), where)
+                self.assertNotIn('POSTGRES_PASSWORD_FILE', env, where)
+                self.assertFalse(env.get('DJANGO_SUPERUSER_PASSWORD'), where)
+                self.assertFalse(any('POSTGRES_PASSWORD' in str(v) for v in env.values()), where)
+                reads_dot_env = any((item.get('path') if isinstance(item, dict) else item) == '.env' for item in (spec.get('env_file') or []))
+                if reads_dot_env:
+                    self.assertEqual(env.get('POSTGRES_PASSWORD'), '', where + ': must blank the password .env would pass')
+                    self.assertEqual(env.get('DJANGO_SUPERUSER_PASSWORD'), '', where + ': must blank the admin password .env would pass')
+                if service in APP_SERVICES:
+                    self.assertEqual(spec.get('restart'), 'always', where)  # these are the long running ones the rule is about
+
+    def test_the_migrate_service_is_the_one_off_owner(self):
+        for name in self.FILES:
+            services = self.load(name)['services']
+            migrate = services['migrate']
+            env = self.env_of(migrate)
+            self.assertEqual(env['POSTGRES_PASSWORD'], '${POSTGRES_PASSWORD}', name)
+            self.assertEqual(env['CVENGINE_DB_ROLE'], 'owner', name)
+            self.assertEqual(env['CVENGINE_DB_OWNER_FALLBACK_FILE'], '/var/lib/cvengine-db-owner/password', name)
+            self.assertNotIn('CVENGINE_DB_ALLOW_OWNER_FALLBACK', env, name)  # from .env (env_file), or -e from the scripts: never defaulted to off over it
+            self.assertEqual(migrate['restart'], 'no', name)
+            self.assertEqual(migrate['entrypoint'], '/usr/src/app/migrate-entrypoint.sh', name)
+            self.assertEqual(migrate['image'], services['web']['image'], name)  # the same image as web
+            for key in ('ports', 'healthcheck', 'profiles'):
+                self.assertNotIn(key, migrate, name)
+            self.assertIn('db_owner_fallback:/var/lib/cvengine-db-owner', migrate['volumes'], name)
+            for service in APP_SERVICES:
+                spec = services[service]
+                self.assertEqual(spec['depends_on']['migrate'], {'condition': 'service_completed_successfully'}, f'{name} {service}')
+                self.assertIn('db_owner_fallback:/var/lib/cvengine-db-owner:ro', spec['volumes'], f'{name} {service}')
+                self.assertEqual(self.env_of(spec)['CVENGINE_DB_OWNER_FALLBACK_FILE'], '/var/lib/cvengine-db-owner/password', f'{name} {service}')
+            for service, spec in services.items():
+                if service not in (*APP_SERVICES, 'migrate'):
+                    self.assertFalse([v for v in spec.get('volumes') or [] if 'db_owner_fallback' in str(v)], f'{name} {service}')
+            self.assertIn('db_owner_fallback', self.load(name)['volumes'], name)
+
+    @unittest.skipUnless(shutil.which('docker') and subprocess.run(['docker', 'compose', 'version'], capture_output=True).returncode == 0,
+                         'needs docker compose')
+    def test_compose_itself_gives_the_password_only_to_db_and_migrate(self):
+        """The effective configuration (docker compose config: env_file merged, overlays applied), with a .env that holds the secrets."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            for name in self.FILES:
+                shutil.copy(ROOT / name, tmp / name)
+            (tmp / '.env').write_text('POSTGRES_USER=cvengine\nPOSTGRES_PASSWORD=owner-canary\nDJANGO_SUPERUSER_PASSWORD=admin-canary\n'
+                                      'CVENGINE_DB_APP_PASSWORD=app\nPOSTGRES_DB=cvengine\nPOSTGRES_HOST=db\nPOSTGRES_PORT=5432\nDOMAIN_NAME=x.test\n')
+            (tmp / 'secrets' / 'certs').mkdir(parents=True)
+            for name in self.FILES:
+                out = subprocess.run(['docker', 'compose', '-f', name, 'config', '--format', 'json'], cwd=tmp, capture_output=True, text=True)
+                self.assertEqual(out.returncode, 0, out.stderr[-2000:])
+                services = json.loads(out.stdout)['services']
+                holders = sorted(n for n, spec in services.items() if 'owner-canary' in json.dumps(spec.get('environment') or {}))
+                self.assertEqual(holders, ['db', 'migrate'], name)
+                self.assertFalse([n for n, spec in services.items() if 'admin-canary' in json.dumps(spec.get('environment') or {})
+                                  and n != 'migrate'], name)
 
     def test_compose_reads_an_empty_app_user_as_empty_for_the_rollback(self):
         # ${VAR-default} (no colon): CVENGINE_DB_APP_USER= in the env file stays empty, which is the way back to the owner role
@@ -343,40 +564,82 @@ class ComposeTests(SimpleTestCase):
 
 
 class MigrateCallersTests(SimpleTestCase):
-    """Every place that runs migrate (or createsuperuser) for real uses the owner role; the runtime never does."""
+    """Every place that runs migrate (or createsuperuser) for real does it as the owner role, in the one-off migrate service (the only container
+    with the owner's password); the application containers never do."""
 
-    def test_every_migrate_call_names_the_owner_role(self):
-        sources = [*sorted(SCRIPTS.glob('*.sh')), ROOT / 'Makefile', *sorted(WEB.glob('*.sh'))]
-        missing = []
-        for path in sources:
-            if not path.is_file():
-                continue
-            for number, line in enumerate(path.read_text().splitlines(), 1):
-                if line.lstrip().startswith('#'):
+    OWNER_LINE = re.compile(r'manage\.py (migrate(?! --check)(?! --plan)|createsuperuser|create_admin|showmigrations|db_app_role gate|test\b)')
+
+    def sources(self):
+        for path in [*sorted(SCRIPTS.glob('*.sh')), ROOT / 'Makefile', *sorted(WEB.glob('*.sh'))]:
+            if path.is_file():
+                yield path, path.read_text().splitlines()
+
+    def test_every_owner_command_runs_in_the_migrate_service(self):
+        wrong = []
+        for path, lines in self.sources():
+            for number, line in enumerate(lines, 1):
+                if line.lstrip().startswith('#') or not self.OWNER_LINE.search(line):
                     continue
-                if re.search(r'manage\.py (migrate(?! --check)(?! --plan)|createsuperuser)\b', line) and 'CVENGINE_DB_ROLE=owner' not in line:
-                    missing.append(f'{path.relative_to(ROOT)}:{number}: {line.strip()}')
-        self.assertEqual(missing, [])
+                where = f'{path.relative_to(ROOT)}:{number}: {line.strip()}'
+                if path.name == 'migrate-entrypoint.sh':
+                    continue  # the migrate service itself (CVENGINE_DB_ROLE=owner is exported there)
+                in_migrate = re.search(r'\bmigrate python3 (manage\.py|"\$@")', line) or re.search(r'migrate python3 "\$@"', line)
+                owner_run = re.match(r'\s*(?:if ! |plan=\$\()?owner_run\b', line)
+                # the fallback for a Compose layout without the migrate service, and the built-in deploy of checkouts older than update-deploy.sh
+                legacy = 'CVENGINE_DB_ROLE=owner --entrypoint python3 web' in line
+                if not (in_migrate or owner_run or legacy):
+                    wrong.append(where)
+                if re.search(r'exec\b.*\bweb\b.*manage\.py (migrate(?! --check)|createsuperuser)', line):
+                    wrong.append(where + ' (web has no owner password)')
+        self.assertEqual(wrong, [])
 
-    def test_the_web_entrypoint_migrates_as_owner_then_chooses_its_runtime_role(self):
-        text = (WEB / 'entrypoint.sh').read_text()
-        self.assertLess(text.index('CVENGINE_DB_ROLE=owner python3 manage.py migrate --noinput'), text.index('cvengine_db_role 0'))
-        self.assertLess(text.index('cvengine_db_role 0'), text.index('gunicorn'))
-        for name in ('celery-entrypoint.sh', 'beat-entrypoint.sh'):
-            # the workers wait for the migrations as the owner (the app role does not exist before web's first migrate), then choose
+    def test_the_owner_run_helpers_use_the_migrate_service(self):
+        for name in ('update-deploy.sh', 'update.sh'):
+            text = (SCRIPTS / name).read_text()
+            body = text[text.index('owner_run() {'):]
+            body = body[:body.index('\n}\n')]
+            self.assertIn('migrate python3 "$@"', body, name)
+            self.assertIn('--entrypoint python3 web "$@"', body, name)  # only for a layout without the service
+
+    def test_no_application_entrypoint_migrates_or_forces_the_owner_role(self):
+        for name in ('entrypoint.sh', 'celery-entrypoint.sh', 'beat-entrypoint.sh'):
             text = (WEB / name).read_text()
-            self.assertLess(text.index('CVENGINE_DB_ROLE=owner python3 manage.py migrate --check'), text.index('cvengine_db_role "${CVENGINE_DB_ROLE_WAIT:-60}"'), name)
+            code = '\n'.join(line for line in text.splitlines() if not line.lstrip().startswith('#'))
+            self.assertNotIn('migrate --noinput', code, name)
+            self.assertNotIn('CVENGINE_DB_ROLE=owner', code, name)
+            # the role is chosen first, then the container waits for the migrations as that role
+            self.assertLess(code.index('cvengine_db_role'), code.index('manage.py migrate --check'), name)
+        web = (WEB / 'entrypoint.sh').read_text()
+        self.assertLess(web.index('manage.py migrate --check'), web.index('gunicorn'))
+        migrate = (WEB / 'migrate-entrypoint.sh').read_text()
+        self.assertIn('export CVENGINE_DB_ROLE=owner', migrate)
+        self.assertLess(migrate.index('python3 manage.py migrate --noinput'), migrate.index('exec python3 manage.py db_app_role gate'))
+        self.assertLess(migrate.index('export CVENGINE_DB_ROLE=owner'), migrate.index('exec "$@"'))
 
     def test_the_post_migrate_step_is_connected(self):
         from django.db.models.signals import post_migrate
         self.assertTrue(any('cvengine-db-app-role' in str(receiver[0]) for receiver in post_migrate.receivers))
 
-    def test_the_update_scripts_generate_the_password_and_report_the_role(self):
+    def test_the_update_scripts_generate_the_password_check_the_role_then_migrate_and_restart(self):
         deploy = (SCRIPTS / 'update-deploy.sh').read_text()
-        self.assertLess(deploy.index('cvengine_ensure_db_app_password'), deploy.index('run_migrations || return 1'))
-        self.assertLess(deploy.index('verify_serving || return 1'), deploy.index('cvengine_db_role_report "${compose[@]}"'))
+        steps = deploy[deploy.index('deploy_steps() {'):]
+        order = [steps.index(step) for step in ('cvengine_ensure_db_app_password', 'backup_database || return 1', 'check_db_roles || return 1',
+                                                'DEPLOY_STAGE=migrate', 'run_migrations || return 1',
+                                                'up -d --no-deps --force-recreate "${services[@]}"', 'verify_serving || return 1',
+                                                'cvengine_db_role_report "${compose[@]}"')]
+        self.assertEqual(order, sorted(order))
+        check = deploy[deploy.index('check_db_roles() {'):]
+        self.assertLess(check.index('cvengine_owner_password_check'), check.index('cvengine_db_gate'))
         update = (SCRIPTS / 'update.sh').read_text()
-        self.assertLess(update.index('cvengine_ensure_db_app_password'), update.index('manage.py migrate --noinput'))
+        order = [update.index(step) for step in ('cvengine_ensure_db_app_password', 'scripts/db-backup.sh "$STATE"', 'cvengine_owner_password_check "${compose[@]}" || die',
+                                                 'cvengine_db_gate "${compose[@]}" || die', 'owner_run manage.py migrate --noinput',
+                                                 'up -d --no-deps --force-recreate "${services[@]}"')]
+        self.assertEqual(order, sorted(order))
+        make = (ROOT / 'Makefile').read_text()
+        up = make[make.index('\nup:'):make.index('\nbuild:')]
+        order = [up.index(step) for step in ('cvengine_ensure_db_app_password', 'cvengine_owner_password_check', 'build web', 'up -d db redis',
+                                             ') migrate\n', 'up -d --build --no-deps ${SERVICES}')]
+        self.assertEqual(order, sorted(order))
         self.assertIn('cvengine_db_role_report', update)
         self.assertIn('cvengine_ensure_db_app_password', (ROOT / 'Makefile').read_text())
         self.assertIn('fill CVENGINE_DB_APP_PASSWORD', (SCRIPTS / 'init-env.sh').read_text())
@@ -437,6 +700,70 @@ class PasswordScriptTests(SimpleTestCase):
         self.assertIn('Database role of celery-beat: owner cvengine', out)
         self.assertIn('Warning: celery-beat still connects to the database as the owner role', out)
 
+    def compose_stub(self, config_json):
+        (self.tmp / 'config.json').write_text(config_json)
+        stub = self.tmp / 'compose'
+        stub.write_text('#!/bin/sh\necho "$*" >> "$(dirname "$0")/calls"\n'
+                        'case "$*" in *"config --format json"*) cat "$(dirname "$0")/config.json";; *"db_app_role gate"*) exit "${GATE_EXIT:-0}";; esac\n')
+        stub.chmod(0o755)
+        return stub
+
+    def run_fn(self, call, **env):
+        return subprocess.run(['bash', '-c', f'. {SCRIPTS / "db-app-role.sh"} && {call}'], cwd=self.tmp, capture_output=True, text=True,
+                              env={**{k: v for k, v in os.environ.items() if k != 'CVENGINE_DB_ALLOW_OWNER_FALLBACK'}, **env})
+
+    def test_the_owner_password_check_names_a_service_an_overlay_hands_it_to_and_never_the_value(self):
+        config = json.dumps({'services': {
+            'db': {'environment': {'POSTGRES_PASSWORD': 'canary-pw'}}, 'migrate': {'environment': {'POSTGRES_PASSWORD': 'canary-pw'}},
+            'web': {'environment': {'POSTGRES_PASSWORD': ''}}, 'celery': {'environment': {'POSTGRES_PASSWORD': 'canary-pw'}},
+            'celery-beat': {'environment': {'POSTGRES_PASSWORD_FILE': '/run/secrets/pw'}}, 'proxy': {}}})
+        result = self.run_fn(f'cvengine_owner_password_check {self.compose_stub(config)} -f docker-compose.yml -f docker-compose.vps.yml')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('gives the database owner password to: celery celery-beat.', result.stdout)
+        self.assertIn('Fix: remove POSTGRES_PASSWORD from the environment of celery celery-beat', result.stdout)
+        self.assertNotIn('canary', result.stdout + result.stderr)
+
+    def test_the_owner_password_check_passes_the_shipped_layout_and_an_unreadable_one(self):
+        config = json.dumps({'services': {'db': {'environment': {'POSTGRES_PASSWORD': 'x'}}, 'migrate': {'environment': {'POSTGRES_PASSWORD': 'x'}},
+                                          'web': {'environment': {'POSTGRES_PASSWORD': ''}}, 'reviewer': {'environment': {'A': 'b'}}}})
+        self.assertEqual(self.run_fn(f'cvengine_owner_password_check {self.compose_stub(config)}').returncode, 0)
+        self.assertEqual(self.run_fn(f'cvengine_owner_password_check {self.compose_stub("not json")}').returncode, 0)
+
+    def test_the_fallback_switch_is_read_from_the_environment_the_compose_env_file_or_dot_env(self):
+        self.assertEqual(self.run_fn('cvengine_db_owner_fallback').stdout.strip(), '0')
+        (self.tmp / '.env').write_text('CVENGINE_DB_ALLOW_OWNER_FALLBACK=1\n')
+        self.assertEqual(self.run_fn('cvengine_db_owner_fallback').stdout.strip(), '1')
+        (self.tmp / '.env.vps').write_text('CVENGINE_DB_ALLOW_OWNER_FALLBACK=0\n')
+        self.assertEqual(self.run_fn('cvengine_db_owner_fallback .env.vps').stdout.strip(), '0')
+        self.assertEqual(self.run_fn('cvengine_db_owner_fallback .env.vps', CVENGINE_DB_ALLOW_OWNER_FALLBACK='1').stdout.strip(), '1')
+        (self.tmp / '.env').write_text('CVENGINE_DB_ALLOW_OWNER_FALLBACK=yes\n')
+        self.assertEqual(self.run_fn('cvengine_db_owner_fallback').stdout.strip(), '0')
+
+    def test_the_gate_runs_in_the_migrate_service_with_the_switch_and_returns_its_status(self):
+        stub = self.compose_stub('{}')
+        (self.tmp / '.env.vps').write_text('CVENGINE_DB_ALLOW_OWNER_FALLBACK=1\n')
+        self.assertEqual(self.run_fn(f'cvengine_db_gate {stub} --env-file .env.vps -f docker-compose.yml').returncode, 0)
+        self.assertEqual(self.run_fn(f'cvengine_db_gate {stub} -f docker-compose.yml', GATE_EXIT='1').returncode, 1)
+        calls = (self.tmp / 'calls').read_text().splitlines()
+        self.assertEqual(calls[0], '--env-file .env.vps -f docker-compose.yml run --rm --no-deps -T -e CVENGINE_DB_ALLOW_OWNER_FALLBACK=1 migrate '
+                                   'python3 manage.py db_app_role gate')
+        self.assertIn('-e CVENGINE_DB_ALLOW_OWNER_FALLBACK=0 migrate', calls[1])
+
+    def test_make_dbshell_and_the_backups_use_the_owner_inside_the_db_container(self):
+        make = (ROOT / 'Makefile').read_text()
+        dbshell = make[make.index('\ndbshell:'):]
+        dbshell = dbshell[:dbshell.index('\n\n')]
+        self.assertIn('exec db sh -c \'exec psql -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"\'', dbshell)
+        for name in ('db-backup.sh', 'auto-deploy.sh'):
+            self.assertIn('sh -c \'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"\'', (SCRIPTS / name).read_text(), name)
+        for target in ('admin', 'admin-password', 'username', 'migrate', 'test'):
+            body = make[make.index(f'\n{target}:'):]
+            body = body[:body.index('\n\n')]
+            self.assertIn(' migrate', body.replace('migrate:', ''), target)
+            self.assertNotIn('exec web', body, target)
+            self.assertNotIn('exec -T web', body, target)
+            self.assertNotIn('exec -e CVENGINE_DB_ROLE=owner web', body, target)
+
 
 class DocsTests(SimpleTestCase):
     def test_the_docs_explain_the_roles_the_update_and_the_rollback(self):
@@ -450,3 +777,16 @@ class DocsTests(SimpleTestCase):
         deployment = (ROOT / 'docs' / 'DEPLOYMENT.md').read_text()
         for phrase in ('cvengine_app', 'data_network', 'CVENGINE_LOG_MAX_SIZE', 'log_connections'):
             self.assertIn(phrase, deployment)
+
+    def test_the_docs_explain_the_migrate_service_and_the_explicit_fallback(self):
+        for name in ('CONFIGURATION.md', 'UPGRADE.md', 'DEPLOYMENT.md'):
+            text = (ROOT / 'docs' / name).read_text()
+            for phrase in ('CVENGINE_DB_ALLOW_OWNER_FALLBACK=1', 'migrate', 'POSTGRES_PASSWORD'):
+                self.assertIn(phrase, text, name)
+        upgrade = (ROOT / 'docs' / 'UPGRADE.md').read_text()
+        section = upgrade[upgrade.index('### The owner password leaves the application containers'):]
+        section = section[:section.index('\n### ')]
+        for phrase in ('What restarts', 'What an operator does on an existing install', 'docker-compose.vps.yml', 'Fix:', 'make dbshell',
+                       'db_owner_fallback'):
+            self.assertIn(phrase, section)
+        self.assertIn('CVENGINE_DB_OWNER_FALLBACK_FILE', (ROOT / 'docs' / 'CONFIGURATION.md').read_text())

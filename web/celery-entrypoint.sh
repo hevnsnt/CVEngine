@@ -5,16 +5,16 @@
 # administrator wins.
 export PYTHONFAULTHANDLER="${PYTHONFAULTHANDLER:-1}"
 
-# web owns migrations; wait until they are applied (avoids concurrent-migrate race). The check reads django_migrations as the owner role, so the
-# wait is the same whether or not the app role exists yet (the web service's migrate creates it, after the last migration).
-until CVENGINE_DB_ROLE=owner python3 manage.py migrate --check >/dev/null 2>&1; do
-    echo "Waiting for web to apply migrations..."
+# The database role this container runs as (web/db-role.sh): the least privilege app role, which the one-off migrate service created and checked
+# before this started. This container has no owner password; the owner role only when CVENGINE_DB_ALLOW_OWNER_FALLBACK=1 made the migrate service
+# hand it over and the app role cannot log in within CVENGINE_DB_ROLE_WAIT seconds, said in the log.
+. "$(dirname "$0")/db-role.sh" && cvengine_db_role "${CVENGINE_DB_ROLE_WAIT:-60}"
+
+# The migrate service owns migrations; wait until they are applied (as this container's role: migrate --check only reads django_migrations).
+until python3 manage.py migrate --check >/dev/null 2>&1; do
+    echo "Waiting for the database migrations (the one-off migrate service applies them: docker compose run --rm migrate)..."
     sleep 3
 done
-
-# The database role this container runs as (web/db-role.sh): the least privilege app role, which the web service's migrate has just created; when
-# it cannot log in within CVENGINE_DB_ROLE_WAIT seconds, the owner role, said in the log.
-. "$(dirname "$0")/db-role.sh" && cvengine_db_role "${CVENGINE_DB_ROLE_WAIT:-60}"
 
 # The built-in scanner's first enrollment blob must not wait for the beat task (every five minutes). CVENGINE_BUILTIN_SCANNER=0 revokes it instead,
 # and never a reason for the container not to start.

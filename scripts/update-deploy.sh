@@ -82,10 +82,42 @@ backup_database() {
   return 0
 }
 
+# The database owner's commands (migrate, showmigrations, the app role's check) run in a one-off container of the migrate service
+# (docker-compose.yml, web/migrate-entrypoint.sh): the only container with the owner's password; web, celery and celery-beat do not have it.
+# A Compose layout without that service (an install's own file that replaces docker-compose.yml) keeps the old way: a one-off web container
+# with CVENGINE_DB_ROLE=owner. deploy_steps sets CV_OWNER_SERVICE from the services the layout defines.
+CV_OWNER_SERVICE=migrate
+owner_run() {  # owner_run [-T] manage.py ARGS...
+  local tty=()
+  if [ "${1:-}" = -T ]; then tty=(-T); shift; fi
+  if [ "$CV_OWNER_SERVICE" = migrate ]; then
+    "${COMPOSE[@]}" run --rm --no-deps ${tty[@]+"${tty[@]}"} migrate python3 "$@"
+  else
+    "${COMPOSE[@]}" run --rm --no-deps ${tty[@]+"${tty[@]}"} -e CVENGINE_DB_ROLE=owner --entrypoint python3 web "$@"
+  fi
+}
+
+# Before anything is migrated or restarted: the application must be able to run without the owner's password. cvengine_owner_password_check
+# refuses a layout that still hands it to another service (an overlay's environment); cvengine_db_gate creates and grants the app role in the
+# migrate service and checks that it logs in, and fails with the one-line fix when it does not (unless CVENGINE_DB_ALLOW_OWNER_FALLBACK=1).
+# Still DEPLOY_STAGE=datastores, so a failure here puts the previous version back on the unchanged database.
+check_db_roles() {
+  local out status=0 line
+  [ "$CV_OWNER_SERVICE" = migrate ] && [ -f scripts/db-app-role.sh ] || return 0
+  . scripts/db-app-role.sh
+  out=$(cvengine_owner_password_check "${COMPOSE[@]}" 2>&1) || status=$?
+  if [ "$status" = 0 ]; then out=$(cvengine_db_gate "${COMPOSE[@]}" 2>&1) || status=$?; fi
+  while IFS= read -r line; do [ -z "$line" ] || log "$line"; done <<<"$out"
+  [ "$status" = 0 ] && return 0
+  line=$(grep -m1 '^Fix:' <<<"$out" || true)
+  DEPLOY_WHY="The update stopped before migrating: the server would have to run with the database owner's password. ${line:-See the update log.}"
+  return 1
+}
+
 # How many migrations the database has applied; fails when that cannot be read.
 applied_migrations() {
   local plan
-  plan=$("${COMPOSE[@]}" run --rm --no-deps -T -e CVENGINE_DB_ROLE=owner --entrypoint python3 web manage.py showmigrations --plan 2>/dev/null) || return 1
+  plan=$(owner_run -T manage.py showmigrations --plan 2>/dev/null) || return 1
   grep -c '^\[X\]' <<<"$plan" || true
 }
 
@@ -95,8 +127,8 @@ applied_migrations() {
 run_migrations() {
   local before after
   before=$(applied_migrations) || before=''
-  # as the database's owner role (CVENGINE_DB_ROLE=owner); the migrate also creates or updates the app role and grants it (web/reNgine/db_roles.py)
-  "${COMPOSE[@]}" run --rm --no-deps -e CVENGINE_DB_ROLE=owner --entrypoint python3 web manage.py migrate --noinput && return 0
+  # as the database's owner role, in the migrate service; the migrate also creates or updates the app role and grants it (web/reNgine/db_roles.py)
+  owner_run manage.py migrate --noinput && return 0
   after=$(applied_migrations) || after=''
   if [ -z "$before" ] || [ "$before" != "$after" ]; then
     DEPLOY_STAGE=migrated
@@ -138,6 +170,9 @@ deploy_steps() {
     listed=''
     services+=(proxy)
   fi
+  # where the owner's commands run (owner_run): the migrate service, unless the layout lacks it (and when the list cannot be read, it is there)
+  CV_OWNER_SERVICE=migrate
+  if [ -n "$listed" ] && ! grep -qx migrate <<<"$listed"; then CV_OWNER_SERVICE=web; fi
   DEPLOY_STAGE=build
   phase applying "$DEPLOY_STAGE"
   cv_status step build
@@ -209,6 +244,7 @@ deploy_steps() {
   phase applying backup
   cv_status step backup
   backup_database || return 1
+  check_db_roles || return 1
   DEPLOY_STAGE=migrate
   phase applying "$DEPLOY_STAGE"
   cv_status step migrating
@@ -274,8 +310,8 @@ verify_running() {
 # "Running" is what Docker says about a container that may be restarting over and over, and an update that only checked that reported "done"
 # for a web service that never came up, or one whose database lacked what its code needs. After the restart the web service must ANSWER (any
 # status under 500: the redirect to the login page counts, and so does a 400 for a host name it does not allow) and no migration may be
-# waiting. The web entrypoint migrates when it starts, so a migration still waiting here means something else went wrong: it is applied
-# once, and if it still cannot be the update fails visibly instead of reporting success on an install that returns errors.
+# waiting. The migrate service ran before the restart, so a migration still waiting here means something else went wrong: it is applied
+# once (in the migrate service again), and if it still cannot be the update fails visibly instead of reporting success on an install that returns errors.
 verify_serving() {
   local compose=("${COMPOSE[@]}") attempt served=0
   for attempt in $(seq 1 "${CVENGINE_VERIFY_WEB_TRIES:-90}"); do
@@ -288,7 +324,7 @@ verify_serving() {
   fi
   if ! "${compose[@]}" exec -T web python3 manage.py migrate --check >/dev/null 2>&1; then
     log "the web service answers but the database has migrations waiting; applying them"
-    "${compose[@]}" exec -T -e CVENGINE_DB_ROLE=owner web python3 manage.py migrate --noinput || return 1
+    owner_run -T manage.py migrate --noinput || return 1
     if ! "${compose[@]}" exec -T web python3 manage.py migrate --check >/dev/null 2>&1; then
       log "migrations are still waiting after migrate; the update is not complete"
       return 1
