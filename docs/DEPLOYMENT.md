@@ -46,6 +46,36 @@ Scale the first four with the memory the host can give the database.
 
 Before it writes, it checks that shared buffers, plus work memory for 4 sort steps on each of 24 busy connections (the web server's 16 threads and the workers), plus one maintenance job fit in 90 percent of that memory, and takes smaller values until they do: the kernel kills a database that reaches its ceiling. If your own values do not fit, it says so and changes nothing. The production host this was written for (12 GB, the database held to `2g`) gets `512MB`, `3328MB`, `8MB` and `128MB`; `DB_MEM_LIMIT=4g` gets `1GB`, `16MB` and `256MB`. Each value goes into the env file Compose reads, with a comment line, after a backup (`<file>.cvengine-review-<time>`), and the update log says *Postgres settings changed, the database restarts once during this update*: the update's `docker compose up -d --no-deps db` recreates the container because its command line changed. A second run changes nothing. **Settings, Sentinels, Which scanners run** does not restart the database, so it leaves the values for the next update. The review never writes `DB_MEM_LIMIT` for this; raise the ceiling yourself and the next update sizes up a value it wrote. A changed value takes effect only when the database restarts: run `docker compose up -d db` (with the same `-f` files and `--env-file` as your other compose commands), which recreates the `db` container in a few seconds and keeps the data. These command line values take precedence over a value set with `ALTER SYSTEM` or in `postgresql.conf`, so move such a setting to `.env`.
 
+## Finding slow queries
+
+Three `.env` values help find the statements that cost the database the most. All are off by default and the update never sets them: they are diagnostics, so turn them on while you look and back off when you are done. Each takes a restart of the database: `docker compose up -d db` (with the same `-f` files and `--env-file` as your other compose commands) recreates the `db` container in a few seconds and keeps the data.
+
+| Setting (`.env`) | Default | To diagnose | What it does |
+| --- | --- | --- | --- |
+| `POSTGRES_SHARED_PRELOAD_LIBRARIES` | empty | `pg_stat_statements` | Loads the per query statistics. |
+| `POSTGRES_TRACK_IO_TIMING` | `off` | `on` | Records how long each statement waited on disk reads. |
+| `POSTGRES_LOG_MIN_DURATION_STATEMENT` | `-1` (no log) | `1000` | Writes every statement that ran for 1000 ms or more to the database log, with its duration. |
+
+1. Set the values in `.env`, then run `docker compose up -d db`.
+2. Once, in the cvENGINE database (`docker compose exec db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"`), create the extension:
+
+   ```sql
+   CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+   ```
+
+3. After the server has done a few hours of its usual work, rank the statements by the total time they took:
+
+   ```sql
+   SELECT round(total_exec_time) AS total_ms, calls, round(mean_exec_time::numeric, 1) AS mean_ms,
+          round((shared_blk_read_time + shared_blk_write_time)::numeric) AS io_ms, rows, left(query, 120) AS query
+   FROM pg_stat_statements ORDER BY total_exec_time DESC LIMIT 20;
+   ```
+
+   `io_ms` stays 0 unless `POSTGRES_TRACK_IO_TIMING` is `on`. `SELECT pg_stat_statements_reset();` starts the counts again.
+4. The slow log: `docker compose logs db | grep 'duration:'` lists each statement of 1000 ms or more with its time.
+
+To turn them off, remove the lines from `.env` (or set `off` and `-1`) and run `docker compose up -d db` again. `pg_stat_statements` costs little and may stay loaded.
+
 ## Ports
 
 | Port | Bound to | Service |
