@@ -104,3 +104,48 @@ class StatementCountTests(World):
         cve_groups = lambda run: [q for q in run if '"cveFeed_cveentry"."cvss" >=' in q and 'GROUP BY' in q]
         self.assertEqual((len(cve_groups(own_run)), len(cve_groups(shared_run))), (3, 1))
         self.assertLess(len(shared_run), len(own_run))
+
+
+class ScopedSharedReadTests(World):
+    """An expired row is counted with the shared numbers of the projects still to count only, read under a scope of exactly them, so a cold row of
+    one project no longer reads every finished scan, target and current host of the instance (review finding C1)."""
+
+    def test_a_row_from_the_scoped_shared_counts_is_the_row_the_project_counts_for_itself(self):
+        for project in self.projects:
+            shared = system_status._scoped_shared_inputs([project.id])
+            self.assertEqual(system_status._project_row(project, shared), system_status._project_row(project), project.slug)
+        both = system_status._scoped_shared_inputs([p.id for p in self.projects[:2]])
+        for project in self.projects[:2]:
+            self.assertEqual(system_status._project_row(project, both), system_status._project_row(project), project.slug)
+
+    def test_the_scoped_read_reads_only_those_projects_hosts_and_leaves_the_scope_as_it_was(self):
+        from unittest import mock
+
+        from cveFeed import inventory_counts
+        from tenancy import scope
+        seen = []
+        original = inventory_counts.current_rows
+        with mock.patch.object(inventory_counts, 'current_rows', lambda *a, **k: seen.append(original(*a, **k)) or seen[-1]):
+            system_status._scoped_shared_inputs([self.projects[1].id])
+            self.assertIsNone(scope.current_allowed())
+            tokens = scope.set_scope({self.projects[0].id}, None)  # a caller's own scope is narrowed, never widened
+            try:
+                system_status._scoped_shared_inputs([self.projects[0].id, self.projects[2].id])
+                self.assertEqual(scope.current_allowed(), {self.projects[0].id})
+            finally:
+                scope.reset_scope(tokens)
+        self.assertEqual({row[3] for row in seen[0]}, {self.projects[1].id})
+        self.assertEqual({row[3] for row in seen[1]}, {self.projects[0].id})
+
+    def test_one_expired_row_reads_the_shared_numbers_of_the_projects_not_cached(self):
+        from unittest import mock
+        ctx = Ctx(user=self.root)
+        first, _ = system_status._projects_partial(ctx)
+        cache.delete(system_status._row_keys(self.projects[1])[0])  # one row expired; its last known row and the others stay
+        cache.delete(system_status._fingerprint_key(self.projects[1]))  # and it is counted again, not renewed
+        asked = []
+        original = system_status._shared_inputs
+        with mock.patch.object(system_status, '_shared_inputs', lambda ids: asked.append(sorted(ids)) or original(ids)):
+            again, waiting = system_status._projects_partial(ctx)
+        self.assertEqual(asked, [[self.projects[1].id]])
+        self.assertEqual((again, waiting), (first, []))

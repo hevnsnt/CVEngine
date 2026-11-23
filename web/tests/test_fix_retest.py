@@ -569,7 +569,7 @@ class ListTests(Base):
         self.assertEqual(first, {'verified_fixed': 0, 'unverified_fixed': 0, 'reopened': 0})
         again, cheaper = poll()
         self.assertEqual(again, first)
-        self.assertEqual(cost - cheaper, 3, 'the second poll must not run the three retest aggregates')
+        self.assertEqual(cost - cheaper, 6, 'the second poll must not run the three retest aggregates nor the three finding counts (_finding_counts)')
         with self.captureOnCommitCallbacks(execute=True):  # what a person marking a finding fixed does: the revision moves on commit
             self.assertEqual(self.mark()[0], 200)
         after, _ = poll()
