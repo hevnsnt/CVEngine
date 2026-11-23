@@ -392,7 +392,7 @@ class GraphVersionCacheTests(World):
 
 class QueryCeilingTests(World):
     """Pinned with the clock caches held steady. ``floor`` is what any authenticated request costs before its view runs (the session, the user, the
-    memberships, the roles: 9 for a member, 5 for an App Admin), measured on /cve/api/alive, which does nothing else; what a poll adds to it is what
+    memberships, the roles: 5 for a member, 5 for an App Admin; a member's was 9 before tenancy.snapshot), measured on /cve/api/alive, which does nothing else; what a poll adds to it is what
     this class pins."""
 
     def queries(self, client, path, **extra):
@@ -406,7 +406,7 @@ class QueryCeilingTests(World):
         return self.queries(client, '/cve/api/alive')[1]
 
     def test_the_floor_is_what_it_was(self):
-        self.assertEqual(self.floor(client_for(self.a1)), 9)
+        self.assertEqual(self.floor(client_for(self.a1)), 5)  # session, user, profile, project memberships, organization memberships
         self.assertEqual(self.floor(client_for(self.root)), 5)
 
     def test_stats_warm_poll_costs_the_floor_and_the_fresh_scan_counts(self):
