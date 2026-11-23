@@ -101,6 +101,16 @@ class StatusAndTileTests(Base):
         StatsSnapshot.objects.all().update(needs_hosts=None)  # a day from before the figure was kept: no comparison, no invented one
         self.assertIsNone(self.digest()['headline']['needs_prev'])
 
+    def test_the_overviews_needs_tile_says_the_emails_number(self):
+        for org in (False, True):
+            ids = list(self.scope(**({'org': 'acme-org'} if org else {'project': 'acme-web'})).ids)
+            StatsSnapshot.objects.update_or_create(project_id=ids[0], date=overview.timezone.localdate(), defaults={'hosts': 1, 'exposed_hosts': 0, 'open_findings': {}, 'needs_hosts': 99})
+            email = self.digest(org=org)['headline']['needs']
+            tile = next(k for k in overview.build(ids)['kpis'] if k['key'] == 'needs')
+            self.assertEqual((tile['label'], tile['value']), ('Needs attention', email), org)  # never the stale 99 of today's row
+            self.assertEqual(tile['value'], overview.needs_hosts(ids))
+            self.assertGreater(email, 0)
+
 
 class ThreatSectionTests(Base):
     def test_only_what_is_found_on_a_host_of_the_scope_is_listed(self):

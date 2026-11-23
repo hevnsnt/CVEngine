@@ -34,11 +34,12 @@ export function sparkLabel(label, values) {
 export const toneClass = (tone) => (tone === "worse" ? "worse" : tone === "better" ? "better" : "");
 export const pillClass = (tone) => (tone === "fire" || tone === "ok" || tone === "smoke" ? tone : "smoke");
 
-// Where a tile goes (the Overview's slug may be a project's or the reserved _all).
+// Where a tile goes (the Overview's slug may be a project's or the reserved _all). Needs attention counts the hosts whose worst situation is high hygiene or
+// worse, so it opens the Situations page on exactly that filter.
 export function kpiHref(key, slug) {
   if (!SLUG.test(slug || "")) return "";
   const base = `/cve/${slug}`;
-  return { exposed: `${base}/hosts/?exposed=1`, needs: `${base}/matches/`, critical: `${base}/vulns/?severity=critical`, mttf: `${base}/vulns/?status=fixed` }[key] || "";
+  return { exposed: `${base}/hosts/?exposed=1`, needs: `${base}/situations/?tier=hygiene`, critical: `${base}/vulns/?severity=critical`, mttf: `${base}/vulns/?status=fixed` }[key] || "";
 }
 
 // The hosts of a threat card: the Hosts page with the group's own search (a CVE id, or the product). Only the fallback for a summary built before the exact

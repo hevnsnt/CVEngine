@@ -2,7 +2,7 @@
 // documented there); this page draws its answer. Every string that came from a scan is drawn with textContent, never as markup, and a finding's link
 // is used only when it points at one of the existing panes (situations-logic.js safeLink).
 import { api, badge, el, emptyState, selectOf, whatIs } from "/staticfiles/cve/ui.js";
-import { chipsOf, countLine, heatOf, moreFindings, safeLink, stateView } from "/staticfiles/cve/situations-logic.js";
+import { chipsOf, countLine, heatOf, moreFindings, safeLink, stateView, tierFromSearch } from "/staticfiles/cve/situations-logic.js";
 
 const TIER_BADGE = { proven: "fire", likely: "smoke", hygiene: "high", exposure: "medium", minor: "info" };
 const TIER_LABEL = { proven: "Proven", likely: "Likely", hygiene: "Hygiene, high", exposure: "Exposed", minor: "Minor" };
@@ -69,6 +69,8 @@ export function situationsPage(mount, { slug, all, listHead, createList, selecta
   mount.append(root);
   const search = el("input", "", null, { type: "search", placeholder: "Search hosts", "aria-label": "Search situations" });
   const tier = selectOf([["all", "Everything that needs you"], ["exposure", "Exposed or worse"], ["hygiene", "High hygiene or worse"], ["likely", "Likely or proven"], ["proven", "Proven only"]], "all", "Show");
+  const asked = tierFromSearch(window.location.search);
+  if (asked) tier.value = asked;
   const count = el("span", "list-count note", "", { role: "status" });
   const tools = el("span", "meta-tools");
   tools.append(whatIs("One host at a time, with everything open on it that needs a person: what a check proved first, then what is likely real, what is exposed, then the small things. Closed, accepted and ruled-out findings are not here. The order is the same everywhere: proof first, then known exploited, then internet-facing, then how bad, then how old."));

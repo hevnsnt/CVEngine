@@ -21,6 +21,13 @@ const LINK = /^\/cve\/[-\w]+\/(vulns|hygiene|secrets|hosts)\/(\?[-\w=%.&]*)?(#[-
 export const safeLink = (href) => (typeof href === "string" && LINK.test(href) ? href : "");
 
 const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+// The tier filter a link asks for ("?tier=hygiene", the Overview's Needs attention tile), or "" for one the page does not offer.
+export const TIER_FILTERS = ["all", "exposure", "hygiene", "likely", "proven"];
+export function tierFromSearch(search) {
+  const wanted = new URLSearchParams(typeof search === "string" ? search : "").get("tier") || "";
+  return TIER_FILTERS.includes(wanted) ? wanted : "";
+}
+
 export const countLine = (data) => (data && data.count != null ? plural(data.count, "situation", "situations") : "");
 
 // What an empty list says, from the server's `state` (never from the rows): {kind, title, body, tone}.

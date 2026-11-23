@@ -40,6 +40,8 @@ test('a tile links to the page it counts, and nowhere for a slug that is not one
   assert.equal(kpiHref('exposed', 'acme'), '/cve/acme/hosts/?exposed=1');
   assert.equal(kpiHref('exposed', '_all'), '/cve/_all/hosts/?exposed=1');
   assert.equal(kpiHref('critical', 'acme'), '/cve/acme/vulns/?severity=critical');
+  assert.equal(kpiHref('needs', 'acme'), '/cve/acme/situations/?tier=hygiene');  // the hosts Needs attention counts: high hygiene or worse
+  assert.equal(kpiHref('needs', '_all'), '/cve/_all/situations/?tier=hygiene');
   assert.equal(kpiHref('needs', 'a/../b'), '');
   assert.equal(kpiHref('nope', 'acme'), '');
 });
