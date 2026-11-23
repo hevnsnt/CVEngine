@@ -206,3 +206,54 @@ class TechnologyConstraintTests(Base):
 		self.assertEqual(list(out['a'].technologies.values_list('pk', flat=True)), [out['old'].pk])
 		self.assertEqual(list(out['b'].technologies.values_list('pk', flat=True)), [out['old'].pk])
 		self.assertEqual(list(out['page'].techs.values_list('pk', flat=True)), [out['old'].pk])
+
+
+class FindingVocabularyTests(Base):
+	"""Tags, CVE ids and CWE ids of findings: one row per name, so ``get_or_create`` in ``save_vulnerability`` never meets two rows."""
+	CASES = (('VulnerabilityTags', 'uniq_vulntag_name', '0033_uniq_vulntag_name', 'tags', 'xss'),
+			 ('CveId', 'uniq_cveid_name', '0034_uniq_cveid_name', 'cve_ids', 'CVE-2024-0001'),
+			 ('CweId', 'uniq_cweid_name', '0035_uniq_cweid_name', 'cwe_ids', 'CWE-79'))
+
+	def test_the_constraints_exist_and_refuse_a_second_row_for_a_name(self):
+		for model_name, constraint, _migration, _field, name in self.CASES:
+			model = apps.get_model('startScan', model_name)
+			self.assertTrue(constraint_exists(constraint), constraint)
+			model.objects.create(name=name)
+			with self.assertRaises(IntegrityError), transaction.atomic():
+				model.objects.create(name=name)
+
+	def test_a_finding_save_that_loses_the_race_links_the_winners_row(self):
+		from reNgine.tasks import save_vulnerability
+		sub = self.host()
+		winners = {model_name: apps.get_model('startScan', model_name).objects.create(name=name) for model_name, _c, _m, _f, name in self.CASES}
+		get = QuerySet.get
+		missed = set()
+
+		def racing(qs, *args, **kwargs):  # each lookup misses the row once, as a save that read just before another created it
+			if qs.model.__name__ in winners and qs.model.__name__ not in missed:
+				missed.add(qs.model.__name__)
+				raise qs.model.DoesNotExist
+			return get(qs, *args, **kwargs)
+		with mock.patch.object(QuerySet, 'get', racing):
+			vuln, created = save_vulnerability(scan_history=self.scan, target_domain=self.domain, subdomain=sub, name='XSS', severity=2,
+											   tags=['xss'], cve_ids=['CVE-2024-0001'], cwe_ids=['CWE-79'])
+		self.assertEqual(missed, set(winners))
+		for model_name, _c, _m, field, _name in self.CASES:
+			self.assertEqual(list(getattr(vuln, field).values_list('pk', flat=True)), [winners[model_name].pk])
+			self.assertEqual(apps.get_model('startScan', model_name).objects.count(), 1)
+
+	def test_the_merge_keeps_the_oldest_row_and_relinks_the_findings(self):
+		for model_name, constraint, migration, field, name in self.CASES:
+			model = apps.get_model('startScan', model_name)
+
+			def build():
+				old, new = model.objects.create(name=name), model.objects.create(name=name)
+				a = Vulnerability.objects.create(scan_history=self.scan, target_domain=self.domain, name=f'A {name}', severity=1)
+				b = Vulnerability.objects.create(scan_history=self.scan, target_domain=self.domain, name=f'B {name}', severity=1)
+				getattr(a, field).add(old, new)  # both copies on one finding: one link stays
+				getattr(b, field).add(new)
+				return {'old': old, 'a': a, 'b': b}
+			out = merged(model, constraint, migration, 'merge_duplicate_names', build)
+			self.assertEqual(list(model.objects.filter(name=name).values_list('pk', flat=True)), [out['old'].pk], model_name)
+			for vuln in (out['a'], out['b']):
+				self.assertEqual(list(getattr(vuln, field).values_list('pk', flat=True)), [out['old'].pk], model_name)
