@@ -872,7 +872,7 @@ def installed_templates_version():
 # Every code ops_checks can return, in the order it computes them. The snapshot sends it to the reviewer container, which builds the model's answer
 # format from it; tests/test_ai_prompts.py holds it equal to the codes written in ops_checks and to the container's fallback copy.
 OPS_CODES = ('sentinels_idle', 'workers_down', 'nuclei_templates', 'sentinel_errors', 'sentinel_waiting', 'sentinels_offline', 'scan_errors', 'system',
-             'generated_templates', 'ai_errors', 'memory', 'queue_starvation', 'sentinel_claims_refused', 'ai_budget', 'triage_backlog')
+             'generated_templates', 'ai_errors', 'memory', 'queue_starvation', 'sentinel_claims_refused', 'ai_budget', 'triage_backlog', 'ct_watch_stalled')
 
 
 def _check(code, state, title, detail, facts=None, actions=(), severity=None):
