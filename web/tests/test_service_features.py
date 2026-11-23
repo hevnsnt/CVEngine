@@ -298,8 +298,7 @@ class SharedIndexTests(FeatureCase):
         service_features.reset_index()
         self.assertIsNone(cache.get(service_features.INDEX_CACHE_KEY))
         _, prefilter = self.index()
-        self.assertEqual(len(prefilter), 1)
-        self.assertNotIn(' IN (', prefilter[0])  # a full build: the whole table
+        self.assertEqual(prefilter, [])  # a full build walks the whole table in Python: no database regex runs
 
 
 class MatchTests(FeatureCase):
