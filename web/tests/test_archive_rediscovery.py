@@ -127,7 +127,7 @@ class ArchivedRediscoveryTests(TestCase):
         row = self.state('blocked.archive.example')
         HostExclusion.objects.create(org=self.org, host=row.host)
         with mock.patch('cveFeed.scan_control.pause_requested', return_value=False):
-            self.assertEqual(check_one(row, resolver=lambda name: ('resolved', {'8.8.8.8'})), 'deferred')
+            self.assertEqual(check_one(row, resolver=lambda name: ('resolved', {'8.8.8.8'})), 'held')  # excluded: stays so, not deferred work
         row.refresh_from_db()
         self.assertIsNotNone(row.archived_at)
         with mock.patch('cveFeed.scan_control.pause_requested', return_value=True):
@@ -135,7 +135,7 @@ class ArchivedRediscoveryTests(TestCase):
         row.project = self.other
         row.save(update_fields=['project'])
         with mock.patch('cveFeed.scan_control.pause_requested', return_value=False):
-            self.assertEqual(check_one(row), 'deferred')
+            self.assertEqual(check_one(row), 'held')
 
     def test_manual_archive_pin_restore_access_and_scanner_scheduling_gate(self):
         name = 'manual.archive.example'
@@ -216,3 +216,65 @@ class ArchivedRediscoveryTests(TestCase):
         self.assertIsNone(row.archived_at)
         self.assertEqual(row.archive_check_status, 'rediscovered_scan')
         self.assertTrue(AssetChange.objects.filter(project=self.project, host=row.host, kind='host_returned').exists())
+
+    def test_a_scan_that_restores_a_never_resolved_host_starts_its_streak_afresh(self):
+        # archived for never resolving (cveFeed.unresolved_archive), then found by a scan with a scannable address: the old streak was kept, so
+        # the next daily review archived the host again and closed its findings again, and the next scan restored it, every day
+        from cveFeed import unresolved_archive
+        from cveFeed.changes import record_scan_changes
+        old = timezone.now() - timedelta(days=6)
+        row = self.state('loop.archive.example', state={'ips': {'8.8.8.8': {'ports': {}}}}, unresolved_first_at=old,
+                         unresolved_last_at=old + timedelta(days=4), unresolved_checks=4)
+        scan = ScanHistory.objects.create(domain=self.domain, scan_type=self.engine, start_scan_date=timezone.now(), scan_status=2)
+        sub = Subdomain.objects.create(target_domain=self.domain, scan_history=scan, name=row.host)
+        sub.ip_addresses.add(IpAddress.objects.create(address='8.8.8.8'))
+        with mock.patch('cveFeed.retest.queue_retests'):
+            record_scan_changes(scan.pk, resolver=lambda names: set())
+        row.refresh_from_db()
+        self.assertIsNone(row.archived_at)
+        self.assertEqual((row.unresolved_first_at, row.unresolved_last_at, row.unresolved_checks), (None, None, 0))
+        self.assertFalse(unresolved_archive.candidates().filter(pk=row.pk).exists())
+        with mock.patch('cveFeed.scan_control.pause_requested', return_value=False):
+            self.assertEqual(unresolved_archive.check_one(row), 'deferred')
+        row.refresh_from_db()
+        self.assertIsNone(row.archived_at)
+
+    def test_a_first_scan_of_another_target_that_restores_the_host_also_starts_its_streak_afresh(self):
+        from cveFeed import unresolved_archive
+        from cveFeed.changes import record_scan_changes
+        old = timezone.now() - timedelta(days=6)
+        row = self.state('base.archive.example', state={'ips': {'8.8.8.8': {'ports': {}}}}, unresolved_first_at=old, unresolved_checks=4)
+        target = Domain.objects.create(name='base.archive.example', project=self.project, insert_date=timezone.now())  # no snapshot yet: a baseline
+        scan = ScanHistory.objects.create(domain=target, scan_type=self.engine, start_scan_date=timezone.now(), scan_status=2)
+        sub = Subdomain.objects.create(target_domain=target, scan_history=scan, name=row.host)
+        sub.ip_addresses.add(IpAddress.objects.create(address='8.8.8.8'))
+        with mock.patch('cveFeed.retest.queue_retests'):
+            self.assertTrue(record_scan_changes(scan.pk, resolver=lambda names: set()).get('baseline'))
+        row.refresh_from_db()
+        self.assertIsNone(row.archived_at)
+        self.assertEqual((row.unresolved_first_at, row.unresolved_checks), (None, 0))
+        self.assertFalse(unresolved_archive.candidates().filter(pk=row.pk).exists())
+
+    def test_a_run_that_meets_only_permanent_states_completes(self):
+        # a private address (blocked) or an excluded host answers the same every day: counted as deferred, they kept every run partial
+        private = self.state('private.archive.example')
+        excluded = self.state('excluded.archive.example')
+        HostExclusion.objects.create(org=self.org, host=excluded.host)
+        resolver = lambda name: ('absent', set()) if name.startswith('cvengine-nonexistent-') else ('resolved', {'10.0.0.5'})  # noqa: E731
+        with mock.patch.dict('os.environ', {'CVENGINE_ALLOW_PRIVATE_TARGETS': '0'}), \
+             mock.patch('cveFeed.scan_control.pause_requested', return_value=False), \
+             mock.patch('cveFeed.tasks.rediscover_archived_hosts.apply_async'):
+            out = run_page(resolver=resolver, tcp_probe=lambda ip, port: False)
+        self.assertEqual((out['status'], out['checked'], out['deferred'], out['errors']), ('completed', 2, 0, 0))
+        private.refresh_from_db()
+        self.assertIsNotNone(private.archived_at)  # still held in its archive
+        self.assertEqual(private.archive_check_status, 'blocked')
+        # a wait (an assessment that could not be queued) is still deferred work, and the run is partial
+        ArchiveRediscovery.objects.all().delete()
+        self.state('busy.archive.example')
+        with mock.patch('cveFeed.scan_control.pause_requested', return_value=False), \
+             mock.patch('cveFeed.host_assessment.enqueue', side_effect=RuntimeError('at capacity')), \
+             mock.patch('cveFeed.tasks.rediscover_archived_hosts.apply_async'):
+            out = run_page(resolver=lambda name: ('absent', set()) if name.startswith('cvengine-nonexistent-') else ('resolved', {'8.8.8.8'}),
+                           tcp_probe=lambda ip, port: False)
+        self.assertEqual((out['status'], out['deferred']), ('partial', 2))  # busy, and private (now a public address) could not be queued

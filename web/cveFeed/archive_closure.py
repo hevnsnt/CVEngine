@@ -38,7 +38,7 @@ from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 
-from cveFeed.closure import AUTOMATIC, NOTE_MAX
+from cveFeed.closure import AUTOMATIC, prepend_note
 
 logger = logging.getLogger(__name__)
 
@@ -94,10 +94,6 @@ def reopens_on_sight(obj, project_id, host):
     """Whether a scan or check that reports ``obj`` again reopens it as an archive closure: it is one (``is_archive_closed``) and its host is no
     longer archived (``still_archived``)."""
     return is_archive_closed(obj) and not still_archived(project_id, host)
-
-
-def _clip(text):
-    return text[:NOTE_MAX]
 
 
 def _names_q(field, names):
@@ -224,7 +220,7 @@ def _close(project_id, name, names, line, by, user, why):
             for row in rows:
                 before = row.remediation_status
                 row.remediation_status, row.remediation_by, row.remediation_updated_at = 'fixed', None, now
-                row.remediation_note = _clip(f'{line}\n{row.remediation_note}' if row.remediation_note else line)
+                row.remediation_note = prepend_note(line, row.remediation_note)  # a person's note below is never cut (closure.prepend_note)
                 events.append(FindingAuditEvent(project_id=project_id, finding_kind=kind, finding_id=row.pk, event='status', actor=user,
                                                 before={'status': before}, after={'status': 'fixed', 'note': line, 'by': by}))
             type(rows[0])._base_manager.bulk_update(rows, list(_FIELDS), batch_size=BATCH)
@@ -273,7 +269,7 @@ def reopen_host(project_id, host, *, user=None, when=None, prefixes=PREFIXES, li
                 status = earlier.get(row.pk) if earlier.get(row.pk) in LIVE else 'open'
                 rest = row.remediation_note.split('\n', 1)[1] if '\n' in row.remediation_note else ''
                 row.remediation_status, row.remediation_by, row.remediation_updated_at = status, None, timezone.now()
-                row.remediation_note = _clip(f'{line}\n{rest}' if rest else line)
+                row.remediation_note = prepend_note(line, rest)
                 events.append(FindingAuditEvent(project_id=project_id, finding_kind=kind, finding_id=row.pk, event='status', actor=user,
                                                 before={'status': 'fixed'}, after={'status': status, 'note': line, 'by': BY_RESTORE}))
             type(rows[0])._base_manager.bulk_update(rows, list(_FIELDS), batch_size=BATCH)

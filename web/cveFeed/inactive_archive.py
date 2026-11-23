@@ -25,7 +25,7 @@ def candidates(now=None):
 
 def check_one(row, *, resolver=None, tcp_probe=None, now=None):
     from cveFeed import activity
-    from cveFeed.archive_rediscovery import observe
+    from cveFeed.archive_rediscovery import HELD, PERMANENT, observe
     from cveFeed.exclusions import is_excluded
     from cveFeed.host_assessment import enqueue
     from cveFeed.models import HostAssessment
@@ -41,7 +41,7 @@ def check_one(row, *, resolver=None, tcp_probe=None, now=None):
     domain, host = row.domain, row.host.lower().rstrip('.')
     if domain.project_id != row.project_id or is_excluded(row.project_id, host) or not (
             host == domain.name.lower() or (not domain.is_host_scoped() and host.endswith('.' + domain.name.lower()))):
-        return 'deferred'
+        return HELD
     if HostAssessment.objects.filter(project_id=row.project_id, host=host, status__in=('queued', 'running')).exists() or \
             ScanHistory.objects.filter(domain=domain, scan_status__in=(-1, 1), start_scan_date__gte=now - STUCK_SCAN_AGE).exists():
         return 'deferred'
@@ -83,7 +83,7 @@ def check_one(row, *, resolver=None, tcp_probe=None, now=None):
             values.update(inactive_first_absent_at=None, inactive_last_absent_at=None,
                           inactive_absent_checks=0)
         selector.update(**values)
-        return 'error' if status == 'error' else 'deferred'
+        return 'error' if status == 'error' else HELD if status in PERMANENT + ('unobserved',) else 'deferred'
 
     prior_still_valid = bool(row.inactive_first_absent_at and row.last_seen <= row.inactive_first_absent_at)
     first = row.inactive_first_absent_at if prior_still_valid else now
