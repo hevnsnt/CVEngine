@@ -31,7 +31,7 @@ from django.db.models import Q
 from django.db.models.fields.json import KeyTransform
 from django.utils import timezone
 
-from cveFeed.closure import AUTOMATIC, CLOSED
+from cveFeed.closure import AUTOMATIC, CLOSED, prepend_note
 
 logger = logging.getLogger(__name__)
 
@@ -118,7 +118,7 @@ def seen_again(row):
     if engine_fixed(row) or (archive_closure.is_archive_closed(row) and not archive_closure.still_archived(  # or only because the host was archived
             row.target_domain.project_id if row.target_domain_id else None, row.subdomain.name if row.subdomain_id else '')):
         row.remediation_status, row.remediation_updated_at = 'open', timezone.now()
-        row.remediation_note = _note(f'{REOPENED_NOTE}\n{row.remediation_note}')
+        row.remediation_note = prepend_note(REOPENED_NOTE, row.remediation_note)  # a person's note below is never cut
         changed += ['remediation_status', 'remediation_updated_at', 'remediation_note']
     return changed
 
