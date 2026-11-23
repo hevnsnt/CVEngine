@@ -38,13 +38,12 @@ class Fixture(TestCase):
 		engine = EngineType.objects.create(engine_name='e', yaml_configuration='x', default_engine=True)
 		self.scan = ScanHistory.objects.create(domain=self.domain, scan_type=engine, scan_status=1, start_scan_date=timezone.now())
 		HostExclusion.objects.create(org=self.org, host='banned.eq.test')
-		# what an earlier streaming batch stored: a host with an address, a port nmap named (and one it left unnamed), and a twin row of one name
+		# what an earlier streaming batch stored: a host with an address, a port nmap named (and one it left unnamed), and a host the batch names again (a second row of one name in one scan is refused by the unique key since startScan 0031)
 		self.old = Subdomain.objects.create(name='old.eq.test', scan_history=self.scan, target_domain=self.domain, discovered_date=timezone.now())
 		ip = IpAddress.objects.create(address='198.51.100.9', org=self.org)
 		self.old.ip_addresses.add(ip)
 		ip.ports.add(Port.objects.create(number=22, service_name='ssh-custom', description='', source='nmap'))
 		ip.ports.add(Port.objects.create(number=443, service_name='', description='', source=''))
-		Subdomain.objects.create(name='twin.eq.test', scan_history=self.scan, target_domain=self.domain)
 		Subdomain.objects.create(name='twin.eq.test', scan_history=self.scan, target_domain=self.domain)
 		self.subscan = SubScan.objects.create(scan_history=self.scan, subdomain=self.old, start_scan_date=timezone.now(), status=1)
 		self.ctx = {'scan_history_id': self.scan.id, 'domain_id': self.domain.id, 'subscan_id': self.subscan.id}
