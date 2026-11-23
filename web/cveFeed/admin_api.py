@@ -540,9 +540,19 @@ TIMING_LIMITS = {'cve_sync_minutes': (5, 1440), 'hygiene_hour_utc': (0, 23), 'ct
                  'discovery_timeout_hours': (1, 48), 'nuclei_timeout_hours': (1, 24)}
 
 
+TIMING_SWITCHES = ('ct_fallback_source',)  # on or off: a lookup crt.sh cannot answer asks Cert Spotter (cveFeed.ctmonitor)
+
+
 def timings_get(request, actor):
     t = SystemTimings.current()
-    return {**{k: getattr(t, k) for k in TIMING_LIMITS}, 'limits': TIMING_LIMITS}
+    from cveFeed import ctmonitor
+    from cveFeed import ct_health
+    try:
+        ct_line = ct_health.summary()['line']  # how the watch is doing: two small reads of the daily rollup
+    except Exception:  # noqa: BLE001 - the timings page must open whatever the rollup says
+        ct_line = ''
+    return {**{k: getattr(t, k) for k in TIMING_LIMITS}, **{k: bool(getattr(t, k)) for k in TIMING_SWITCHES}, 'limits': TIMING_LIMITS,
+            'ct_fallback_forced_off': not ctmonitor.fallback_enabled() and bool(t.ct_fallback_source), 'ct_watch_status': ct_line}
 
 
 def apply_timings(t):
@@ -575,9 +585,14 @@ def timings_put(request, actor):
             if not low <= value <= high:
                 raise AdminError(400, f'{key} must be between {low} and {high}')
             setattr(t, key, value)
+    for key in TIMING_SWITCHES:
+        if key in data:
+            if not isinstance(data[key], bool):
+                raise AdminError(400, f'{key} must be true or false')
+            setattr(t, key, data[key])
     t.save()
     apply_timings(t)
-    audit(actor, 'timings.update', '', **{k: getattr(t, k) for k in TIMING_LIMITS})
+    audit(actor, 'timings.update', '', **{k: getattr(t, k) for k in (*TIMING_LIMITS, *TIMING_SWITCHES)})
     return timings_get(request, actor)
 
 

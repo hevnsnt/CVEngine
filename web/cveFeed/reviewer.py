@@ -872,7 +872,7 @@ def installed_templates_version():
 # Every code ops_checks can return, in the order it computes them. The snapshot sends it to the reviewer container, which builds the model's answer
 # format from it; tests/test_ai_prompts.py holds it equal to the codes written in ops_checks and to the container's fallback copy.
 OPS_CODES = ('sentinels_idle', 'workers_down', 'nuclei_templates', 'sentinel_errors', 'sentinel_waiting', 'sentinels_offline', 'scan_errors', 'system',
-             'generated_templates', 'ai_errors', 'memory', 'queue_starvation', 'sentinel_claims_refused', 'ai_budget', 'triage_backlog')
+             'generated_templates', 'ai_errors', 'memory', 'queue_starvation', 'sentinel_claims_refused', 'ai_budget', 'triage_backlog', 'ct_watch_stalled')
 
 
 def _check(code, state, title, detail, facts=None, actions=(), severity=None):
@@ -1207,6 +1207,16 @@ def ops_checks(now=None, templates_release=None, _out=None):
     problems = [str(p)[:300] for p in (status.get('problems') or [])][:20]
     checks.append(_check('system', 'problem' if problems else 'ok', 'cvENGINE reports problems' if problems else 'cvENGINE reports no problems',
                          '\n'.join(problems), {'problems': problems}))
+
+    # the certificate transparency watch: no source answered for hours while lookups were attempted. Nothing attempted (no target to watch,
+    # the sweep idle or scanning paused, a restart) is ok: there is nothing to judge
+    from cveFeed import ct_health
+    try:
+        ct = ct_health.stalled_check(now)
+        checks.append(_check('ct_watch_stalled', ct['state'], ct['title'], ct['detail'], ct['facts'], severity='warning'))
+    except Exception:  # noqa: BLE001 - a read problem is no verdict
+        logger.debug('ct watch check: could not read the lookup rollup', exc_info=True)
+        checks.append(_check('ct_watch_stalled', 'unknown', 'Certificate transparency watch not read', '', {}))
 
     # AI-written templates are validated by the system (cveFeed.templatevalidate), never by a person: only a real problem it cannot fix itself is reported
     from cveFeed import templatevalidate
