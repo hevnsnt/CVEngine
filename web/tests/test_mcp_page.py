@@ -60,6 +60,29 @@ class CallLogTests(TestCase):
 			error, _data = tool_call(self.key, 'list_projects')
 		self.assertFalse(error)
 
+	def test_a_call_the_statement_timeout_cut_off_is_recorded_as_a_timeout(self):
+		from unittest import mock
+		from django.db.utils import OperationalError
+		cut = OperationalError('canceling statement due to statement timeout')
+		cut.__cause__ = type('Canceled', (Exception,), {'pgcode': '57014'})()
+		with mock.patch('agentapi.mcp.call_tool', side_effect=cut):
+			error, message = tool_call(self.key, 'list_hosts', {'project': 'mcp-proj', 'q': 'x'})
+		self.assertTrue(error)
+		self.assertIn('narrow it', message)  # the caller's answer is unchanged
+		row = McpCall.objects.get()
+		self.assertEqual((row.tool, row.ok, row.project, row.token_name), ('list_hosts', False, 'mcp-proj', 'laptop-agent'))
+		self.assertTrue(row.error.startswith('timeout:'))
+		self.assertEqual(row.arguments, {'project': 'mcp-proj', 'q': 'x'})  # the same masked arguments as any call, never more
+
+	def test_a_call_that_crashed_is_recorded_as_an_internal_error(self):
+		from unittest import mock
+		from tests.test_agentapi import rpc
+		with mock.patch('agentapi.mcp.call_tool', side_effect=RuntimeError('a secret path /var/x')):
+			_status, data = rpc(self.key, 'tools/call', {'name': 'list_projects', 'arguments': {}})
+		self.assertEqual(data['error']['code'], -32603)  # the caller's answer is unchanged
+		row = McpCall.objects.get()
+		self.assertEqual((row.ok, row.error), (False, mcp_log.INTERNAL_ERROR))  # the exception's text stays in the server log
+
 	def test_people_see_their_own_calls_and_an_app_admin_sees_everyones(self):
 		McpCall.objects.create(user=self.alice, username='mcp-alice', tool='list_projects')
 		McpCall.objects.create(user=self.bob, username='mcp-bob', tool='get_cve')
@@ -106,6 +129,13 @@ class PageTests(TestCase):
 		self.assertIn('add_targets', html.split('id="history"')[1].split('</form>')[1])
 		self.assertNotIn('<code>list_projects</code>', html.split('id="history"')[1].split('</form>')[1])
 		self.assertIn('No call matches these filters', self.get(self.bob, '?writes=1'))
+
+	def test_the_history_filters_the_calls_that_timed_out(self):
+		McpCall.objects.create(user=self.alice, username='mcp-page-alice', token_name='laptop', tool='search_hosts', ok=False, error=mcp_log.TIMEOUT_ERROR)
+		table = self.get(self.alice, '?outcome=timeout').split('id="history"')[1].split('</form>')[1]
+		self.assertIn('search_hosts', table)
+		self.assertNotIn('add_targets', table)  # failed, but not a timeout
+		self.assertIn('<option value="timeout" selected>Timed out</option>', self.get(self.alice, '?outcome=timeout'))
 
 	def test_the_rail_has_an_mcp_entry_that_is_current_on_the_page(self):
 		html = self.get(self.alice)

@@ -51,6 +51,18 @@ class EntrypointTests(SimpleTestCase):
             if saved is not None:
                 os.environ['CLASSIC_CONCURRENCY'] = saved
 
+    def test_the_database_sizing_is_documented_with_its_restart(self):
+        root = SCRIPT.parent.parent
+        deploy = (root / 'docs' / 'DEPLOYMENT.md').read_text()
+        sizing = deploy.split('## Sizing the database', 1)[1].split('\n## ', 1)[0]
+        for needle in ('`POSTGRES_SHARED_BUFFERS` | `256MB` | `1GB`', '`POSTGRES_EFFECTIVE_CACHE_SIZE` | `768MB` | `4GB`', '`POSTGRES_WORK_MEM` | `4MB` | `16MB`',
+                       '`POSTGRES_MAINTENANCE_WORK_MEM` | `64MB` | `256MB`', '`DB_MEM_LIMIT`', '`4g`', 'per connection', '2 workers of 8 threads',
+                       'docker compose up -d db', 'CREATE EXTENSION IF NOT EXISTS pg_stat_statements'):
+            self.assertIn(needle, sizing)
+        config = (root / 'docs' / 'CONFIGURATION.md').read_text()
+        for name in ('POSTGRES_WORK_MEM', 'POSTGRES_SHARED_PRELOAD_LIBRARIES', 'DB_MEM_LIMIT', 'docker compose up -d db'):
+            self.assertIn(name, config)
+
     def test_postgres_allows_enough_connections_for_the_workers_and_updates_apply_it(self):
         root = SCRIPT.parent.parent
         for name in ('docker-compose.yml', 'docker-compose.dev.yml'):
@@ -58,8 +70,13 @@ class EntrypointTests(SimpleTestCase):
             self.assertIn('command: ["postgres", "-c", "max_connections=${POSTGRES_MAX_CONNECTIONS:-300}"', text, name)
             # the memory settings a 2 GB host needs (docs/DEPLOYMENT.md, Small hosts), each overridable from .env, with defaults that are safe from 1 GB up
             for setting in ('shared_buffers=${POSTGRES_SHARED_BUFFERS:-256MB}', 'effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-768MB}',
-                            'maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM:-64MB}', 'random_page_cost=${POSTGRES_RANDOM_PAGE_COST:-1.1}'):
+                            'maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM:-64MB}', 'random_page_cost=${POSTGRES_RANDOM_PAGE_COST:-1.1}',
+                            # PostgreSQL's own defaults, so an install that sets neither runs exactly as before
+                            'work_mem=${POSTGRES_WORK_MEM:-4MB}', 'shared_preload_libraries=${POSTGRES_SHARED_PRELOAD_LIBRARIES:-}'):
                 self.assertIn(setting, text, name)
+        # the shipped file sets no memory ceiling on db (an overlay's DB_MEM_LIMIT does): adding one would change every install on update
+        db = (root / 'docker-compose.yml').read_text().split('\n  db:\n', 1)[1].split('\n  redis:\n', 1)[0]
+        self.assertNotIn('mem_limit', db)
         # an existing install gets it on update: the db container is recreated when its definition changed, before the migration runs
         for name in ('update.sh', 'apply-update.sh', 'update-deploy.sh'):
             text = (root / 'scripts' / name).read_text()
