@@ -125,26 +125,47 @@ def reuse_findings(scan, project, targets):
     have = set(Vulnerability.objects.filter(scan_history=scan).values_list('name', 'http_url'))
     # every scan stores its own copy of a finding: only the newest copy of each (name, URL) is read, not all of the history
     source = Vulnerability.objects.filter(target_domain__project_id=project, subdomain__name__in=hosts) \
-        .exclude(scan_history=scan).select_related('subdomain').order_by('name', 'http_url', '-id').distinct('name', 'http_url')
+        .exclude(scan_history=scan).select_related('subdomain').order_by('name', 'http_url', '-id').distinct('name', 'http_url') \
+        .prefetch_related(*_COPIED_LINKS)  # the links of each chunk of 500 in one read per kind, not four reads per finding
     copied, copied_hosts = 0, set()
-    for vuln in source.iterator(chunk_size=500):
-        key = (vuln.name, vuln.http_url)
-        if key in have:
-            continue
-        have.add(key)
-        host = vuln.subdomain.name
-        tags, refs, cves, cwes = (list(m.all()) for m in (vuln.tags, vuln.references, vuln.cve_ids, vuln.cwe_ids))
-        vuln.pk = None
-        vuln.scan_history, vuln.target_domain, vuln.subdomain = scan, scan.domain, mine.get(host)
-        vuln.endpoint = None
-        vuln.save()
-        vuln.tags.set(tags)
-        vuln.references.set(refs)
-        vuln.cve_ids.set(cves)
-        vuln.cwe_ids.set(cwes)
-        copied += 1
-        copied_hosts.add(host)
+    links = {field: [] for field in _COPIED_LINKS}
+    try:
+        for vuln in source.iterator(chunk_size=500):
+            key = (vuln.name, vuln.http_url)
+            if key in have:
+                continue
+            have.add(key)
+            host = vuln.subdomain.name
+            linked = {field: [obj.pk for obj in getattr(vuln, field).all()] for field in _COPIED_LINKS}
+            vuln.pk = None
+            vuln.scan_history, vuln.target_domain, vuln.subdomain = scan, scan.domain, mine.get(host)
+            vuln.endpoint = None
+            vuln.save()
+            for field, ids in linked.items():
+                links[field].extend((vuln.pk, pk) for pk in ids)
+            copied += 1
+            copied_hosts.add(host)
+    finally:  # every copy that was saved gets its links, also when a later one fails
+        _link_copies(links)
     return copied, len(copied_hosts)
+
+
+# the many to many links a reused finding carries over to its copy
+_COPIED_LINKS = ('tags', 'references', 'cve_ids', 'cwe_ids')
+
+
+def _link_copies(links):
+    """Write the many to many rows of the copied findings: ``links`` is ``{field: [(copy id, linked id)]}``. A copy is a new row with no links of its
+    own, so this is what ``.set()`` per copy wrote, in one insert per kind (batches of 1000) instead of a read and an insert per copy and kind."""
+    from startScan.models import Vulnerability
+    for field, pairs in links.items():
+        if not pairs:
+            continue
+        m2m = Vulnerability._meta.get_field(field)
+        through = m2m.remote_field.through
+        own = through._meta.get_field(m2m.m2m_field_name()).attname
+        other = through._meta.get_field(m2m.m2m_reverse_field_name()).attname
+        through.objects.bulk_create([through(**{own: copy_id, other: linked_id}) for copy_id, linked_id in pairs], batch_size=1000)
 
 
 def _waiting_message(exc, left):
@@ -591,7 +612,7 @@ def run_light_nuclei(scan_id, stream, force=False):
     held = set() if force else backed_off(service, [t for t in targets if t not in covered], project)  # only partly checked within the day: asked again after it
     todo = [t for t in targets if t not in covered and t not in held]
     reused = reuse_technologies(scan, project, {t: host_of({'host': t}) for t in covered}) if covered else 0
-    by_name = {s.name: s for s in Subdomain.objects.filter(scan_history=scan)}
+    by_name = {s.name: s for s in Subdomain.objects.filter(scan_history=scan).prefetch_related('ip_addresses')}  # one read of the addresses, not one per host
     by_ip = {}
     for sub in by_name.values():
         for ip in sub.ip_addresses.all():

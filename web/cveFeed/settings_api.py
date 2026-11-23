@@ -85,10 +85,31 @@ def _text(data, key, current='', secret=False, max_len=500):
 
 # --- AI -----------------------------------------------------------------------
 
+GUIDANCE_PROGRESS_SECONDS = 30  # the AI tab's catalogue progress (five counts over the whole catalogue) is shared this long by every page load and save
+
+
 def _guidance_progress():
+    """``detection_author.progress()``, kept ``GUIDANCE_PROGRESS_SECONDS`` under a key of the daily budget (a save of it shows at once), the newest
+    CVE and the newest detection record (a new one shows at once). The catalogue belongs to no project, so every admin is given the same numbers."""
+    from django.core.cache import cache
+    from django.db.models import Max
+
     from cveFeed import detection_author
+    from cveFeed.models import CVEDetection, CVEEntry
     try:
-        return detection_author.progress()
+        key = (f"cve:guidance-progress:{detection_author.daily_limit()}:{CVEEntry.objects.aggregate(m=Max('id'))['m']}"
+               f":{CVEDetection.objects.aggregate(m=Max('id'))['m']}")
+        try:
+            got = cache.get(key)
+        except Exception:  # noqa: BLE001 - a cache outage counts directly
+            return detection_author.progress()
+        if got is None:
+            got = detection_author.progress()
+            try:
+                cache.set(key, got, GUIDANCE_PROGRESS_SECONDS)
+            except Exception:  # noqa: BLE001
+                pass
+        return got
     except Exception:  # noqa: BLE001 - a counting problem must not break the settings page
         return None
 
@@ -1172,7 +1193,7 @@ def reviewer_get(request):
            'template_validation_enabled': row.template_validation_enabled,
            'host_review_enabled': row.host_review_enabled, 'host_review_auto_close': row.host_review_auto_close, 'host_review_daily_max': row.host_review_daily_max,
            'host_review_auto_per_project_day': row.host_review_auto_per_project_day, 'host_reviews_today': host_review.reviews_today(),
-           'host_review_projects': [{'slug': p.slug, 'name': p.name, 'mode': host_review.mode_of(p)} for p in Project.objects.order_by('name')[:500]],
+           'host_review_projects': [{'slug': p.slug, 'name': p.name, 'mode': mode} for p, mode in host_review.modes_of(Project.objects.order_by('name')[:500])],
            'default_ops_hours': list(reviewer.DEFAULT_OPS_HOURS), 'default_models': reviewer.DEFAULT_MODELS,
            'reviews_today': reviewer.reviews_today(), 'last_ops_at': row.last_ops_at.isoformat() if row.last_ops_at else None,
            'container': builtin_reviewer.status(), 'working': reviewer.enabled(row, provider)}

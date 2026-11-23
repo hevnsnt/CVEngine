@@ -132,4 +132,4 @@ class DueHostIndexTests(TestCase):
             Subdomain.objects.create(target_domain=domain, name=f'h{i}.dh.example.test')
         with CaptureQueriesContext(connection) as q:
             _, due = coverage_topup.host_coverage_due(project, now, limit=10, need_count=False)
-        self.assertEqual((len(due), len(q)), (5, 1))
+        self.assertEqual((len(due), len(q)), (5, 2))  # one statement, after the small read of the current scan ids it filters by (cveFeed.current_scans)

@@ -1525,12 +1525,18 @@ def reconcile_invalid_correlations(limit=50):
             cursor.last_pk = 0
             batch = list(base[:batch_size])
         closed, by_reason = 0, {}
-        for match in batch:
-            reason = correlation.invalid_identity_reason(match)
-            if reason and correlation.close_invalid_correlation(match, reason):
-                closed += 1
-                kind = js_libraries.closure_kind(reason) or 'identity'
-                by_reason[kind] = by_reason.get(kind, 0) + 1
+        from cveFeed import match_policy
+        match_policy.prime_standing(batch)  # what invalid_identity_reason asks of each match, read for the batch at once
+        match_policy.prime_sightings(batch)
+        try:
+            for match in batch:
+                reason = correlation.invalid_identity_reason(match)
+                if reason and correlation.close_invalid_correlation(match, reason):
+                    closed += 1
+                    kind = js_libraries.closure_kind(reason) or 'identity'
+                    by_reason[kind] = by_reason.get(kind, 0) + 1
+        finally:
+            match_policy.forget_primed(batch)
         if batch:
             cursor.last_pk = batch[-1].pk
         cursor.save(update_fields=['last_pk', 'updated_at'])
@@ -2899,7 +2905,9 @@ def weekly_maintenance():
                           f'({", ".join(f"{k} {v:,}" for k, v in result["archived"].items() if v)}) into '
                           f'{os.path.basename(result["archive"])}' if archived else
                           'Weekly log maintenance: no log rows were past their retention')
-                 + (f'; {result["archives_removed"]} expired archive(s) deleted' if result['archives_removed'] else ''),
+                 + (f'; {result["archives_removed"]} expired archive(s) deleted' if result['archives_removed'] else '')
+                 + (f'; pruned {", ".join(f"{k} {v:,}" for k, v in result.get("pruned", {}).items() if v)}'
+                    if any(result.get('pruned', {}).values()) else ''),
                  archived=result['archived'], deleted=result['deleted'])
     return result
 
