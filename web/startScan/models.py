@@ -408,6 +408,9 @@ class CveId(models.Model):
 	id = models.AutoField(primary_key=True)
 	name = models.CharField(max_length=100)
 
+	class Meta:
+		constraints = [models.UniqueConstraint(fields=['name'], name='uniq_cveid_name')]  # migration 0034 merged the duplicates
+
 	def __str__(self):
 		return self.name
 
