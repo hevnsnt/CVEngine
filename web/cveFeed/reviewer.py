@@ -875,6 +875,19 @@ OPS_CODES = ('sentinels_idle', 'workers_down', 'nuclei_templates', 'sentinel_err
              'generated_templates', 'ai_errors', 'memory', 'queue_starvation', 'sentinel_claims_refused', 'ai_budget', 'triage_backlog')
 
 
+def _watchdog_restarts(now):
+    """What the watchdog's own events say it did to the workers in the 24 hours before ``now``: ``{'count', 'rules', 'last_at'}`` of the worker restarts the host
+    carried out for it (R1, a lane that stopped answering; R2, a lane that took no work). None when the events cannot be read: the memory check then says
+    nothing about the watchdog."""
+    try:
+        from cveFeed.models import WatchdogEvent
+        rows = list(WatchdogEvent.objects.filter(at__gte=now - timedelta(hours=24), level='action', action='restart-celery',
+                                                 result__startswith='The host carried it out').values_list('rule', 'at'))
+    except Exception:  # noqa: BLE001 - a reading for the text, never a reason to fail the checks
+        return None
+    return {'count': len(rows), 'rules': sorted({r for r, _ in rows}), 'last_at': max(at for _, at in rows).timestamp() if rows else None}
+
+
 def _check(code, state, title, detail, facts=None, actions=(), severity=None):
     """One check. ``state`` is ok, warning or problem, or ``unknown``: the numbers it needs could not be read, so there is no verdict."""
     return {'code': code, 'state': state, 'severity': severity or ('critical' if state == 'problem' else 'warning' if state == 'warning' else 'info'),
@@ -1139,7 +1152,7 @@ def ops_checks(now=None, templates_release=None, _out=None):
     # the maintainer's checks (cveFeed/maintainer_checks.py): what the signals say about memory, starved queues and refused claims. A part that could not be read is
     # no verdict ('unknown'): it neither raises an alert nor resolves one.
     work = _starvation_inputs(now, bool((system.get('work') or {}).get('paused')), fleet['live_sentinels'])
-    checks.append(_check('memory', **maintainer_checks.memory(signals)))
+    checks.append(_check('memory', **maintainer_checks.memory(signals, _watchdog_restarts(now))))
     checks.append(_check('queue_starvation', **maintainer_checks.queue_starvation(signals, work)))
     checks.append(_check('sentinel_claims_refused', **maintainer_checks.claim_refusals(signals)))
     checks.append(_check('ai_budget', **maintainer_checks.ai_budget(signals)))  # an AI cap used up stops that work silently otherwise
