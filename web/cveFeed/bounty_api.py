@@ -776,8 +776,9 @@ def stats(request, user):
     paid = list(reports.filter(bounty_amount__isnull=False).values("bounty_currency").annotate(total=Sum("bounty_amount"), n=Count("id")))
     now = timezone.now()
     stale = []
-    for r in reports.filter(status__in=BountyReport.OPEN_STATUSES, submitted_at__isnull=False).select_related("program")[:200]:
-        last = r.events.aggregate(m=Max("at"))["m"] or r.submitted_at
+    # the newest event of each report is read with the reports (one statement), not with one aggregate per report
+    for r in reports.filter(status__in=BountyReport.OPEN_STATUSES, submitted_at__isnull=False).annotate(last_event=Max("events__at")).select_related("program")[:200]:
+        last = r.last_event or r.submitted_at
         days = (now - last).days
         if r.status == "needs_info" and r.platform == "hackerone" and days >= 20:
             stale.append({"id": r.id, "title": r.title, "days": days, "why": "HackerOne closes a report left in Needs More Info for 30 days"})
@@ -800,17 +801,23 @@ def _empty_scope():
     return {"in_scope": 0, "out_of_scope": 0, "ambiguous": 0, "not_listed": 0}
 
 
+WORKBENCH_SECONDS = 8  # how long the inventory half of the workbench is shared by every viewer of the same projects (the page polls every 8 s)
+
+
 def workbench(request, user):
     """Current scans, potential findings and identified hosts for the targets the project's engagements imported, read with the same
     definitions as every other count (``cveFeed.counts``): what the dashboard, the Hosts page and the Findings page show for those
     targets is what is shown here. Hosts are checked against each program's own scope, because discovery finds hosts a program does
-    not allow testing, and the page should say so before anyone does."""
-    from cveFeed import bounty_scope, counts
-    from startScan.models import ScanHistory, Vulnerability
+    not allow testing, and the page should say so before anyone does.
+
+    The engagements, their targets and reports are read on every poll. What the inventory says about them (hosts, scans, findings, matches:
+    the host collapse is the dearest query there is) is a snapshot (``cveFeed.snapshot_cache``) kept ``WORKBENCH_SECONDS`` and shared by every
+    viewer whose projects are the same. Its key holds everything that half is computed from apart from the inventory itself (the engagements in
+    order, their programs' names and scope versions, the imported targets, the findings already reported), so an edit on this page shows at once."""
+    from cveFeed import snapshot_cache
 
     project = _project(request, {})
     engagements = list(BountyEngagement.objects.filter(project=project).exclude(status="done").select_related("program").order_by("-updated_at")[:100])
-    sev_name = services.SEVERITY_NAMES
     domain_of = {}  # engagement id -> [domain ids]
     for t in BountyEngagementTarget.objects.filter(engagement__in=engagements, domain__isnull=False).values("engagement_id", "domain_id"):
         domain_of.setdefault(t["engagement_id"], []).append(t["domain_id"])
@@ -823,7 +830,13 @@ def workbench(request, user):
         reports_by.setdefault(r["engagement_id"], {})[r["status"]] = r["n"]
     all_ids = sorted({d for ids in domain_of.values() for d in ids})
 
-    rows, scans, potential, matches_to_check, out_hosts = [], [], [], [], []
+    inputs = [project.id, [[e.id, e.program_id, e.program.name, e.program.content_hash, sorted(set(domain_of.get(e.id, [])))] for e in engagements],
+              sorted([pid, sorted(reported.get(pid, ()))] for pid in {e.program_id for e in engagements})]
+    scope = snapshot_cache.scope_hash("bounty-workbench", snapshot_cache.token_of(inputs))  # the caller's projects too: never another scope's numbers
+    inventory = snapshot_cache.snapshot("bounty-workbench", scope, lambda: _workbench_inventory(engagements, domain_of, reported, all_ids),
+                                        WORKBENCH_SECONDS, etag_of=lambda _payload: "")["payload"]
+
+    rows = []
     for e in engagements:
         ids = domain_of.get(e.id, [])
         row = {"id": e.id, "status": e.status, "program": {"id": e.program_id, "name": e.program.name, "platform": e.program.platform},
@@ -831,61 +844,97 @@ def workbench(request, user):
                "targets": target_count.get(e.id, 0), "imported": len(ids), "hosts": 0, "live": 0, "hosts_capped": False, "scope": _empty_scope(),
                "scans": {"running": 0, "queued": 0, "stalled": 0}, "findings": 0, "potential": 0, "matches": 0, "needs_validation": 0,
                "reports": reports_by.get(e.id, {})}
-        if ids:
-            reps = counts.host_reps(domain_ids=ids)
-            names = list(reps.order_by("name").values_list("name", flat=True)[:WORKBENCH_HOST_CAP + 1])
-            row["hosts"] = reps.count()
-            row["live"] = reps.filter(counts.LIVE_HOST_Q).distinct().count()
-            row["hosts_capped"] = len(names) > WORKBENCH_HOST_CAP
-            index = scope_index(e.program)
-            for name in names[:WORKBENCH_HOST_CAP]:
-                verdict = index.check(name)
-                row["scope"][verdict.state] += 1
-                if verdict.state == bounty_scope.OUT and len(out_hosts) < WORKBENCH_LIST:
-                    out_hosts.append({"host": name, "program": e.program.name, "engagement_id": e.id, "reason": verdict.reason})
-            qs = ScanHistory.objects.filter(domain_id__in=ids)
-            row["scans"] = {"running": counts.running_scans(qs).count(), "queued": counts.queued_scans(qs).count(), "stalled": counts.stalled_scans(qs).count()}
-            vulns = counts.actionable_findings(Vulnerability.objects.filter(target_domain_id__in=ids))
-            row["findings"] = vulns.count()
-            done = reported.get(e.program_id, set())
-            todo = vulns.exclude(pk__in=done).select_related("subdomain").order_by("-severity", "-id")
-            row["potential"] = todo.count()
-            for v in todo[:WORKBENCH_LIST]:
-                potential.append({"kind": "vuln", "id": v.id, "name": v.name, "severity": sev_name.get(v.severity, str(v.severity)), "rank": v.severity,
-                                  "host": v.subdomain.name if v.subdomain_id else None, "program": e.program.name, "engagement_id": e.id})
-            ms = counts.exposed_matches().filter(subdomain__target_domain_id__in=ids)
-            row["matches"] = ms.count()
-            need = ms.filter(triage__classification="needs_validation")
-            row["needs_validation"] = need.count()
-            for m in need.select_related("cve_entry", "subdomain").order_by("-id")[:WORKBENCH_LIST]:
-                matches_to_check.append({"kind": "match", "id": m.id, "cve": m.cve_entry.cve_id, "host": m.subdomain.name if m.subdomain_id else None,
-                                         "program": e.program.name})
+        row.update(inventory["rows"].get(e.id, {}))
         rows.append(row)
 
-    totals = {"engagements": len(rows), "targets": sum(r["targets"] for r in rows), "imported": len(all_ids), "hosts": 0, "live": 0,
-              "scope": _empty_scope(), "scans": {"running": 0, "queued": 0, "stalled": 0}, "findings": sum(r["findings"] for r in rows),
-              "potential": sum(r["potential"] for r in rows), "matches": sum(r["matches"] for r in rows),
+    totals = {"engagements": len(rows), "targets": sum(r["targets"] for r in rows), "imported": len(all_ids), "hosts": inventory["totals"]["hosts"],
+              "live": inventory["totals"]["live"], "scope": _empty_scope(), "scans": dict(inventory["totals"]["scans"]),
+              "findings": sum(r["findings"] for r in rows), "potential": sum(r["potential"] for r in rows), "matches": sum(r["matches"] for r in rows),
               "needs_validation": sum(r["needs_validation"] for r in rows)}
+    for r in rows:
+        for k in totals["scope"]:
+            totals["scope"][k] += r["scope"][k]
+    return {"project": project.slug, "updated": _iso(timezone.now()), "totals": totals, "engagements": rows, "scans": inventory["scans"],
+            "potential": inventory["potential"], "matches": inventory["matches"], "out_of_scope_hosts": inventory["out_of_scope_hosts"]}
+
+
+def _workbench_inventory(engagements, domain_of, reported, all_ids):
+    """The inventory half of ``workbench``: ``{'rows': {engagement id: its host, scope, scan, finding and match numbers}, 'totals': {'hosts', 'live',
+    'scans'}, 'scans', 'potential', 'matches', 'out_of_scope_hosts'}``. The hosts of each engagement are collapsed once (``counts.rep_ids``) and every
+    number over them is read from those ids; the scan counts of every target are one grouped read."""
+    from cveFeed import bounty_scope, counts
+    from startScan.models import ScanHistory, Vulnerability
+
+    sev_name = services.SEVERITY_NAMES
+    window = counts.running_window()  # a settings lookup: read once for every scan count and the stalled flag below
+    since = timezone.now() - window
+    per_domain = {}
+    if all_ids:  # running, queued and stalled as counts.running_scans / queued_scans / stalled_scans define them, for every target in one read
+        for r in (ScanHistory.objects.filter(domain_id__in=all_ids).order_by().values("domain_id")
+                  .annotate(running=Count("id", filter=Q(scan_status=1, start_scan_date__gte=since)), queued=Count("id", filter=Q(scan_status=-1)),
+                            stalled=Count("id", filter=Q(scan_status=1, start_scan_date__lt=since)))):
+            per_domain[r["domain_id"]] = r
+
+    def scan_counts(ids):
+        return {k: sum(per_domain.get(d, {}).get(k, 0) for d in set(ids)) for k in ("running", "queued", "stalled")}
+
+    def collapse(ids):
+        rep = counts.rep_ids(domain_ids=ids)  # the dearest query there is: once per set of targets, every number below comes from these ids
+        reps = counts.reps_of(rep)
+        return reps, len(rep), reps.filter(counts.LIVE_HOST_Q).distinct().count()
+
+    rows, scans, potential, matches_to_check, out_hosts, collapsed = {}, [], [], [], [], {}
+    for e in engagements:
+        ids = domain_of.get(e.id, [])
+        if not ids:
+            continue
+        key = frozenset(ids)
+        if key not in collapsed:
+            collapsed[key] = collapse(ids)
+        reps, hosts, live = collapsed[key]
+        names = list(reps.order_by("name").values_list("name", flat=True)[:WORKBENCH_HOST_CAP + 1])
+        row = {"hosts": hosts, "live": live, "hosts_capped": len(names) > WORKBENCH_HOST_CAP, "scope": _empty_scope()}
+        index = scope_index(e.program)
+        for name in names[:WORKBENCH_HOST_CAP]:
+            verdict = index.check(name)
+            row["scope"][verdict.state] += 1
+            if verdict.state == bounty_scope.OUT and len(out_hosts) < WORKBENCH_LIST:
+                out_hosts.append({"host": name, "program": e.program.name, "engagement_id": e.id, "reason": verdict.reason})
+        row["scans"] = scan_counts(ids)
+        vulns = counts.actionable_findings(Vulnerability.objects.filter(target_domain_id__in=ids))
+        row["findings"] = vulns.count()
+        done = reported.get(e.program_id, set())
+        todo = vulns.exclude(pk__in=done).select_related("subdomain").order_by("-severity", "-id")
+        row["potential"] = todo.count()
+        for v in todo[:WORKBENCH_LIST]:
+            potential.append({"kind": "vuln", "id": v.id, "name": v.name, "severity": sev_name.get(v.severity, str(v.severity)), "rank": v.severity,
+                              "host": v.subdomain.name if v.subdomain_id else None, "program": e.program.name, "engagement_id": e.id})
+        ms = counts.exposed_matches().filter(subdomain__target_domain_id__in=ids)
+        row["matches"] = ms.count()
+        need = ms.filter(triage__classification="needs_validation")
+        row["needs_validation"] = need.count()
+        for m in need.select_related("cve_entry", "subdomain").order_by("-id")[:WORKBENCH_LIST]:
+            matches_to_check.append({"kind": "match", "id": m.id, "cve": m.cve_entry.cve_id, "host": m.subdomain.name if m.subdomain_id else None,
+                                     "program": e.program.name})
+        rows[e.id] = row
+
+    totals = {"hosts": 0, "live": 0, "scans": {"running": 0, "queued": 0, "stalled": 0}}
     if all_ids:
-        reps = counts.host_reps(domain_ids=all_ids)  # one host once, however many programs list it
-        totals["hosts"], totals["live"] = reps.count(), reps.filter(counts.LIVE_HOST_Q).distinct().count()
-        qs = ScanHistory.objects.filter(domain_id__in=all_ids)
-        totals["scans"] = {"running": counts.running_scans(qs).count(), "queued": counts.queued_scans(qs).count(), "stalled": counts.stalled_scans(qs).count()}
-        recent = list(qs.select_related("domain").order_by("-id")[:40])
+        key = frozenset(all_ids)
+        _reps, totals["hosts"], totals["live"] = collapsed[key] if key in collapsed else collapse(all_ids)  # one host once, however many programs list it
+        totals["scans"] = scan_counts(all_ids)
+        recent = list(ScanHistory.objects.filter(domain_id__in=all_ids).select_related("domain").order_by("-id")[:40])
         active = [s for s in recent if s.scan_status in (-1, 1)]
         finished = [s for s in recent if s.scan_status not in (-1, 1)][:5]
         eng_of = {d: e for e in engagements for d in domain_of.get(e.id, [])}
         for s in active + finished:
             e = eng_of.get(s.domain_id)
             scans.append({"id": s.id, "target": s.domain.name, "status": s.scan_status, "started": _iso(s.start_scan_date),
-                          "stalled": s.scan_status == 1 and s.start_scan_date < timezone.now() - counts.RUNNING_WINDOW,
+                          "stalled": s.scan_status == 1 and s.start_scan_date < timezone.now() - window,
                           "program": e.program.name if e else None})
-    for r in rows:
-        for k in totals["scope"]:
-            totals["scope"][k] += r["scope"][k]
     potential.sort(key=lambda p: (-p["rank"], -p["id"]))
-    return {"project": project.slug, "updated": _iso(timezone.now()), "totals": totals, "engagements": rows, "scans": scans[:WORKBENCH_LIST],
-            "potential": potential[:WORKBENCH_LIST], "matches": matches_to_check[:WORKBENCH_LIST], "out_of_scope_hosts": out_hosts}
+    return {"rows": rows, "totals": totals, "scans": scans[:WORKBENCH_LIST], "potential": potential[:WORKBENCH_LIST],
+            "matches": matches_to_check[:WORKBENCH_LIST], "out_of_scope_hosts": out_hosts}
 
 
 # --- the user's own platform accounts -----------------------------------------------------------

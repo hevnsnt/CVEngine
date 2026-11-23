@@ -277,6 +277,40 @@ class RestoreReopensTests(Base):
         self.assertEqual(self.m_open.remediation_status, 'open')
 
 
+    def test_close_and_reopen_cycles_never_cut_a_person_s_note(self):
+        # each cycle used to add an engine line on top, and the note was cut from its end at 2000 characters: the person's note went first
+        note = ('Ticket OPS-12: waiting on the vendor patch. ' * 40).strip()
+        CVEMatch.objects.filter(pk=self.m_progress.pk).update(remediation_note=note)
+        for day in range(30):
+            when = timezone.now() + timedelta(days=day)
+            archive_closure.close_host(self.a1.pk, HOST, why=archive_closure.WHY_GONE, when=when)
+            self.m_progress.refresh_from_db()
+            self.assertEqual(self.m_progress.remediation_status, 'fixed')
+            self.assertTrue(self.m_progress.remediation_note.startswith(archive_closure.ARCHIVED))
+            self.assertTrue(self.m_progress.remediation_note.endswith('\n' + note), day)
+            self.assertLessEqual(len(self.m_progress.remediation_note), closure.NOTE_MAX)
+            archive_closure.reopen_host(self.a1.pk, HOST, when=when)
+            self.m_progress.refresh_from_db()
+            self.assertEqual(self.m_progress.remediation_status, 'in_progress')
+            self.assertTrue(self.m_progress.remediation_note.startswith(archive_closure.REOPENED))
+            self.assertTrue(self.m_progress.remediation_note.endswith('\n' + note), day)
+            self.assertLessEqual(len(self.m_progress.remediation_note), closure.NOTE_MAX)
+
+    def test_a_scan_reopen_never_cuts_a_person_s_note_either(self):
+        note = 'n' * (closure.NOTE_MAX - 20)
+        history = '\n'.join([finding_lifecycle.REOPENED_NOTE] * 5)
+        out = closure.prepend_note(finding_lifecycle.REOPENED_NOTE, f'{archive_closure.ARCHIVED} automatically on 2026-11-02 ({HOST}).\n{history}\n{note}')
+        self.assertEqual(out, f'{finding_lifecycle.REOPENED_NOTE}\n{note}')  # the engine's lines go, oldest first, the person's text stays whole
+        self.assertEqual(closure.prepend_note('Closed automatically: x.', 'short note'), 'Closed automatically: x.\nshort note')  # fits: as before
+        self.assertEqual(closure.prepend_note('Closed automatically: x.', ''), 'Closed automatically: x.')
+        long_ = 'p' * closure.NOTE_MAX  # a note longer than the room left keeps the person's text whole
+        self.assertEqual(closure.prepend_note('Closed automatically: x.', long_), 'Closed automatically: x.\n' + long_)
+        # a hygiene reopen appends its line at the end: that is the engine's too, and goes before the person's text
+        tail = 'Reopened: the check found this again after it was marked fixed.'
+        out = closure.prepend_note('Closed automatically: x.', f'{note}\n{tail}\n{tail}')
+        self.assertEqual(out, f'Closed automatically: x.\n{note}')
+
+
 class NextScanTests(Base):
     """The sticky-fixed rules keep a person's fixed status across scans; they keep an archive closure only while the host is archived."""
 

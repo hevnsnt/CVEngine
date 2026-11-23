@@ -1862,6 +1862,7 @@ def reap_expired(now=None):
     _ended_many(batch)
     _audit_sweep(ended)
     scrub_stale_values(now)
+    scrub_stale_images(now)
     return sum(len(v) for v in ended.values())
 
 
@@ -1905,6 +1906,40 @@ def scrub_stale_values(now=None):
     ids = list(SentinelTask._base_manager.filter(kind__in=('secrets_scan', 'route_probe'), status='done', finished_at__lt=now - STALE_VALUES_AFTER)
                .exclude(result__has_key='values_scrubbed').order_by('id').values_list('id', flat=True)[:STALE_VALUES_BATCH])
     return sum(1 for task_id in ids if scrub_values(task_id))
+
+
+STALE_IMAGES_AFTER = timedelta(minutes=10)  # a finished web_screenshot result keeps its pictures this long at most (the step that files them has long run)
+STALE_IMAGES_BATCH = 100
+
+
+def scrub_images(task_id):
+    """Drop the pictures from the stored result of a finished ``web_screenshot`` task. Each page of the result carries its PNG as base64 (up to about 6 MB a
+    task); ``cveFeed.web_shot`` writes the picture to the screenshot store and its row when the result arrives, and nothing reads the copy in the task again,
+    but it was kept for the 30 days a finished task is kept: 1.4 GB of a 3 GB database. The page's outcome, size and reasons stay; the result says so
+    (``images_scrubbed``). Returns whether a result was scrubbed."""
+    task = SentinelTask.objects.filter(pk=task_id).only('id', 'kind', 'result').first()
+    if task is None or task.kind != 'web_screenshot' or not isinstance(task.result, dict) or task.result.get('images_scrubbed'):
+        return False
+    result = dict(task.result)
+    result['pages'] = [{k: v for k, v in page.items() if k != 'image'} if isinstance(page, dict) else page for page in result.get('pages') or []]
+    result['images_scrubbed'] = True
+    SentinelTask.objects.filter(pk=task.pk, status='done').update(result=result)
+    return True
+
+
+def scrub_stale_images(now=None):
+    """``scrub_images`` for any finished ``web_screenshot`` result older than ``STALE_IMAGES_AFTER`` that still has its pictures, ``STALE_IMAGES_BATCH`` rows
+    at a time, at most once a minute (every broker entry point calls the reaper). Returns the number scrubbed."""
+    from django.core.cache import cache
+    now = now or timezone.now()
+    try:
+        if not cache.add('sentinel:scrub-stale-images', 1, 60):
+            return 0
+    except Exception:  # noqa: BLE001 - without the cache it runs every call, bounded by the batch
+        pass
+    ids = list(SentinelTask._base_manager.filter(kind='web_screenshot', status='done', finished_at__lt=now - STALE_IMAGES_AFTER)
+               .exclude(result__has_key='images_scrubbed').order_by('id').values_list('id', flat=True)[:STALE_IMAGES_BATCH])
+    return sum(1 for task_id in ids if scrub_images(task_id))
 
 
 SWEEP_SAMPLE = 20  # task ids named in a sweep's summary row: enough to find the tasks, never a row the size of the sweep

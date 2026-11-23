@@ -92,7 +92,7 @@ class CapTests(SimpleTestCase):
         self.assertLess(clock[0] - entry['computed_at'], 70)
 
     def test_each_snapshot_has_its_own_worst_case_staleness(self):
-        self.assertEqual(live_refresh.RENEWAL_SECONDS, {'stats': 60, 'discovery-counts': 300})  # the Sentinel state and the clock-derived numbers are in stats
+        self.assertEqual(live_refresh.RENEWAL_SECONDS, {'stats': 60, 'discovery-counts': 300, 'graph-version': 60})  # the Sentinel state and the clock-derived numbers are in stats
 
 
 class GuardTests(TestCase):
@@ -136,7 +136,7 @@ class GuardTests(TestCase):
 
     def test_every_table_a_snapshot_reads_is_in_its_fingerprint(self):
         from cveFeed import views
-        computes = {'stats': views.stats_payload, 'discovery-counts': views.discovery_counts}
+        computes = {'stats': views.stats_payload, 'discovery-counts': views.discovery_counts, 'graph-version': views.graph_version}
         for name, compute in computes.items():
             missing = self.tables_read(compute) - set(live_refresh.fingerprint_tables(name)) - live_refresh.NOT_AN_INPUT
             self.assertEqual(missing, set(), f'the {name} snapshot reads tables its fingerprint does not list')
@@ -166,5 +166,38 @@ class FingerprintTests(TestCase):
 
     def test_the_headline_snapshots_have_a_fingerprint_over_real_tables(self):
         prints = live_refresh.fingerprints()
-        self.assertEqual(set(prints), {'stats', 'discovery-counts'})
+        self.assertEqual(set(prints), {'stats', 'discovery-counts', 'graph-version'})
         self.assertIsNotNone(prints['stats'][0]())
+        self.assertIsNotNone(prints['graph-version'][0]())
+
+
+class GraphVersionRenewalTests(SimpleTestCase):
+    """The graph's version token (eight aggregates, every 5 s for every open graph) is renewed by the refresher while nothing it reads was written."""
+
+    def setUp(self):
+        cache.clear()
+        self.addCleanup(cache.clear)
+        self.calls = []
+        self.fp = ['a']
+
+    def compute(self):
+        self.calls.append(1)
+        return f'v{len(self.calls)}'
+
+    def refresh(self):
+        return snapshot_cache.refresh('graph-version', 'graph-renew-test', self.compute, 5, due_age=0, fingerprint=lambda: self.fp[0],
+                                      unchanged_keep=live_refresh.RENEWAL_SECONDS['graph-version'])
+
+    def test_an_unchanged_graph_is_renewed_and_a_write_recomputes_it(self):
+        self.assertEqual(self.refresh()[0], 'refreshed')
+        status, entry, _ = self.refresh()
+        self.assertEqual((status, entry['payload'], len(self.calls)), ('unchanged', 'v1', 1))
+        self.fp[0] = 'b'  # a host, finding, scan step, match or label was written
+        status, entry, _ = self.refresh()
+        self.assertEqual((status, entry['payload'], len(self.calls)), ('refreshed', 'v2', 2))
+
+    def test_the_tables_are_the_ones_graph_version_reads(self):
+        tables = live_refresh.fingerprint_tables('graph-version')
+        for table in ('startScan_subdomain', 'startScan_vulnerability', 'startScan_scanactivity', 'cveFeed_discoveryevent', 'cveFeed_cvematch',
+                      'cveFeed_hostprofile', 'targetApp_domain'):
+            self.assertIn(table, tables)
