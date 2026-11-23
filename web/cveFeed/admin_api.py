@@ -465,7 +465,14 @@ def org_excluded_addresses_remove(request, actor, org_id, entry_id):
     return {'removed': cidr}
 
 
-@transaction.atomic
+def _drain_project(project):
+    """Everything under ``project`` but its memberships, a bounded batch per transaction (``cveFeed.bounded_delete``): the project's own
+    delete, the cache bump and the audit row then commit together in one short transaction, and a delete that failed part way is finished by
+    deleting again."""
+    from cveFeed import bounded_delete
+    bounded_delete.drain_below(Project, [project.pk], keep=(ProjectMembership,))
+
+
 def orgs_delete(request, actor, org_id):
     if not actor.is_superuser:
         raise AdminError(403, 'only an App Admin can delete organizations')
@@ -479,10 +486,15 @@ def orgs_delete(request, actor, org_id):
     if projects and not data.get('delete_projects'):
         raise AdminError(409, f'it still has {len(projects)} project(s); delete them too to continue')
     name = org.name
+    from cveFeed import bounded_delete
     for project in projects:
-        project.delete()
-    org.delete()
-    audit(actor, 'org.delete', name, projects=len(projects))
+        _drain_project(project)
+    bounded_delete.drain_below(Org, [org.pk], keep=(OrgMembership,))
+    with transaction.atomic():
+        for project in projects:
+            project.delete()
+        org.delete()
+        audit(actor, 'org.delete', name, projects=len(projects))
     return {'deleted': True, 'projects_deleted': len(projects)}
 
 
@@ -506,7 +518,6 @@ def projects_create(request, actor):
     return {'id': project.id, 'name': project.name, 'slug': project.slug, 'org_id': org.id, 'org_name': org.name}, 201
 
 
-@transaction.atomic
 def projects_delete(request, actor, project_id):
     project = Project.objects.filter(pk=project_id).select_related('org').first() if str(project_id).isdigit() else None
     if not project or not project.org_id or not roles.can_manage_org(actor, project.org_id):
@@ -514,10 +525,12 @@ def projects_delete(request, actor, project_id):
     if _body(request).get('confirm') != project.name:
         raise AdminError(400, 'type the project name to confirm')
     name, org = project.name, project.org
-    project.delete()  # cascades to its targets, scans and findings
-    from cveFeed import snapshot_cache
-    snapshot_cache.bump_on_commit()  # an All projects view counted them
-    audit(actor, 'project.delete', name, org=org)
+    _drain_project(project)  # its targets, scans and findings, in bounded batches
+    with transaction.atomic():
+        project.delete()  # cascades to whatever the drain left (its memberships, rows written meanwhile)
+        from cveFeed import snapshot_cache
+        snapshot_cache.bump_on_commit()  # an All projects view counted them
+        audit(actor, 'project.delete', name, org=org)
     return {'deleted': True}
 
 

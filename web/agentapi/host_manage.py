@@ -1,6 +1,7 @@
 """Host management: editable asset information, "Delete host data" (one project) and "Remove & exclude" (the whole organization).
 
-Both removals are destructive, so each runs in one transaction, needs write access (get_project(..., write=True): an audit
+Both removals are destructive, so each runs in one transaction (after its heavy part, a host's copies in every scan, was removed in bounded
+batches, ``_drain_host``), needs write access (get_project(..., write=True): an audit
 role or a read-only token gets 403) and only ever touches projects the caller may write to. A host is matched by its WHOLE name,
 case-insensitively: never a suffix or a substring, so ``provider.example`` leaves ``notprovider.example`` and
 ``www.provider.example`` alone.
@@ -230,9 +231,55 @@ def host_group_names(project, name):
     return sorted(names)
 
 
-def _purge(project, name, subtree=False):
+DRAIN_BATCH = 500  # host copies per transaction in _drain_host (each takes its findings, matches and endpoints with it)
+
+
+def _drain_host(project, name, subtree=False):
+    """The heavy part of ``_purge`` first, in bounded steps: the host's copies in every scan (``name``, any case; with ``subtree`` every
+    name under it too), ``DRAIN_BATCH`` at a time, each batch in its own transaction with the notes and audit trail of the findings and
+    matches it takes, exactly as ``_purge`` removes them; with ``subtree`` then the scan activity, tasks and runs of the targets it will
+    delete. A failure part way keeps what was done, and the same removal run again finishes it. Returns the counts ``_purge`` reports
+    for what it removed (hosts, findings, CVE matches, endpoints), so the caller's totals do not change."""
+    from cveFeed import bounded_delete
+    from cveFeed.models import CVEMatch, FindingAuditEvent, FindingComment
+    from startScan.models import EndPoint, ScanActivity, SubScan, Subdomain, Vulnerability
+    from agentapi.models import SentinelTask, StageRun
+    from targetApp.models import Domain
+    subs = Subdomain.objects.filter(target_domain__project=project).filter(_host_q('name', name, subtree))
+
+    def notes_first(ids):
+        # the findings _purge counts and clears the notes of: on these copies, plus the ones this batch takes through an endpoint (on
+        # a later batch's copy, or a bare-host finding _purge would find by its URL), which a later step would no longer see
+        vuln_ids = list(Vulnerability.objects.filter(
+            Q(subdomain_id__in=ids) | Q(endpoint__subdomain_id__in=ids, subdomain__in=subs)
+            | Q(endpoint__subdomain_id__in=ids, subdomain__isnull=True, target_domain__project=project,
+                http_url__iregex=_url_host_pattern(name, subtree))).values_list('id', flat=True))
+        match_ids = list(CVEMatch.objects.filter(subdomain_id__in=ids).values_list('id', flat=True))
+        endpoints = EndPoint.objects.filter(subdomain_id__in=ids).count()
+        for kind, finding_ids in (('vulnerability', vuln_ids), ('match', match_ids)):
+            for model in (FindingComment, FindingAuditEvent):
+                model.objects.filter(project=project, finding_kind=kind, finding_id__in=finding_ids).delete()
+        return {'hosts': len(ids), 'findings': len(vuln_ids), 'cve_matches': len(match_ids), 'endpoints': endpoints}
+    done = bounded_delete.drain(subs, DRAIN_BATCH, before=notes_first, attempts=PURGE_ATTEMPTS, pause=PURGE_RETRY_SECONDS)
+    if subtree:  # rows nothing counts, under the scans of the targets _purge deletes whole; the counted rows stay for _purge
+        domain_ids = list(Domain.objects.filter(project=project).filter(_host_q('name', name, True)).values_list('id', flat=True))
+        bounded_delete.drain_below(Domain, domain_ids, only=(ScanActivity, SubScan, StageRun, SentinelTask),
+                                   attempts=PURGE_ATTEMPTS, pause=PURGE_RETRY_SECONDS)
+    return {key: done.get(key, 0) for key in ('hosts', 'findings', 'cve_matches', 'endpoints')}
+
+
+def _drain_settled(drain):
+    """``drain()``, with the same answer as ``_purge_settled`` when scans kept writing through every retry of a batch."""
+    from django.db import IntegrityError
+    try:
+        return drain()
+    except IntegrityError:
+        raise ApiError(409, 'scans of this host kept writing results while it was being removed; try again in a minute') from None
+
+
+def _purge(project, name, subtree=False, drained=None):
     """Remove everything recorded for the host ``name`` in ``project`` (exact name, any case; with ``subtree`` also every name under
-    it). Returns the counts."""
+    it). Returns the counts, plus ``drained`` (what ``_drain_host`` already removed for it)."""
     from cveFeed.models import (AssetChange, CVEMatch, DiscoveryEvent, FindingAuditEvent, FindingComment, HostArchive, HostAssessment,
                                 HostInventory, HostLabel, HostProfile, HostScreenshot, HostState, HygieneFinding, JavaRuntime, ProbeObservation, RdpScreenshot,
                                 RouteAuth, ServiceFeature, TlsCertificate, Triage)
@@ -284,6 +331,8 @@ def _purge(project, name, subtree=False):
         host_q = _hygiene_host_q(name, subtree) if model is HygieneFinding else _host_q('host', name, subtree)  # a certificate finding names name:443
         counts[label] = model.objects.filter(host_q, **flt).delete()[0]
     scan_dirs = list(shot_files)  # relative to the results root, like the scan directories
+    for key, value in (drained or {}).items():
+        counts[key] += value
     counts['target_deleted'], counts['target_kept'] = False, False
     if subtree:  # a whole domain: the targets named like it or under it go with their scans, whatever else they held
         domains = list(Domain.objects.filter(project=project).filter(_host_q('name', name, True)))
@@ -332,7 +381,8 @@ def delete_host(ctx, slug, host, with_aliases=False):
     project, _ = get_project(ctx, slug, write=True)
     name = clean_host(host)
     names = host_group_names(project, name) if with_aliases else [name]
-    done = _purge_settled(lambda: [_purge(project, n) for n in names])
+    drained = _drain_settled(lambda: [_drain_host(project, n) for n in names])
+    done = _purge_settled(lambda: [_purge(project, n, drained=d) for n, d in zip(names, drained)])
     counts = _sum_counts(c for c, _ in done)
     _remove_result_dirs([d for _, dirs in done for d in dirs])
     from cveFeed.admin_api import audit
@@ -513,11 +563,13 @@ def exclude_host(ctx, slug, host, reason='', include_subdomains=False, with_alia
             if n == name:
                 reason_kept = exclusion.reason
 
+    drained = _drain_settled(lambda: {(n, p.pk): _drain_host(p, n, subtree) for n in names for p in projects})
+
     def purge():
         per_project, scan_dirs = {}, []
         for n in names:
             for p in projects:
-                counts, dirs = _purge(p, n, subtree)
+                counts, dirs = _purge(p, n, subtree, drained=drained[(n, p.pk)])
                 scan_dirs += dirs
                 if any(v for v in counts.values()):
                     per_project.setdefault(p.slug, []).append(counts)
