@@ -335,6 +335,16 @@ class StageTests(RouteFixture, TestCase):
             out = self.stage()
         self.assertEqual(out['hosts'], 1)
 
+    def test_the_hosts_and_their_prefetches_are_read_once(self):
+        """The feature lookup takes the scan's names from a names only read: the host rows and their technology, address and WAF prefetches are read
+        once, by the loop, not a second time to collect the names."""
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+        with mock.patch('cveFeed.probes.features_needed', wraps=probes.features_needed) as needed, CaptureQueriesContext(connection) as seen:
+            self.stage()
+        self.assertEqual(needed.call_args.args[1], {'www.rt.test', 'plain.rt.test'})
+        self.assertEqual(len([q for q in seen if 'startScan_subdomain_waf' in q['sql']]), 1)
+
 
 # The shape of the port in #408: a DNS server on a non-standard port that nmap only soft-matched, stored with the port table's name
 BIND_XML = """<?xml version="1.0"?><nmaprun><scaninfo protocol="tcp" services="5353"/><host><address addr="192.0.2.53" addrtype="ipv4"/><ports>

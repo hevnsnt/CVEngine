@@ -173,7 +173,7 @@ def draft_projects(text):
     if not cves:
         return []
     return sorted(set(CVEMatch.objects.filter(cve_entry_id__in=cves, subdomain__target_domain__project__isnull=False)
-                      .values_list('subdomain__target_domain__project_id', flat=True)))
+                      .values_list('subdomain__target_domain__project_id', flat=True).order_by().distinct()))  # one row per project, not per match
 
 
 def hosts_problem(project, targets):

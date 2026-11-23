@@ -722,3 +722,17 @@ class RetestTests(UdpBase):
 		with mock.patch('cveFeed.tasks.retest_hosts.delay') as delay:
 			udp_scan.queue_retests(ip, [123], self.project.id)
 		delay.assert_called_once_with(self.domain.id, ['edge.udp.test'])
+
+	def test_the_ledger_is_read_once_per_target_not_once_per_name(self):
+		"""Hosts sharing the address are judged against one read of the retest ledger; a host re-tested today is still left out."""
+		from cveFeed import retest
+		ip = self.ip('192.0.2.10', name='a.udp.test')
+		for name in ('b.udp.test', 'c.udp.test', 'd.udp.test'):
+			Subdomain.objects.create(scan_history=self.scan, target_domain=self.domain, name=name).ip_addresses.add(ip)
+		ledger.record(retest.RETEST_SERVICE, ['c.udp.test'], self.project.id)
+		seen = []
+		with mock.patch.object(ledger, 'fresh', wraps=ledger.fresh) as fresh:
+			queued = udp_scan.queue_retests(ip, [123], self.project.id, pipeline=lambda d, n: seen.append((d, n)))
+		self.assertEqual(fresh.call_count, 1)
+		self.assertEqual(queued, ['a.udp.test', 'b.udp.test', 'd.udp.test'])
+		self.assertEqual(seen, [(self.domain.id, ['a.udp.test', 'b.udp.test', 'd.udp.test'])])
