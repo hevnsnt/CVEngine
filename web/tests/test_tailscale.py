@@ -1645,7 +1645,7 @@ class ComposeProfileTests(SimpleTestCase):
         for name in ('celery', 'web'):
             self.assertNotIn('cap_add', services[name])
             self.assertNotIn('network_mode', services[name])
-        self.assertEqual(services['celery']['networks'], ['rengine_network'])
+        self.assertEqual(services['celery']['networks'], ['rengine_network', 'data_network'])  # data_network: the database and Redis
 
     def test_env_example_documents_the_profile_without_a_secret(self):
         text = (ROOT / '.env.example').read_text()

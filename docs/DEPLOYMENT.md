@@ -326,6 +326,10 @@ To keep it across reboots, copy the file to `/etc/apparmor.d/cvengine-scanner` a
 
 The fallback is `apparmor=unconfined` in place of `apparmor=cvengine-scanner` in the overlay. It works, and the trade-off is real: the scanner container, which runs scan tools against the internet, then has no AppArmor confinement at all (its capabilities, user and seccomp limits still apply). Use it only to prove the diagnosis, and move to the profile.
 
+## Database roles, networks and logs
+
+The server runs as the least privilege database role `cvengine_app`, not as `POSTGRES_USER` (the owner, used for migrations and backups only); every update and `make up` set it up by themselves, and nothing has to be done by hand ([CONFIGURATION.md](CONFIGURATION.md#database-roles-and-logs), [UPGRADE.md](UPGRADE.md#database-roles-the-server-no-longer-runs-as-the-database-owner)). `docker compose exec web python3 manage.py db_app_role status` says which role a container runs as. The database and Redis sit on `data_network` with `web`, `celery` and `celery-beat` only. PostgreSQL logs every connection and disconnection (`log_connections`, `log_disconnections`), and every container's Docker log rotates at 5 files of 50 MB (`CVENGINE_LOG_MAX_FILE`, `CVENGINE_LOG_MAX_SIZE`).
+
 ## Backups
 
 Back up the database, `.env` and the secret file, but keep the keys apart from the dump. The dump holds the database only: scan result files (screenshots and raw output) live in the `scan_results` Docker volume, and the optional add-ons keep their state in volumes of their own (`tailscale_state` and the `openvas_*` volumes), so none of those are in it. `web/secret` also keys the hashes of the session table and the recovery codes, so a restore without it signs everyone out and breaks new recovery codes. Stored secrets are encrypted with `CVENGINE_FIELD_KEY` from `.env` (older values with a key derived from `web/secret`), so a restored database needs the same keys. A dump stored in the same archive, bucket or folder as those keys gives away every stored API key, webhook URL and two-step seed to anyone who can read that place, which is exactly what the encryption is there to prevent: put `.env` and `web/secret` in a password manager or another store with different access, and the database dumps wherever backups normally go. Keep every copy private (mode 0600).
@@ -340,6 +344,8 @@ To restore, put the original `.env` (with `CVENGINE_FIELD_KEY`) and `web/secret`
 ```bash
 gunzip -c cvengine-2026-01-01.sql.gz | docker compose exec -T db sh -c 'psql -U "$POSTGRES_USER" "$POSTGRES_DB"'
 ```
+
+Load it as the owner (`POSTGRES_USER`), as above. Into a brand new database the dump's grants to `cvengine_app` fail with "role does not exist" (everything else loads); `make up` then migrates, which creates the role and grants it again.
 
 Every updater takes a database dump just before it migrates (`scripts/update.sh` and the in-app updater keep the last 3 in `.git/cvengine-update/backups`, mode 0700, and stop the update when a dump fails; `CVENGINE_UPDATE_BACKUPS=0` in `.env` turns that off; automatic deployment makes its own in `.git/cvengine-auto-deploy/backups`, [UPDATES.md](UPDATES.md#automatic-deployment)). These dumps stay on the same disk as the database: copy them elsewhere if the disk is what you are protecting against.
 

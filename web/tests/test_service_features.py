@@ -1,9 +1,12 @@
 """Service features (cveFeed.service_features): the HTTP/2 reading a Sentinel takes in the hygiene check's handshake (ALPN), the CVEs whose
 advisory needs HTTP/2, and what the reading does to their matches: rule out, raise within the ceiling, or nothing when it is unknown."""
 import datetime
+from unittest import mock
 
 from django.contrib.auth.models import User
+from django.db import connection
 from django.test import SimpleTestCase, TestCase
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
 from agentapi import sentinel_broker
@@ -209,6 +212,93 @@ class AssessTests(FeatureCase):
         CVEDetection.objects.create(cve_entry=self.other, source='ai', strategy={'summary': 's', 'requires_features': {'http2': True}})
         self.reading(443, 'no', 'ALPN http/1.1')
         self.assertIsNone(self.state(self.other))
+
+
+class SharedIndexTests(FeatureCase):
+    """``service_features.index()`` is shared between processes and refreshed by reading only the CVEs that changed: the same answer as a
+    full build, without the prefilter over the whole table (about 30 s on the live install) in every new worker and after every feed sync."""
+
+    def setUp(self):
+        from django.core.cache.backends.locmem import LocMemCache
+        patcher = mock.patch('django.core.cache.cache', LocMemCache('sf-index-test', {}))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        super().setUp()
+
+    def new_process(self):
+        from django.core.cache import cache
+        cache.delete(service_features.STAMP_KEY)  # the table stamp is shared for STAMP_SECONDS: a changed table is looked at again
+        service_features._INDEX.update(checked=0.0, stamp=None, value={}, seen=None, stated=None)
+
+    def index(self):
+        with CaptureQueriesContext(connection) as queries:
+            got = service_features.index()
+        return got, [q['sql'] for q in queries.captured_queries if '~*' in q['sql']]
+
+    def full(self):
+        service_features.reset_index()
+        return service_features.index()
+
+    def test_a_new_process_takes_the_shared_index_without_reading_the_words(self):
+        built = service_features.index()
+        self.assertIn(self.cve.pk, built)
+        self.new_process()
+        got, prefilter = self.index()
+        self.assertEqual(got, built)
+        self.assertEqual(prefilter, [])
+
+    def test_a_changed_cve_is_read_again_alone_in_a_new_process_and_in_the_same_one(self):
+        service_features.index()
+        self.other.title, self.other.original_description = NGINX_123633
+        self.other.save()
+        self.new_process()
+        got, prefilter = self.index()
+        self.assertIn(self.other.pk, got)
+        self.assertEqual(len(prefilter), 1)
+        self.assertIn(' IN (', prefilter[0])  # by id, not over the whole table
+        self.assertEqual(got, self.full())
+        self.cve.title, self.cve.original_description = 'nginx resolver flaw', 'A crafted DNS response can crash the worker.'
+        self.cve.save()
+        service_features._INDEX['checked'] = 0.0  # the next look at the table is due
+        mock_cache = __import__('django.core.cache', fromlist=['cache']).cache
+        mock_cache.delete(service_features.STAMP_KEY)
+        got, prefilter = self.index()
+        self.assertNotIn(self.cve.pk, got)
+        self.assertIn(self.other.pk, got)
+        self.assertEqual(len(prefilter), 1)
+        self.assertEqual(got, self.full())
+
+    def test_a_deleted_cve_leaves_the_index(self):
+        self.assertIn(self.cve.pk, service_features.index())
+        gone = self.cve.pk
+        self.cve.delete()
+        self.new_process()
+        got, prefilter = self.index()
+        self.assertNotIn(gone, got)
+        self.assertEqual(prefilter, [])
+        self.assertEqual(got, self.full())
+
+    def test_a_persons_record_reaches_the_shared_index(self):
+        self.assertNotIn(self.other.pk, service_features.index())
+        record = CVEDetection.objects.create(cve_entry=self.other, source='manual', strategy={'summary': 's', 'requires_features': {'http2': True}})
+        self.new_process()
+        got, _ = self.index()
+        self.assertIn(self.other.pk, got)
+        record.delete()
+        __import__('django.core.cache', fromlist=['cache']).cache.delete(service_features.STAMP_KEY)
+        service_features._INDEX['checked'] = 0.0
+        got, _ = self.index()
+        self.assertNotIn(self.other.pk, got)
+        self.assertEqual(got, self.full())
+
+    def test_reset_clears_the_shared_copy(self):
+        from django.core.cache import cache
+        service_features.index()
+        self.assertIsNotNone(cache.get(service_features.INDEX_CACHE_KEY))
+        service_features.reset_index()
+        self.assertIsNone(cache.get(service_features.INDEX_CACHE_KEY))
+        _, prefilter = self.index()
+        self.assertEqual(prefilter, [])  # a full build walks the whole table in Python: no database regex runs
 
 
 class MatchTests(FeatureCase):

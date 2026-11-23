@@ -9,9 +9,15 @@ Now the lookup ``__in_current_scans`` reads the sets when its statement is compi
 startScan 0029, about 35 buffers) and writes them into the statement as array literals, so the planner reaches the current rows by the scan index
 (about 4,000 buffers). The sets are read again for every statement, so a queryset evaluated later (a page of a long walk) sees the scans as they are
 then, exactly as the subqueries did; every lookup of one statement (its subqueries too) shares one read.
+
+A computation that is itself a snapshot of a moment (``snapshot_cache``: the Overview, the headline counts, the situations ranking) runs inside
+``shared_sets``: there every statement shares one read per connection and scope, for the length of the block. The Overview's summary read the sets
+fourteen times (about 5 ms each) to answer one poll, and a scan that finishes while it is being worked out changes nothing it says.
 """
+import contextvars
 import sys
 from collections import namedtuple
+from contextlib import contextmanager
 
 from django.core.exceptions import EmptyResultSet
 from django.db.models import ForeignKey, Lookup
@@ -23,6 +29,21 @@ successful full scan. ``unfull_domains``: every other domain. Frozensets of ids.
 
 _MEMO = '_cvengine_current_scan_sets'
 _COMPILER_CODES = None
+_SHARED = contextvars.ContextVar('cvengine_shared_scan_sets', default=None)
+
+
+@contextmanager
+def shared_sets():
+    """Within this block the sets are read once per connection and scope (``tenancy.scope``) and reused by every statement, instead of once per
+    statement. For a read-only computation of one moment (a snapshot); nested blocks share the outer one."""
+    if _SHARED.get() is not None:
+        yield
+        return
+    token = _SHARED.set({})
+    try:
+        yield
+    finally:
+        _SHARED.reset(token)
 
 
 def current_scan_sets(connection):
@@ -90,6 +111,12 @@ def sets_for_statement(connection):
     from tenancy import scope
 
     allowed = scope.current_allowed()
+    shared = _SHARED.get()
+    if shared is not None:  # inside ``shared_sets``: one read for the block
+        block_key = (connection.alias, None if allowed is None else frozenset(allowed))
+        if block_key not in shared:
+            shared[block_key] = current_scan_sets(connection)
+        return shared[block_key]
     key = (_outermost_compile(), None if allowed is None else frozenset(allowed))
     memo = getattr(connection, _MEMO, None)
     if key[0] is not None and memo is not None and memo[0][0] is key[0] and memo[0][1] == key[1]:

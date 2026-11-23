@@ -6,8 +6,13 @@
 // list is drawn: every host keeps its own finding, status and audit, so an action on a group is the same action on each member, sent through
 // the ordinary per-finding route (POST findings/status), and its result is read back per member.
 
-export const GROUPED = "cve"; // the server's group mode the page asks for by default
+export const GROUPED = "cve"; // the same library file on sibling hosts of one site is one row
+export const BY_PRODUCT = "product"; // the page's default: the CVE matches of one product version on one host are one row (cveFeed/version_groups.py)
 export const EVERY_HOST = "none"; // "Show every host": one row per host, as before
+export const MODES = [BY_PRODUCT, GROUPED, EVERY_HOST];
+// A group by product (`group.by` "product") stands for findings (several CVEs on the names of one host); a group of the same file for hosts.
+const unit = (group) => (group && group.by === BY_PRODUCT ? ["finding", "findings"] : ["host", "hosts"]);
+const joinNames = (names) => (names.length < 2 ? names[0] || "" : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`);
 export const STATUS_VALUES = ["open", "in_progress", "fixed", "accepted_risk", "false_positive"]; // closure-logic.js STATUS_VALUES
 const HEAT_ORDER = { fire: 3, smoke: 2, ice: 1 };
 const STATUS_WORD = { open: "open", in_progress: "in progress", fixed: "fixed", accepted_risk: "accepted risk", false_positive: "false positive", "ruled out": "ruled out" };
@@ -15,7 +20,7 @@ const STATUS_WORD = { open: "open", in_progress: "in progress", fixed: "fixed", 
 export const isGroup = (item) => Boolean(item && item.group && Array.isArray(item.group.member_ids) && item.group.member_ids.length > 1);
 
 // The list request's parameters: the page's filters plus the group mode (left out when showing every host, the server's default).
-export const listParams = (filters, mode) => (mode === EVERY_HOST ? { ...filters } : { ...filters, group: GROUPED });
+export const listParams = (filters, mode) => (mode === EVERY_HOST ? { ...filters } : { ...filters, group: MODES.includes(mode) ? mode : BY_PRODUCT });
 
 // The chips' numbers: rows when grouped (what the list shows), findings otherwise.
 export const chipCounts = (r) => ({ all: r.total || 0, ...((r && (r.row_counts || r.counts)) || {}) });
@@ -27,7 +32,10 @@ export function statusSplit(group) {
   const keys = Object.keys(counts).sort((a, b) => (order.indexOf(a) + 1 || 99) - (order.indexOf(b) + 1 || 99));
   return keys.map((k) => `${counts[k]} ${STATUS_WORD[k] || String(k).replace(/_/g, " ")}`).join(" · ");
 }
-export const hostsText = (group) => `on ${group.hosts} host${group.hosts === 1 ? "" : "s"}`;
+export const hostsText = (group) =>
+  group.by === BY_PRODUCT
+    ? `${group.cves} CVE${group.cves === 1 ? "" : "s"} in ${group.findings} findings on ${joinNames(group.host_names || [])}`
+    : `on ${group.hosts} host${group.hosts === 1 ? "" : "s"}`;
 
 // The split of heat across members when they differ ("2 fire · 4 ice"); empty when every member is as hot as the row.
 export function heatSplit(group) {
@@ -37,9 +45,11 @@ export function heatSplit(group) {
   return keys.sort((a, b) => (HEAT_ORDER[b] || 0) - (HEAT_ORDER[a] || 0)).map((k) => `${counts[k]} ${k || "no heat"}`).join(" · ");
 }
 
-// The members for the expanded row, hottest first, then by host name.
+// The members for the expanded row, hottest first, then by CVE (a group by product) and host name.
 export const sortedMembers = (group) =>
-  [...((group && group.members) || [])].sort((a, b) => (HEAT_ORDER[b.heat] || 0) - (HEAT_ORDER[a.heat] || 0) || String(a.host).localeCompare(String(b.host)));
+  [...((group && group.members) || [])].sort(
+    (a, b) => (HEAT_ORDER[b.heat] || 0) - (HEAT_ORDER[a.heat] || 0) || String(a.cve || "").localeCompare(String(b.cve || "")) || String(a.host).localeCompare(String(b.host)),
+  );
 
 // The hash that opens one member on the Findings page (#match-12, or #project:match-12 in the all-projects view).
 export const memberHash = (member, project, all) => `${all ? `${project}:` : ""}match-${member.id}`;
@@ -126,7 +136,7 @@ export function foldResults(items, result, keyOf) {
         ? { ...bad[0].item }
         : { ...item, group: { ...item.group, member_ids: badIds, members: (item.group.members || []).filter((m) => badIds.includes(m.id)) } };
     if (item.__bulkKey !== undefined) narrowed.__bulkKey = item.__bulkKey;
-    failed.push({ item: narrowed, error: `${bad.length} of ${bad.length + changed.length} hosts not updated: ${bad[0].error}` });
+    failed.push({ item: narrowed, error: `${bad.length} of ${bad.length + changed.length} ${unit(item.group)[1]} not updated: ${bad[0].error}` });
   });
   return { ok, failed };
 }
@@ -176,6 +186,7 @@ export function confirmText(items, value, opts = {}) {
   let ids = 0;
   let closed = 0;
   let same = 0;
+  const [one, many] = groups.every((item) => item.group.by === BY_PRODUCT) ? unit({ by: BY_PRODUCT }) : unit(null);
   groups.forEach((item) => {
     const t = targetsOf(item.group, value, opts);
     ids += t.ids.length;
@@ -186,7 +197,8 @@ export function confirmText(items, value, opts = {}) {
   const notes = [];
   if (closed) notes.push(`${closed} already fixed, accepted or ruled out left as they are`);
   if (same) notes.push(`${same} already ${STATUS_WORD[value] || value}`);
-  return `Mark ${plural(ids, "host", "hosts")} in ${plural(groups.length, "group", "groups")}${singles ? ` and ${plural(singles, "other finding", "other findings")}` : ""} as ${STATUS_WORD[value] || value}${notes.length ? ` (${notes.join("; ")})` : ""}. Each host keeps its own history.`;
+  const keeps = one === "host" ? "Each host keeps its own history." : "Each finding keeps its own history.";
+  return `Mark ${plural(ids, one, many)} in ${plural(groups.length, "group", "groups")}${singles ? ` and ${plural(singles, "other finding", "other findings")}` : ""} as ${STATUS_WORD[value] || value}${notes.length ? ` (${notes.join("; ")})` : ""}. ${keeps}`;
 }
 
 // The done message: findings (hosts) and sites, not rows. "214 findings on 6 sites".
@@ -210,7 +222,8 @@ export function doneSummary(okItems) {
 export function menuLabel(item, value, label, opts = {}) {
   const t = targetsOf(item.group, value, opts);
   const left = opts.includeClosed ? "" : t.closed ? `; ${t.closed} fixed or accepted left as they are` : "";
-  return `Mark as ${label}${opts.includeClosed ? ", including closed hosts" : ""} (${plural(t.ids.length, "host", "hosts")}${left})`;
+  const [one, many] = unit(item.group);
+  return `Mark as ${label}${opts.includeClosed ? `, including closed ${many}` : ""} (${plural(t.ids.length, one, many)}${left})`;
 }
 
 export const TRUNCATED_NOTE = "Showing the first 20,000 matches grouped; narrow the filters or use Show every host.";
@@ -219,11 +232,13 @@ export const TRUNCATED_NOTE = "Showing the first 20,000 matches grouped; narrow 
 export function headerParts(r) {
   const counts = r.counts || {};
   const findings = r.findings_total ?? r.total ?? 0;
-  if (r.group !== GROUPED) return { lead: `${plural(findings, "finding", "findings")}: `, counts, grouped: "", truncated: "" };
+  if (r.group !== GROUPED && r.group !== BY_PRODUCT) return { lead: `${plural(findings, "finding", "findings")}: `, counts, grouped: "", truncated: "" };
   const rows = r.total || 0;
-  const grouped = r.groups
-    ? `${plural(r.grouped_findings || 0, "CVE match", "CVE matches")} on sibling hosts shown as ${plural(r.groups, "row", "rows")} (the same library file on one site)`
-    : "";
+  const grouped = !r.groups
+    ? ""
+    : r.group === BY_PRODUCT
+      ? `${plural(r.grouped_findings || 0, "CVE match", "CVE matches")} shown as ${plural(r.groups, "row", "rows")}, one per product version on a host (they rest on the version read; each stays its own finding)`
+      : `${plural(r.grouped_findings || 0, "CVE match", "CVE matches")} on sibling hosts shown as ${plural(r.groups, "row", "rows")} (the same library file on one site)`;
   return { lead: `${plural(findings, "finding", "findings")} in ${plural(rows, "row", "rows")}: `, counts, grouped, truncated: r.group_scan_truncated ? TRUNCATED_NOTE : "" };
 }
 

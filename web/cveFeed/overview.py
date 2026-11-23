@@ -650,8 +650,8 @@ def _fix_row(members):
             'action': _PLURAL_ACTION.get(label, label), 'link': f"/cve/{first['project']}/situations/", 'internal': first['internal']}
 
 
-def _fix_first(ids, groups, hosts):
-    listing = situations.listing(ids, page=1, size=FIX_FIRST_SITUATIONS)
+def _fix_first(ids, groups, hosts, info=None):
+    listing = situations.listing(ids, page=1, size=FIX_FIRST_SITUATIONS, info=info)
     counts = host_counts(groups)
     return {'state': listing['state'], 'hosts': hosts, 'total': listing['situations'], 'needs': counts['needs'],
             'rows': fix_first_groups(listing['results']), 'counts': counts}
@@ -660,13 +660,15 @@ def _fix_first(ids, groups, hosts):
 # ------------------------------------------------------------------------------------------------------------------------ what changed
 
 def _certs(ids, now):
+    from django.db.models import Count, Q
+
     from cveFeed import counts
     from cveFeed.models import TlsCertificate
     base = TlsCertificate._base_manager.filter(domain__project_id__in=list(ids))
     due = counts.expiring_certificates(base)
-    total = due.count()
+    got = due.aggregate(total=Count('pk'), expired=Count('pk', filter=Q(not_after__lt=now)))  # the two counts in one read
+    total, expired = got['total'], got['expired']
     nxt = base.filter(not_after__gte=now).order_by('not_after').values_list('host', 'not_after').first() if total else None
-    expired = due.filter(not_after__lt=now).count() if total else 0
     if nxt:
         days = max(0, (nxt[1] - now).days)
         detail = f"next: {clean(nxt[0], 100)} " + ('expires today' if days == 0 else f"in {plural(days, 'day', 'days')}")
@@ -679,6 +681,9 @@ def _certs(ids, now):
 
 def what_changed(ids, kpi_list, now):
     """The four lines of "What changed" (see the module text): grouped counts over the project's change log and certificates, bounded by the week and the ids."""
+    from django.db.models import CharField, Count, Q, Value
+    from django.db.models.functions import Cast, Concat
+
     from cveFeed.models import AssetChange
     since = now - timedelta(days=WINDOW_DAYS)
     log = AssetChange._base_manager.filter(project_id__in=list(ids), detected_at__gte=since)
@@ -694,7 +699,11 @@ def what_changed(ids, kpi_list, now):
                         'detail': f'{was:,} {when}, {exposed["value"]:,} now' if d else f'{exposed["value"]:,} now, the same as {when}',
                         'tone': 'worse' if d > 0 else 'better' if d < 0 else ''}
     sens = log.filter(kind='sensitive_found')
-    sens_n = sens.count()
+    # the three counts of the week's log in one read: a host found or retired is counted once per project and name, as ``values(...).distinct()`` did
+    pair = Concat(Cast('project_id', CharField()), Value(' '), 'host', output_field=CharField())
+    tally = log.aggregate(sens=Count('pk', filter=Q(kind='sensitive_found')), new=Count(pair, distinct=True, filter=Q(kind='host_new')),
+                          gone=Count(pair, distinct=True, filter=Q(kind='host_retired')))
+    sens_n = tally['sens']
     detail = 'none this week'
     if sens_n:
         types, example = [], ''
@@ -706,9 +715,8 @@ def what_changed(ids, kpi_list, now):
                     types.append(t)
         detail = ', '.join(types) + (f' on {clean(example, 100)}' if example else '') if types else (f'on {clean(example, 100)}' if example else '')
     certs, cert_detail = _certs(ids, now)
-    new = log.filter(kind='host_new').values('project_id', 'host').distinct().count()
-    gone = log.filter(kind='host_retired').values('project_id', 'host').distinct().count()
-    new_host = log.filter(kind='host_new').order_by('-detected_at', '-id').values_list('host', flat=True).first()
+    new, gone = tally['new'], tally['gone']
+    new_host = log.filter(kind='host_new').order_by('-detected_at', '-id').values_list('host', flat=True).first() if new else None
     return {'since': since.isoformat(), 'lines': [
         line_exposed,
         {'key': 'sensitive', 'value': f'{sens_n:,}', 'title': 'Pages showing personal data' if sens_n != 1 else 'Page showing personal data', 'detail': detail, 'tone': 'worse' if sens_n else ''},
@@ -740,7 +748,7 @@ def sentinels(now=None):
     key of its own (never in the entry callers share). Failures say nothing rather than break the page."""
     def compute():
         from agentapi import sentinel_broker
-        cap = sentinel_broker.planner_capacity((), now=now)
+        cap = sentinel_broker.planner_capacity((), now=now, queued=False)  # the line says what is live and busy, never the queue
         slots = sum(a['slots'] for a in cap['agents'])
         return {'text': sentinel_line_text(cap['live'], slots, cap['held_total']), 'live': cap['live'], 'slots': slots, 'held': cap['held_total']}
     try:
@@ -766,7 +774,7 @@ def build(ids, live=None, now=None, label=''):
     threats = _cached_threats(ids, label, names, now, slugs)
     status = status_block(hosts, counts, situations.last_scan(ids) if hosts else None, now, next((g for g in threats['groups'] if g['matched']), None),
                           next(k for k in tiles if k['key'] == 'exposed'))
-    return {'status': status, 'kpis': tiles, 'threats': threats, 'fix_first': _fix_first(ids, groups, hosts), 'what_changed': what_changed(ids, tiles, now),
+    return {'status': status, 'kpis': tiles, 'threats': threats, 'fix_first': _fix_first(ids, groups, hosts, {p['id']: (p['slug'], p['name']) for p in projects}), 'what_changed': what_changed(ids, tiles, now),
             'updated_at': now.isoformat(), 'projects': len(ids)}
 
 

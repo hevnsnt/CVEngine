@@ -1093,6 +1093,36 @@ def api_overview(request):
 
 
 GRAPH_CACHE_SECONDS = 30
+# The dashboard's host map (static/cve/dashboard.js MAP_SCORE_OVER) draws only the hosts that score more than this, and the map's tiles are the only
+# reader of a host node's ``info`` (the hover card and the score dialog). The graph page reads none of it. tests/test_graph_payload_size.py holds the two equal.
+GRAPH_INFO_SCORE_OVER = 40
+GRAPH_JSON = {'separators': (',', ':')}  # the graph is the largest live answer: no blank after each comma and colon
+
+
+def compact_graph(payload):
+    """The graph as it is cached and sent: what ``graph_payload`` built, less what no page reads. A host's ``info`` (the hover card, up to 16 score
+    lines of 600 characters each) only on a host the dashboard map can draw (score above ``GRAPH_INFO_SCORE_OVER``), and ``internal`` and ``network``
+    only on an internal host (graph.js tests both for truth). The other keys and every node, edge and count are unchanged."""
+    nodes = payload.get('nodes')
+    if not nodes:
+        return payload
+
+    def lean(node):
+        if node.get('kind') != 'subdomain':
+            return node
+        drop = {k for k in ('internal', 'network') if k in node and not node[k]}
+        if 'info' in node and (node.get('score') or 0) <= GRAPH_INFO_SCORE_OVER:
+            drop.add('info')
+        return {k: v for k, v in node.items() if k not in drop} if drop else node
+    return {**payload, 'nodes': [lean(n) for n in nodes]}
+
+
+def without_info(payload):
+    """``payload`` with no host ``info`` at all: what the graph page asks for (``?info=0``), which never reads it."""
+    nodes = payload.get('nodes')
+    if not nodes:
+        return payload
+    return {**payload, 'nodes': [{k: v for k, v in n.items() if k != 'info'} if 'info' in n else n for n in nodes]}
 GRAPH_LIVE_SECONDS = 2  # how long what the running scans are doing is shared between tabs
 GRAPH_VERSION_SECONDS = 5  # the version token is itself kept this long per scope: the 304 path of every open graph asked eight aggregate queries per poll
 GRAPH_VERSION_WINDOW = 300  # a graph that "has not changed" is still re-sent this often: edits to existing rows move no id
@@ -1175,7 +1205,7 @@ def cached_graph(scope, version, domain_id=None, scan_id=None, wait=True):
             return None
 
     def build():
-        payload = {**graph_payload(domain_id, scan_id), 'version': version}
+        payload = {**compact_graph(graph_payload(domain_id, scan_id)), 'version': version}
         try:
             cache.set(key, payload, GRAPH_CACHE_SECONDS)
             cache.set(last_key, payload, GRAPH_LAST_SECONDS)
@@ -1228,7 +1258,8 @@ def api_graph(request):
     """The asset graph. ``?v=<version>`` equal to the current version answers 304, so the dashboard's poller costs a few
     aggregate queries when nothing changed; otherwise the payload is served from a short per-scope cache (shared by every viewer of the
     same projects). The version is itself a snapshot kept GRAPH_VERSION_SECONDS per scope, so a change shows within that many seconds (at once
-    after ``bump_stats_revision``) and a poll in between costs no aggregate query at all."""
+    after ``bump_stats_revision``) and a poll in between costs no aggregate query at all. The payload is ``compact_graph``'s; ``?info=0`` (the graph
+    page) leaves out every host's ``info`` too."""
     from django.http import HttpResponseNotModified
     domain, scan = request.GET.get('domain', ''), request.GET.get('scan', '')
     domain_id, scan_id = int(domain) if domain.isdigit() else None, int(scan) if scan.isdigit() else None
@@ -1238,7 +1269,10 @@ def api_graph(request):
                                       hot={'params': params, 'args': {'domain_id': domain_id, 'scan_id': scan_id}, 'check': _hot_check(domain_id, scan_id)})['payload']
     if request.GET.get('v') == version:
         return HttpResponseNotModified()
-    return JsonResponse(cached_graph(scope, version, domain_id, scan_id))  # one viewer builds a cold graph, the others wait for it
+    payload = cached_graph(scope, version, domain_id, scan_id)  # one viewer builds a cold graph, the others wait for it
+    if request.GET.get('info') == '0':  # the graph page: it draws no hover card, so it is sent none
+        payload = without_info(payload)
+    return JsonResponse(payload, json_dumps_params=GRAPH_JSON)
 
 
 @require_GET
