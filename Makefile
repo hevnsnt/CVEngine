@@ -16,7 +16,7 @@ $(info Using: $(shell echo "$(DOCKER_COMPOSE)"))
 
 # --------------------------
 
-.PHONY: check-env check-secrets certs up build admin admin-password username changepassword migrate dbshell down stop restart rm test logs images help inventory-sync uninstall-updater scanner-build scanner-update scanner-logs
+.PHONY: rotate-secrets db-backup db-backup-schedule restore-check check-env check-secrets certs up build admin admin-password username changepassword migrate dbshell down stop restart rm test logs images help inventory-sync uninstall-updater scanner-build scanner-update scanner-logs
 
 # .env is not tracked. Create it on first use, with the passwords generated and DOMAIN_NAME set to this machine's address.
 check-env:
@@ -73,6 +73,18 @@ redis-auth:	## Put a password on the Redis broker of an older installation (see 
 
 rotate-field-key:	## Rotate the key that encrypts stored API keys and webhook URLs (see docs/CONFIGURATION.md).
 	./scripts/rotate-field-key.sh
+
+rotate-secrets:	## Rotate the database, Redis and field keys and the Django secret, then verify (ARGS=--dry-run shows the plan; docs/CONFIGURATION.md).
+	./scripts/rotate-secrets.sh $(ARGS)
+
+db-backup:	## Dump the database now into the nightly dump folder (backups/db; see docs/DEPLOYMENT.md, Backups).
+	./scripts/db-backup-daily.sh
+
+db-backup-schedule:	## Dump the database every night at 03:17 and keep CVENGINE_DB_BACKUP_DAYS days (a crontab line; see docs/DEPLOYMENT.md, Backups).
+	./scripts/install-db-backup.sh
+
+restore-check:	## Restore the newest dump into a throwaway database, count rows, drop it (see docs/DEPLOYMENT.md, Backups).
+	./scripts/restore-check.sh
 
 username: check-secrets	## Create an admin account of your own choosing (asks for the password; use after make up).
 ifeq ($(isNonInteractive), true)

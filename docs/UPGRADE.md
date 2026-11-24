@@ -8,6 +8,65 @@ Older installs (reNgine and pre-release cvENGINE builds) ran PostgreSQL 12. The 
 
 To roll back, check out the previous commit and start it. It still uses the untouched old volume, without anything written since the upgrade.
 
+## Rolling back
+
+This covers going back from the 1.5.0 changes (everything after 1.4.2: the pinned Python in the image, the migrations listed below, the database role split, the separate network for the database and Redis, and the log limits) to 1.4.2. Going back means building and running the previous image again; the database keeps what the migrations did, so read the migration list before you start.
+
+**Before you go back**
+
+1. Stop updates from bringing the new version straight back: set **Settings, Updates** to Manual and approve nothing until you are ready.
+2. Run the two statements under "Migrations that 1.4.2 cannot live with" below. Each is safe to run on 1.5.0 too.
+3. Save what you need from the container logs (`docker compose logs --no-color web > web.log`): every container is recreated, and Docker deletes a container's log when it does that.
+
+**Return to the previous image.** The images are built on the host from the checkout, and the in-app updater removes the replaced image once an update is verified, so the old image is built again from the old commit:
+
+```bash
+git checkout v1.4.2
+env -i PATH="$PATH" HOME="$HOME" docker compose up -d --build
+```
+
+Add the `-p`, `--env-file` and `-f` options your installation uses (for example `-p cvengine --env-file .env.vps -f docker-compose.yml -f docker-compose.vps.yml`), and keep `env -i`: Docker Compose takes a variable exported in your shell before the one in the env file, and a stale password in the shell breaks the database login. On a plain installation `make up` does the same. The build takes a few minutes, and the containers are recreated on the 1.4.2 Compose file. To come forward again later, `git checkout master` and update as usual.
+
+**What each 1.5.0 change means for the way back**
+
+- **Python in the image.** 1.4.2's image runs Ubuntu's CPython 3.14.4, whose garbage collector crashes the celery workers now and then (*Fatal Python error: Segmentation fault*, see [The application image runs Python 3.14.10](#the-application-image-runs-python-31410)). Going back brings those crashes back; the workers restart by themselves, but come forward again as soon as you can. Nothing in the database depends on the interpreter.
+- **Database roles.** 1.4.2 ignores `CVENGINE_DB_APP_USER` and `CVENGINE_DB_APP_PASSWORD` and connects as the owner (`POSTGRES_USER`), as it always did; nothing has to be changed for it. The role `cvengine_app` stays in the database unused, and the next update to 1.5.0 uses it again. To stay on 1.5.0 and only go back to the owner role, you do not need a rollback at all: set `CVENGINE_DB_APP_USER=` (empty) in `.env` and in the Compose env file, then recreate `web`, `celery` and `celery-beat` ([Database roles](#database-roles-the-server-no-longer-runs-as-the-database-owner)).
+- **Networks.** 1.4.2 puts the database and Redis back on `rengine_network` with every other service (the proxy and the AI reviewer can reach them again). The `<project>_data_network` network is left behind empty; `docker network rm <project>_data_network` removes it.
+- **Log limits.** 1.4.2's Compose file sets no log rotation, so each container's log grows again until Docker's own default limits it (none, unless `/etc/docker/daemon.json` sets one). PostgreSQL stops logging connections, because 1.4.2's command line does not ask for it (a value set earlier with `ALTER SYSTEM` comes back).
+
+**Migrations already run.** 1.4.2 has none of the 1.5.0 migrations, so `migrate` on 1.4.2 neither applies nor reverses them: their rows stay in `django_migrations`, and the next update to 1.5.0 skips them. What each leaves behind:
+
+| Migrations | What they did | On 1.4.2 |
+| --- | --- | --- |
+| `agentapi` 0026, `cveFeed` 0186, 0187, 0188, 0189, 0192, `dashboard` 0038, `startScan` 0029, 0030 | Indexes only, built concurrently | Harmless. They are used where they help and cost a little disk and write time. |
+| `agentapi` 0027, `cveFeed` 0190 | Autovacuum settings of the busiest tables | Harmless; keep them. |
+| `cveFeed` 0180, 0182, 0185, 0191 | New tables (email reports and their deliveries, the Zero Wire briefings and their settings, the MCP call history, the certificate transparency rollup) | Harmless: 1.4.2 never reads them, and they are there again when you come forward. |
+| `cveFeed` 0179, 0184, `dashboard` 0039 | New columns with a database default or nullable (report scope and format, the needs attention count of a snapshot, the CT fallback switch) | Harmless: 1.4.2 writes rows without them. 1.4.2 does not show the organization reports made on 1.5.0. |
+| `cveFeed` 0178 | `front` on the host assessment: NOT NULL with **no database default** | **Breaks host assessments on 1.4.2** until fixed: see below. |
+| `cveFeed` 0181, 0183 | Two beat schedules, `cvengine-report-digests` and `cvengine-zero-wire`, for tasks 1.4.2 does not have | Each run is an "unregistered task" error in the worker log: disable them, below. |
+| `startScan` 0031 to 0035 | Merged duplicate hosts, technology names and finding tags, CVE ids and CWE ids, then made those keys unique | **Not reversible**: the merged rows stay merged, also after a restore of nothing but the code. The unique constraints stay; 1.4.2 can then fail with *duplicate key value violates unique constraint "uniq_..."* where it used to store a second row. |
+
+**Migrations that 1.4.2 cannot live with.** As the owner (`docker compose exec db psql -U "$POSTGRES_USER" "$POSTGRES_DB"`), before or right after you go back:
+
+```sql
+ALTER TABLE "cveFeed_hostassessment" ALTER COLUMN front SET DEFAULT false;
+UPDATE django_celery_beat_periodictask SET enabled = false WHERE name IN ('cvengine-report-digests', 'cvengine-zero-wire');
+```
+
+The first lets 1.4.2 queue host assessments again (without it every new assessment fails with *null value in column "front"*). The second stops the two schedules; coming forward to 1.5.0 does not switch them on again by itself, so set `enabled = true` for both after that update. Only if 1.4.2 then reports *duplicate key value violates unique constraint* for one of the keys above, drop that constraint (the merge stays):
+
+```sql
+ALTER TABLE "startScan_subdomain" DROP CONSTRAINT IF EXISTS uniq_sub_scan_dom_name;
+ALTER TABLE "startScan_technology" DROP CONSTRAINT IF EXISTS uniq_technology_name;
+ALTER TABLE "startScan_vulnerabilitytags" DROP CONSTRAINT IF EXISTS uniq_vulntag_name;
+ALTER TABLE "startScan_cveid" DROP CONSTRAINT IF EXISTS uniq_cveid_name;
+ALTER TABLE "startScan_cweid" DROP CONSTRAINT IF EXISTS uniq_cweid_name;
+```
+
+and when you come forward again, before the update, delete the `django_migrations` row of each migration whose constraint you dropped (0031 hosts, 0032 technology names, 0033 tags, 0034 CVE ids, 0035 CWE ids), for example `DELETE FROM django_migrations WHERE app = 'startScan' AND name = '0032_uniq_technology_name';`. The update then runs that migration again: it merges the duplicates written meanwhile and builds the constraint again. Leave the rows of the constraints you kept, because adding a constraint that exists fails.
+
+**To undo the migrations themselves**, the only complete way back is the database dump the update took just before it migrated (`.git/cvengine-update/backups`, or `.git/cvengine-auto-deploy/backups` with automatic deployment, or a nightly dump from before the update, [DEPLOYMENT.md](DEPLOYMENT.md#backups)). Restoring it loses everything written since. Reversing the migrations with `manage.py migrate APP NUMBER` works only while 1.5.0's code is still checked out (1.4.2 does not have the migration files), drops the new tables with their data, and for `cveFeed` 0179 fails once an organization report exists; it is not needed for any of the above.
+
 ## Upgrading to 1.4
 
 ### Each Sentinel is auto-tuned
@@ -16,11 +75,11 @@ After the update, auto-tuning (when in Auto, the default) also tunes each Sentin
 
 ### Duplicate rows merged before unique constraints
 
-`startScan` 0031 to 0035 make the database refuse a second row for a key the scans always treated as one row: a host in a scan (`uniq_sub_scan_dom_name` on scan, target and name; hosts stored without a scan are not covered), a technology name (`uniq_technology_name`, exact name; spellings in another case stay separate rows as before) and the tag, CVE id and CWE id names of findings (`uniq_vulntag_name`, `uniq_cveid_name`, `uniq_cweid_name`). Before, two writers that stored the same host or name at the same moment (or a discovery copied into a scan twice by a resumed stage) left two rows, and a later lookup could fail with "returned more than one".
+`startScan` 0031 to 0036 make the database refuse a second row for a key the scans always treated as one row: a host in a scan (`uniq_sub_scan_dom_name` on scan, target and name; hosts stored without a scan are not covered), a technology name (`uniq_technology_name`, exact name; spellings in another case stay separate rows as before) and the tag, CVE id and CWE id names of findings (`uniq_vulntag_name`, `uniq_cveid_name`, `uniq_cweid_name`). Before, two writers that stored the same host or name at the same moment (or a discovery copied into a scan twice by a resumed stage) left two rows, and a later lookup could fail with "returned more than one".
 
 Each migration first merges the duplicates, in its own transaction: the oldest row stays (the one every page and lookup already used), the empty fields of a kept host are filled from its copies, and every row that pointed at a copy (findings, endpoints, CVE matches, subscans, address, technology and WAF links) is moved onto the kept row; a link the kept row already has is dropped rather than doubled. Nothing that has rows pointing at it is ever deleted: if moving a finding or a CVE match would make it a duplicate of one the kept host already has, the migration stops with the ids to merge by hand and changes nothing (we found no such case in the data we checked). Then the unique index is built with `CREATE INDEX CONCURRENTLY`, so scans keep writing while it builds, and the constraint is attached to the built index, a short metadata change. If a build is interrupted, or a scan stored a new duplicate between the merge and the build, `migrate` stops: run `DROP INDEX CONCURRENTLY IF EXISTS <name>;` with the name it gives and run `migrate` again (the merge runs again first). Rolling back (`migrate startScan` to the migration before 0031) drops the constraints; merged rows stay merged.
 
-Ports are not constrained: a port's key (the address it is on, its number and protocol) spans the address link table and the port row, which one unique constraint cannot express.
+`startScan` 0036 does the same for ports. A port's key is the address it is on, its number and its protocol, and the address was only in the link table, so the port row gets the column `ip_address_id` (the address it belongs to, filled from its link; no default, so the table is not rewritten; no foreign key and no cascade, so deleting an address leaves its port rows as before) and the constraint `uniq_port_ip_number_proto` on address, number and protocol. Before the constraint, in one transaction: a port row still linked to more than one address gets a copy for each further address (as `startScan` 0007 did), a protocol stored empty is written as `tcp` (it was read as TCP everywhere), and the duplicates are merged onto the oldest row, the one every lookup already used. The address's link to a newer copy is dropped, since the address is linked to the kept row already; a copy's own columns are not taken over, because the copies were made from a row another address's scan had filled (on the instance we checked, all 30 copies were of that kind and no CVE match pointed at one). From the update on, two scans that find the same new port of an address at the same moment store one row: the second one's insert waits for the first, is refused, and it uses the first one's row. If the build is interrupted, run `DROP INDEX CONCURRENTLY IF EXISTS uniq_port_ip_number_proto;` and `migrate` again. Rolling back to `startScan` 0035 drops the constraint and the column; merged rows stay merged.
 
 ### Autovacuum on the busiest tables
 
@@ -187,6 +246,10 @@ Read the state from a terminal: `scripts/update.sh --check` prints the memory th
 **The cve.now window a walk wrongly declared covered is read again (`recover_feed_gap`).** cve.now renamed its list cursor and limited listings without a key to the newest 400, and the coverage walk took the end of its first page for the floor of its window: it moved the feed watermark to the head of the feed, and the CVEs the incremental sync missed since then were never read (the status said the feed was complete). The update step moves the watermark back to 2026-11-06 (the published seed's `covers_through`; a watermark already earlier is left as it is) and queues `recover_cve_feed_window`, which runs the corrected walk until the window is covered (each past day from cve.now's archive page, today from the `since` delta listing, at most 1,500 entry reads a run, 0.5 s apart) and matches every CVE it reads against the inventory, whatever its tier. It needs the cve.now feed to be reachable; a run that is refused or cannot list a day stops, and the hourly backfill carries on from the same watermark. System status (`cve_feed_watermark`) shows the lag until it is done. A dry run by default when run by hand: `python3 manage.py recover_feed_gap [--apply] [--through 2026-11-06T00:00:00Z]`.
 
 **Open ranges from an upper bound written as text are checked (`repair_open_ranges`, issue 696).** A CVE List entry whose `lessThan` is text ("Apache HTTP Server 2.4*") was stored as an open range, so every later release matched. The update step reads the CVE List record of each stored CVE with an open range on a vendor's product (a bounded, resumable walk; it continues with every threat-intelligence run), leaves out each range the record bounds with text, notes the ranges the record means open, and marks the changed CVEs for re-correlation, so their matches outside the real range close. A dry run by default when run by hand: `python3 manage.py repair_open_ranges [--apply]`.
+
+**Matches past a branch fix their own advisory states are re-correlated (`recheck_branch_fixes`).** An advisory that states a fix for one release line beside a wider range (F5's nginx records: 1.13.10 up to 1.31.2 plus 1.30.2 up to 1.30.3) now reads a version at or past that line's fix as outside the wider range; no stored range is rewritten. The update step finds the stored in-range matches this changes, by itself and once (one read of the in-range matches and of their CVEs' ranges: 0.3 s on an install with 10,355 version matches, where it found 162 matches of 12 nginx CVEs), and marks those CVEs for re-correlation; the next `correlate_refreshed_cves` run, which the 30 minute feed sync queues, closes the matches in one batch (it handles 100 CVEs per walk of the inventory). By hand: `python3 manage.py recheck_branch_fixes [--apply]`. No migration.
+
+**Dismissed findings are not counted as open.** A finding the triage classed a likely false positive or not applicable is left out of every open count (the dashboard tiles, the Findings list's Actionable view and its counts, the weekly email, the PDF report, Situations and the hosts that need attention), as the PDF report already did; it is still listed under **All** and keeps its heat. On the install this was measured on, the scanner findings counted fall by 11 (5 in Marino Management). Nothing is stored or migrated.
 
 **Ranges bounded by distribution package builds are typed (`retype_distro_ranges`).** A bound such as `0:8.7p1-38.el9_4.4` was read as the upstream release. The update step types those stored ranges `RPM` or `DEB` (database only, no request) and marks the CVEs for re-correlation. `python3 manage.py retype_distro_ranges [--apply]`.
 

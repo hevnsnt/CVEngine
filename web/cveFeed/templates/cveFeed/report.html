@@ -126,7 +126,7 @@ secrets, closed findings). What goes into it, and the severity rules, are in cve
 {% if r.kind == 'hosts' %}<section class="page">
   <h2>Summary</h2>
   <p>This report lists <b>{{ r.scope.hosts_listed }}</b> of the <b>{{ r.scope.hosts_total }}</b> host{{ r.scope.hosts_total|pluralize }} in the current inventory of {{ r.project }}.
-    {% if r.summary.findings %}They carry <b>{{ r.summary.findings }}</b> open finding{{ r.summary.findings|pluralize }}: <b>{{ r.summary.heat.fire }}</b> fire, <b>{{ r.summary.heat.smoke }}</b> smoke and <b>{{ r.summary.heat.ice }}</b> ice.{% else %}No open CVE matches or scanner findings are recorded for them.{% endif %}
+    {% if r.summary.findings %}They carry <b>{{ r.summary.findings }}</b> open finding{{ r.summary.findings|pluralize }} ({{ r.summary.by_kind.cve|default:0 }} CVE match{{ r.summary.by_kind.cve|default:0|pluralize:"es" }} and {{ r.summary.by_kind.scanner|default:0 }} scanner finding{{ r.summary.by_kind.scanner|default:0|pluralize }}), by heat: <b>{{ r.summary.heat.fire }}</b> fire, <b>{{ r.summary.heat.smoke }}</b> smoke and <b>{{ r.summary.heat.ice }}</b> ice. Counted per host as the Findings page counts them, that is {{ r.summary.finding_issues_text }}. {{ r.summary.issues_note }}{% else %}No open CVE matches or scanner findings are recorded for them.{% endif %}
     {% if r.hosts_summary.new_30d %}<b>{{ r.hosts_summary.new_30d }}</b> host{{ r.hosts_summary.new_30d|pluralize }} {{ r.hosts_summary.new_30d|pluralize:"was,were" }} first found in the last 30 days.{% endif %}</p>
   <div class="tiles">
     <div class="tile t-fire"><b>{{ r.hosts_summary.heat.fire }}</b><span>Hosts on fire</span></div>
@@ -182,6 +182,7 @@ secrets, closed findings). What goes into it, and the severity rules, are in cve
     <tbody>{% for s in r.summary.levels %}<tr><td><span class="swatch s-{{ s.level }}"></span>{{ s.label }}</td><td class="num">{{ s.issues }}</td><td class="num">{{ s.hosts }}</td><td class="num">{{ s.findings }}</td></tr>{% endfor %}</tbody>
   </table>
   <p class="small mute">An issue is one weakness, however many hosts it is found on; a finding is one occurrence on one host. Critical, high and medium issues are written up in this report; low and informational issues are listed in Appendix {{ r.appendix.minor }}.</p>
+  {% if r.summary.distinct_issues %}<p class="small mute">Counted per host as the Findings page and the Overview count them: {{ r.summary.distinct_issues_text }}. {{ r.summary.issues_note }}</p>{% endif %}
   {% if r.actions %}<h3>Key recommendations</h3>
   <ol class="tight">{% for a in r.actions %}<li>{{ a }}</li>{% endfor %}</ol>{% endif %}
   {% if r.executive.positives %}<h3>Positive observations</h3>
