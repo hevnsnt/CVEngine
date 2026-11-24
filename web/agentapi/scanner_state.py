@@ -136,14 +136,6 @@ def disabled_kinds(now=None):
     return list(state(now).get('disabled', []))
 
 
-def offline_kinds(now=None):
-    """The waiting kinds that really are waiting for a scanner to come back: not turned off, and not a kind no scanner ever registered for (the second
-    sentence of ``messages``)."""
-    snapshot = state(now)
-    skip = set(snapshot.get('disabled', [])) | set(snapshot.get('never_seen', []))
-    return [k for k in snapshot['kinds'] if k not in skip]
-
-
 def is_waiting(kind, now=None):
     return kind in state(now)['kinds']
 
