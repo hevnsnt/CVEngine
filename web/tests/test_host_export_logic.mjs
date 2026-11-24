@@ -76,3 +76,40 @@ test('the counts are read from the headers the server sends, and a missing heade
 test('what the dialog promises the file holds says nothing of findings, notes or owners being in it', () => {
   assert.match(L.CONTAINS, /No findings, notes, owners or scores/);
 });
+
+// --- one host ----------------------------------------------------------------------------------------------------------------------------
+
+test('the address selects a host by its id, and nothing else counts as a selection', () => {
+  assert.equal(L.hostIdFromHash('#40413'), 40413);
+  assert.equal(L.hostIdFromHash('40413'), 40413);
+  assert.equal(L.hostIdFromHash('#40413&validate'), 40413);
+  for (const hash of ['', '#', '#0', '#abc', '#12abc', '#-4', '#certs', null, undefined]) assert.equal(L.hostIdFromHash(hash), null, String(hash));
+});
+
+test('the label: Export all hosts with no selection, Export host with one, and back after a deselect', () => {
+  assert.equal(L.buttonLabel(L.hostIdFromHash('')), 'Export all hosts');
+  assert.equal(L.buttonLabel(L.hostIdFromHash('#40413')), 'Export host');
+  assert.equal(L.buttonLabel(L.hostIdFromHash('#41')), 'Export host');  // a hash change to another host
+  assert.equal(L.buttonLabel(L.hostIdFromHash('')), 'Export all hosts');  // deselected
+  assert.match(L.buttonTitle(null), /penetration testing/);
+  assert.match(L.buttonTitle(5), /ZIP/);
+});
+
+test('one host goes to its own route under the project', () => {
+  assert.equal(L.hostExportPath({slug: 'acme-web', id: 40413}), '/api/v1/projects/acme-web/hosts/40413/export');
+  assert.equal(L.hostExportPath({slug: 'a b', id: 1}), '/api/v1/projects/a%20b/hosts/1/export');
+});
+
+test('the one-host dialog says what the file holds and that secrets are masked', () => {
+  const all = L.HOST_CONTAINS.join(' ');
+  for (const word of ['host.json', 'Services', 'finding', 'history', 'inventory', 'Screenshots', 'certificates', 'masked']) assert.match(all, new RegExp(word));
+  assert.match(L.HOST_NOTE, /audit log/);
+});
+
+test('the toast after one host: its name and the counts, or just the name when a proxy dropped the headers', () => {
+  const h = (o) => ({get: (k) => o[k]});
+  assert.deepEqual(L.hostCountsFrom(h({'X-Export-Findings': '3', 'X-Export-Screenshots': '1'})), {findings: 3, screenshots: 1});
+  assert.equal(L.hostDoneMessage({name: 'www.example.com', findings: 3, screenshots: 1}), 'Exported www.example.com (3 findings, 1 screenshot)');
+  assert.equal(L.hostDoneMessage({name: 'a', findings: 1, screenshots: NaN}), 'Exported a (1 finding)');
+  assert.equal(L.hostDoneMessage({name: '', findings: NaN}), 'Exported the host');
+});
