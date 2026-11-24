@@ -559,7 +559,7 @@ class ProxyContainerTests(SimpleTestCase):
         echo = f'{self.tmp}/echo.conf'
         with open(echo, 'w') as f:
             f.write('server { listen 8000; location / { default_type text/plain; '
-                    'return 200 "remote=$remote_addr\\nxff=$http_x_forwarded_for\\nupstream=$http_x_cvengine_upstream\\n"; } }\n')
+                    'return 200 "remote=$remote_addr\\nxff=$http_x_forwarded_for\\nupstream=$http_x_cvengine_upstream\\nprobe=$http_x_cvengine_probe_forwarded\\n"; } }\n')
         os.chmod(echo, 0o644)
         web = f'{self.tag}-web'
         self.names.append(web)
@@ -584,11 +584,11 @@ class ProxyContainerTests(SimpleTestCase):
         logs = subprocess.run(['docker', 'logs', proxy], capture_output=True, text=True)
         self.fail(f'the proxy never answered: {logs.stderr[-2000:]}')
 
-    def fetch(self, port, xff=None, secret=None, path='/'):
+    def fetch(self, port, xff=None, secret=None, path='/', **more):
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
-        headers = {'Host': 'rengine'}
+        headers = {'Host': 'rengine', **more}
         if xff:
             headers['X-Forwarded-For'] = xff
         if secret is not None:
@@ -623,6 +623,21 @@ class ProxyContainerTests(SimpleTestCase):
         os.chmod(f'{self.tmp}/state/maintenance', 0o644)
         self.assertEqual(self.fetch(port, REAL, self.SECRET, path='/client-address-probe/x/')['xff'], REAL)
         self.assertEqual(self.fetch(port, REAL, self.SECRET), {})  # every other route shows the maintenance page (503)
+
+    def test_the_probe_route_says_what_the_proxy_did_with_the_forwarding_headers(self):
+        # the label the client address check reads (cveFeed/client_address.py): a label only, set on the probe route alone
+        port = self.start(self.SECRET)
+        probe = '/client-address-probe/x/'
+        self.assertEqual(self.fetch(port, path=probe)['probe'], 'none')
+        self.assertEqual(self.fetch(port, REAL, path=probe)['probe'], 'ignored')
+        self.assertEqual(self.fetch(port, path=probe, **{'X-Real-IP': REAL})['probe'], 'ignored')
+        self.assertEqual(self.fetch(port, REAL, 'wrong' * 8, path=probe)['probe'], 'wrong-secret')
+        self.assertEqual(self.fetch(port, REAL, self.SECRET.swapcase(), path=probe)['probe'], 'wrong-secret')
+        believed = self.fetch(port, REAL, self.SECRET, path=probe)
+        self.assertEqual((believed['probe'], believed['xff']), ('believed', REAL))
+        self.assertEqual(self.fetch(port, path=probe, **{'X-CVEngine-Probe-Forwarded': 'believed'})['probe'], 'none')  # a client cannot set it
+        ignored = self.fetch(port, REAL, path=probe)
+        self.assertNotEqual(ignored['xff'], REAL)  # and the chain is still overwritten, exactly as before
 
     def test_with_an_empty_secret_nothing_is_believed(self):
         port = self.start('')
