@@ -456,11 +456,6 @@ a.cve-link{font-family:var(--mono)}
 /* update bar */
 .updatebar{display:flex;gap:var(--s-3);align-items:center;flex-wrap:wrap;padding:var(--s-3) var(--gutter);background:var(--brand);color:var(--on-brand);font-size:var(--fs-3);font-weight:var(--fw-semi)}
 .updatebar .btn.ghost{background:transparent;color:var(--on-brand);border-color:var(--on-brand)}
-/* the two-step sign-in reminder for administrators (tenancy.mfa_nag): a bar fixed to the bottom edge, out of the page flow so it never moves a heading, a table or the first screen; shown until MFA is on or snoozed for the session */
-.mfa-nag{position:fixed;left:0;right:0;bottom:0;z-index:40;box-sizing:border-box;max-width:100vw;display:flex;gap:var(--s-3);align-items:center;flex-wrap:wrap;margin:0;padding:var(--s-2) var(--gutter);background:var(--surface);border-top:2px solid var(--brand);box-shadow:0 -2px 8px rgba(0,0,0,.12);font-size:var(--fs-3)}
-@media (max-width:900px){.mfa-nag{bottom:64px}}
-.mfa-nag p{flex:1 1 280px;min-width:0;margin:0;overflow-wrap:anywhere}
-.mfa-nag form{margin:0}
 /* the one status strip (static/cve/statusstrip.js): scanner notices and an admin's alerts in a single 40px line with a count and a Details button;
    the notices open in full under it. */
 .scannerbar{background:var(--ice-bg);color:var(--ice-ink);box-shadow:0 1px 0 var(--ring-ice);font-size:var(--fs-3);line-height:1.4}
@@ -3223,3 +3218,7 @@ details[open]>summary .ov-chev{transform:rotate(45deg)}
 .ov-det-body .trends{margin:0;padding:0 var(--s-4) var(--s-4)}
 @media (max-width:719px){.ov-headline{font-size:var(--fs-6)}.ov-kpi-value{font-size:var(--fs-7)}.ov-threat{padding:var(--s-4);gap:var(--s-4)}}
 @media (max-width:1023px),(pointer:coarse){.ov-link,a.ov-fix-host{display:inline-flex;align-items:center;min-height:44px}}
+
+.sb-row-mfa,.sb-row .sb-mfa{margin:0}
+.sb-row-mfa{display:flex;gap:var(--s-3);align-items:center;flex-wrap:wrap}
+.sb-row-mfa form{margin:0}

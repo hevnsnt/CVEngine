@@ -153,7 +153,7 @@ class EndpointEquivalenceTests(Tenants):
         if response.get('Content-Type', '').startswith('application/json'):
             body = self.STAMP.sub('T', self.VOLATILE.sub(r'"\1": 0', body))
         else:
-            body = re.sub(r'(csrfmiddlewaretoken" value=|name="cvengine-build" content=)"[^"]*"', r'\1""', body)
+            body = re.sub(r'(csrfmiddlewaretoken" value=|data-csrf=|name="cvengine-build" content=)"[^"]*"', r'\1""', body)
         return response.status_code, body, len(ctx.captured_queries)
 
     def _same(self, client, url, headers=None):
