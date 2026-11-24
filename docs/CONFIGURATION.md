@@ -536,6 +536,19 @@ Read by `install.sh`, the compose files and the scripts, not by the application.
 
 Set inside the compose file for the containers, not for you to change: `CVENGINE_SENTINEL_BUILTIN`, `CVENGINE_SENTINEL_BLOB_FILE` and `CVENGINE_SENTINEL_ALLOW_INSECURE` (the built-in scanner), `CVENGINE_REVIEWER_SERVER` and `CVENGINE_REVIEWER_TOKEN_FILE` (the AI reviewer container).
 
+## Renamed in 1.5.0
+
+1.5.0 gives everything that carried the upstream project's name the cvengine name. Every update path (Settings > Updates, `scripts/update.sh`, `make up`, `install.sh` run again) moves an older install by itself with `scripts/legacy_names.py`: it writes each new variable under the old one in `.env` (and in the env file your Compose layout names) with the same value, never printing it, and keeps the old file as `.env.pre-cvengine-rename`; once the updated site answers, the old lines go. Nothing has to be edited by hand.
+
+| Variable | Was | Purpose |
+| --- | --- | --- |
+| `CVENGINE_HOME` | `RENGINE_HOME` | The application folder (default `/usr/src/app`): `web/secret` and the update requests are read from it. |
+| `CVENGINE_RESULTS` | `RENGINE_RESULTS` | Where scan results are written (default `<CVENGINE_HOME>/scan_results`). |
+| `CVENGINE_RAISE_ON_ERROR` | `RENGINE_RAISE_ON_ERROR` | `1` makes a failing background task raise instead of logging the error (development only). |
+| `CVENGINE_SECRET_KEY` | `RENGINE_SECRET_KEY` | See [Templates and secrets](#templates-and-secrets). |
+
+The same update renames, in files the repository does not track: the certificate files (`secrets/certs/cvengine.pem`, `cvengine_rsa.key`, `cvengine_chain.pem`, the same files under a second name until the update is verified) and, in a Compose overlay of your own, the network `cvengine_network` and `config/nginx/cvengine.conf` (a backup `<file>.pre-cvengine-rename` is kept). The Compose network becomes `<project>_cvengine_network`: the update recreates web, celery, celery-beat, the proxy and the AI reviewer on it, moves any other container of the install that is still on the old one, then removes the old network. The project name, the database name and its owner role stay what your `.env` says (`COMPOSE_PROJECT_NAME`, `POSTGRES_DB`, `POSTGRES_USER`): renaming a volume or a database would hide your data, so an install keeps its own and a new install gets `cvengine`.
+
 ## Ignored or removed in 1.4
 
 Remove these from `.env`; they change nothing and nothing warns about them.
