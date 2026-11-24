@@ -1,6 +1,7 @@
 """Content-versioned asset URLs. A CDN or browser that cached last release's cve.css must never serve it with this
 release's HTML, so every script and stylesheet URL carries a hash of the file, and an import map does the same for the
 ES modules that import each other (a plain import has no query string to change)."""
+import base64
 import hashlib
 import json
 import os
@@ -47,13 +48,27 @@ def build_stamp():
 @register.simple_tag
 def importmap():
     """Map each module under static/cve to its versioned URL, so ``import ... from "/staticfiles/cve/ui.js"`` follows it."""
+    body = importmap_body()
+    return mark_safe(f'<script type="importmap">{body}</script>') if body else ''
+
+
+def importmap_body():
+    """The text inside the import map's <script> element ('' when there is no static/cve folder). It only changes with the static files."""
     root = next((r for r in settings.STATICFILES_DIRS if os.path.isdir(os.path.join(r, 'cve'))), None)
     if not root:
         return ''
     names = sorted(f for f in os.listdir(os.path.join(root, 'cve')) if f.endswith('.js') and not f.endswith('.min.js'))
     imports = {static(f'cve/{n}'): asset(f'cve/{n}') for n in names}
-    body = json.dumps({'imports': imports}).replace('</', '<\\/')
-    return mark_safe(f'<script type="importmap">{body}</script>')
+    return json.dumps({'imports': imports}).replace('</', '<\\/')
+
+
+def importmap_csp_source():
+    """The import map as a Content-Security-Policy hash source (``'sha256-...'``), so a script policy can allow it and no other inline
+    script; None when there is no import map."""
+    body = importmap_body()
+    if not body:
+        return None
+    return "'sha256-%s'" % base64.b64encode(hashlib.sha256(body.encode('utf-8')).digest()).decode('ascii')
 
 
 # The first rules a page needs, inlined in <head> BEFORE the stylesheet link, so a stylesheet that arrives late (a slow or lossy link, a CDN
