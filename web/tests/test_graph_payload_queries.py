@@ -183,7 +183,7 @@ def old_graph_payload(domain_id=None, scan_id=None):
     total_hosts, per_project = drawn_hosts, {}
     if capped:
         from django.db.models import Count
-        per_project = {slug or '': n for slug, n in subs.order_by().values_list('target_domain__project__slug').annotate(n=Count('pk', distinct=True))}
+        per_project = dict(sorted({slug or '': n for slug, n in subs.order_by().values_list('target_domain__project__slug').annotate(n=Count('pk', distinct=True))}.items()))  # sorted, as the real one is: a GROUP BY has no order of its own
         total_hosts = max(sum(per_project.values()), drawn_hosts)
     return {'nodes': list(nodes.values()), 'edges': [{'from': a, 'to': b} for a, b in sorted(edges)],
             'hosts': {'drawn': drawn_hosts, 'total': total_hosts, 'projects': per_project},
