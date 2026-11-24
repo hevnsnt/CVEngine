@@ -32,14 +32,14 @@ class CleaningTests(SimpleTestCase):
 		self.assertEqual(alias_note.clean_alias('  Lab printer  '), 'Lab printer')
 		self.assertEqual(alias_note.clean_alias(''), '')
 		self.assertEqual(alias_note.clean_alias('x' * alias_note.ALIAS_MAX), 'x' * alias_note.ALIAS_MAX)
-		for bad in ('x' * (alias_note.ALIAS_MAX + 1), 'two\nlines', 'tab\there', 'nul\x00', 'bidi‮evil', 'sep arator', 7, None, ['a']):
+		for bad in ('x' * (alias_note.ALIAS_MAX + 1), 'two\nlines', 'tab\there', 'nul\x00', 'bidi\u202eevil', 'sep\u2028arator', 7, None, ['a']):
 			with self.assertRaises(ValueError, msg=repr(bad)):
 				alias_note.clean_alias(bad)
 
 	def test_a_note_may_have_lines_but_no_control_characters_and_is_bounded(self):
 		self.assertEqual(alias_note.clean_note(' rack 3\r\nunit 7 \n'), 'rack 3\nunit 7')
 		self.assertEqual(alias_note.clean_note('y' * alias_note.NOTE_MAX), 'y' * alias_note.NOTE_MAX)
-		for bad in ('y' * (alias_note.NOTE_MAX + 1), 'bell\x07', 'bidi‮evil', 5, None):
+		for bad in ('y' * (alias_note.NOTE_MAX + 1), 'bell\x07', 'bidi\u202eevil', 5, None):
 			with self.assertRaises(ValueError, msg=repr(bad)):
 				alias_note.clean_note(bad)
 
