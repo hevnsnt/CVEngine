@@ -170,7 +170,8 @@ class Command(BaseCommand):
         for ip in ips:
             for number, svc in rng.sample(PORT_POOL, min(len(PORT_POOL), max(1, round(rng.gauss(3.0, 1.2))))):
                 port_rows.append(Port(number=number, service_name=svc, product=rng.choice(PRODUCTS), version=rng.choice(('1.0', '2.4', '3.1')),
-                                      state=pick(rng, (('open', .9), ('filtered', .06), ('closed', .04))), protocol='tcp', last_seen=now))
+                                      state=pick(rng, (('open', .9), ('filtered', .06), ('closed', .04))), protocol='tcp', last_seen=now,
+                                      ip_address_id=ip.id))
                 port_ip.append(ip.id)
         ports = Port.objects.bulk_create(port_rows)
         Through = IpAddress.ports.through

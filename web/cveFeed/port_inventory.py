@@ -124,11 +124,13 @@ def _persist_ports(ip_obj, host, source, now, tcp_protocols):
     from django.db import transaction
 
     from startScan.models import IpAddress, Port
+    from startScan.port_rows import create_port, create_ports, release_ports
     through = IpAddress.ports.through
     linked = [] if getattr(ip_obj, '_created_now', False) else list(ip_obj.ports.order_by('id'))  # the IP's own ports, oldest first, as a lookup by number then id finds them
     before = {port.pk: {f: copy.deepcopy(getattr(port, f)) for f in _PORT_FIELDS} for port in linked}
     shared = set(through.objects.filter(port_id__in=list(before)).exclude(ipaddress_id=ip_obj.pk).values_list('port_id', flat=True)) if before else set()
     unlink, created, stored = [], [], []  # ports to unlink from this IP; new ports; the port of each record written (in record order)
+    conflict = {}  # {id(new port): the columns its record writes onto a port of the same key another writer stored meanwhile}
     known = set(before)  # existing rows, and (by id()) the rows this run created: what a lookup in the database would have found by now
     seen = lambda port: (port.pk in known) if port.pk else (id(port) in known)  # noqa: E731
     for rec in host.get('ports', []):
@@ -156,6 +158,8 @@ def _persist_ports(ip_obj, host, source, now, tcp_protocols):
             continue
         if port is None:
             port = Port(number=number, protocol=protocol, service_name=rec.get('service_name') or None)
+            # what this record would write onto that port had it been found: a run with no fingerprint only its state and time (see above)
+            conflict[id(port)] = ('state', 'last_seen') if _unprobed(rec) else tuple(f for f in _PORT_FIELDS if f not in ('number', 'protocol'))
         elif rec.get('service_name'):
             port.service_name = rec['service_name']
         if seen(port) and rec.get('product') and rec['product'] != port.product:
@@ -219,14 +223,15 @@ def _persist_ports(ip_obj, host, source, now, tcp_protocols):
             with transaction.atomic():
                 if unlink:
                     through.objects.filter(ipaddress_id=ip_obj.pk, port_id__in=unlink).delete()
+                    release_ports(ip_obj.pk, unlink)
                 if created:
-                    Port.objects.bulk_create(created)
-                    through.objects.bulk_create([through(ipaddress_id=ip_obj.pk, port_id=port.pk) for port in created], ignore_conflicts=True)
+                    create_ports([(ip_obj.pk, port) for port in created], on_conflict=lambda port: conflict.get(id(port), ()))
                 if changed:
                     Port.objects.bulk_update(changed, columns)
         except DatabaseError:  # one at a time, so only the port that cannot be stored is lost
             if unlink:
                 through.objects.filter(ipaddress_id=ip_obj.pk, port_id__in=unlink).delete()
+                release_ports(ip_obj.pk, unlink)
             fresh = {id(port) for port in created}
             for port in created + changed:
                 new = id(port) in fresh
@@ -234,9 +239,10 @@ def _persist_ports(ip_obj, host, source, now, tcp_protocols):
                     port.pk = port.id = None
                 try:
                     with transaction.atomic():
-                        port.save(**({} if new else {'update_fields': columns}))
-                        if new:
-                            through.objects.get_or_create(ipaddress_id=ip_obj.pk, port_id=port.pk)
+                        if new:  # linked to the address, or the row another writer stored meanwhile used instead
+                            create_port(ip_obj.pk, port, on_conflict=conflict.get(id(port), ()))
+                        else:
+                            port.save(update_fields=columns)
                 except DatabaseError:
                     logger.warning('could not store port %s of %s', port.number, ip_obj.address, exc_info=True)
                     if new:

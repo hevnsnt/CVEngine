@@ -53,13 +53,13 @@ class LowerNameIndexTests(TestCase):
         self.assertLessEqual(len(idx.name), 30)
 
     def test_the_migration_builds_it_concurrently_after_the_current_leaf(self):
-        mod = importlib.import_module('startScan.migrations.0036_subdomain_lower_name_idx')
+        mod = importlib.import_module('startScan.migrations.0037_subdomain_lower_name_idx')
         self.assertFalse(mod.Migration.atomic)
-        self.assertEqual(mod.Migration.dependencies, [('startScan', '0035_uniq_cweid_name')])
+        self.assertEqual(mod.Migration.dependencies, [('startScan', '0036_uniq_port_ip_number')])
         op = mod.Migration.operations[0]
         self.assertEqual(type(op).__name__, 'AddIndexConcurrently')
         self.assertEqual(op.index.name, 'sub_lower_name_idx')
-        self.assertEqual(max(p.name for p in (WEB / 'startScan' / 'migrations').glob('0*.py')), '0036_subdomain_lower_name_idx.py')
+        self.assertEqual(max(p.name for p in (WEB / 'startScan' / 'migrations').glob('0*.py')), '0037_subdomain_lower_name_idx.py')
 
     def test_the_name_lookups_of_manual_only_read_it(self):
         # the statements of other_holder and _holders, as they are written there

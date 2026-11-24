@@ -222,7 +222,7 @@ class Subdomain(models.Model):
 			models.Index(fields=['target_domain', '-score'], name='sub_domain_score_idx'),
 			# a name matched without case (archive closures, a host's group of names): 0030
 			models.Index(Upper('name'), name='sub_upper_name_idx'),
-			# a name looked up in lower case within a project (cveFeed.manual_only, run for every host a sweep considers): 0036
+			# a name looked up in lower case within a project (cveFeed.manual_only, run for every host a sweep considers): 0037
 			models.Index(Lower('name'), name='sub_lower_name_idx'),
 		]
 		constraints = [
@@ -702,6 +702,15 @@ class Port(models.Model):
 	extra = models.JSONField(default=dict, blank=True)
 	source = models.CharField(max_length=32, blank=True, default='')
 	last_seen = models.DateTimeField(null=True, blank=True)
+	# The address this row is the port of (the one ``IpAddress.ports`` links it to): a port's key is (address, number, protocol), and the link
+	# table alone cannot hold a unique key over the port's number. Written by the port writers (startScan.port_rows), filled for the rows
+	# stored before by migration 0036. No database foreign key and no cascade: deleting an address leaves its port rows as before.
+	ip_address = models.ForeignKey('IpAddress', on_delete=models.DO_NOTHING, null=True, blank=True, db_constraint=False, db_index=False,
+								   related_name='+', editable=False)
+
+	class Meta:
+		# one row per port of an address: migration 0036 merged the duplicates. Rows with no address (NULL) are not covered.
+		constraints = [models.UniqueConstraint(fields=['ip_address', 'number', 'protocol'], name='uniq_port_ip_number_proto')]
 
 	def __str__(self):
 		return str(self.service_name)

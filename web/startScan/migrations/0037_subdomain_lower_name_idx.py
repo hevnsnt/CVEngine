@@ -15,7 +15,7 @@ class Migration(migrations.Migration):
     atomic = False
 
     dependencies = [
-        ('startScan', '0035_uniq_cweid_name'),
+        ('startScan', '0036_uniq_port_ip_number'),
     ]
 
     operations = [
