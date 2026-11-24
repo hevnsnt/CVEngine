@@ -1643,11 +1643,12 @@ def _reserve_validation_check(project_id):
     from django.db import transaction
     from django.db.models import F
     from cveFeed.models import ValidationBudget
+    from cvengine.usage_stamps import durable_commit
     day = _today().date()
     limits = ((f'project:{project_id}', cap('VALIDATE_MAX_PER_PROJECT_DAY')), ('global', cap('VALIDATE_MAX_PER_DAY')))
     for attempt in range(2):
         try:
-            with transaction.atomic():
+            with transaction.atomic(), durable_commit():  # a reservation a crash could undo would let the day's cap be passed
                 for scope, limit in limits:
                     if not ValidationBudget.objects.filter(day=day, scope=scope, reserved__lt=limit).update(reserved=F('reserved') + 1):
                         raise _Refused
