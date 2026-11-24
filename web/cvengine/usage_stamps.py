@@ -16,6 +16,11 @@ Two tools, used together by each stamp:
 
 Never use either for a security record: the audit log, a revocation, a lockout or failure counter, a one-time secret read, or anything that decides
 access. Those stay fully synchronous.
+
+The counterpart, ``durable_commit()``: the database runs with ``synchronous_commit=off`` server wide (``POSTGRES_SYNCHRONOUS_COMMIT`` in the compose
+files, docs/CONFIGURATION.md), so every commit may lose its last few hundred milliseconds on a crash. The few writes that must survive one (an audit
+row, a token revocation, an address ban, a validation budget reservation) run with ``SET LOCAL synchronous_commit TO ON``: their commit waits for the
+WAL flush, as every commit did before. A flush covers all WAL written before it, so the writes the same request committed earlier become durable too.
 """
 from contextlib import contextmanager
 
@@ -57,4 +62,25 @@ def relaxed_commit(using=DEFAULT_DB_ALIAS):
     with transaction.atomic(using=using):
         with conn.cursor() as cursor:
             cursor.execute('SET LOCAL synchronous_commit TO OFF')
+        yield True
+
+
+@contextmanager
+def durable_commit(using=DEFAULT_DB_ALIAS):
+    """Make the commit that holds the block's writes wait for the WAL flush, whatever the server wide ``synchronous_commit``. Outside a transaction
+    the block runs in its own; inside a caller's open transaction the setting applies to that transaction (``SET LOCAL`` lasts until its commit),
+    so the caller's commit, which carries the block's writes, is the durable one. No savepoint is opened, so a failing write inside a caller's
+    transaction behaves exactly as before. Yields True when the setting was made, False on a database that is not PostgreSQL."""
+    conn = connections[using]
+    if conn.vendor != 'postgresql':
+        yield False
+        return
+    if conn.in_atomic_block:
+        with conn.cursor() as cursor:
+            cursor.execute('SET LOCAL synchronous_commit TO ON')
+        yield True
+        return
+    with transaction.atomic(using=using):
+        with conn.cursor() as cursor:
+            cursor.execute('SET LOCAL synchronous_commit TO ON')
         yield True
