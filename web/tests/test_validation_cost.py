@@ -93,6 +93,9 @@ class BudgetReservationTests(TestCase):
 		with CaptureQueriesContext(connection) as ctx:
 			self.assertTrue(self.reserve(7, 100, 100))
 		sql = [q['sql'] for q in ctx.captured_queries if not q['sql'].startswith(('SAVEPOINT', 'RELEASE'))]
+		# the reservation commits durably (usage_stamps.durable_commit): one SET LOCAL first, then the two updates
+		self.assertEqual(sql[0], 'SET LOCAL synchronous_commit TO ON', sql)
+		sql = sql[1:]
 		self.assertEqual(len(sql), 2, sql)
 		self.assertTrue(all(s.startswith('UPDATE "cveFeed_validationbudget"') for s in sql))
 		self.assertFalse(any('FOR UPDATE' in q['sql'] for q in ctx.captured_queries))
