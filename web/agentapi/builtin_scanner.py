@@ -9,6 +9,7 @@ next run revokes the scanner's token and removes any blob, so the container idle
 """
 import logging
 import os
+import stat
 from datetime import timedelta
 
 from django.utils import timezone
@@ -32,11 +33,20 @@ def bootstrap_dir():
     return os.environ.get('CVENGINE_SCANNER_BOOTSTRAP_DIR', '/var/lib/cvengine-scanner').strip() or '/var/lib/cvengine-scanner'
 
 
-def scanner_uid():
+BLOB_MODE = 0o640  # the writer and the group the scanner is given, never anyone else
+
+
+class BlobPermissionError(OSError):
+    """The blob could not be made mode 0640 with the scanner's group, so none was left behind (it is never written readable by others)."""
+
+
+def blob_gid():
+    """The group the scanner container reads the blob with: the application's group, 10002, which docker-compose.yml gives the scanner service with
+    ``group_add`` (``CVENGINE_APP_GID``, as for the ownership service)."""
     try:
-        return int(os.environ.get('CVENGINE_SCANNER_UID', '10001'))
+        return int(os.environ.get('CVENGINE_APP_GID', '10002'))
     except ValueError:
-        return 10001
+        return 10002
 
 
 def blob_path():
@@ -77,16 +87,35 @@ def _write_blob(text):
     path = blob_path()
     os.makedirs(os.path.dirname(path), mode=0o750, exist_ok=True)
     tmp = f'{path}.{os.getpid()}.tmp'
+    gid = blob_gid()
+    # Created 0600, then given the scanner's group and opened to it (0640): the scanner runs as its own account with group 10002 added
+    # (docker-compose.yml, group_add), and the folder is 10002's with mode 2750 (web/ownership.sh). The writer is uid 10002 with no capability, so
+    # it can set its own group on its own file but never give the file away. When the file cannot be made 0640 with that group it is removed and
+    # the run fails: the secret is never left readable by others.
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, 'w') as handle:
-        handle.write(text)
-    try:  # the scanner container runs as an unprivileged user that must be able to read it; given to that user, the file stays 0600
-        os.chown(tmp, scanner_uid(), scanner_uid())
-    except OSError:
-        # This process is not root (the server runs as its own account, docs/DEPLOYMENT.md) and cannot give the file away, so the scanner reads it
-        # as "other". Only celery (which writes it) and the scanner (read-only) mount this volume, and Docker's volume folder is root's on the host.
-        os.chmod(tmp, 0o644)
-    os.replace(tmp, path)
+    try:
+        with os.fdopen(fd, 'w') as handle:
+            handle.write(text)
+            handle.flush()
+            try:
+                os.fchown(handle.fileno(), -1, gid)
+                os.fchmod(handle.fileno(), BLOB_MODE)
+            except OSError as exc:
+                raise BlobPermissionError(f'cannot give the built-in scanner blob group {gid} and mode 0640: {exc}') from exc
+            st = os.fstat(handle.fileno())
+            if stat.S_IMODE(st.st_mode) != BLOB_MODE or st.st_gid != gid:
+                raise BlobPermissionError(f'the built-in scanner blob came out mode {oct(stat.S_IMODE(st.st_mode))} group {st.st_gid}, '
+                                          f'not 0640 group {gid}')
+        os.replace(tmp, path)
+    except BaseException as exc:
+        try:
+            os.remove(tmp)
+        except FileNotFoundError:
+            pass
+        if isinstance(exc, BlobPermissionError):
+            logger.error('built-in scanner: no enrollment written, %s. The writer must own the file and be in group %s (or be root); '
+                         '`docker compose run --rm ownership` sets up the folder (docs/BUILTIN-SCANNER.md)', exc, gid)
+        raise
 
 
 def _remove_blob():
@@ -105,7 +134,8 @@ def _admin():
 def ensure(now=None):
     """Bring the built-in scanner's enrollment up to date and say where it stands: ``disabled``, ``no_admin`` (no App Admin yet to own it),
     ``enrolled`` (a live built-in Sentinel exists; any leftover blob is removed), ``waiting`` (a blob is ready and still good) or
-    ``blob_written`` (a new one was written this run)."""
+    ``blob_written`` (a new one was written this run). Raises ``BlobPermissionError`` (and logs why) when the blob cannot be made mode 0640 with the
+    scanner's group: nothing is written then, and the enrollment made for it is deleted."""
     from agentapi import sentinel_broker as broker
     from agentapi.models import SentinelEnrollment
     from tenancy import audit
@@ -128,7 +158,11 @@ def ensure(now=None):
     row = SentinelEnrollment.objects.create(token_hash=broker._hash_enrollment(raw), prefix=raw[:10], created_by=admin, expires_at=expires_at,
                                             network='external', builtin=True)
     payload = {'enrollment_token': raw, 'server_url': server_url(), 'expires_at': expires_at.isoformat(), 'scope': 'instance'}
-    _write_blob(broker.encode_enrollment_blob(payload))
+    try:
+        _write_blob(broker.encode_enrollment_blob(payload))
+    except BlobPermissionError:
+        row.delete()  # its secret was never handed over; the next run tries again with a new one
+        raise
     audit.record(admin, 'sentinel.enroll.generate', 'instance enrollment for the built-in scanner', enrollment_id=row.pk)
     logger.info('built-in scanner: enrollment %s ready until %s', row.prefix, expires_at.isoformat())
     return {'state': 'blob_written', 'expires_at': expires_at.isoformat()}

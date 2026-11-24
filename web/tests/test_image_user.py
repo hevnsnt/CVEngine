@@ -150,6 +150,56 @@ class ComposeLayoutTests(SimpleTestCase):
                 self.assertEqual(dev[name]['user'], '0:0', 'the bind-mounted files are the developer\'s, not uid 10002\'s')
 
 
+class _ComposeLoader(yaml.SafeLoader):
+    """Reads Compose's own tags (``!reset``, ``!override``) as their plain value."""
+
+
+_ComposeLoader.add_multi_constructor('!', lambda loader, suffix, node: loader.construct_sequence(node) if isinstance(node, yaml.SequenceNode)
+                                     else loader.construct_mapping(node) if isinstance(node, yaml.MappingNode) else loader.construct_scalar(node))
+
+
+class ScannerGroupTests(SimpleTestCase):
+    """The built-in scanner keeps its image's own user and is given group 10002, the server's, to read the 0640 enrollment blob."""
+
+    OVERLAYS = ('docker-compose.hostnet.yml', 'docker-compose.macvlan.yml', 'docker-compose.apparmor.yml')
+
+    def overlay(self, name):
+        return yaml.load((ROOT / name).read_text(), Loader=_ComposeLoader)['services'].get('scanner', {})
+
+    def test_the_default_compose_gives_the_scanner_group_10002_and_keeps_its_own_user(self):
+        scanner = compose()['scanner']
+        self.assertEqual([str(g) for g in scanner.get('group_add', [])], ['10002'])
+        self.assertNotIn('user', scanner, "the Sentinel image's own user (uid 10001) runs it")
+        self.assertEqual(volumes(scanner)['/bootstrap'], ('scanner_bootstrap', True))
+
+    def test_every_scanner_overlay_keeps_the_group(self):
+        # Compose merges an overlay's group_add into the base list, and none of them sets a user or replaces the list
+        for name in self.OVERLAYS:
+            with self.subTest(overlay=name):
+                scanner = self.overlay(name)
+                self.assertNotIn('user', scanner)
+                self.assertNotIn('group_add', scanner)
+
+    def test_docker_compose_config_has_the_group_in_the_default_stack_and_with_the_hostnet_overlay(self):
+        if shutil.which('docker') is None:
+            self.skipTest('docker is not installed here; the file checks above still run')
+        for files in (['docker-compose.yml'], ['docker-compose.yml', 'docker-compose.hostnet.yml']):
+            with self.subTest(files=files):
+                args = ['docker', 'compose', '--project-directory', str(ROOT)]
+                for name in files:
+                    args += ['-f', str(ROOT / name)]
+                out = subprocess.run(args + ['config', '--format', 'json', 'scanner'], capture_output=True, text=True, timeout=120,
+                                     env={**os.environ, 'COMPOSE_PROFILES': ''})
+                if out.returncode != 0 and 'unknown flag' in out.stderr:
+                    self.skipTest(f'this docker compose cannot print one service as JSON: {out.stderr.strip()}')
+                self.assertEqual(out.returncode, 0, out.stderr)
+                scanner = json.loads(out.stdout)['services']['scanner']
+                self.assertEqual([str(g) for g in scanner.get('group_add', [])], ['10002'])
+                self.assertNotIn('user', scanner)
+                if 'docker-compose.hostnet.yml' in files:
+                    self.assertEqual(scanner.get('network_mode'), 'host')
+
+
 class UpdateOrderTests(SimpleTestCase):
     """The ownership service runs after the image is built and before anything of the new image runs, on every path; collectstatic runs in celery."""
 
@@ -284,8 +334,19 @@ class OwnershipScriptTests(unittest.TestCase):
         self.assertEqual(self.mode(secret), 0o600)
         self.assertEqual(self.mode(self.web), 0o1775, 'the sticky bit: the application cannot replace a file it does not own')
         self.assertEqual(self.mode(self.root / 'usr/src/scan_results'), 0o750)
+        self.assertEqual(self.mode(self.root / 'var/lib/cvengine-scanner'), 0o2750, 'setgid: the blob takes group 10002, which the scanner is given')
         self.assertTrue((self.web / '.update-approved').is_symlink())
         self.assertEqual(self.run_it().strip(), f'ownership: every application path already belongs to uid {self.uid}; nothing changed')
+
+    def test_a_scanner_blob_readable_by_others_is_closed_to_the_group(self):
+        blob = self.root / 'var/lib/cvengine-scanner/blob'
+        blob.write_text('enrol')
+        os.chmod(blob, 0o644)
+        self.assertIn('cvengine-scanner/blob', self.run_it())
+        self.assertEqual(self.mode(blob), 0o640)
+        self.assertEqual(os.stat(blob).st_gid, self.gid)
+        self.assertEqual(blob.read_text(), 'enrol')
+        self.assertNotIn('cvengine-scanner/blob', self.run_it())
 
     def test_an_existing_secret_is_kept_and_its_mode_tightened(self):
         (self.web / 'secret').write_text('k' * 64 + '\n')
@@ -308,9 +369,22 @@ class HostDirTests(SimpleTestCase):
             self.assertEqual(updater._file('.commit'), '/src/web/.commit')
             self.assertEqual(watchdog._home(), '/src/web')
 
-    def test_the_scanner_blob_is_readable_by_the_scanner_when_it_cannot_be_given_away(self):
+    def test_the_scanner_blob_is_0640_with_the_group_the_scanner_is_given(self):
+        # celery is uid 10002 with no capability: it cannot give the file away, but it can give its own file its own group (10002)
         from agentapi import builtin_scanner
-        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {'CVENGINE_SCANNER_BOOTSTRAP_DIR': tmp}), \
-                mock.patch('os.chown', side_effect=PermissionError('not root')):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {'CVENGINE_SCANNER_BOOTSTRAP_DIR': tmp,
+                                                                                 'CVENGINE_APP_GID': str(os.getgid())}):
             builtin_scanner._write_blob('enrol')
-            self.assertEqual(stat.S_IMODE(os.stat(os.path.join(tmp, 'blob')).st_mode), 0o644)
+            info = os.stat(os.path.join(tmp, 'blob'))
+            self.assertEqual(stat.S_IMODE(info.st_mode), 0o640)
+            self.assertEqual(info.st_gid, os.getgid())
+
+    def test_the_scanner_blob_is_never_written_readable_by_others(self):
+        # a writer that cannot give the file the scanner's group (as the old fallback to 0644 did) writes nothing at all
+        from agentapi import builtin_scanner
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {'CVENGINE_SCANNER_BOOTSTRAP_DIR': tmp, 'CVENGINE_APP_GID': '10002'}), \
+                mock.patch('os.fchown', side_effect=PermissionError(1, 'Operation not permitted')), \
+                self.assertLogs('agentapi.builtin_scanner', 'ERROR'):
+            with self.assertRaises(builtin_scanner.BlobPermissionError):
+                builtin_scanner._write_blob('enrol')
+            self.assertEqual(os.listdir(tmp), [], 'neither the blob nor its temporary file is left')

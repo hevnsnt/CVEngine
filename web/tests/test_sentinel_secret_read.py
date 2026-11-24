@@ -43,7 +43,9 @@ class SecretBase(TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.dir.cleanup)
-        env = mock.patch.dict(os.environ, {'CVENGINE_BUILTIN_SCANNER': '1', 'CVENGINE_SCANNER_BOOTSTRAP_DIR': self.dir.name}, clear=False)
+        # the blob's group: the test runner's own, which it can always give its own file (10002, the image's, is not the CI runner's)
+        env = mock.patch.dict(os.environ, {'CVENGINE_BUILTIN_SCANNER': '1', 'CVENGINE_SCANNER_BOOTSTRAP_DIR': self.dir.name,
+                                           'CVENGINE_APP_GID': str(os.getgid())}, clear=False)
         env.start()
         self.addCleanup(env.stop)
         self.logs = Capture()

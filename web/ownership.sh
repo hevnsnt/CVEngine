@@ -8,7 +8,8 @@
 # are root's. This changes only what is not already right, says how many paths it changed in one line, and changes nothing on a second run:
 #   scan results          every entry to uid 10002 (groups kept); the folder itself 10002:101 (the proxy's nginx group), mode 0750
 #   static files, generated templates, ~/.config (the CVE seed folder), the owner fallback, the AI reviewer's token folder: every entry to 10002:10002
-#   the built-in scanner's enrollment folder: the folder only (the blob in it stays the scanner's until the server writes the next one)
+#   the built-in scanner's enrollment folder: the folder only, 10002:10002 mode 2750 (setgid: the blob the server writes there is 0640, group 10002,
+#   which the scanner service is given with group_add); a blob left readable by others is made group 10002 and 0640
 #   the host's web/ folder (mounted at /var/lib/cvengine/web): group 10002 and mode 1775, so the application can create its update requests there
 #   but cannot change, rename or remove any file it does not own (the sticky bit); the Django secret (web/secret, mode 0600) and the request
 #   files the containers wrote as root before (.update-approved and the rest) become 10002's. Nothing else in web/ changes owner: the source stays
@@ -57,10 +58,24 @@ top "$R/usr/src/scan_results" "$APP_UID:$PROXY_GID" 750
 for dir in /usr/src/app/staticfiles /root/cvengine-generated-templates /home/cvengine/.config /var/lib/cvengine-db-owner /var/lib/cvengine-reviewer; do
     tree "$R$dir" "$APP_UID:$APP_GID" "( ! -user $APP_UID -o ! -group $APP_GID )"
 done
-if [ -d "$R/var/lib/cvengine-scanner" ] && [ "$(stat -c '%u' "$R/var/lib/cvengine-scanner")" != "$APP_UID" ]; then
-    chown "$APP_UID:$APP_GID" "$R/var/lib/cvengine-scanner"
+# The built-in scanner's enrollment folder: 10002's, group 10002 (the scanner service has it through group_add), setgid so a blob created in it
+# takes that group, and closed to others. A blob left readable by others (the 0644 an earlier writer fell back to) is closed to group 10002 and 0640.
+# The setgid bit is set while the folder's group is still root's: this root has no FSETID capability and is not in group 10002, and the kernel
+# drops the bit from a chmod by such a process; a later change of a folder's group keeps it.
+scanner_dir="$R/var/lib/cvengine-scanner"
+if [ -d "$scanner_dir" ] && [ "$(stat -c '%u:%g %a' "$scanner_dir")" != "$APP_UID:$APP_GID 2750" ]; then
+    chown "$APP_UID:$(id -g)" "$scanner_dir"
+    chmod 2750 "$scanner_dir"
+    chgrp "$APP_GID" "$scanner_dir"
     changed=$((changed + 1))
     report="$report cvengine-scanner/"
+fi
+blob="$R/var/lib/cvengine-scanner/blob"
+if [ -f "$blob" ] && [ ! -L "$blob" ] && [ -n "$(find "$blob" -perm /0007 -print)" ]; then
+    chgrp -h "$APP_GID" "$blob"
+    chmod 0640 "$blob"
+    changed=$((changed + 1))
+    report="$report cvengine-scanner/blob"
 fi
 
 if [ -d "$HOST_WEB" ]; then

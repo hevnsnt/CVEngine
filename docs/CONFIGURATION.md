@@ -267,7 +267,7 @@ and `no-new-privileges` ([DEPLOYMENT.md](DEPLOYMENT.md#who-the-containers-run-as
 |---|---|---|
 | `CVENGINE_HOST_DIR` | empty (the source folder) | Set by docker-compose.yml to `/var/lib/cvengine/web`: where the containers see the host's `web/` folder (the update channel and the secret), now that they run the image's own copy of the source. Not for `.env`. |
 | `CVENGINE_LOG_DIR` | `/home/cvengine/logs` in the image, else the working directory | Where `errors.log`, `db.log` and `celery.log` are written (inside the container; every line is in the container log too, `docker compose logs`). |
-| `CVENGINE_APP_UID`, `CVENGINE_APP_GID`, `CVENGINE_PROXY_GID` | `10002`, `10002`, `101` | Read by the ownership service (`web/ownership.sh`): the account and the proxy group it hands the paths to. They must match the image; change them only together with `web/Dockerfile`. |
+| `CVENGINE_APP_UID`, `CVENGINE_APP_GID`, `CVENGINE_PROXY_GID` | `10002`, `10002`, `101` | Read by the ownership service (`web/ownership.sh`): the account and the proxy group it hands the paths to. `CVENGINE_APP_GID` is also the group celery gives the built-in scanner's enrollment blob (`agentapi/builtin_scanner.py`). They must match the image and the scanner's `group_add` in `docker-compose.yml`; change them only together with `web/Dockerfile`. |
 | `CVENGINE_OWNERSHIP_ROOT` | empty | Puts every path of the ownership service below another folder; for its tests only. |
 
 ## Built-in scanner
@@ -531,7 +531,7 @@ Read by `install.sh`, the compose files and the scripts, not by the application.
 | `CVENGINE_UPSTREAM_SECONDS`, `CVENGINE_HEARTBEAT_SECONDS` | `1800`, `15` | The update watcher's upstream check interval and its heartbeat (the second is for the tests). |
 | `CVENGINE_UPDATE_FROM`, `CVENGINE_UPDATE_FROM_SHA`, `CVENGINE_REQUEUE`, `CVENGINE_SCANNER_POLL` | | Set by `scripts/update.sh` and `scripts/scanner.sh` for their own re-runs. Do not set them. |
 | `CVENGINE_AUTO_DEPLOY_DRAIN_SECONDS`, `CVENGINE_AUTO_DEPLOY_RETRY_SECONDS` | `1800`, `3600` | See [Updates](#updates). |
-| `CVENGINE_SCANNER_BOOTSTRAP_DIR`, `CVENGINE_SCANNER_UID` | `/var/lib/cvengine-scanner`, `10001` | Where the server's celery container writes the built-in scanner's enrollment blob (the `scanner_bootstrap` volume) and the user id it hands the file to. Change them only together with the compose volume. |
+| `CVENGINE_SCANNER_BOOTSTRAP_DIR` | `/var/lib/cvengine-scanner` | Where the server's celery container writes the built-in scanner's enrollment blob (the `scanner_bootstrap` volume), mode 0640 with group `CVENGINE_APP_GID` (10002), which the scanner service is given with `group_add`. Change it only together with the compose volume. |
 
 Set inside the compose file for the containers, not for you to change: `CVENGINE_SENTINEL_BUILTIN`, `CVENGINE_SENTINEL_BLOB_FILE` and `CVENGINE_SENTINEL_ALLOW_INSECURE` (the built-in scanner), `CVENGINE_REVIEWER_SERVER` and `CVENGINE_REVIEWER_TOKEN_FILE` (the AI reviewer container).
 
