@@ -73,7 +73,7 @@ class VulnerabilityReportSetting(models.Model):
     company_address = models.CharField(max_length=200, null=True, blank=True)
     company_email = models.CharField(max_length=100, null=True, blank=True)
     company_website = models.CharField(max_length=100, null=True, blank=True)
-    show_cvengine_banner = models.BooleanField(default=True)
+    show_cvengine_banner = models.BooleanField(default=True, db_default=True)
     show_executive_summary = models.BooleanField(default=True)
     executive_summary_description = models.TextField(blank=True, null=True)
     show_footer = models.BooleanField(default=False)
