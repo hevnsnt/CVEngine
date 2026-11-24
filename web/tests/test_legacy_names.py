@@ -147,6 +147,34 @@ class CertificateTests(Base):
         self.assertEqual(sorted(os.listdir(folder)), ['cvengine.pem', 'cvengine_chain.pem', 'cvengine_rsa.key'])
         self.assertEqual((folder / 'cvengine.pem').read_text(), '-----rengine.pem-----\n')
 
+    def test_a_certificate_folder_of_root_is_changed_by_a_throwaway_root_container(self):
+        # scripts/update.sh run by a member of the docker group: make certs wrote the folder as root, so the link is made in a container
+        from unittest import mock
+        self.certs()
+        calls = []
+
+        def fake_run(argv, **kw):
+            calls.append(argv)
+            out = 'cvengine/web:latest\nnginx:alpine@sha256:abc\n' if argv[:2] == ['docker', 'ps'] else ''
+            return subprocess.CompletedProcess(argv, 0, out, '')
+        with mock.patch.object(names.os, 'link', side_effect=PermissionError(13, 'denied')), mock.patch.object(names, 'run', fake_run):
+            code, out = self.run_script('migrate')
+        self.assertEqual(code, 0)
+        docker_run = [c for c in calls if c[:2] == ['docker', 'run']]
+        self.assertEqual(len(docker_run), 1)
+        self.assertIn('nginx:alpine@sha256:abc', docker_run[0])
+        self.assertIn('--network', docker_run[0])
+        self.assertEqual(docker_run[0][-1], 'ln /c/rengine.pem /c/cvengine.pem && ln /c/rengine_rsa.key /c/cvengine_rsa.key && ln /c/rengine_chain.pem /c/cvengine_chain.pem')
+        self.assertIn('cvengine.pem, cvengine_rsa.key, cvengine_chain.pem', out)
+
+    def test_without_an_image_to_do_it_as_root_migrate_stops_the_update_before_anything_changes(self):
+        from unittest import mock
+        self.certs()
+        with mock.patch.object(names.os, 'link', side_effect=PermissionError(13, 'denied')), \
+                mock.patch.object(names, 'run', lambda argv, **kw: subprocess.CompletedProcess(argv, 0, '', '')):
+            code, _ = self.run_script('migrate')
+        self.assertEqual(code, 1)
+
     def test_an_old_name_that_differs_from_the_new_file_is_kept(self):
         folder = self.certs()
         (folder / 'cvengine.pem').write_text('a newer certificate\n')

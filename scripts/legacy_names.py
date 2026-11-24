@@ -195,17 +195,40 @@ def migrate_overlays(root, argv):
     return changed
 
 
+SHELL_IMAGES = re.compile(r'(^|/)(nginx|redis|postgres|alpine)[:@]')
+
+
+def as_root(folder, script):
+    """Run a short sh script as root in a throwaway container, with ``folder`` mounted at /c. The certificate folder belongs to root (make certs
+    writes it from a container), while scripts/update.sh may run as a member of the docker group; the image is one already on this host
+    (a stock image of the stack: they all have sh), so nothing is pulled."""
+    listed = run(['docker', 'ps', '--format', '{{.Image}}']).stdout.split()
+    image = next((i for i in listed if SHELL_IMAGES.search(i)), None)
+    if image is None:
+        raise PermissionError(13, 'not allowed, and no running container image to do it as root', folder)
+    done = run(['docker', 'run', '--rm', '--network', 'none', '--user', '0', '-v', f'{os.path.realpath(folder)}:/c', '--entrypoint', 'sh', image,
+                '-c', script])
+    if done.returncode != 0:
+        raise PermissionError(13, f'could not change it as root either ({done.stderr.strip()[:120]})', folder)
+
+
 def migrate_certs(root):
     folder = os.path.join(root, 'secrets', 'certs')
-    linked = []
+    linked, by_root = [], []
     for old in CERTS:
         src, dst = os.path.join(folder, old), os.path.join(folder, old.replace(OLD, NEW))
         if os.path.lexists(src) and not os.path.lexists(dst):
             try:
                 os.link(src, dst, follow_symlinks=False)
+            except PermissionError:
+                by_root.append((old, os.path.basename(dst)))
+                continue
             except OSError:
                 shutil.copy2(src, dst, follow_symlinks=False)
             linked.append(os.path.basename(dst))
+    if by_root:
+        as_root(folder, ' && '.join(f'ln /c/{a} /c/{b}' for a, b in by_root))
+        linked += [b for _, b in by_root]
     return linked
 
 
@@ -217,7 +240,10 @@ def cleanup_certs(root):
         if not os.path.lexists(src) or not os.path.lexists(dst):
             continue
         if os.path.samestat(os.lstat(src), os.lstat(dst)) or _same_bytes(src, dst):
-            os.unlink(src)
+            try:
+                os.unlink(src)
+            except PermissionError:
+                as_root(folder, f'rm -f /c/{old}')
             removed.append(old)
         else:
             kept.append(old)
