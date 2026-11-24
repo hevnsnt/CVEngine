@@ -165,6 +165,7 @@ class Pass:
         self.activity_new = []
         self.groups = dict(engine.get('groups') or {})
         self.claims = [tuple(c) for c in engine.get('claims') or []]
+        self._held = None  # the set of self.claims, built on the first hold_claim
         self.token = engine.get('token') or uuid.uuid4().hex[:16]
         self.refill = False
         self.works = {}  # key -> restored _Dispatch, for this pass
@@ -257,8 +258,12 @@ class Pass:
 
     def hold_claim(self, key, owner):
         """A Redis claim (key, owner) this pass holds that must outlive it: kept by the drive while the run waits, released when the run ends."""
-        if (key, owner) not in self.claims:
-            self.claims.append((key, owner))
+        pair = (key, owner)
+        if self._held is None:  # a set beside the list (only this method adds to it): a test on the list scanned every claim held, per claim
+            self._held = set(self.claims)
+        if pair not in self._held:
+            self.claims.append(pair)
+            self._held.add(pair)
 
     def claim_owner(self, service):
         return f'stagerun:{self.token}:{service}'[:120]
@@ -509,11 +514,10 @@ def _release_claims(claims):
     if client is None:
         return
     from cvengine import resources
-    for key, owner in claims:
-        try:
-            resources.claim_release(client, key, owner)
-        except Exception:  # noqa: BLE001 - a claim left behind expires on its own
-            pass
+    try:  # one call per chunk of claims; a chunk that fails is retried key by key inside, so one bad key never keeps the rest
+        resources.claim_release_many(client, claims)
+    except Exception:  # noqa: BLE001 - a claim left behind expires on its own
+        pass
 
 
 def _renew_claims(claims):
@@ -521,11 +525,10 @@ def _renew_claims(claims):
     if client is None:
         return
     from cvengine import resources
-    for key, owner in claims:
-        try:
-            resources.claim_refresh(client, key, owner, HOLD_SECONDS)
-        except Exception:  # noqa: BLE001
-            pass
+    try:  # a run can hold tens of thousands of claims: one call per chunk, not one round trip per claim (see claim_refresh_many)
+        resources.claim_refresh_many(client, claims, HOLD_SECONDS)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 # --- waking ------------------------------------------------------------------------------------------------------------------------------
