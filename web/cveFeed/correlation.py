@@ -13,6 +13,11 @@ import json
 import logging
 import os
 import re
+import sys
+import threading
+import time
+from datetime import datetime, timedelta
+from datetime import timezone as dt_timezone
 from functools import cmp_to_key
 
 from cvengine_scanner import cms, versions
@@ -764,12 +769,7 @@ def build_product_index(cves):
 
     `cves` is any iterable of CVEEntry (a queryset or a list).
     """
-    index = ProductIndex()
-    for cve in cves:
-        for item in (cve.affected or []):
-            for token in affected_product_tokens(item):
-                index.setdefault(token, set()).add(cve.id)
-    return index
+    return _build_index(cves, None)
 
 
 def _candidate_tokens(token, product_index):
@@ -2353,22 +2353,176 @@ def correlate_subdomains(subdomains, product_index, cve_by_id, min_confidence=0.
     return hosts, matches + save_matches(rows, covered=(ids, pool), retriage=retriage)
 
 
-# One product index per process, rebuilt only when the CVE table changes (a new or re-synced entry moves the key).
+# One product index per process. When the CVE table changes (a new or re-synced entry moves the key) the cached pool is refreshed in place of
+# a full build: only the rows whose synced_at moved since the pool's own stamp are read, and the rows that left the pool (deleted, rejected,
+# only usable from the host) are found by one query of the ids. A full build of every row runs on the first call, when a test or caller
+# clears the key, and at most every POOL_FULL_EVERY_S seconds while the key keeps moving (a safety net for a write that changes a pool
+# column without moving synced_at, which the code base does not do: see cveFeed.intel's notes on synced_at).
 _INDEX_CACHE = {"key": None, "value": None}
 _LOCAL_CACHE = {"key": None, "value": None}
 _CVE_FIELDS = ("id", "cve_id", "affected", "kev", "epss_reached", "exploit_db", "cvss", "cvss_vector", "published_at",
                "local_only")  # the vector, date and locality: cveFeed.windows_builds.eligible
+POOL_OVERLAP = timedelta(minutes=10)  # rows stamped this long before the pool's newest stamp are read again: a writer commits after it stamps
+POOL_FULL_EVERY_S = 1800
+POOL_REFRESH_MAX = (500, 0.2)  # more changed or added rows than both this many and this share of the pool: a full build is as cheap
+_NO_DATE = datetime.min.replace(tzinfo=dt_timezone.utc)  # only ever compared with another entry that has no date
+POOL_YIELD_ROWS = 2000  # a build lets the other greenlets of a gevent worker run every this many rows
+_POOL_LOCKS = {"cve": threading.Lock(), "local": threading.Lock()}
 
 
-def _pool(qs, cache, key):
-    if cache["key"] == key:
+def _gevent_sleep():
+    """gevent.sleep in a gevent worker, else None. Never imports gevent: a process that has not loaded and patched it is not a gevent worker
+    (the gevent_db module's gevent_patched asks the same question)."""
+    monkey = sys.modules.get("gevent.monkey")
+    if monkey is None or not monkey.is_module_patched("socket"):
+        return None
+    return sys.modules["gevent"].sleep
+
+
+def _pool_order(cve):
+    """The pool's order, as the full build reads it: published_at DESC (Postgres puts an empty date first) then id DESC."""
+    return (cve.published_at is None, cve.published_at or _NO_DATE, cve.id)
+
+
+def _load_rows(qs, sleep):
+    """``{id: CVEEntry}`` of a queryset, each entry's affected list cleaned (``clean_affected``), yielding to gevent while it builds."""
+    out = {}
+    for n, cve in enumerate(qs, 1):
+        cve.affected = clean_affected(cve.affected)
+        out[cve.id] = cve
+        if sleep is not None and n % POOL_YIELD_ROWS == 0:
+            sleep(0)
+    return out
+
+
+def _cve_tokens(cve):
+    tokens = set()
+    for item in (cve.affected or []):
+        tokens |= affected_product_tokens(item)
+    return tokens
+
+
+def _build_index(cves, sleep):
+    """``build_product_index``, yielding to gevent every POOL_YIELD_ROWS entries."""
+    index = ProductIndex()
+    for n, cve in enumerate(cves, 1):
+        for token in _cve_tokens(cve):
+            index.setdefault(token, set()).add(cve.id)
+        if sleep is not None and n % POOL_YIELD_ROWS == 0:
+            sleep(0)
+    return index
+
+
+def patch_product_index(index, old_cves, new_cves):
+    """A new ProductIndex equal to ``build_product_index`` of the pool after ``old_cves`` (the cached entries of the changed and removed ids)
+    are taken out and ``new_cves`` (the fresh rows of the changed and added ids) are put in. The index is a union of each entry's own
+    ``{token: {id}}`` and nothing else, so removing an entry's tokens and adding the new ones gives what a full build gives; a token left with
+    no id is dropped, as a full build never makes one. ``index`` is never changed: every set this touches is a copy, so a caller still
+    holding the old pool keeps reading a whole one. The word map behind ``candidate_tokens`` depends only on the tokens and is patched the same
+    way when the old index had built it."""
+    new = ProductIndex(index)
+    owned = {}
+
+    def own(token):
+        ids = owned.get(token)
+        if ids is None:
+            ids = owned[token] = set(new.get(token, ()))
+            new[token] = ids
+        return ids
+
+    for cve in old_cves:
+        for token in _cve_tokens(cve):
+            own(token).discard(cve.id)
+    for cve in new_cves:
+        for token in _cve_tokens(cve):
+            own(token).add(cve.id)
+    gone = [token for token, ids in owned.items() if not ids]
+    for token in gone:
+        del new[token]
+    born = [token for token in owned if token in new and token not in index]
+    if index._by_word is not None:
+        by_word, words_owned = dict(index._by_word), {}
+        for token, change in [(t, "discard") for t in gone] + [(t, "add") for t in born]:
+            for words in _words_for(token):
+                for word in words:
+                    if word not in words_owned:
+                        words_owned[word] = by_word[word] = set(by_word.get(word, ()))
+                    getattr(words_owned[word], change)(token)
+        for word, tokens in words_owned.items():
+            if not tokens:
+                del by_word[word]
+        new._by_word = by_word
+    return new
+
+
+def _full(qs, sleep):
+    cve_by_id = _load_rows(qs, sleep)
+    return (cve_by_id, _build_index(cve_by_id.values(), sleep)), len(cve_by_id)
+
+
+def _refresh(base, value, since, sleep):
+    """The cached pool brought up to date, or None when a full build is the better way. ``base`` is the pool's own queryset (every
+    exclusion the full build applies), so a row that became rejected or only usable from the host is missing from the ids and leaves."""
+    old_by_id, old_index = value
+    ids = set(base.values_list("id", flat=True))
+    removed = old_by_id.keys() - ids
+    added = ids - old_by_id.keys()
+    most = max(POOL_REFRESH_MAX[0], POOL_REFRESH_MAX[1] * len(ids))
+    if len(added) > most:
+        return None
+    from django.db.models import Q
+
+    # read at most one row more than a refresh takes: a sync that moved more of the table is built whole without reading it twice
+    fresh = _load_rows(base.filter(Q(synced_at__gte=since) | Q(id__in=added)).only(*_CVE_FIELDS)[:int(most) + 1], sleep)
+    if len(fresh) > most:
+        return None
+    cve_by_id = dict(old_by_id)
+    for cid in removed:
+        del cve_by_id[cid]
+    moved = bool(added)
+    for cid, cve in fresh.items():
+        old = cve_by_id.get(cid)
+        if old is not None and old.published_at != cve.published_at:
+            moved = True
+        cve_by_id[cid] = cve
+    if moved:  # a new entry, or one whose date changed: put the pool back in the order the full build reads
+        cve_by_id = dict(sorted(cve_by_id.items(), key=lambda kv: _pool_order(kv[1]), reverse=True))
+    old_cves = [old_by_id[cid] for cid in removed] + [old_by_id[cid] for cid in fresh if cid in old_by_id]
+    return (cve_by_id, patch_product_index(old_index, old_cves, fresh.values())), len(fresh)
+
+
+def _pool(base, qs, cache, key, latest, kind):
+    """The cached ``(cve_by_id, product_index)`` for ``key``, refreshed or built when the key moved. A new pool is built aside and published
+    in one assignment, so a caller never sees a half patched one; one caller per pool builds while the others of the process wait for it."""
+    if cache["key"] == key and cache["value"] is not None:
         return cache["value"]
-    cve_by_id = {c.id: c for c in qs}
-    for c in cve_by_id.values():
-        c.affected = clean_affected(c.affected)
-    value = (cve_by_id, build_product_index(cve_by_id.values()))
-    cache.update(key=key, value=value)
-    return value
+    sleep = _gevent_sleep()
+    lock = _POOL_LOCKS[kind]
+    if not lock.acquire(blocking=False):
+        if sleep is None:
+            lock.acquire()
+        else:  # in a gevent worker the lock may be a real one: wait without blocking the other greenlets
+            while not lock.acquire(blocking=False):
+                sleep(0.05)
+    try:
+        if cache["key"] == key and cache["value"] is not None:
+            return cache["value"]
+        started, cpu = time.monotonic(), time.process_time()
+        state, done = cache.get("state") or {}, None
+        if (base is not None and cache["key"] is not None and cache["value"] is not None and state.get("latest") is not None
+                and latest is not None and latest >= state["latest"] and started - state.get("full_at", 0) < POOL_FULL_EVERY_S):
+            done = _refresh(base, cache["value"], state["latest"] - POOL_OVERLAP, sleep)
+        if done is None:
+            value, rows = _full(qs, sleep)
+            how, state = "full", {"full_at": started}
+        else:
+            (value, rows), how = done, "refresh"
+        cache.update(key=key, value=value, state={**state, "latest": latest})
+        logger.info("cve pool %s %s: %d entries, %d rows read, %.2f s (%.2f s CPU), pid %d", kind, how, len(value[0]), rows,
+                    time.monotonic() - started, time.process_time() - cpu, os.getpid())
+        return value
+    finally:
+        lock.release()
 
 
 def cve_pool(cve_limit=None):
@@ -2379,11 +2533,13 @@ def cve_pool(cve_limit=None):
 
     stamp = CVEEntry.objects.aggregate(n=Count("id"), latest=Max("synced_at"), local=Count("id", filter=Q(local_only=True)))
     key = (cve_limit, stamp["n"], stamp["latest"], stamp["local"])
-    if _INDEX_CACHE["key"] == key:
+    if _INDEX_CACHE["key"] == key and _INDEX_CACHE["value"] is not None:
         return _INDEX_CACHE["value"]
     # a rejected CVE matches nothing, and neither does one only usable from the host itself (cveFeed.locality)
-    qs = CVEEntry.objects.exclude(status__iregex=DEAD_STATUS_RE).exclude(local_only=True).only(*_CVE_FIELDS).order_by("-published_at")
-    return _pool(qs[:cve_limit] if cve_limit else qs, _INDEX_CACHE, key)
+    base = CVEEntry.objects.exclude(status__iregex=DEAD_STATUS_RE).exclude(local_only=True)
+    qs = base.only(*_CVE_FIELDS).order_by("-published_at", "-id")
+    # a capped pool (the newest cve_limit entries) is always built whole
+    return _pool(None if cve_limit else base, qs[:cve_limit] if cve_limit else qs, _INDEX_CACHE, key, stamp["latest"], "cve")
 
 
 def local_pool():
@@ -2393,9 +2549,10 @@ def local_pool():
 
     from cveFeed.models import CVEEntry
 
-    qs = CVEEntry.objects.exclude(status__iregex=DEAD_STATUS_RE).filter(local_only=True)
-    stamp = qs.aggregate(n=Count("id"), latest=Max("synced_at"))
-    return _pool(qs.only(*_CVE_FIELDS).order_by("-published_at"), _LOCAL_CACHE, (stamp["n"], stamp["latest"]))
+    base = CVEEntry.objects.exclude(status__iregex=DEAD_STATUS_RE).filter(local_only=True)
+    stamp = base.aggregate(n=Count("id"), latest=Max("synced_at"))
+    return _pool(base, base.only(*_CVE_FIELDS).order_by("-published_at", "-id"), _LOCAL_CACHE, (stamp["n"], stamp["latest"]),
+                 stamp["latest"], "local")
 
 
 def _index_hit(token, product_index):

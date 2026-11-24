@@ -278,7 +278,7 @@ _POOL = {}
 def windows_cves(cve_by_id):
     """``{release id: [(cve, why, [(affected index, item)])]}``: the eligible CVEs of a correlation pool whose affected entries name a release of the
     table (memoised per pool)."""
-    if _POOL.get('id') != id(cve_by_id) or _POOL.get('size') != len(cve_by_id):
+    if _POOL.get('pool') is not cve_by_id:  # the pool itself, not its id: a refreshed pool can reuse a freed one's id and size
         out = {}
         for cve in cve_by_id.values():
             items = {}
@@ -298,7 +298,7 @@ def windows_cves(cve_by_id):
                 continue
             for key, found in items.items():
                 out.setdefault(key, []).append((cve, why, found))
-        _POOL.update(id=id(cve_by_id), size=len(cve_by_id), cves=out)
+        _POOL.update(pool=cve_by_id, cves=out)
     return _POOL['cves']
 
 
