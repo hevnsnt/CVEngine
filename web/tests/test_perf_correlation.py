@@ -270,7 +270,7 @@ class RemediationCarriesToTheNextScanTests(CorrelationPerfTests):
 
 class FindingStateCarriesTests(CorrelationPerfTests):
 	def test_a_nuclei_finding_seen_again_on_the_next_scan_keeps_its_remediation_state(self):
-		from reNgine.tasks import save_vulnerability
+		from cvengine.tasks import save_vulnerability
 		from startScan.models import Vulnerability
 		old_scan, new_scan = self._scan(), self._scan()
 		old_sub = self._host('web.perf.test', old_scan)
@@ -286,7 +286,7 @@ class FindingStateCarriesTests(CorrelationPerfTests):
 		self.assertEqual((again.remediation_status, again.remediation_note, again.subdomain_id), ('fixed', 'patched', new_sub.id))
 
 	def test_a_scanner_finding_marked_false_positive_stays_closed_on_the_next_scan(self):
-		from reNgine.tasks import save_vulnerability
+		from cvengine.tasks import save_vulnerability
 		from startScan.models import Vulnerability
 		old_scan, new_scan = self._scan(), self._scan()
 		old_sub = self._host('fp.perf.test', old_scan)

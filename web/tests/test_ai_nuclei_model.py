@@ -18,8 +18,8 @@ from cveFeed import nuclei_templates as nt
 from cveFeed.ai_usage import snapshot
 from cveFeed.models import AIUsage
 from dashboard.models import AIProviderSettings, AuditLog, Org, OrgMembership
-from reNgine import ai_nuclei_model as anm
-from reNgine import ai_providers as ai
+from cvengine import ai_nuclei_model as anm
+from cvengine import ai_providers as ai
 from tests.anthropic_fake import SHAPES, FakeAnthropic
 from tests.test_settings import send
 from tests.test_tenancy import client_for

@@ -462,7 +462,7 @@ class TestsslSweepTests(NoActivity, FallbackEnv, RouteFixture, TestCase):
     def setUp(self):
         super().setUp()
         self.scan_obj = self.scan(names=('www.rt.test',), ports=((443, 'https'),))
-        mock.patch('reNgine.resources.global_pause_requested', return_value=False).start()
+        mock.patch('cvengine.resources.global_pause_requested', return_value=False).start()
 
     def sweep(self):
         return tls_audit.sweep(self.project.id, resolve=lambda host, port, project: '203.0.113.5')
@@ -524,7 +524,7 @@ class UdpSweepTests(NoActivity, FallbackEnv, UdpBase):
         self.assertFalse(ServiceRun.objects.exists())
 
     def test_it_answers_before_the_coverage_check_and_before_any_claim(self):
-        with mock.patch('cveFeed.coverage_topup.backlog_exists') as backlog, mock.patch('reNgine.resources.redis_claim') as claim:
+        with mock.patch('cveFeed.coverage_topup.backlog_exists') as backlog, mock.patch('cvengine.resources.redis_claim') as claim:
             run_udp(runner=self.runner())
         backlog.assert_not_called()
         claim.assert_not_called()
@@ -586,7 +586,7 @@ class WpscanQuickTests(NoActivity, FallbackEnv, WordPressFixture, TestCase):
         self.assertIn('no scanner is online', out['skipped'])
 
     def test_a_pause_is_answered_before_it(self):
-        from reNgine import resources
+        from cvengine import resources
         with mock.patch.object(resources, 'global_pause_requested', return_value=True), mock.patch.object(wpscan_scan, 'queue_quick') as again:
             out = self.run_quick()
         self.assertIn('paused', out['skipped'])

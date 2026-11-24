@@ -138,7 +138,7 @@ class AllowlistThroughTheBridgeTests(TestCase):
         self.root = User.objects.create_superuser('lock_root', 'l@x.io', 'x')
 
     def tearDown(self):
-        from reNgine import ip_allowlist
+        from cvengine import ip_allowlist
         ip_allowlist.invalidate_cache()
 
     def test_an_agent_cannot_add_an_entry_switch_the_list_on_or_delete_an_entry(self):

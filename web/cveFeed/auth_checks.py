@@ -3,7 +3,7 @@ check so the scanners see the signed-in application and not only its login page.
 
 What is stored (``cveFeed.models.AuthCredential``): a label, header name/value pairs, an optional cookie string, the ``scheme:port``
 origins it may be sent to, and an expiry (30, 90 or 120 days, or an explicit never), for one host of a target or for every host of that target. The values are
-encrypted at rest (``reNgine.crypto_fields``, so ``rotate_field_key`` re-encrypts them with every other secret) and are write-only:
+encrypted at rest (``cvengine.crypto_fields``, so ``rotate_field_key`` re-encrypts them with every other secret) and are write-only:
 no read returns one, only the header names.
 
 The scope guard is ``AuthScope.credential``: a credential goes to a request only when its destination host is exactly the host it

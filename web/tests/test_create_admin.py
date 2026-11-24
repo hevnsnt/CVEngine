@@ -135,7 +135,7 @@ class InitEnvScriptTests(TestCase):
 		self.assertNotEqual(env['POSTGRES_PASSWORD'], env['AUTHORITY_PASSWORD'])
 		self.assertEqual(env['DJANGO_SUPERUSER_PASSWORD'], '')  # the admin password is make admin's job
 		self.assertNotEqual(env['DOMAIN_NAME'], 'cvengine.example.com')  # the example name is replaced by a detected address
-		self.assertEqual(env['COMPOSE_PROJECT_NAME'], 'rengine')  # nothing else is touched
+		self.assertEqual(env['COMPOSE_PROJECT_NAME'], 'cvengine')  # nothing else is touched
 		self.assertEqual(stat.S_IMODE(os.stat(Path(self.dir) / '.env').st_mode), 0o600)
 
 	def test_running_it_again_changes_nothing(self):

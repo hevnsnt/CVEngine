@@ -1,4 +1,4 @@
-"""The least privilege database role (reNgine/db_roles.py): which role a process uses, the GRANT statements, the entrypoints' fallback, the
+"""The least privilege database role (cvengine/db_roles.py): which role a process uses, the GRANT statements, the entrypoints' fallback, the
 scripts that generate its password, the compose files' data network and log rotation, and the docs. The grants against a real database are
 in tests/test_db_app_role_grants.py."""
 import importlib
@@ -16,7 +16,7 @@ from unittest import mock
 
 from django.test import SimpleTestCase
 
-from reNgine import db_roles
+from cvengine import db_roles
 
 try:
     import yaml
@@ -45,7 +45,7 @@ class ResolveTests(SimpleTestCase):
     def test_runtime_uses_the_app_role(self):
         got = resolve()
         self.assertEqual((got['role'], got['user'], got['password']), ('app', 'cvengine_app', 'apppw'))
-        for argv in (['gunicorn'], ['celery', '-A', 'reNgine', 'worker'], ['manage.py', 'watchdog_tick'], ['manage.py', 'shell'],
+        for argv in (['gunicorn'], ['celery', '-A', 'cvengine', 'worker'], ['manage.py', 'watchdog_tick'], ['manage.py', 'shell'],
                      ['manage.py', 'migrate', '--check'], ['manage.py', 'migrate', '--plan'], ['/usr/src/app/manage.py', 'collectstatic']):
             self.assertEqual(resolve(argv)['role'], 'app', argv)
 
@@ -104,7 +104,7 @@ class SettingsTests(SimpleTestCase):
     """settings.DATABASES follows the resolution: the runtime alias gets the app role, the migrate process the owner role."""
 
     def reload(self, argv, **env):
-        from reNgine import settings
+        from cvengine import settings
         values = {'CVENGINE_DB_ROLE_STATE': NO_STATE, **{k: v for k, v in env.items() if v is not None}}
         with mock.patch.dict(os.environ, values), mock.patch.object(sys, 'argv', argv):
             for key, value in env.items():
@@ -114,7 +114,7 @@ class SettingsTests(SimpleTestCase):
             return settings.DATABASE_ROLE, dict(settings.DATABASES['default'])
 
     def tearDown(self):
-        from reNgine import settings
+        from cvengine import settings
         importlib.reload(settings)
 
     def test_runtime_and_migrate(self):
@@ -393,7 +393,7 @@ class AppRuntimeSqlTests(SimpleTestCase):
     def runtime_sources(self):
         for path in WEB.rglob('*.py'):
             rel = path.relative_to(WEB).as_posix()
-            if '/migrations/' in rel or rel.startswith('tests/') or rel == 'reNgine/db_roles.py' or rel == 'startScan/dedupe.py':
+            if '/migrations/' in rel or rel.startswith('tests/') or rel == 'cvengine/db_roles.py' or rel == 'startScan/dedupe.py':
                 continue
             yield rel, path.read_text(errors='replace')
 
@@ -439,8 +439,8 @@ class ComposeTests(SimpleTestCase):
     def test_the_reviewer_keeps_reaching_web_and_nothing_with_a_database(self):
         services = self.load('docker-compose.yml')['services']
         reviewer = services['reviewer']
-        self.assertEqual(self.networks(reviewer), {'rengine_network'})
-        self.assertIn('rengine_network', self.networks(services['web']))  # http://web:8000
+        self.assertEqual(self.networks(reviewer), {'cvengine_network'})
+        self.assertIn('cvengine_network', self.networks(services['web']))  # http://web:8000
         self.assertEqual(reviewer['environment']['CVENGINE_REVIEWER_SERVER'], 'http://web:8000')
         self.assertFalse([k for k in reviewer['environment'] if k.startswith(('POSTGRES', 'REDIS', 'CVENGINE_DB'))])
         source = '\n'.join(p.read_text() for p in (ROOT / 'reviewer' / 'cvengine_reviewer').glob('*.py'))

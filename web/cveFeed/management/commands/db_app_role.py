@@ -1,4 +1,4 @@
-"""Create, grant and check the least privilege database role the application runs as (reNgine/db_roles.py, docs/CONFIGURATION.md).
+"""Create, grant and check the least privilege database role the application runs as (cvengine/db_roles.py, docs/CONFIGURATION.md).
 
     manage.py db_app_role ensure              create or update the app role and grant it (as the owner role; every migrate does this too)
     manage.py db_app_role choose [--wait N]   which role this container runs as: prints app or owner and writes it to /tmp/cvengine-db-role
@@ -13,7 +13,7 @@ import sys
 
 from django.core.management.base import BaseCommand, CommandError
 
-from reNgine import db_roles
+from cvengine import db_roles
 
 
 class Command(BaseCommand):

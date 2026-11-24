@@ -12,7 +12,7 @@ from cveFeed import host_actions, host_review, triage
 from cveFeed.models import (CVEEntry, CVEMatch, FindingReview, HostReview, HostScreenshot, HostState, HygieneFinding, ProjectSettings,
                             ReviewerSettings, SecretFinding, SecretOccurrence, Triage)
 from dashboard.models import Org, Project
-from reNgine import ai_prompts, ai_profiles
+from cvengine import ai_prompts, ai_profiles
 from scanEngine.models import EngineType
 from startScan.models import IpAddress, Port, ScanHistory, Subdomain, Vulnerability
 from targetApp.models import Domain

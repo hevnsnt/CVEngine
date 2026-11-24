@@ -4,7 +4,7 @@ import os
 from django.core.management.base import BaseCommand, CommandError
 from django.db import connection
 
-from reNgine import crypto_fields
+from cvengine import crypto_fields
 
 
 class Command(BaseCommand):

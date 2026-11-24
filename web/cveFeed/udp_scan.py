@@ -139,7 +139,7 @@ def ports():
 
 
 def _store():
-    from reNgine import resources
+    from cvengine import resources
     return getattr(resources.get_store(), 'r', None)
 
 
@@ -310,7 +310,7 @@ def host_from_report(xml_text, address):
     - an empty, cut short, or other-addresses-only report: ``ScannerReportedNothing`` (counted, see ``MAX_EMPTY_PER_DAY``).
     """
     from cveFeed.port_inventory import parse_xml
-    from reNgine.resources import ScannerReportedNothing
+    from cvengine.resources import ScannerReportedNothing
     want = normalize_address(address)
     hosts = parse_xml(xml_text or '')
     host = next((h for h in hosts if normalize_address(h.get('ip')) == want), None)
@@ -718,7 +718,7 @@ def scan_ip(ip, pipeline=None):
     """Scan one IpAddress on a scanner and record it. Returns the result dict (``ok`` False with an ``error`` when the scan failed).
     ``pipeline(domain_id, names)`` runs the re-test inline. Nothing runs on this server: with no scanner able to take it the address stays due."""
     from cveFeed import activity, fullscan, ledger
-    from reNgine.resources import MemoryBusy, ScanAborted, ScannerReportedNothing, ScannerUnavailable
+    from cvengine.resources import MemoryBusy, ScanAborted, ScannerReportedNothing, ScannerUnavailable
     address, asset = ip.address, asset_of(ip)
     from cveFeed.conductor import bounty_blocked_projects
     project = fullscan.active_attached(ip).exclude(target_domain__project_id__in=bounty_blocked_projects()).values_list(
@@ -821,7 +821,7 @@ def run(pipeline=None, clock=time.monotonic):
     one address gets a UDP exposure sweep. The next firing checks again.
     """
     from cveFeed import coverage_topup
-    from reNgine import resources
+    from cvengine import resources
     if not enabled():
         return {'skipped': 'CVENGINE_UDPSCAN is off'}
     from agentapi import scanner_state
@@ -848,7 +848,7 @@ def _resume_sweep(context):
 
 def _sweep(pipeline, clock):
     from agentapi import stage_runs
-    from reNgine import resources
+    from cvengine import resources
     from startScan.models import IpAddress
     in_run = stage_runs.current() is not None
     if in_run:  # the passes of one firing share its time budget, its place and the addresses it found no scanner for

@@ -119,7 +119,7 @@ if [ "$(wc -l <"$ACTIONS_LOG" 2>/dev/null || echo 0)" -gt 500 ]; then tail -n 20
 if ! layout; then answer failed "could not work out the Compose layout (see the log on the host)"; exit 0; fi
 recreate() { timeout -k 10 300 "${COMPOSE[@]}" up -d --no-deps --force-recreate "$@" >>"$LOG" 2>&1 </dev/null 6>&- 9>&-; }
 # Before the workers are recreated: a lane is restarted because it stopped answering, and recreating the container drops the only log that could say
-# why. Ask each Celery worker to print the stack of every thread (faulthandler on SIGUSR2, web/reNgine/lane_stacks.py; it runs even while the lane is
+# why. Ask each Celery worker to print the stack of every thread (faulthandler on SIGUSR2, web/cvengine/lane_stacks.py; it runs even while the lane is
 # stuck in C code), then keep the end of the log beside this one (the previous copy as .1). Best effort and bounded: the restart goes ahead whatever happens here.
 STACKS_PY='import os, signal
 for p in os.listdir("/proc"):
@@ -129,7 +129,7 @@ for p in os.listdir("/proc"):
         args = open("/proc/%s/cmdline" % p, "rb").read().split(b"\0")
     except OSError:
         continue
-    if b"reNgine.tasks" in args and b"worker" in args:
+    if b"cvengine.tasks" in args and b"worker" in args:
         try:
             os.kill(int(p), signal.SIGUSR2)
         except OSError:

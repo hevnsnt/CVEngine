@@ -23,7 +23,7 @@ PROXY_GID=${CVENGINE_PROXY_GID:-101}
 # CVENGINE_OWNERSHIP_ROOT puts every path below another folder: the tests run this script on a scratch tree (tests/test_image_user.py)
 R=${CVENGINE_OWNERSHIP_ROOT:-}
 HOST_WEB=$R${CVENGINE_HOST_DIR:-/var/lib/cvengine/web}
-INIT=$(dirname "$0")/reNgine/init.py
+INIT=$(dirname "$0")/cvengine/init.py
 # what the web and celery containers write in web/ (cveFeed/updater.py, cveFeed/scanner_plan.py, cveFeed/watchdog.py, agentapi/sentinel_autoupdate.py)
 REQUESTS='.update-approved .update-branch .update-sentinels .update-mode .update-wait-scans .update-source .scanner-update-requested .scanner-plan-wanted .watchdog-action'
 changed=0
@@ -83,7 +83,7 @@ fi
 if [ -d "$HOST_WEB" ]; then
     owner=$(stat -c '%u' "$HOST_WEB")
     top "$HOST_WEB" "$owner:$APP_GID" 1775
-    # A first start: the Django secret is created here, with the application's own code (reNgine/init.py first_run: 64 random characters, written
+    # A first start: the Django secret is created here, with the application's own code (cvengine/init.py first_run: 64 random characters, written
     # atomically, mode 0600), and handed over below. The migrate service and Beat mount web/ read-only and could not create it.
     if [ ! -e "$HOST_WEB/secret" ] && [ ! -L "$HOST_WEB/secret" ]; then
         python3 -c "import importlib.util, sys; s = importlib.util.spec_from_file_location('cvengine_init', sys.argv[2]); m = importlib.util.module_from_spec(s); s.loader.exec_module(m); m.first_run(sys.argv[1], '')" "$HOST_WEB/secret" "$INIT"

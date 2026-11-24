@@ -1,7 +1,7 @@
 #!/bin/bash
 # Removes THIS CVEngine installation: the containers, volumes, networks and built images of its Docker Compose project, and nothing
 # else. Everything is matched by the exact Compose project label (or by `docker compose down` with this checkout's own Compose
-# files), never by a name that merely contains a word, so another application on the host, including a separate reNgine install,
+# files), never by a name that merely contains a word, so another application on the host, including another install with a similar name,
 # is not touched.
 #
 # The project is, in order: CVENGINE_COMPOSE_PROJECT, COMPOSE_PROJECT_NAME, then the checkout directory's name (Compose's own default).

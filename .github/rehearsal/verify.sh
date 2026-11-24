@@ -73,7 +73,7 @@ print('WORDING OK', new)
 PY
 fi
 # captured first: `inspect | grep -q` fails under pipefail when grep exits early and the producer gets SIGPIPE, even though it matched
-queues=$(dc exec -T celery celery -A reNgine.tasks inspect active_queues -t 20 2>/dev/null || true)
+queues=$(dc exec -T celery celery -A "$(app_package).tasks" inspect active_queues -t 20 2>/dev/null || true)
 grep -q wpscan_queue <<<"$queues" || { bad "no worker consumes wpscan_queue"; grep -oE "'name': '[a-z_]+'" <<<"$queues" | sort -u | head -20; }
 
 if [ "$(mode)" = overlay ]; then

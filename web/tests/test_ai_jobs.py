@@ -15,7 +15,7 @@ from agentapi.auth import REVIEWER_PATH, create_token
 from cveFeed import ai_jobs, triage
 from cveFeed.models import AIJob, AIUsage, CVEEntry, CVEMatch, Triage, TriageCall, TriageVerdict
 from dashboard.models import AIProviderSettings, Org, Project
-from reNgine import ai_profiles
+from cvengine import ai_profiles
 from startScan.models import Subdomain
 from targetApp.models import Domain
 from tests import ai_queue

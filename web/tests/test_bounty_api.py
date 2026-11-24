@@ -742,7 +742,7 @@ class GuardTests(ReportBase):
         self.assertGreaterEqual(self.strikes(), 1)
 
     def test_other_endpoints_keep_the_full_rules(self):
-        from reNgine import input_guard
+        from cvengine import input_guard
         from django.test import RequestFactory
         rf = RequestFactory()
         req = rf.patch(f'{B}reports/1', json.dumps({'steps': self.PAYLOAD, 'project': 'a1'}), content_type='application/json')

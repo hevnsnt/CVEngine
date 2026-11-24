@@ -2,7 +2,7 @@
 
 cvENGINE runs headless: nobody is expected to open a shell and type a management command after an update. Every backfill command an
 update ships (each is a dry run unless ``--apply``, so a person can still preview one) is listed in ``BACKFILLS`` and applied
-automatically: when a worker starts (``reNgine.celery.run_pending_backfills``), the ``run_upgrade_backfills`` task works through the ones
+automatically: when a worker starts (``cvengine.celery.run_pending_backfills``), the ``run_upgrade_backfills`` task works through the ones
 this install has not finished, one per run, in the order listed, and records each as done (``BackgroundCursor`` lane ``bf:<name>``).
 
 * One worker at a time: the run holds a Redis claim, and a run that finds it held returns at once.
@@ -128,7 +128,7 @@ def run_one(name, call=None):
 def run_next(call=None):
     """Run the first pending backfill under the claim. Returns ``{'state', 'name', 'remaining'}``: ``state`` is ``off``, ``none`` (all
     done), ``held`` (another worker runs them), or the outcome of the backfill it ran."""
-    from reNgine import resources
+    from cvengine import resources
     if not enabled():
         return {'state': 'off', 'name': '', 'remaining': 0}
     todo = pending()

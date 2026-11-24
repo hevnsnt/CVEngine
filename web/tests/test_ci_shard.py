@@ -14,7 +14,7 @@ from unittest import mock
 
 from django.test import SimpleTestCase
 
-from reNgine import test_runner as runner
+from cvengine import test_runner as runner
 
 ROOT = os.path.join(os.path.dirname(__file__), '..', '..')
 SCRIPT = os.path.join(ROOT, 'scripts', 'ci_shard.py')

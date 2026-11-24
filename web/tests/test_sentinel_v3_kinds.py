@@ -21,7 +21,7 @@ from agentapi.services import ApiError
 from agentapi.auth import create_token
 from cveFeed import db_exposure, fullscan, node2shell_scan, path_probe, probes, rdp_shot, templategen, waf_fingerprint
 from cveFeed.models import RdpScreenshot, ServiceRun
-from reNgine import resources
+from cvengine import resources
 from startScan.models import IpAddress, Port, Subdomain, Technology, Vulnerability
 from tests.fake_scanner import FakeScanner, LocalFallback, assert_ran_nowhere_locally, fixture
 from tests.test_fake_scanner import NoRealSleep

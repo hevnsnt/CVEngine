@@ -7,7 +7,7 @@ from django.utils import timezone
 from cveFeed import ctmonitor, ledger, tasks
 from cveFeed.models import ServiceRun
 from dashboard.models import Org, Project, SystemTimings
-from reNgine import resources
+from cvengine import resources
 from targetApp.models import Domain
 from tests import hygiene_harness
 

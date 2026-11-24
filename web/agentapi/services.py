@@ -20,7 +20,7 @@ from django.utils import timezone
 from cveFeed import match_policy, result_cuts
 from cveFeed.counts import running_window
 from cveFeed.discovery import NUCLEI_SCAN_ACTIVITY_NAMES
-from reNgine.state_machines import SCAN
+from cvengine.state_machines import SCAN
 from tenancy import roles
 
 logger = logging.getLogger(__name__)
@@ -281,8 +281,8 @@ def list_projects(ctx, params=None):
 
 
 def describe_states(ctx, params=None):
-    """Every explicit lifecycle (reNgine.state_machines): states, labels, meanings and allowed moves. The same table the server enforces."""
-    from reNgine import lifecycle
+    """Every explicit lifecycle (cvengine.state_machines): states, labels, meanings and allowed moves. The same table the server enforces."""
+    from cvengine import lifecycle
     return {'results': lifecycle.legends()}
 
 
@@ -608,7 +608,7 @@ def _scan(s, detail=False, queued=None, stalled_before=None):
     if stalled_before is None:
         stalled_before = timezone.now() - running_window()
     out = {'id': s.id, 'target': s.domain.name, 'target_id': s.domain_id, 'engine': s.scan_type.engine_name,
-           'status': s.scan_status, 'state': SCAN.key(s.scan_status),  # status: the stored code (kept); state: its name (reNgine.state_machines.SCAN)
+           'status': s.scan_status, 'state': SCAN.key(s.scan_status),  # status: the stored code (kept); state: its name (cvengine.state_machines.SCAN)
            'started': _iso(s.start_scan_date), 'finished': _iso(s.stop_scan_date),
            'error': s.error_message,
            'stalled': s.scan_status == 1 and s.start_scan_date < stalled_before,  # marked running, but older than any scan can run
@@ -815,8 +815,8 @@ def _abort_scan(scan, user=None):
     check and each heavy job kills its scanner process tree, which also releases the memory reservation and the ledger and
     domain claims it holds), and revoke the celery task. Returns True when the scan was still active."""
     from django.utils import timezone as tz
-    from reNgine import resources
-    from reNgine.celery import app as celery_app
+    from cvengine import resources
+    from cvengine.celery import app as celery_app
     from startScan.models import ScanActivity, ScanHistory
     stopped = ScanHistory.objects.filter(pk=scan.pk, scan_status__in=(-1, 1)).update(
         scan_status=3, stop_scan_date=tz.now(), aborted_by=user, error_message='Stopped by a person')
@@ -865,7 +865,7 @@ def delete_targets(ctx, slug, ids=None, all_matching=False, q=''):
     ``all_matching`` (optionally narrowed by ``q``, the same search the target list uses). A target with a scan
     still running or queued is skipped, not deleted, and reported. Only this project's targets are ever touched."""
     import os
-    from reNgine.common_func import SCAN_RESULTS_ROOT, safe_remove_path
+    from cvengine.common_func import SCAN_RESULTS_ROOT, safe_remove_path
     from startScan.models import ScanHistory
     from targetApp.models import Domain
     project, _ = get_project(ctx, slug, write=True)
@@ -1094,7 +1094,7 @@ def _start_discoveries(domains, mode, project_id, initiated_by=None):
     """Queue discovery for each domain with one summary line in the AI feed instead of one per target."""
     from cveFeed import activity
     from cveFeed.discovery import start_discoveries
-    from reNgine import discovery_events as bbot_lib
+    from cvengine import discovery_events as bbot_lib
     mode = mode or bbot_lib.DEFAULT_MODE
     scans = start_discoveries(domains, mode, quiet=True, initiated_by=initiated_by)
     if scans:
@@ -4824,7 +4824,7 @@ def _apply_remediation(obj, status, note, user, rescore=True, only_from=None):
     now = timezone.now()
     values = {'remediation_updated_at': now, 'remediation_by': user, **({'remediation_note': note} if note is not None else {})}
     if only_from is not None:
-        from reNgine.state_machines import REMEDIATION
+        from cvengine.state_machines import REMEDIATION
         if not REMEDIATION.move(type(obj)._base_manager.filter(pk=obj.pk), status, only_from=only_from, **values):
             obj.refresh_from_db(fields=['remediation_status', 'remediation_updated_at', 'remediation_by', 'remediation_note'])
             return False

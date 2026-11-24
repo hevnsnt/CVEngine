@@ -5,7 +5,7 @@ from django.test import TestCase
 from kombu import Queue
 
 from cveFeed.broker_recovery import live_task_ids, requeue_unacked
-from reNgine.celery import app
+from cvengine.celery import app
 
 
 class RequeueUnackedTests(TestCase):

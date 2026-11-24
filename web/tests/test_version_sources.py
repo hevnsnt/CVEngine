@@ -573,7 +573,7 @@ class ReadTests(VersionFixture, TestCase):
 
     def test_no_scanner_leaves_the_reads_due_and_runs_nothing_here(self):
         scan = self.host_scan(techs=('Grafana',))
-        from reNgine.resources import ScannerUnavailable
+        from cvengine.resources import ScannerUnavailable
         with self.assertRaises(ScannerUnavailable):
             version_sources.run_for_scan(scan.id)
         self.assertFalse(ProbeObservation.objects.filter(probe='vsrc:grafana').exists())

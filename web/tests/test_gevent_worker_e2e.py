@@ -1,4 +1,4 @@
-"""End to end through celery's own consumer: a real ``celery worker --pool=gevent --autoscale=N,1`` subprocess with the settings ``reNgine.celery``
+"""End to end through celery's own consumer: a real ``celery worker --pool=gevent --autoscale=N,1`` subprocess with the settings ``cvengine.celery``
 sets, running acks_late tasks (``run_bbot_discovery`` and ``run_internal_scan`` are acks_late). For those the consumer's prefetch (QoS) is what
 bounds how many run at once, so these go through it rather than stubbing the consumer (``tests/test_gevent_autoscale.py`` covers the pool):
 
@@ -6,9 +6,9 @@ bounds how many run at once, so these go through it rather than stubbing the con
 * a ceiling raised live while the worker is idle (configMaxxing's resize) is honoured: celery's own path returned early with no task running;
 * after a broker reconnect the worker comes back to its ceiling: celery's prefetch restore read the greenlets running, so it stayed at one;
 * an ack lost to a dropped broker connection does not cost a slot: kombu kept counting that delivery against the prefetch, so the worker ran
-  one task fewer at once until a restart (``reNgine/broker_acks.py``). The reconnect test hit it when its cut landed on an ack.
+  one task fewer at once until a restart (``cvengine/broker_acks.py``). The reconnect test hit it when its cut landed on an ack.
 * remote control (ping, ``autoscale``) is answered again after a broker reconnect: celery's gevent pidbox loop ended on the
-  ``ConnectionError`` and, with kombu 5.7 keeping the consumer, never came back (``reNgine/gevent_pidbox.py``).
+  ``ConnectionError`` and, with kombu 5.7 keeping the consumer, never came back (``cvengine/gevent_pidbox.py``).
 
 Needs the Redis of ``CELERY_BROKER`` (CI has it); skipped without it. Each test uses its own queue and keys and cuts only its own worker's
 connections."""
@@ -38,7 +38,7 @@ def _redis_ok():
 class GeventWorkerEndToEndTests(unittest.TestCase):
 
     def setUp(self):
-        from reNgine.celery import app as real
+        from cvengine.celery import app as real
         self.name = f'e2e{uuid.uuid4().hex[:10]}'
         self.queue = f'{self.name}_q'
         self.node = f'{self.name}@e2e'
@@ -127,7 +127,7 @@ class GeventWorkerEndToEndTests(unittest.TestCase):
 
     def test_an_ack_lost_to_a_dropped_broker_connection_does_not_cost_a_slot(self):
         # The reconnect above fails only when the cut lands on an ack (about one run in thirty); this drops the first ack every time. kombu
-        # then never freed the delivery, so the prefetch counted it for good and the worker ran 3 at a time from then on (reNgine/broker_acks.py).
+        # then never freed the delivery, so the prefetch counted it for good and the worker ran 3 at a time from then on (cvengine/broker_acks.py).
         self.env['E2E_DROP_ONE_ACK'] = '1'
         self.start(4)
         self.send(24, 5)
@@ -138,7 +138,7 @@ class GeventWorkerEndToEndTests(unittest.TestCase):
 
     def test_remote_control_is_answered_again_after_a_broker_reconnect(self):
         # ping, inspect, autoscale and revoke all go through this loop: scan_concurrency.apply_discovery's resize, the admin worker panel, a
-        # revoke, broker_recovery.live_tasks. Before reNgine/gevent_pidbox.py the worker went on running tasks and answered none of them again.
+        # revoke, broker_recovery.live_tasks. Before cvengine/gevent_pidbox.py the worker went on running tasks and answered none of them again.
         self.start(4)
         self.send(8, 3)
         time.sleep(2)

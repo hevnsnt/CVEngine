@@ -811,7 +811,7 @@ def run_for_scan(scan_id, force=False):
     (at most MAX_PROBES_PER_HOST that are due; the http probes are a Sentinel's: ``http_probe``), inside the ledger TTL and ``max_hosts`` per scan, honouring exclusions, scan stop and pause. Returns ``{'hosts', 'probes', 'versions', 'reused', 'errors'}``."""
     from cveFeed import activity, host_context, ledger
     from cveFeed.nuclei_scan import scan_targets
-    from reNgine import resources
+    from cvengine import resources
     from startScan.models import ScanHistory, Subdomain
     scan = ScanHistory.objects.select_related('domain').get(pk=scan_id)
     project, domain = scan.domain.project_id, scan.domain
@@ -908,7 +908,7 @@ def _remote_http(scan, due):
     """``(answers, waiting)``: the http probes of ``due`` a Sentinel ran (``{asset: observations or the error}``, see
     ``agentapi.probe_dispatch.try_http_probes``), and whether they must wait because no scanner can take them (the kind never runs here)."""
     from agentapi import probe_dispatch
-    from reNgine.resources import ScannerUnavailable
+    from cvengine.resources import ScannerUnavailable
     planned = [(sub, asset, entry) for sub, todo in due for asset, entry in todo.items() if BY_ID[entry['probe']]['family'] == 'http']
     try:
         got = probe_dispatch.try_http_probes(scan.domain.project, scan, planned)

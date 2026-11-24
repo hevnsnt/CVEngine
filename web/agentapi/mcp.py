@@ -25,7 +25,7 @@ from agentapi import sentinel_broker as sentinels
 from agentapi import sentinel_settings
 from agentapi import settings_bridge
 from agentapi import sentinel_dispatch
-from reNgine import schema_guard
+from cvengine import schema_guard
 from agentapi import services as svc
 from agentapi import suppliers
 from agentapi import system_status
@@ -59,7 +59,7 @@ INSTRUCTIONS = ('CVEngine vulnerability management. Start with whoami and list_p
 def server_info():
     """The serverInfo block for initialize. The version is the release's own (web/.version via settings), read on each call, so it never needs a
     hand edit at release time."""
-    return {'name': 'cvengine', 'version': settings.RENGINE_CURRENT_VERSION}
+    return {'name': 'cvengine', 'version': settings.CVENGINE_CURRENT_VERSION}
 MAX_BODY_BYTES = 256 * 1024
 MAX_BATCH_ITEMS = 20
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024

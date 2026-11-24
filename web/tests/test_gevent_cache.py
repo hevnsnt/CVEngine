@@ -1,4 +1,4 @@
-"""reNgine/gevent_cache.py: in a gevent worker every greenlet uses one Django cache client (one Redis connection pool), where Django's own handler built a new
+"""cvengine/gevent_cache.py: in a gevent worker every greenlet uses one Django cache client (one Redis connection pool), where Django's own handler built a new
 client, pool and Redis connection for each greenlet, that is for each task, and the classic lane ran out of file descriptors in a burst of tasks."""
 from unittest import mock
 
@@ -6,7 +6,7 @@ import gevent
 from django.core.cache import CacheHandler
 from django.test import SimpleTestCase
 
-from reNgine import gevent_cache
+from cvengine import gevent_cache
 
 REDIS = {'default': {'BACKEND': 'django.core.cache.backends.redis.RedisCache', 'LOCATION': 'redis://127.0.0.1:1/9'}}
 

@@ -165,7 +165,7 @@ class PromptTests(ContextFixture, TestCase):
         self.assertEqual(decision['check_kinds'], ['fact_probe'])  # an empty plan never leaves a lead a probe can address
 
     def test_with_no_ai_the_probes_and_a_vetted_template_still_run(self):
-        with mock.patch('reNgine.ai_settings.get_configured_provider', return_value=None):
+        with mock.patch('cvengine.ai_settings.get_configured_provider', return_value=None):
             decision, _ = validation_plan.plan(self.project.id, mock.Mock(signature='s2'), self.cve, {}, [{'kind': 'nmap_sv'}, {'kind': 'fact_probe'}],
                                                ('', 'no template'))
         self.assertEqual(decision['check_kinds'], ['fact_probe'])

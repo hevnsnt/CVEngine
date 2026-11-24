@@ -3,7 +3,7 @@ from unittest import mock
 
 from django.test import RequestFactory, SimpleTestCase
 
-from reNgine.client_ip import client_ip
+from cvengine.client_ip import client_ip
 
 GATEWAY = '172.18.0.1'     # what the web container sees when a proxy on the Docker host connects to it
 REAL_CLIENT = '198.51.100.9'

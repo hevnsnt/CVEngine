@@ -27,7 +27,7 @@ case "${DEBUG:-0}" in
         # Only the gunicorn process gets a database statement timeout (30 s, CVENGINE_WEB_STATEMENT_TIMEOUT_MS, 0 = none): the migration above, the management
         # commands run with `exec` and the workers must not be cut off by it, and a web request that needs more than 30 s for one statement is too big (review 2 F2).
         export CVENGINE_WEB_STATEMENT_TIMEOUT_MS="${CVENGINE_WEB_STATEMENT_TIMEOUT_MS-30000}"
-        exec python3 -m gunicorn reNgine.wsgi:application \
+        exec python3 -m gunicorn cvengine.wsgi:application \
             --bind 0.0.0.0:8000 \
             --worker-class gthread \
             --workers "${GUNICORN_WORKERS:-2}" \

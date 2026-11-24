@@ -84,7 +84,7 @@ def installed_sha():
     return env if SHA_RE.match(env) else ''
 
 
-_build_seen = None  # the answer, computed when the web process starts (reNgine.middleware.HtmlRevalidateMiddleware); tests put None back
+_build_seen = None  # the answer, computed when the web process starts (cvengine.middleware.HtmlRevalidateMiddleware); tests put None back
 
 
 def fingerprint(*roots):

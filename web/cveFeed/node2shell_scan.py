@@ -79,7 +79,7 @@ def run_for_scan(scan_id, force=False):
     TTL-gated. A critical finding is raised only when the detector's own verdict is VULNERABLE. Returns a summary
     dict; never raises."""
     from cveFeed import activity, ledger
-    from reNgine import resources
+    from cvengine import resources
     from startScan.models import ScanHistory
     if not enabled():
         return {'checked': 0, 'skipped': 'disabled'}
@@ -130,7 +130,7 @@ def run_for_scan(scan_id, force=False):
 
 
 def _record_finding(scan, sub, url, result):
-    from reNgine.tasks import save_vulnerability
+    from cvengine.tasks import save_vulnerability
     evidence = (result.get('response') or '')[:2048]
     save_vulnerability(
         target_domain=scan.domain, scan_history=scan, subdomain=sub, http_url=url, name=f'{CVE_ID} (node2shell)',

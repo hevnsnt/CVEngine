@@ -38,7 +38,7 @@ class EntrypointTests(SimpleTestCase):
 
     def test_the_classic_worker_defaults_to_ten_slots(self):
         # certificate lookups may sleep up to 30 s in a slot waiting for crt.sh's pacing (ctmonitor.MAX_INLINE_WAIT), and every running task holds a
-        # database connection: ten, not twenty, now that the autoscaler really fills them (reNgine/gevent_autoscale.py)
+        # database connection: ten, not twenty, now that the autoscaler really fills them (cvengine/gevent_autoscale.py)
         saved = os.environ.pop('CLASSIC_CONCURRENCY', None)
         try:
             classic = [c for c in worker_commands() if 'classic_worker' in c]
@@ -203,9 +203,9 @@ class WebEntrypointTests(SimpleTestCase):
         # the one-off migrate service migrates (the only container with the owner's password); web only waits for migrate --check
         lines = web_command(DEBUG='0')
         self.assertNotIn('manage.py migrate --noinput', lines)
-        self.assertIn('-m gunicorn reNgine.wsgi:application', lines[0])
+        self.assertIn('-m gunicorn cvengine.wsgi:application', lines[0])
         lines = [''] + lines  # the assertions below read the gunicorn line as lines[1]
-        self.assertIn('--bind 0.0.0.0:8000', lines[1])  # the proxy's upstream is rengine:8000
+        self.assertIn('--bind 0.0.0.0:8000', lines[1])  # the proxy's upstream is cvengine:8000
         self.assertIn('--worker-class gthread', lines[1])
         self.assertNotIn('runserver', ' '.join(lines))
 
@@ -223,9 +223,9 @@ class WebEntrypointTests(SimpleTestCase):
         self.assertNotIn('gunicorn', ' '.join(lines))
 
     def test_proxy_upstream_port_matches(self):
-        conf = Path(__file__).resolve().parents[2] / 'config' / 'nginx' / 'rengine.conf'
+        conf = Path(__file__).resolve().parents[2] / 'config' / 'nginx' / 'cvengine.conf'
         if conf.is_file():  # the config directory is not mounted inside the web container
-            self.assertIn('http://rengine:8000;', conf.read_text())
+            self.assertIn('http://cvengine:8000;', conf.read_text())
 
 
 class BeatEntrypointTests(SimpleTestCase):

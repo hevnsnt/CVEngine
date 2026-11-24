@@ -439,7 +439,7 @@ HOST_REVIEW_BODY = (
 
 
 def system_prompt():
-    from reNgine import ai_prompts
+    from cvengine import ai_prompts
     return ai_prompts.compose('host_review', HOST_REVIEW_BODY)
 
 
@@ -478,7 +478,7 @@ def validate(text, refs, offered=None):
     lists; the next step names an action of ``host_actions.ACTIONS`` and a target that is a ref of this packet or empty; notes are text within their
     room. Whether the action and its target were OFFERED is not a schema question: that step is stored as refused (``store_step``)."""
     from cveFeed import host_actions, reviewer
-    from reNgine.ai_providers import extract_json
+    from cvengine.ai_providers import extract_json
     body = extract_json(text, keys=('findings', 'next_step'))
     if not isinstance(body, dict):
         return None, 'the reply is not one JSON object with findings and next_step'
@@ -695,7 +695,7 @@ def job_answer(job, text):
     """The model's reply arrived. A reply that is not valid is sent back once (``host_review_repair``) and then fails the review, changing nothing.
     A valid one is applied (``apply_reply``)."""
     from cveFeed import ai_jobs
-    from reNgine.ai_providers import repair_parts
+    from cvengine.ai_providers import repair_parts
     review = _row_of(job)
     if review is None or review.status != 'queued':
         return None

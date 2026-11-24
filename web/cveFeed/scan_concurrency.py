@@ -26,7 +26,7 @@ import re
 import time
 from collections import namedtuple
 
-from reNgine import resources
+from cvengine import resources
 
 logger = logging.getLogger(__name__)
 
@@ -164,7 +164,7 @@ def invalidate():
 
 
 def stored_values(now_fn=time.monotonic):
-    """What an App Admin saved, as the workers see it: the Redis copy, cached CACHE_SECONDS, shared with reNgine.resources (which reads it for
+    """What an App Admin saved, as the workers see it: the Redis copy, cached CACHE_SECONDS, shared with cvengine.resources (which reads it for
     the scanner caps). On a Redis outage the last copy this process saw is kept; with none, there are no saved values and the environment or
     the default applies, as it did before this page."""
     return resources.saved_values(now_fn)
@@ -192,7 +192,7 @@ def saved_row():
 
 def recover(publish_again=True):
     """The saved values from the database without creating the row, published again when Redis is there: what a process does when Redis answers
-    but has lost the published copy (``reNgine.resources.saved_values``). Raises when the database cannot be read."""
+    but has lost the published copy (``cvengine.resources.saved_values``). Raises when the database cannot be read."""
     from cveFeed.models import ScanConcurrency
     row = ScanConcurrency.objects.order_by('pk').first()
     values = {k: v for k, v in ((row.values if row else None) or {}).items() if k in BY_KEY and isinstance(v, int) and not isinstance(v, bool)}
@@ -283,7 +283,7 @@ def after_saved(changed, stored):
 def request_apply():
     """Queue the live resize of the discovery worker. A broker that is down only delays it: the 30 second tick does it too."""
     try:
-        from reNgine.celery import app
+        from cvengine.celery import app
         app.send_task('apply_scan_concurrency', queue='cve_feed_queue')
     except Exception:
         logger.warning('scan concurrency: could not queue the discovery worker resize; the 30 second check will do it')
@@ -304,7 +304,7 @@ def bootstrap_value(key):
 def discovery_workers(app=None, timeout=1.5):
     """{worker name: its autoscale ceiling} for every discovery worker that answers a ``stats`` broadcast."""
     if app is None:
-        from reNgine.celery import app
+        from cvengine.celery import app
     stats = app.control.inspect(timeout=timeout).stats() or {}
     out = {}
     for name, info in stats.items():
@@ -319,7 +319,7 @@ def apply_discovery(app=None, now_fn=time.time, saved=None):
     record what each worker says it runs. A value is recorded only when the worker confirmed it (its reply, or a later ``stats`` showing
     it): a worker that does not answer keeps the number it has. Returns {'want', 'workers': {name: ceiling or None}, 'changed': [names]}."""
     if app is None:
-        from reNgine.celery import app
+        from cvengine.celery import app
     if saved is None:
         want = effective('discovery_concurrency', saved_values(), _tuned_from_database())
     else:
@@ -359,7 +359,7 @@ def lane_ceilings(key, app=None, timeout=1.5, stats=None):
     """{worker name: its autoscale ceiling} for the worker of the lane ``key`` names (``lane.cve_feed``, ``lane.classic``). ``stats``: the answer of one ``inspect().stats()``
     broadcast, when the caller asks for several lanes (one broadcast waits its whole timeout)."""
     if app is None:
-        from reNgine.celery import app
+        from cvengine.celery import app
     if stats is None:
         stats = app.control.inspect(timeout=timeout).stats() or {}
     out = {}
@@ -375,7 +375,7 @@ def apply_lanes(app=None, saved=None):
     ``autoscale`` remote control, as ``apply_discovery`` does for the discovery pool. A lane that does not answer keeps the number it has (the 30 second tick
     tries again). The entrypoint reads the same resolved number at start, so a restart keeps it. Returns {key: {'want', 'workers', 'changed'}}."""
     if app is None:
-        from reNgine.celery import app
+        from cvengine.celery import app
     out = {}
     stored = saved_values() if saved is None else saved
     tuned = _tuned_from_database()

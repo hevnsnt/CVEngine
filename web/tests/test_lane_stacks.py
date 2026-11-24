@@ -1,4 +1,4 @@
-"""reNgine/lane_stacks.py and the stack request of scripts/watchdog.sh: a gevent worker whose hub is held inside C code (the state the watchdog's rule R1
+"""cvengine/lane_stacks.py and the stack request of scripts/watchdog.sh: a gevent worker whose hub is held inside C code (the state the watchdog's rule R1
 restarts) still prints the Python stack of every thread when it gets SIGUSR2, and the script's signal reaches the Celery workers and nothing else."""
 import re
 import signal
@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 
 WEB = Path(__file__).resolve().parents[1]
-MODULE = WEB / 'reNgine' / 'lane_stacks.py'
+MODULE = WEB / 'cvengine' / 'lane_stacks.py'
 WATCHDOG = WEB.parent / 'scripts' / 'watchdog.sh'
 
 # a gevent worker in miniature: lane_stacks loaded from its file (no Django), then one greenlet that never yields, inside a C call that runs for seconds
@@ -68,8 +68,8 @@ print(mod.install())
         code = stacks_script()
         self.assertIsNotNone(code, 'STACKS_PY is not in scripts/watchdog.sh')
         catch = 'import signal, sys, time\nsignal.signal(signal.SIGUSR2, lambda *a: (print("got it", flush=True), sys.exit(0)))\nprint("ready", flush=True)\ntime.sleep(30)\n'
-        worker = subprocess.Popen([sys.executable, '-c', catch, '-A', 'reNgine.tasks', 'worker', '-n', 'classic_worker'], stdout=subprocess.PIPE, text=True)
-        bystander = subprocess.Popen([sys.executable, '-c', catch, 'reNgine.tasks'], stdout=subprocess.PIPE, text=True)  # not a worker
+        worker = subprocess.Popen([sys.executable, '-c', catch, '-A', 'cvengine.tasks', 'worker', '-n', 'classic_worker'], stdout=subprocess.PIPE, text=True)
+        bystander = subprocess.Popen([sys.executable, '-c', catch, 'cvengine.tasks'], stdout=subprocess.PIPE, text=True)  # not a worker
         try:
             self.assertEqual(worker.stdout.readline().strip(), 'ready')
             self.assertEqual(bystander.stdout.readline().strip(), 'ready')

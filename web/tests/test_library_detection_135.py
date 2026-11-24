@@ -10,7 +10,7 @@ from cvengine_scanner import cms, fingerprint, versions
 
 from cveFeed import correlation, js_libraries, kev_freshness, nuclei_scan, range_corrections, template_gates
 from cveFeed.models import CVEEntry, CVEMatch, ProbeObservation, RouteAuth
-from reNgine import discovery_events as bbot_lib
+from cvengine import discovery_events as bbot_lib
 from startScan.models import ScanHistory, Subdomain, Technology, Vulnerability
 from tests.test_js_libraries_provenance import ReviewScenarioBase
 from tests.test_route_auth import RouteFixture
@@ -48,7 +48,7 @@ class OtherToolsLibraryVersionTests(SimpleTestCase):
 
 class BbotLibraryIngestTests(RouteFixture, TestCase):
     def test_shodan_library_versions_are_stored_without_their_version(self):
-        from reNgine.tasks import persist_bbot_result
+        from cvengine.tasks import persist_bbot_result
         scan = self.scan()
         result = bbot_lib.BbotResult(subdomains={'www.rt.test'}, resolutions=set(), ports=set())
         for cpe in SHODAN_CPES:

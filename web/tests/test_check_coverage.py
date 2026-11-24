@@ -585,11 +585,11 @@ class StoredHostTests(TestCase):
 	@contextlib.contextmanager
 	def steady_caches(self):
 		"""Pin the per-process caches that expire on the clock, so no request of a measure pays for one. A request costs two queries more when the
-		IP allowlist and ban caches (reNgine.ip_allowlist, reNgine.input_guard: 10 seconds) have expired, and one or three more when the internal
+		IP allowlist and ban caches (cvengine.ip_allowlist, cvengine.input_guard: 10 seconds) have expired, and one or three more when the internal
 		network table (cveFeed.internal_view: 5 minutes) has. Those queries belong to whichever request lands after the expiry, whatever the page
 		holds: on a slow CI worker one landed in the host-less ``without`` request of the first measure only, and the cost read 7 against 9."""
 		from cveFeed import internal_view
-		from reNgine import input_guard, ip_allowlist
+		from cvengine import input_guard, ip_allowlist
 		internal_view.invalidate()
 		with mock.patch.object(internal_view, 'CACHE_SECONDS', float('inf')), \
 				mock.patch.object(ip_allowlist, '_load', return_value=(False, [])), \

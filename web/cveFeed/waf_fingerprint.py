@@ -113,7 +113,7 @@ def run_for_scan(scan_id, force=False):
     if not todo:
         return {'checked': len(sites), 'tested': 0, 'reused': len(covered)}
     from agentapi import sentinel_dispatch
-    from reNgine.resources import ScannerUnavailable
+    from cvengine.resources import ScannerUnavailable
     try:
         sentinel_dispatch.scanner_or_local(project, 'waf')  # raises when no scanner can take it: the kind never runs here
     except ScannerUnavailable as exc:  # the hosts stay due

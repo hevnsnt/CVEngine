@@ -27,7 +27,7 @@ RUN ARCH=$(dpkg --print-architecture) \
       && exit 1; \
     fi
 
-# Labels and credits (CVEngine is a fork of reNgine by Yogesh Ojha, GPL-3.0)
+# Labels and credits (CVEngine is a GPL-3.0 fork; THIRD-PARTY.md names the upstream project and its author)
 LABEL \
     name="CVEngine" \
     description="AI-first vulnerability management: discovery, inventory, live CVE correlation and automated testing." \
@@ -78,7 +78,7 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
 # prints, the About page and the Sentinels page read (agentapi/sentinel_source.py), and tests/test_sentinel_source.py checks against the pin.
 RUN python -c "import json,importlib.metadata as m; print('Sentinel library', json.loads(m.distribution('cvengine-scanner').read_text('direct_url.json'))['vcs_info']['commit_id'])"
 
-# whatportis (the port name lookup) truncates its table instead of purging it (https://github.com/yogeshojha/rengine/issues/984). Patched here, at build
+# whatportis (the port name lookup) truncates its table instead of purging it (upstream issue 984). Patched here, at build
 # time, because the installed packages belong to root and the workers do not run as root (below).
 RUN sed -i 's/purge()/truncate()/g' "$(python -c "import os, whatportis; print(os.path.join(os.path.dirname(whatportis.__file__), 'cli.py'))")"
 
@@ -87,7 +87,7 @@ RUN sed -i 's/purge()/truncate()/g' "$(python -c "import os, whatportis; print(o
 # chown and no capability. Its supplementary group 101 is the nginx group of the proxy image: the scan results folder is root's or this account's
 # and group 101, mode 0750, so only this account and the proxy (which serves /protected_media/ from it) can enter it. The application source and the
 # installed packages stay root's and read only to it. Only the paths it must write are its own: HOME (with ~/.config, where the CVE seed folder is,
-# a volume, and ~/logs, where errors.log, db.log and celery.log go: CVENGINE_LOG_DIR, reNgine/settings.py), the generated templates folder, the scan results and the static files folder (volumes; the ownership service of docker-compose.yml
+# a volume, and ~/logs, where errors.log, db.log and celery.log go: CVENGINE_LOG_DIR, cvengine/settings.py), the generated templates folder, the scan results and the static files folder (volumes; the ownership service of docker-compose.yml
 # hands existing ones over once). /root itself becomes traversable (0711) because the generated templates volume keeps its historical path below
 # it: rows in the database record that path.
 ENV HOME=/home/cvengine \

@@ -134,5 +134,5 @@ web/cve-seed*
 config/nginx/state/maintenance
 config/nginx/state/maintenance-failed
 
-# a trusted tunnel or CDN peer for the bundled proxy (config/nginx/rengine.conf): an administrator's own copy of config/nginx/trusted-upstreams.conf, never tracked
+# a trusted tunnel or CDN peer for the bundled proxy (config/nginx/cvengine.conf): an administrator's own copy of config/nginx/trusted-upstreams.conf, never tracked
 config/nginx/trusted-upstreams.local.conf

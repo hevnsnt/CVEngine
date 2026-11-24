@@ -1,4 +1,4 @@
-"""The app role against a real database: created and granted by reNgine/db_roles.ensure (the step every migrate runs as the owner role), it can
+"""The app role against a real database: created and granted by cvengine/db_roles.ensure (the step every migrate runs as the owner role), it can
 read and write the application's tables, use their sequences, take advisory locks and ANALYZE (pg_maintain), and it cannot create roles,
 create extensions, drop or truncate a table it does not own, create tables, ALTER SYSTEM, or run programs and read files on the server.
 
@@ -13,7 +13,7 @@ from django.core.management import call_command
 from django.db import connection
 from django.test import TransactionTestCase
 
-from reNgine import db_roles
+from cvengine import db_roles
 
 
 class AppRoleGrantTests(TransactionTestCase):

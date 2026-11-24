@@ -16,7 +16,7 @@ is marked as announced under it without a message (``baseline_heat_policy``): th
 made under one rule never holds back a page that is new under another, and a match still waiting for its page (its scan is running, or it was
 made just before the switch) is left to that page.
 
-The senders are the reNgine helpers (Slack, Discord, Telegram, Lark), which read the one Notification row and do nothing
+The senders are the inherited helpers (Slack, Discord, Telegram, Lark), which read the one Notification row and do nothing
 for a channel that is off or incomplete. Sending is best effort: a failure is logged without its text (a Telegram error
 carries the bot token in its URL) and never reaches the caller.
 """
@@ -78,7 +78,7 @@ def _send(text, flag, channels=()):
         row = _settings()
         if not (row and getattr(row, flag) and (row.send_to_slack or row.send_to_discord or row.send_to_telegram or row.send_to_lark)):
             return False
-        from reNgine import common_func
+        from cvengine import common_func
         sent = tried = 0
         for channel, name in CHANNEL_SENDERS.items():
             if (channels and channel not in channels) or not _set_up(row, channel):

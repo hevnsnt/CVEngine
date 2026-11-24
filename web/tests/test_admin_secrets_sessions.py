@@ -28,7 +28,7 @@ class HashedSessionTests(TestCase):
 		cookie = self.client.cookies['sessionid'].value
 		self.assertFalse(Session.objects.filter(session_key=cookie).exists())
 		self.assertEqual(Session.objects.count(), 1)
-		from reNgine.hashed_sessions import db_key
+		from cvengine.hashed_sessions import db_key
 		self.assertTrue(Session.objects.filter(session_key=db_key(cookie)).exists())
 		self.assertEqual(self.client.get('/cve/api/account/me').status_code, 200)  # the session is found again on the next request
 		self.client.post('/signout/') if False else self.client.logout()

@@ -40,7 +40,7 @@ class FirstRunBootstrapTests(TestCase):
 		self.assertIn('bootstrap_first_run', scan_control.PAUSE_EXEMPT_TASKS)
 
 	def test_a_worker_coming_up_queues_it_after_a_short_settle_and_never_fails(self):
-		from reNgine.celery import start_first_run_bootstrap
+		from cvengine.celery import start_first_run_bootstrap
 		with mock.patch('cveFeed.tasks.bootstrap_first_run.apply_async') as queue:
 			start_first_run_bootstrap()
 		queue.assert_called_once_with(countdown=45)

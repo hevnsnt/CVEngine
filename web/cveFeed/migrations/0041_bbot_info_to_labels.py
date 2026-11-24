@@ -2,7 +2,7 @@ import re
 
 from django.db import migrations
 
-# Frozen copy of reNgine.bbot (short_title, is_informational, label_for) as of this migration.
+# Frozen copy of cvengine.bbot (short_title, is_informational, label_for) as of this migration.
 # Never import the live code into a migration: a later change to it must not alter (or break at import)
 # what this migration does when a fresh install replays them all.
 TITLE_MAX = 80

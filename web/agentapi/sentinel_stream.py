@@ -538,9 +538,9 @@ def provider_names(config):
 # --- the stage side: build the target, dispatch it, consume the batches ---------------------------------------------------------------
 
 def mode_options(mode):
-    """The presets, required flags and ``--force`` of a discovery mode, read from the server's own table (``reNgine.discovery_events.MODES``), so the scanner runs the
+    """The presets, required flags and ``--force`` of a discovery mode, read from the server's own table (``cvengine.discovery_events.MODES``), so the scanner runs the
     choices the server makes for a local run."""
-    from reNgine import discovery_events as bbot_lib
+    from cvengine import discovery_events as bbot_lib
     cfg = bbot_lib.MODES.get(mode) or bbot_lib.MODES['passive']
     args = list(cfg['args'])
     flags = [args[i + 1] for i, a in enumerate(args[:-1]) if a == '-rf']
@@ -632,7 +632,7 @@ def dispatch_stream(project, kind, target, scan, on_partial, label='', secret_re
     The waits are ``sentinel_dispatch``'s (claim, queue), and the run's own: its target's ``timeout_seconds`` plus ``REPORT_GRACE`` from the claim.
     A task of the same kind and scan that is still active (the queue gave a lost worker's pipeline to a new one) is ended first."""
     from agentapi import sentinel_broker, sentinel_dispatch
-    from reNgine import resources
+    from cvengine import resources
     if scan is not None:
         for old in SentinelTask._base_manager.filter(scan=scan, kind=kind, status__in=('queued', 'claimed', 'running')).select_related('project'):
             sentinel_broker.expire(old, 'a new run of the same scan took the work over')

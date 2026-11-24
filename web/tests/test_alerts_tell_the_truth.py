@@ -196,7 +196,7 @@ class TemplateAlertTextTests(Base):
         for _ in range(20):
             GeneratedTemplate.objects.create(cve_entry=self.cve, yaml='x', status=GeneratedTemplate.STATUS_DRAFT,
                                              validation_started_at=now() - templatevalidate.STUCK_AFTER - timedelta(hours=1))
-        from reNgine.resources import ScannerUnavailable
+        from cvengine.resources import ScannerUnavailable
         return mock.patch('agentapi.sentinel_dispatch.nuclei_validate_ready', side_effect=ScannerUnavailable('nuclei_validate', 'none'))
 
     def test_remote_sentinels_and_no_built_in_one(self):

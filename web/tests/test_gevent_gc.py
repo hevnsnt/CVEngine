@@ -1,4 +1,4 @@
-"""reNgine.gevent_gc: automatic collection off and a timer in a gevent worker, nothing changed anywhere else."""
+"""cvengine.gevent_gc: automatic collection off and a timer in a gevent worker, nothing changed anywhere else."""
 import gc
 import json
 from unittest import mock
@@ -6,7 +6,7 @@ from unittest import mock
 from django.core.cache import cache
 from django.test import SimpleTestCase
 
-from reNgine import gevent_db, gevent_gc, lane_memory
+from cvengine import gevent_db, gevent_gc, lane_memory
 
 
 def _fresh_state(case):

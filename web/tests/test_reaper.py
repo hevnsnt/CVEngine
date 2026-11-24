@@ -123,7 +123,7 @@ class ReaperTests(TestCase):
 class RedispatchTests(ReaperTests):
 	def setUp(self):
 		super().setUp()
-		from reNgine import resources
+		from cvengine import resources
 		client = resources.get_store().r
 		self.addCleanup(lambda: [client.delete(k) for k in client.scan_iter('cvengine:assess:redispatch:*')])
 		[client.delete(k) for k in client.scan_iter('cvengine:assess:redispatch:*')]
@@ -294,7 +294,7 @@ class QueuedScanRedispatchTests(ReaperTests):
 
 	def setUp(self):
 		super().setUp()
-		from reNgine import resources
+		from cvengine import resources
 		client = resources.get_store().r
 		self.addCleanup(lambda: [client.delete(k) for k in client.scan_iter('cvengine:scan:redispatch:*')])
 		[client.delete(k) for k in client.scan_iter('cvengine:scan:redispatch:*')]
@@ -307,7 +307,7 @@ class QueuedScanRedispatchTests(ReaperTests):
 		                                  results_dir='/tmp', celery_ids=list(celery_ids), tasks=tasks)
 
 	def redispatch(self, live):
-		with mock.patch('reNgine.celery.app.send_task') as send:
+		with mock.patch('cvengine.celery.app.send_task') as send:
 			return reaper.redispatch_queued_scans(now=NOW, live=live), send
 
 	def test_a_scan_the_broker_holds_nothing_for_is_sent_again(self):

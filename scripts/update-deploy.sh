@@ -127,7 +127,7 @@ applied_migrations() {
 run_migrations() {
   local before after
   before=$(applied_migrations) || before=''
-  # as the database's owner role, in the migrate service; the migrate also creates or updates the app role and grants it (web/reNgine/db_roles.py)
+  # as the database's owner role, in the migrate service; the migrate also creates or updates the app role and grants it (web/cvengine/db_roles.py)
   owner_run manage.py migrate --noinput && return 0
   after=$(applied_migrations) || after=''
   if [ -z "$before" ] || [ "$before" != "$after" ]; then
@@ -162,6 +162,18 @@ warn_discovery_pin() {
 deploy_steps() {
   python3 "$STATE_HELPER" commit "$(git rev-parse HEAD)" || return 1
   local compose=("${COMPOSE[@]}")
+  # An install made before 1.5.0 has the old names in its own files (.env, an overlay, its certificates): the new ones are added beside them
+  # before Compose reads anything (scripts/legacy_names.py); the old ones go only after the updated site answered, below.
+  if [ -f scripts/legacy_names.py ]; then
+    local names_out
+    if ! names_out=$(python3 scripts/legacy_names.py migrate -- "${compose[@]}" 2>&1); then
+      names_out=$(tail -n 1 <<<"$names_out")
+      DEPLOY_WHY="The update stopped before the build: ${names_out:0:140}"
+      log "$DEPLOY_WHY"
+      return 1
+    fi
+    while IFS= read -r line; do [ -z "$line" ] || log "$line"; done <<<"$names_out"
+  fi
   local services=(web celery celery-beat) listed=''
   # the dev compose file has no proxy service; recreate it only where it exists (keep it if the list cannot be read)
   if listed=$("${compose[@]}" config --services 2>/dev/null); then
@@ -211,6 +223,11 @@ deploy_steps() {
     "${compose[@]}" build reviewer || log "could not build the AI reviewer image; scanning is not affected (the next update tries again)"
   fi
   build_restore_memory
+  # an install made before 1.5.0: the running database and Redis, still on the old network, are attached to the new one for the one-off
+  # containers of the new images until they are recreated (scripts/legacy_names.py bridge; never fails the update)
+  if [ -f scripts/legacy_names.py ]; then
+    while IFS= read -r line; do [ -z "$line" ] || log "$line"; done < <(python3 scripts/legacy_names.py bridge -- "${compose[@]}" 2>&1)
+  fi
   # The application runs as its own account (uid 10002) from this image on: the paths it writes (the volumes, the Django secret, its own update
   # requests in web/) are handed to it before anything of the new image runs (the host-fit count below, the migrate service, the application).
   # Idempotent: an install that has it already changes nothing (scripts/app-ownership.sh, web/ownership.sh).
@@ -301,12 +318,16 @@ deploy_steps() {
   verify_serving || return 1
   # The proxy is what visitors reach, and a proxy whose configuration nginx refuses restarts over and over while `ps` calls it running.
   if printf '%s\n' "${services[@]}" | grep -qx proxy; then verify_proxy || return 1; fi
+  # the names used before 1.5.0, now that the update is verified (scripts/legacy_names.py): never fails the update
+  if [ -f scripts/legacy_names.py ]; then
+    while IFS= read -r line; do [ -z "$line" ] || log "$line"; done < <(python3 scripts/legacy_names.py cleanup -- "${compose[@]}" 2>&1)
+  fi
   # Which database role web, celery and celery-beat run as; a warning when any still uses the owner role (never fails the update).
   if declare -F cvengine_db_role_report >/dev/null; then
     while IFS= read -r line; do [ -z "$line" ] || log "$line"; done < <(cvengine_db_role_report "${compose[@]}")
   fi
   # Whether the real client address reaches the server (scripts/client-address.sh): one probe through the public name, compared with what
-  # Cloudflare saw. A report in the update log, never a failure; the probe route passes the maintenance page (config/nginx/rengine.conf).
+  # Cloudflare saw. A report in the update log, never a failure; the probe route passes the maintenance page (config/nginx/cvengine.conf).
   if declare -F cvengine_client_address_report >/dev/null; then
     while IFS= read -r line; do [ -z "$line" ] || log "$line"; done < <(cvengine_client_address_report "${compose[@]}" 2>/dev/null)
   fi

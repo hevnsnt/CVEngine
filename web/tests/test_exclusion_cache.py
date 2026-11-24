@@ -12,8 +12,8 @@ from django.utils import timezone
 from cveFeed import exclusions
 from cveFeed.models import ExcludedAddress, HostExclusion, HostMove
 from dashboard.models import Org, Project
-from reNgine import discovery_events as bbot_lib
-from reNgine.tasks import persist_bbot_result
+from cvengine import discovery_events as bbot_lib
+from cvengine.tasks import persist_bbot_result
 from scanEngine.models import EngineType
 from startScan.models import ScanHistory, Subdomain
 from targetApp.models import Domain

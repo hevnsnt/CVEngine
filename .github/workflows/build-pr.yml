@@ -91,7 +91,7 @@ jobs:
       POSTGRES_PORT: 5432
       CELERY_BROKER: redis://127.0.0.1:6379/0
       CELERY_BACKEND: redis://127.0.0.1:6379/0
-      RENGINE_HOME: ${{ github.workspace }}/web
+      CVENGINE_HOME: ${{ github.workspace }}/web
       DOMAIN_NAME: localhost
     steps:
       - name: Set cache directory
@@ -110,7 +110,7 @@ jobs:
           cache-dependency-path: web/requirements.txt
       - name: Native rendering libraries
         run: sudo apt-get update && sudo apt-get install -y libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz-subset0
-      - name: The proxy's own nginx image (web/tests/test_tunnel_client_address.py runs config/nginx/rengine.conf in it and fails when it cannot)
+      - name: The proxy's own nginx image (web/tests/test_tunnel_client_address.py runs config/nginx/cvengine.conf in it and fails when it cannot)
         run: docker pull nginx:alpine
       - name: Install application dependencies
         run: |
@@ -172,8 +172,8 @@ jobs:
         working-directory: web
         env:
           DEBUG: '0'
-          CVENGINE_TEST_BLOCK_NETWORK: '1'  # a test that resolves a name or connects outside loopback, Postgres and Redis fails (reNgine/test_runner.py)
-        # one worker per core (at most 7: reNgine/test_runner.py gives each worker its own Redis databases)
+          CVENGINE_TEST_BLOCK_NETWORK: '1'  # a test that resolves a name or connects outside loopback, Postgres and Redis fails (cvengine/test_runner.py)
+        # one worker per core (at most 7: cvengine/test_runner.py gives each worker its own Redis databases)
         run: python manage.py test --noinput --parallel auto $(python ../scripts/ci_shard.py ${{ matrix.shard }} 4) --durations 15 --module-times
       - name: Front-end node tests (every file in web/tests)
         # was a hand-kept list of 29 files that left 19 of the 50 out (retest, Situations, list failure states, nav fold, ...): a new test file now runs without anyone adding it here
@@ -215,7 +215,7 @@ jobs:
       CELERY_BROKER: redis://127.0.0.1:6379/0
       CELERY_BACKEND: redis://127.0.0.1:6379/0
       CACHE_URL: redis://127.0.0.1:6379/1
-      RENGINE_HOME: ${{ github.workspace }}/web
+      CVENGINE_HOME: ${{ github.workspace }}/web
       DOMAIN_NAME: localhost
       DEBUG: '0'
     steps:

@@ -2,14 +2,14 @@
 
 This page says what cvENGINE sends to AI models, what an AI agent connected over MCP can read, and how to send less or nothing. The same text is in the app at **AI and your data** (account menu, `/cve/ai/`). Every signed-in person can read that page. It also shows which AI jobs are on for the install, and App Admins see each job's calls over the last 30 days.
 
-The in-app text lives in `web/cveFeed/ai_disclosure.py`. `web/tests/test_ai_disclosure.py` fails when an AI stage is added to `reNgine/ai_prompts.STAGES` without a description there, so no AI job ships without saying what it sends.
+The in-app text lives in `web/cveFeed/ai_disclosure.py`. `web/tests/test_ai_disclosure.py` fails when an AI stage is added to `cvengine/ai_prompts.STAGES` without a description there, so no AI job ships without saying what it sends.
 
 ## Where the data goes
 
 - **The provider.** Requests go to the one provider an App Admin chooses in Settings:
   - **Hosted:** Anthropic, OpenAI or OpenRouter. The data leaves your network.
   - **Self-hosted:** Ollama, vLLM or LM Studio. The data goes only to that server.
-  - Profiles: `reNgine/ai_profiles.PROFILES`.
+  - Profiles: `cvengine/ai_profiles.PROFILES`.
 - **Who sends it.** The AI reviewer container makes every model call, except the Settings connection test and the model list ([AI-REVIEWER.md](AI-REVIEWER.md)). The server queues a job (`cveFeed/ai_jobs.enqueue`); the container takes it, calls the provider and posts the answer back.
 - **The API key.** It is stored encrypted and never returned to the browser. It is used only for the provider and host it was saved for. The container receives it to make the calls.
 - **No agreement.** cvENGINE has no agreement with any provider about retention or training. Check your provider's terms, or host the model yourself.

@@ -2,7 +2,7 @@
 
 The scan tools are leaving the server image: every tool run moves to the Sentinel-based scanner, and phase 8 drops the binaries
 from the server. Until then this test stops the server from growing new local scan-tool usage. It walks the non-test code of
-`cveFeed`, `reNgine` and `agentapi` (Python and shell), the three entrypoint scripts and `web/Dockerfile`, and records every
+`cveFeed`, `cvengine` and `agentapi` (Python and shell), the three entrypoint scripts and `web/Dockerfile`, and records every
 (tool, file) pair where the file mentions a scan tool or a way of running one: `subprocess`, `heavy_process.run`, a `*_BIN`
 name, or one of the tool names as a whole word (case-insensitive: nmap, nuclei, naabu, wpscan, testssl, bbot, wafw00f,
 gowitness, aardwolf).
@@ -33,7 +33,7 @@ PATTERNS['subprocess'] = re.compile(r'\bsubprocess\b')
 PATTERNS['heavy_process.run'] = re.compile(r'\bheavy_process\.run')
 PATTERNS['_BIN'] = re.compile(r'_BIN\b')
 
-SCAN_DIRS = ('cveFeed', 'reNgine', 'agentapi', 'targetApp', 'startScan', 'scanEngine', 'dashboard')
+SCAN_DIRS = ('cveFeed', 'cvengine', 'agentapi', 'targetApp', 'startScan', 'scanEngine', 'dashboard')
 SCAN_SUFFIXES = ('.py', '.sh')
 EXTRA_FILES = ('entrypoint.sh', 'celery-entrypoint.sh', 'beat-entrypoint.sh', 'Dockerfile')
 SKIP_DIRS = {'__pycache__', 'tests'}
@@ -107,11 +107,11 @@ ALLOWED = {
         'cveFeed/validation_plan.py',
         'cveFeed/windows_builds.py',  # reads the NTLM and SMB script output the port scan stored (the Windows build) and says nmap's OS guess is never read, runs nothing
         'cveFeed/work_planner.py',  # 1.4 work planner: the check-to-tool table of the coverage rules, queues Sentinel tasks, runs nothing
-        'reNgine/ai_providers.py',
-        'reNgine/common_func.py',
-        'reNgine/definitions.py',
-        'reNgine/input_guard.py',
-        'reNgine/resources.py',
+        'cvengine/ai_providers.py',
+        'cvengine/common_func.py',
+        'cvengine/definitions.py',
+        'cvengine/input_guard.py',
+        'cvengine/resources.py',
         'startScan/migrations/0003_shodan_service_fields.py',  # widened guard (targetApp, startScan, scanEngine, dashboard): an old migration: field help about the fingerprint pass, runs nothing
         'startScan/migrations/0007_deshare_ports.py',  # widened guard (targetApp, startScan, scanEngine, dashboard): an old data migration: names the tools whose rows it moved, runs nothing
         'startScan/migrations/0016_scrub_unreviewed_nse_scripts.py',  # widened guard (targetApp, startScan, scanEngine, dashboard): an old data migration: scrubs stored script output, runs nothing
@@ -189,13 +189,13 @@ ALLOWED = {
         'cveFeed/validation.py',  # T8 nuclei: help text and the policy docstring naming the template policy; the nuclei_template check kind is a data value; runs nothing
         'cveFeed/views.py',
         'cveFeed/work_planner.py',  # 1.4 work planner: the check-to-tool table of the coverage rules, queues Sentinel tasks, runs nothing
+        'cvengine/ai_nuclei_model.py',  # the model of the nuclei tag choice (an AI call about tag names, the stages nuclei_targeting and nuclei_tag_selection): names the tool, runs nothing
+        'cvengine/ai_providers.py',
+        'cvengine/definitions.py',
+        'cvengine/input_guard.py',
+        'cvengine/resources.py',
+        'cvengine/tasks.py',
         'dashboard/models.py',  # widened guard (targetApp, startScan, scanEngine, dashboard): the template policy settings: field help, runs nothing
-        'reNgine/ai_nuclei_model.py',  # the model of the nuclei tag choice (an AI call about tag names, the stages nuclei_targeting and nuclei_tag_selection): names the tool, runs nothing
-        'reNgine/ai_providers.py',
-        'reNgine/definitions.py',
-        'reNgine/input_guard.py',
-        'reNgine/resources.py',
-        'reNgine/tasks.py',
         'scanEngine/migrations/0007_delete_installedexternaltool.py',  # widened guard (targetApp, startScan, scanEngine, dashboard): drops the old installed-tool table, runs nothing
         'startScan/models.py',  # widened guard (targetApp, startScan, scanEngine, dashboard): stored results: names the tool a finding came from, runs nothing
         'targetApp/target_types.py',  # widened guard (targetApp, startScan, scanEngine, dashboard): target classification: names the tools in comments about what a Sentinel takes, runs nothing
@@ -308,9 +308,9 @@ ALLOWED = {
         'cveFeed/threat.py',  # 1.3.5 heat rules (develop): names the sources whose severity heat is not held back, runs nothing
         'cveFeed/triage.py',  # 1.4 T8: finding kind 'bbot' (a stored data value), runs nothing
         'cveFeed/upgrade_backfills.py',  # 1.4 secrets inventory: names the bbot findings it files and masks (rule ids, the finding's source), runs nothing
+        'cvengine/resources.py',  # 1.4 T8: heavy-job kind names 'bbot-deep', 'bbot-standard', 'bbot-passive' now unused: lead decides with the tunables that name them (one-line tables shared with other tools), runs nothing
+        'cvengine/tasks.py',  # 1.4 T8: stores a Sentinel's discovery results with source 'bbot' (a stored data value), runs nothing
         'dashboard/models.py',  # widened guard (targetApp, startScan, scanEngine, dashboard): the discovery settings: names the discovery tool in field help and choices, runs nothing
-        'reNgine/resources.py',  # 1.4 T8: heavy-job kind names 'bbot-deep', 'bbot-standard', 'bbot-passive' now unused: lead decides with the tunables that name them (one-line tables shared with other tools), runs nothing
-        'reNgine/tasks.py',  # 1.4 T8: stores a Sentinel's discovery results with source 'bbot' (a stored data value), runs nothing
         'startScan/migrations/0007_deshare_ports.py',  # widened guard (targetApp, startScan, scanEngine, dashboard): an old data migration: names the tools whose rows it moved, runs nothing
         'startScan/migrations/0011_shorten_bbot_names.py',  # widened guard (targetApp, startScan, scanEngine, dashboard): an old data migration: names the tool whose rows it shortened, runs nothing
         'startScan/migrations/0025_scanhistory_discovery_mode.py',  # widened guard (targetApp, startScan, scanEngine, dashboard): an old migration: the discovery mode field help, runs nothing
@@ -336,7 +336,7 @@ ALLOWED = {
     'subprocess': [
         'cveFeed/report_pdf.py',
         'cveFeed/templatefixture.py',  # runs a model-written regex in a time-limited child interpreter; no scan tool (review 2 F5)
-        'reNgine/time_limits.py',
+        'cvengine/time_limits.py',
     ],
 }
 
@@ -427,7 +427,7 @@ LOOKUP = re.compile(r'\bgetaddrinfo\b|\bgethostbyname(?:_ex)?\b|\bdns\.resolver\
 LOOKUP_ALLOWED = {
     'cveFeed/openvas_scan.py': "own_addresses: this server's own DOMAIN_NAME, so OpenVAS is never pointed at the server itself",
     'cveFeed/settings_api.py': 'the SSRF check of an outbound URL an App Admin enters (SMTP host, AI base URL), not a scan target',
-    'reNgine/ai_providers.py': "the SSRF check of the AI provider's base URL, not a scan target",
+    'cvengine/ai_providers.py': "the SSRF check of the AI provider's base URL, not a scan target",
 }
 
 

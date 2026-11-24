@@ -18,7 +18,7 @@ from cveFeed import exclusions
 from cveFeed.exclusions import address_excluded, excluded_names, parse_entry
 from cveFeed.models import AgentActivity, ExcludedAddress
 from dashboard.models import AuditLog, Org, OrgMembership, Project, ProjectMembership
-from reNgine.resources import AddressExcluded, ScannerUnavailable
+from cvengine.resources import AddressExcluded, ScannerUnavailable
 from scanEngine.models import EngineType
 from startScan.models import IpAddress, ScanHistory, Subdomain
 from targetApp.models import Domain

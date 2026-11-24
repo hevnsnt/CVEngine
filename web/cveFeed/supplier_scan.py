@@ -377,8 +377,8 @@ def sweep(project_id, stop=None, pool=None, budget=None, now=None):
     CVE catalog and the pause check in tests."""
     from cveFeed import activity, exclusions, ledger
     from cveFeed.conductor import bounty_blocked_projects
-    from reNgine import resources
-    from reNgine.resources import ScannerUnavailable
+    from cvengine import resources
+    from cvengine.resources import ScannerUnavailable
     summary = {'suppliers': 0, 'domains': 0, 'new': 0, 'reopened': 0, 'resolved': 0, 'deferred': 0, 'requests': 0}
     if not enabled():
         return {**summary, 'skipped': 'supplier checks are turned off (CVENGINE_SUPPLIERS=0)'}
@@ -447,7 +447,7 @@ def sweep_all(**kwargs):
 
     from cveFeed import ledger
     from cveFeed.models import Supplier
-    from reNgine import resources
+    from cvengine import resources
     if not enabled():
         return {'skipped': 'supplier checks are turned off (CVENGINE_SUPPLIERS=0)'}
     stop = kwargs.get('stop') or (lambda: resources.global_pause_requested(fail_closed=True))

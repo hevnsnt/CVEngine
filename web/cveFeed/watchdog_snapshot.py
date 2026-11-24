@@ -35,7 +35,7 @@ class Probes:
         self.now = now or time.time()
 
     def redis(self):
-        from reNgine import resources
+        from cvengine import resources
         client = resources.redis_client()
         if client is None:
             raise RuntimeError('the broker is not Redis')
@@ -58,14 +58,14 @@ class Probes:
 
     def lanes(self):
         """{worker name: [queues it consumes]} from one broadcast; {} when no worker answered. Raises when the broker cannot be asked."""
-        from reNgine.celery import app
+        from cvengine.celery import app
         answer = app.control.inspect(timeout=PING_SECONDS, limit=len(_lane_table())).active_queues()
         return {name: [q.get('name') for q in (queues or [])] for name, queues in (answer or {}).items()}
 
     def lane_work(self, workers=None):
         """{worker name: {'completed': tasks finished since it started, 'active': tasks running, 'capacity': its pool ceiling or None, 'pid': its process id or None}}: what R2 needs, asked
         only while a queue has messages waiting, and only of the workers that answered (so it returns as soon as they have)."""
-        from reNgine.celery import app
+        from cvengine.celery import app
         inspector = app.control.inspect(timeout=PING_SECONDS, destination=list(workers) if workers else None, limit=len(workers) if workers else len(_lane_table()))
         stats, active = inspector.stats() or {}, inspector.active() or {}
         out = {}
@@ -151,12 +151,12 @@ class Probes:
 
     def disk(self):
         from django.conf import settings
-        usage = shutil.disk_usage(getattr(settings, 'RENGINE_HOME', '/') or '/')
+        usage = shutil.disk_usage(getattr(settings, 'CVENGINE_HOME', '/') or '/')
         return {'free_mb': usage.free // (1 << 20), 'total_mb': usage.total // (1 << 20), 'free_pct': round(100 * usage.free / usage.total, 1) if usage.total else None}
 
     def memory(self):
         """[{host, used_pct}] of every container that published its memory, and this one."""
-        from reNgine import resources
+        from cvengine import resources
         out = []
         for c in (resources.cluster_snapshot().get('containers') or []):
             mem = c.get('memory') or {}
@@ -196,7 +196,7 @@ def update_state():
     except Exception:  # noqa: BLE001
         logger.debug('watchdog: update phase unreadable', exc_info=True)
     approved = os.path.lexists(updater._file('.update-approved'))
-    locked = _lock_held(os.path.join(getattr(settings, 'RENGINE_HOME', '') or '', '.update-lock'))
+    locked = _lock_held(os.path.join(getattr(settings, 'CVENGINE_HOME', '') or '', '.update-lock'))
     return {'phase': phase, 'approved': approved, 'locked': locked, 'active': in_progress or approved or locked, 'warming_up': _just_updated(phase)}
 
 

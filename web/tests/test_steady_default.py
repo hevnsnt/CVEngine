@@ -1,4 +1,4 @@
-"""Every test starts with the per-process, clock-expiring memos unloaded and pinned (``reNgine.test_runner.pin_process_caches``): a request inside it never pays an
+"""Every test starts with the per-process, clock-expiring memos unloaded and pinned (``cvengine.test_runner.pin_process_caches``): a request inside it never pays an
 expiry's reload. A test that is about the expiry opts out with ``tests.steady.expiring_caches``."""
 import time
 from unittest import mock
@@ -8,7 +8,7 @@ from django.test import TestCase
 from django.test.utils import CaptureQueriesContext
 
 from cveFeed import internal_view, tunables
-from reNgine import input_guard, ip_allowlist
+from cvengine import input_guard, ip_allowlist
 from tests.steady import expiring_caches
 
 
@@ -44,7 +44,7 @@ class PinnedCacheSecondsTests(TestCase):
         from pathlib import Path
 
         from cveFeed import egress_proxy, scan_concurrency, tailscale_scope
-        from reNgine import resources
+        from cvengine import resources
         for module, name in ((internal_view, 'CACHE_SECONDS'), (tunables, 'CACHE_SECONDS'), (scan_concurrency, 'CACHE_SECONDS'), (tailscale_scope, 'CACHE_SECONDS'),
                              (egress_proxy, 'CACHE_SECONDS'), (resources, 'SAVED_CACHE_SECONDS')):
             source = Path(module.__file__).read_text(encoding='utf-8')

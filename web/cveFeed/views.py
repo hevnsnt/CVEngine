@@ -27,7 +27,7 @@ from cveFeed.models import (AgentActivity, AutoFireRun, CVEEntry, CVEMatch, Disc
 from cveFeed.threat import FIRE, HEAT_RANK, ICE, SMOKE, classify_threat_tier, host_heat, match_heat
 from startScan.models import OPEN_PORT_STATES, open_services
 from targetApp.target_types import is_public_address
-from reNgine.definitions import FOUR_OH_FOUR_URL, PERM_MODIFY_SYSTEM_CONFIGURATIONS
+from cvengine.definitions import FOUR_OH_FOUR_URL, PERM_MODIFY_SYSTEM_CONFIGURATIONS
 
 logger = logging.getLogger(__name__)
 
@@ -1590,7 +1590,7 @@ def _json_body(request):
 @require_POST
 @has_permission_decorator(PERM_MODIFY_SYSTEM_CONFIGURATIONS, redirect_url=FOUR_OH_FOUR_URL)
 def api_detect(request):
-    from reNgine.ai_providers import ambiguous_key, detect_provider
+    from cvengine.ai_providers import ambiguous_key, detect_provider
     key = _json_body(request).get('key')
     return JsonResponse({'provider': detect_provider(key), 'ambiguous': ambiguous_key(key)})  # ambiguous: an sk- key more than one vendor issues
 
@@ -1601,8 +1601,8 @@ def api_onboarding_save(request):
     """Verify the key against the provider the user chose (or its unambiguous prefix names) with a live call, then save + enable it. A key
     whose vendor is not certain is never tried anywhere: the user is asked to pick the provider."""
     from dashboard.models import AIProviderSettings
-    from reNgine import ai_prompts
-    from reNgine.ai_providers import AIProviderError, detect_provider, get_provider, usage_stage
+    from cvengine import ai_prompts
+    from cvengine.ai_providers import AIProviderError, detect_provider, get_provider, usage_stage
 
     body = _json_body(request)
     key = (body.get('key') or '').strip()
@@ -1616,11 +1616,11 @@ def api_onboarding_save(request):
     model = (body.get('model') or '').strip()
     if not key and previous and previous.provider == provider_name:
         key = previous.api_key or ''
-    from reNgine.ai_providers import SELECTABLE
+    from cvengine.ai_providers import SELECTABLE
     needs_model = provider_name in SELECTABLE and not model
     try:
         base_url = previous.base_url if previous and previous.provider == provider_name else None
-        from reNgine.ai_profiles import AIRuntime
+        from cvengine.ai_profiles import AIRuntime
         provider = get_provider(provider_name, model=model or None, api_key=key or None, base_url=base_url,
                                 runtime=AIRuntime.from_row(previous) if previous else None)  # the timeouts saved in Settings apply to the first check too
         with usage_stage('connection_test'):

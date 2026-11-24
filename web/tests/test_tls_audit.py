@@ -7,7 +7,7 @@ from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
 from cveFeed import hygiene, tls_audit
-from reNgine import resources
+from cvengine import resources
 from cveFeed.models import BountyEngagement, BountyProgram, CVEEntry, CVEMatch, HygieneFinding, ProbeObservation, ServiceRun
 from startScan.models import Subdomain
 from tests.fake_scanner import LocalFallback, assert_ran_nowhere_locally
@@ -119,7 +119,7 @@ class SweepTests(RouteFixture, TestCase):
         self.calls = []  # (host:port, starttls) of each task a Sentinel was handed
         self.output = CLEAN
         mock.patch('cveFeed.activity.log').start()
-        mock.patch('reNgine.resources.global_pause_requested', return_value=False).start()
+        mock.patch('cvengine.resources.global_pause_requested', return_value=False).start()
         LocalFallback('none').apply(self)
         self.guard = assert_ran_nowhere_locally(self, 'testssl')
         self.make_sentinel(['testssl'])
@@ -267,7 +267,7 @@ class SweepTests(RouteFixture, TestCase):
         self.assertEqual(self.calls, [])
 
     def test_nothing_runs_while_scanning_is_paused(self):
-        with mock.patch('reNgine.resources.global_pause_requested', return_value=True):
+        with mock.patch('cvengine.resources.global_pause_requested', return_value=True):
             out = self.sweep()
         self.assertIn('paused', out['skipped'])
         self.assertEqual(self.calls, [])

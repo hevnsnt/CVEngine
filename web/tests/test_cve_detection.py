@@ -212,7 +212,7 @@ class CommandAndTaskTests(TestCase):
 		self.assertIn('1 detection record(s) written', out.getvalue())
 		self.assertTrue(PeriodicTask.objects.filter(name='cvengine-cve-detections', task='author_cve_detections', enabled=True).exists())
 		from cveFeed.tasks import author_cve_detections
-		with mock.patch('reNgine.ai_settings.get_configured_provider', return_value=None):
+		with mock.patch('cvengine.ai_settings.get_configured_provider', return_value=None):
 			self.assertEqual(author_cve_detections()['rules'], 0)
 
 

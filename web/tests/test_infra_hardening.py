@@ -13,7 +13,7 @@ def read(*parts):
 
 class NginxTests(SimpleTestCase):
 	def test_body_size_is_small_and_tls13_is_on(self):
-		conf = read('config', 'nginx', 'rengine.conf')
+		conf = read('config', 'nginx', 'cvengine.conf')
 		size = re.search(r'client_max_body_size\s+(\d+)([MKG])', conf)
 		self.assertEqual(size.group(2), 'M')
 		self.assertLessEqual(int(size.group(1)), 8)
@@ -21,14 +21,14 @@ class NginxTests(SimpleTestCase):
 		self.assertIn('client_body_timeout', conf)
 
 	def test_scan_results_are_served_sandboxed_and_not_sniffed(self):
-		conf = read('config', 'nginx', 'rengine.conf')
+		conf = read('config', 'nginx', 'cvengine.conf')
 		block = conf[conf.index('location /protected_media/'):]
 		block = block[:block.index('}')]
 		self.assertIn('sandbox', block)
 		self.assertIn('nosniff', block)
 
 	def test_json_and_assets_are_gzipped_but_html_and_binaries_are_not(self):
-		conf = read('config', 'nginx', 'rengine.conf')
+		conf = read('config', 'nginx', 'cvengine.conf')
 		self.assertRegex(conf, r'(?m)^\s*gzip\s+on;')
 		types = re.search(r'gzip_types\s+([^;]+);', conf).group(1).split()
 		self.assertIn('application/json', types)

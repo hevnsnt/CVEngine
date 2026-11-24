@@ -1,4 +1,4 @@
-"""Requests do no per-request bookkeeping nothing reads (the per-user preferences row the old reNgine made is gone with its table), and pages still render."""
+"""Requests do no per-request bookkeeping nothing reads (the per-user preferences row the inherited code made is gone with its table), and pages still render."""
 from django.contrib.auth.models import User
 from django.test import TestCase
 

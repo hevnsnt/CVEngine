@@ -18,7 +18,7 @@ The model never decides alone. ``apply_rules`` is the deterministic layer over i
 
 One AI call serves every finding with the same evidence signature (a hash of the evidence, never a hostname), so fifty hosts
 running the same nginx for one CVE are one question; a changed signature resets the verdict and the host is rescored. Prompts carry
-only cleaned, structured evidence (see reNgine.ai_providers.triage_parts) with the host's own names redacted.
+only cleaned, structured evidence (see cvengine.ai_providers.triage_parts) with the host's own names redacted.
 
 The question is not asked here: it is queued for the AI reviewer container (cveFeed.ai_jobs), which makes every model call. ``run_triage``
 reserves the budget and queues one job per signature; when the answer lands, ``job_answer`` checks it (``validate_triage``), queues the one
@@ -38,7 +38,7 @@ from django.utils import timezone
 
 from cveFeed import match_policy
 from cveFeed.secret_redaction import mask_extracted, redact_text
-from reNgine.ai_providers import clean_text
+from cvengine.ai_providers import clean_text
 
 logger = logging.getLogger(__name__)
 
@@ -1749,7 +1749,7 @@ def suggest_local_checks(row, provider=False):
     if _resolve_provider(provider) is None:
         return False
     from cveFeed import ai_jobs
-    from reNgine.ai_providers import LOCAL_CHECK_SYSTEM_PROMPT, local_check_parts
+    from cvengine.ai_providers import LOCAL_CHECK_SYSTEM_PROMPT, local_check_parts
     context = {
         'cve_id': cve.cve_id, 'title': cve.title,
         'affected': [{k: item.get(k) for k in ('vendor', 'product') if isinstance(item.get(k), str) and item.get(k)}
@@ -1777,7 +1777,7 @@ def suggest_local_checks(row, provider=False):
 
 def _local_checks_answer(job, text):
     from cveFeed.models import Triage
-    from reNgine.ai_providers import parse_local_checks
+    from cvengine.ai_providers import parse_local_checks
     claim = _claim_of(job)
     if claim is not None:
         _finish_call(claim, 'succeeded')
@@ -2232,7 +2232,7 @@ def _ask(key, group, claim):
     signature it had, so a row whose evidence changes meanwhile is left for the next pass."""
     from cveFeed import ai_jobs
     from cveFeed.models import CVEMatch
-    from reNgine.ai_providers import TRIAGE_OPTIONS, TRIAGE_SYSTEM_PROMPT, triage_parts, triage_schema
+    from cvengine.ai_providers import TRIAGE_OPTIONS, TRIAGE_SYSTEM_PROMPT, triage_parts, triage_schema
     row, d = group[0]
     # the legacy verdict of each match as the question is asked: a rule that closes one before the answer comes back wins (``_apply``)
     asked = {str(pk): v for pk, v in CVEMatch.objects.filter(pk__in=[r.match_id for r, _ in group if r.match_id]).values_list('pk', 'ai_verdict')}
@@ -2342,7 +2342,7 @@ def _job_error(job, claim, group, error):
 def _triage_answer(job, text):
     from types import SimpleNamespace
     from cveFeed import ai_jobs
-    from reNgine.ai_providers import repair_parts, validate_triage
+    from cvengine.ai_providers import repair_parts, validate_triage
     ctx = job.context
     parsed, reason = validate_triage(text)
     if parsed is None and job.attempt == 1:
@@ -2426,7 +2426,7 @@ def run_triage(pairs, provider=False, scan_id=None):
     ``error`` when it comes back (the sweep retries them); rows over a cap stay ``pending`` ("queued"). Honours the stop flag of
     ``scan_id``. Never raises for one group's trouble. Returns the counts."""
     from cveFeed.models import CVEMatch, MatchVerdict, Triage, TriageVerdict
-    from reNgine import resources
+    from cvengine import resources
     stats = {'rows': len(pairs), 'asked': 0, 'cached': 0, 'queued': 0, 'not_triaged': 0, 'errors': 0, 'stopped': False}
     # A product identity that never matched the advisory is a bad correlation, not a
     # question worth charging the AI provider for. Retain a deterministic, auditable closure.

@@ -762,7 +762,7 @@ class SafetyTests(Fixture, TestCase):
         self.assertEqual(SupplierFinding.objects.filter(category__in=('tls', 'web', 'exposed', 'cve')).count(), 0)
 
     def test_scanning_paused_stops_the_sweep_before_anything_is_asked(self):
-        with mock.patch('reNgine.resources.global_pause_requested', return_value=True) as paused:
+        with mock.patch('cvengine.resources.global_pause_requested', return_value=True) as paused:
             out = self.sweep()
             all_out = ss.sweep_all()
         self.assertIn('paused', out['skipped'])
@@ -773,7 +773,7 @@ class SafetyTests(Fixture, TestCase):
 
     def test_a_pause_before_the_supplier_is_handed_to_the_scanner_records_nothing_and_leaves_it_due(self):
         answers = iter([False, False, True])  # the sweep's start, the supplier loop, then the pause arrives
-        with mock.patch('reNgine.resources.global_pause_requested', side_effect=lambda **kw: next(answers, True)):
+        with mock.patch('cvengine.resources.global_pause_requested', side_effect=lambda **kw: next(answers, True)):
             out = self.sweep()
         self.assertIn('paused', out['skipped'])
         self.assertEqual(self.tasks, [])
@@ -790,7 +790,7 @@ class SafetyTests(Fixture, TestCase):
 
     def test_one_sweep_runs_at_a_time(self):
         self.scanner()
-        with mock.patch('reNgine.resources.redis_claim') as claim:
+        with mock.patch('cvengine.resources.redis_claim') as claim:
             claim.return_value.__enter__.return_value = 'another worker'
             self.assertIn('another supplier sweep', self.sweep()['skipped'])
         self.assertEqual(self.tasks, [])

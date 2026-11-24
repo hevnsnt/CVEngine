@@ -111,7 +111,7 @@ def declared_networks():
     inside it. The ``networks`` of ``summary`` and the organization groups of the Sentinels page."""
     from cveFeed.models import InternalRange
     from dashboard.models import Project
-    from reNgine.definitions import FAILED_TASK, SUCCESS_TASK
+    from cvengine.definitions import FAILED_TASK, SUCCESS_TASK
     from startScan.models import ScanHistory
     projects = {p.pk: p for p in Project.objects.filter(pk__in=InternalRange.objects.values('project_id')).select_related('org')}
     if not projects:

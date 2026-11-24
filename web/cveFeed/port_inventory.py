@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 def persist_inventory(inventory, source='nmap', org_id=None, os_reliable=None):
     """Write parsed scanner records onto Port/IpAddress, creating a Port row if nothing found it first
-    (unlike reNgine.tasks.persist_nmap_service_inventory, which only enriches rows a port sweep already made:
+    (unlike cvengine.tasks.persist_nmap_service_inventory, which only enriches rows a port sweep already made:
     here the fingerprinting pass is the thing finding these ports, so there may be nothing to enrich yet).
     Ports are kept per IP: update_or_create_port matches by number alone, which would write the product and version
     seen on one IP's 443 onto every IP's 443. ``os_reliable`` says whether the operating system guesses in ``inventory`` were measured

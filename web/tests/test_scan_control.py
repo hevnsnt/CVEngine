@@ -21,12 +21,12 @@ from tests.test_tenancy import client_for
 
 class OwnUpdateLock:
     """Mixin: a test that takes the updater's lock (``scan_control.updater_idle``: a pause, a release, an operator's resume) takes it in a directory of its own. Parallel test
-    processes share one ``RENGINE_HOME`` and so one ``.update-lock``, and one process's lock made another's ``flock(LOCK_NB)`` fail ("An update is running")."""
+    processes share one ``CVENGINE_HOME`` and so one ``.update-lock``, and one process's lock made another's ``flock(LOCK_NB)`` fail ("An update is running")."""
     def setUp(self):
         super().setUp()
         home = tempfile.TemporaryDirectory()
         self.addCleanup(home.cleanup)
-        patch = override_settings(RENGINE_HOME=home.name)
+        patch = override_settings(CVENGINE_HOME=home.name)
         patch.enable()
         self.addCleanup(patch.disable)
 
@@ -53,8 +53,8 @@ class ScanControlTests(OwnUpdateLock, TestCase):
         self.assertNotContains(client_for(self.admin).get('/cve/_all/activity/'), 'data-app-admin="1"')
         self.assertContains(client_for(self.root).get('/cve/_all/activity/'), 'data-app-admin="1"')
 
-    @mock.patch('reNgine.resources.request_abort')
-    @mock.patch('reNgine.celery.app.control.inspect')
+    @mock.patch('cvengine.resources.request_abort')
+    @mock.patch('cvengine.celery.app.control.inspect')
     def test_pause_aborts_active_scan_but_keeps_queued_scan_and_is_idempotent(self, inspect, abort):
         inspect.return_value.active.return_value = {'worker@local': []}
         root = client_for(self.root)
@@ -73,8 +73,8 @@ class ScanControlTests(OwnUpdateLock, TestCase):
         self.queued.refresh_from_db()
         self.assertEqual(self.queued.scan_status, -1)
 
-    @mock.patch('reNgine.resources.request_abort')
-    @mock.patch('reNgine.celery.app.control.inspect')
+    @mock.patch('cvengine.resources.request_abort')
+    @mock.patch('cvengine.celery.app.control.inspect')
     def test_failed_stop_is_visible_and_pause_stays_active(self, inspect, abort):
         abort.side_effect = RuntimeError('private failure details')
         inspect.return_value.active.return_value = None
@@ -155,7 +155,7 @@ class ScanControlTests(OwnUpdateLock, TestCase):
 
     def test_an_unreadable_control_database_gates_new_work_but_kills_nothing_running(self):
         from cveFeed import scan_control
-        from reNgine import resources
+        from cvengine import resources
         with mock.patch('cveFeed.models.ScanControl.objects.filter', side_effect=RuntimeError('db down')):
             self.assertTrue(scan_control.pause_requested())
             self.assertFalse(resources.global_pause_requested())
@@ -163,7 +163,7 @@ class ScanControlTests(OwnUpdateLock, TestCase):
 
     def test_resume_respects_updater_lock(self):
         from django.conf import settings
-        with tempfile.TemporaryDirectory() as directory, mock.patch.object(settings, 'RENGINE_HOME', directory):
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(settings, 'CVENGINE_HOME', directory):
             path = os.path.join(directory, '.update-lock')
             with open(path, 'w') as hold:
                 fcntl.flock(hold, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -175,32 +175,32 @@ class ScanControlTests(OwnUpdateLock, TestCase):
                 pass
 
     def test_request_drain_pause_pauses_scanning_and_marks_it_as_an_update_pause(self):
-        with tempfile.TemporaryDirectory() as directory, mock.patch('django.conf.settings.RENGINE_HOME', directory):
+        with tempfile.TemporaryDirectory() as directory, mock.patch('django.conf.settings.CVENGINE_HOME', directory):
             request_drain_pause(reason='An update is being applied')
         control = ScanControl.current()
         self.assertEqual((control.paused, control.paused_by_update, control.reason), (True, True, 'An update is being applied'))
 
     def test_request_drain_pause_never_overrides_an_operators_own_pause(self):
         ScanControl.objects.update_or_create(pk=1, defaults={'paused': True, 'paused_by_update': False, 'reason': 'manual hold'})
-        with tempfile.TemporaryDirectory() as directory, mock.patch('django.conf.settings.RENGINE_HOME', directory):
+        with tempfile.TemporaryDirectory() as directory, mock.patch('django.conf.settings.CVENGINE_HOME', directory):
             request_drain_pause(reason='An update is being applied')
         control = ScanControl.current()
         self.assertEqual((control.paused, control.paused_by_update, control.reason), (True, False, 'manual hold'))
 
     def test_release_update_pause_only_clears_a_pause_it_set(self):
         ScanControl.objects.update_or_create(pk=1, defaults={'paused': True, 'paused_by_update': False, 'reason': 'manual hold'})
-        with tempfile.TemporaryDirectory() as directory, mock.patch('django.conf.settings.RENGINE_HOME', directory):
+        with tempfile.TemporaryDirectory() as directory, mock.patch('django.conf.settings.CVENGINE_HOME', directory):
             release_update_pause()
         control = ScanControl.current()
         self.assertEqual((control.paused, control.paused_by_update, control.reason), (True, False, 'manual hold'))
         ScanControl.objects.update_or_create(pk=1, defaults={'paused': True, 'paused_by_update': True, 'reason': 'An update is being applied'})
-        with tempfile.TemporaryDirectory() as directory, mock.patch('django.conf.settings.RENGINE_HOME', directory):
+        with tempfile.TemporaryDirectory() as directory, mock.patch('django.conf.settings.CVENGINE_HOME', directory):
             release_update_pause()
         control = ScanControl.current()
         self.assertEqual((control.paused, control.paused_by_update, control.reason), (False, False, ''))
 
     def test_drain_pause_and_release_respect_the_updater_lock(self):
-        with tempfile.TemporaryDirectory() as directory, mock.patch('django.conf.settings.RENGINE_HOME', directory):
+        with tempfile.TemporaryDirectory() as directory, mock.patch('django.conf.settings.CVENGINE_HOME', directory):
             path = os.path.join(directory, '.update-lock')
             with open(path, 'w') as hold:
                 fcntl.flock(hold, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -212,8 +212,8 @@ class ScanControlTests(OwnUpdateLock, TestCase):
 
 
 def app_task_names():
-    from reNgine.celery import app
-    import cveFeed.tasks, reNgine.tasks  # noqa: F401,E401 - registers every task
+    from cvengine.celery import app
+    import cveFeed.tasks, cvengine.tasks  # noqa: F401,E401 - registers every task
     return set(app.tasks)
 
 
@@ -229,13 +229,13 @@ class OperatorPauseVersusUpdatePauseTests(TestCase):
         self.assertEqual(api(self.client_root, 'POST', 'scan-control', self.pause)[0], 200)
         control = ScanControl.current()
         self.assertEqual((control.paused, control.paused_by_update), (True, False))
-        with tempfile.TemporaryDirectory() as directory, mock.patch('django.conf.settings.RENGINE_HOME', directory):
+        with tempfile.TemporaryDirectory() as directory, mock.patch('django.conf.settings.CVENGINE_HOME', directory):
             release_update_pause()  # the finishing update must not lift the operator's hold
         self.assertTrue(ScanControl.current().paused)
 
     def test_an_operator_resume_clears_the_update_flag_too(self):
         ScanControl.objects.update_or_create(pk=1, defaults={'paused': True, 'paused_by_update': True, 'reason': 'x'})
-        with tempfile.TemporaryDirectory() as directory, mock.patch('django.conf.settings.RENGINE_HOME', directory):
+        with tempfile.TemporaryDirectory() as directory, mock.patch('django.conf.settings.CVENGINE_HOME', directory):
             self.assertEqual(api(self.client_root, 'POST', 'scan-control', self.resume)[0], 200)
         control = ScanControl.current()
         self.assertEqual((control.paused, control.paused_by_update), (False, False))
@@ -249,5 +249,5 @@ class OperatorPauseVersusUpdatePauseTests(TestCase):
         self.assertTrue(ScanControl.current().paused)
         phase['changed_at'] = (timezone.now() - timezone.timedelta(hours=5)).isoformat()  # a script that died long ago
         with mock.patch('cveFeed.updater.read_phase', return_value=phase), \
-                tempfile.TemporaryDirectory() as directory, mock.patch('django.conf.settings.RENGINE_HOME', directory):
+                tempfile.TemporaryDirectory() as directory, mock.patch('django.conf.settings.CVENGINE_HOME', directory):
             self.assertEqual(api(self.client_root, 'POST', 'scan-control', self.resume)[0], 200)

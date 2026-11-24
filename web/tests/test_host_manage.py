@@ -14,8 +14,8 @@ from cveFeed.exclusions import drop_excluded, excluded_names, is_excluded, norma
 from cveFeed.models import (AssetChange, CVEEntry, CVEMatch, FindingComment, HostExclusion, HostLabel, HostProfile, HostState, RouteAuth)
 from cveFeed.nuclei_scan import scan_targets
 from dashboard.models import AuditLog, Org, OrgMembership, Project, ProjectMembership
-from reNgine import discovery_events as bbot_lib, resources
-from reNgine.tasks import persist_bbot_result, save_subdomain
+from cvengine import discovery_events as bbot_lib, resources
+from cvengine.tasks import persist_bbot_result, save_subdomain
 from scanEngine.models import EngineType
 from startScan.models import EndPoint, IpAddress, Port, ScanHistory, Subdomain, Vulnerability
 from targetApp.models import Domain

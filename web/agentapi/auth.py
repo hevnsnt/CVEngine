@@ -88,7 +88,7 @@ def stamp_last_used(token, now=None):
     written by one request at a time per stale value (``usage_stamps.one_writer``: the requests of a busy Sentinel no longer queue on the row lock behind each
     other) with a commit that does not wait for the WAL flush (``usage_stamps.relaxed_commit``). The UPDATE keeps the same staleness condition, so a
     time another request just wrote is left as it is. Returns whether it wrote."""
-    from reNgine import usage_stamps
+    from cvengine import usage_stamps
     now = now or timezone.now()
     stored = token.last_used_at
     if stored and now - stored <= LAST_USED_RESOLUTION:

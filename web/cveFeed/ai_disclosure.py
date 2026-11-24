@@ -1,6 +1,6 @@
 """What cvENGINE sends to AI models, and what an AI agent connected over MCP can read: the text of the "AI and your data" page (/cve/ai/).
 
-Every AI stage the product names (``reNgine.ai_prompts.STAGES``) is described here, job by job: when it runs, what it sends, what it never sends,
+Every AI stage the product names (``cvengine.ai_prompts.STAGES``) is described here, job by job: when it runs, what it sends, what it never sends,
 what it can change by itself and the switch that stops it. ``tests/test_ai_disclosure.py`` fails when a stage is added without an entry, so a new
 AI job cannot ship without saying what it sends. ``state()`` reads the live settings, so the page says which jobs are on for this install now.
 
@@ -270,7 +270,7 @@ def state(include_counts=False):
     """The install's AI state as the page shows it: the provider (``kind`` 'off', 'hosted' or 'self_hosted'), whether the reviewer container
     may send anything, and ``{job id: (on, why)}``. ``include_counts`` adds the calls of the last 30 days per job (App Admins only)."""
     from cveFeed import ai_jobs, reviewer
-    from reNgine.ai_profiles import PROFILES
+    from cvengine.ai_profiles import PROFILES
     row = ai_jobs.provider_row()
     profile = PROFILES.get(getattr(row, 'provider', None)) if row is not None else None
     container = reviewer.env_enabled()

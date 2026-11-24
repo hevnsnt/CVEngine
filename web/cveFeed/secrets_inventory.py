@@ -4,7 +4,7 @@ Detectors feed it through ``record``:
 
 * the route check (``route_auth._persist``): the credentials ``sensitive.credential_values`` read in a body before it was dropped;
 * nuclei token templates and bbot's badsecrets and trufflehog modules (``take_from_finding`` and ``feed_finding``, called by
-  ``reNgine.tasks.save_vulnerability``): the value is taken out of the finding, which keeps only its mask;
+  ``cvengine.tasks.save_vulnerability``): the value is taken out of the finding, which keeps only its mask;
 * the ``secrets_scan`` Sentinel kind (``cveFeed.secrets_results``): Kingfisher's findings, and validation outcomes when the project opted in.
 
 The value itself is never stored. ``fingerprint`` is a keyed HMAC-SHA256 of the normalised value, with an install key of its own

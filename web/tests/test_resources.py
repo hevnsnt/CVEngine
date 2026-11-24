@@ -1,4 +1,4 @@
-"""reNgine.resources: memory reading, the shared Redis handle and its fallback, what each container publishes and the web container reads back,
+"""cvengine.resources: memory reading, the shared Redis handle and its fallback, what each container publishes and the web container reads back,
 claims, and the stop flags. No scanner runs on the server, so the per-tool memory gate (``heavy_job``, its costs, caps and watchdog) is gone."""
 import json
 import os
@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from reNgine import resources as res
+from cvengine import resources as res
 
 STATE = {'total_mb': 4000, 'limit_mb': 4000, 'used_mb': 1000, 'available_mb': 3000}
 
@@ -146,13 +146,13 @@ class PublishedPictureTests(unittest.TestCase):
 
     def test_report_state_publishes_the_host_its_memory_and_the_time(self):
         with mock.patch.object(socket, 'gethostname', return_value=self.namespace[len(res.STATE_PREFIX):]), \
-                mock.patch('reNgine.container_signals.publish') as signals:
+                mock.patch('cvengine.container_signals.publish') as signals:
             res.report_state(state_fn=lambda: STATE, now_fn=lambda: 1000.0)
         published = json.loads(self.client.get(f'{self.namespace}:state'))
         self.assertEqual(published, {'host': self.namespace[len(res.STATE_PREFIX):], 'memory': STATE, 't': 1000.0})
         signals.assert_called_once_with('worker', client=self.client, now=1000.0)
         process = res.MemoryStore()
-        with mock.patch('reNgine.container_signals.publish') as signals:
+        with mock.patch('cvengine.container_signals.publish') as signals:
             res.report_state(process, state_fn=lambda: STATE, now_fn=lambda: 5.0)
         self.assertEqual(set(process._state), {'host', 'memory', 't'})
         signals.assert_not_called()  # without Redis there is nobody to read it

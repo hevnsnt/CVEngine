@@ -61,9 +61,9 @@ the code or the docs show it. **Assumption** means it is inferred and has to be 
   The light pass is ruled out: it is forced to `-tags tech -severity info` (`nuclei_scan.py:42`, `agentapi/sentinel_dispatch.py:467-468`). The finding row
   does not record which pass produced it (gap G9). The activity log tells them apart: "nuclei targeted scan of <host>: …" versus "Weekly deep Nuclei
   checking <host>".
-- **How the finding was saved.** `parse_nuclei_result` (`reNgine/tasks.py:337-363`) keeps `extracted_results`, the raw `request` and `response`, and the
-  `curl_command`. `save_vulnerability` (`reNgine/tasks.py:534-610`) deduplicates on `VULNERABILITY_KEY = (target_domain, scan_history, subdomain, endpoint,
-  source, template_id, name, http_url, matcher_name)` (`reNgine/tasks.py:510-511`).
+- **How the finding was saved.** `parse_nuclei_result` (`cvengine/tasks.py:337-363`) keeps `extracted_results`, the raw `request` and `response`, and the
+  `curl_command`. `save_vulnerability` (`cvengine/tasks.py:534-610`) deduplicates on `VULNERABILITY_KEY = (target_domain, scan_history, subdomain, endpoint,
+  source, template_id, name, http_url, matcher_name)` (`cvengine/tasks.py:510-511`).
 - **Why there are 4 findings (assumption).** Rows differ by `http_url` (matched-at) and by scan. With two request paths, each scanned base URL gives at least
   two rows (`/` and `/hopfully404`). A second base (a non-default port target, `nuclei_scan.build_targets`) or a second scan doubles that. Listing the 4 rows'
   `http_url` and `scan_history` (MCP `get_finding`) settles it. Either way, it is **one key**, and nothing groups it.
@@ -73,7 +73,7 @@ the code or the docs show it. **Assumption** means it is inferred and has to be 
   any credential type scores 25 (`sensitive.py:159-171`), and scoring prints "Credentials served on /" (`cveFeed/scoring.py:97-103`). This path stores no
   value: only the type, the count and a sample with the length and the public prefix (`sensitive.py:92-110`).
 - **What the AI saw.** `describe_vulnerability` (`cveFeed/triage.py:358-394`) puts `extracted_results` (the raw key) into the triage payload. The
-  `TRIAGE_FORBIDDEN_KEYS` list (`reNgine/ai_providers.py:755-756`) does not include `extracted_results`, and the strict character filter keeps the
+  `TRIAGE_FORBIDDEN_KEYS` list (`cvengine/ai_providers.py:755-756`) does not include `extracted_results`, and the strict character filter keeps the
   characters a typical key is made of: letters, digits and `_ - . / + =` (`_SAFE_CHARS`, `ai_providers.py:180`). **The full key was sent to the AI provider.** See G1.
 
 ### 1.2 How this specific case would come out under this plan
@@ -94,12 +94,12 @@ a leaked server secret. The AI never sees the key.
 | D1 | Route sensitive-data scan | `cveFeed/sensitive.py`, called from `route_auth.analyse` (`route_auth.py:273-284`) | Up to 64 KB of each route body. At most 20 URLs per host (`MAX_URLS_PER_HOST`, `route_auth.py:34`): the 10 `COMMON_PATHS` plus 12 EndPoint paths, 2 bases per host | `RouteAuth.sensitive` holds counts and a masked sample, never the value (`sensitive.py:1-5`). Scores 25 for any credential (`sensitive.py:164-165`) | 7 credential regexes only (AWS key ID, AIza, Slack, GitHub classic, Stripe live, JWT, PEM header). `.js` and `.map` are excluded from the paths (`STATIC_EXT`, `route_auth.py:48`). No provider diagnosis beyond a label, no cross-host identity, a browser key scores like a server secret. `google_key`'s trailing `\b` misses keys that end in `-` |
 | D2 | Front-page scripts | `route_auth._read_scripts` (`route_auth.py:351-372`), `js_libraries.script_sources` (`cveFeed/js_libraries.py`) | Up to 4 same-host scripts of `/` only (`route_auth.py:209`), 64 KB each | Library fingerprints only | **The fetched JS is never scanned for secrets.** Cross-origin scripts are never fetched. Source maps are never fetched |
 | D3 | nuclei token templates | `nuclei_scan._run_nuclei` (`nuclei_scan.py:400-518`), Sentinel `nuclei_targeted` / `nuclei_deep` | 211 of the 218 upstream templates GET `{{BaseURL}}` only (counted on upstream HEAD; the installed set may differ) | `Vulnerability.extracted_results` = **raw key** (`startScan/models.py:439`), `response` = **raw body** (`models.py:457`) | Root page only, one row per URL and scan, the full value shown everywhere (G2) |
-| D4 | bbot `badsecrets` (standard and deep) | bbot `web` preset, `-rf safe` (`reNgine/bbot.py:30`). In 3.0.2 the `web` flag covers baddns, badsecrets, bucket_amazon/google/firebase/microsoft, filedownload, git, graphql_introspection, http, ntlm, oauth, robots, securitytxt, sslcert | HTTP responses bbot fetches | FINDING text "Known Secret Found … Secret: [<value>]" saved as `Vulnerability.description` (`reNgine/tasks.py:195-208`) | Raw secret at rest and in the AI prompt (G1) |
+| D4 | bbot `badsecrets` (standard and deep) | bbot `web` preset, `-rf safe` (`cvengine/bbot.py:30`). In 3.0.2 the `web` flag covers baddns, badsecrets, bucket_amazon/google/firebase/microsoft, filedownload, git, graphql_introspection, http, ntlm, oauth, robots, securitytxt, sslcert | HTTP responses bbot fetches | FINDING text "Known Secret Found … Secret: [<value>]" saved as `Vulnerability.description` (`cvengine/tasks.py:195-208`) | Raw secret at rest and in the AI prompt (G1) |
 | D5 | bbot `excavate` JWT extractor | built into bbot (`excavate.JWTExtractor`) | All responses | A FINDING "contains JSON Web Token" | Noise, no decoding |
-| D6 | bbot `trufflehog` (**deep mode only**) | `kitchen-sink` includes `code-enum` (`reNgine/bbot.py:31`). bbot's trufflehog defaults to `only_verified: True`, never passes `--no-verification`, and watches `HTTP_RESPONSE`, `CODE_REPOSITORY` and `FILESYSTEM` with `scope_distance_modifier = 2` | Every HTTP body, plus code repositories, Docker images and Postman workspaces up to 2 hops out | Description includes "Raw result: [<secret>]" | **Live third-party verification of every found secret, with no cvENGINE gate** (G3). Raw secret at rest and to the AI |
+| D6 | bbot `trufflehog` (**deep mode only**) | `kitchen-sink` includes `code-enum` (`cvengine/bbot.py:31`). bbot's trufflehog defaults to `only_verified: True`, never passes `--no-verification`, and watches `HTTP_RESPONSE`, `CODE_REPOSITORY` and `FILESYSTEM` with `scope_distance_modifier = 2` | Every HTTP body, plus code repositories, Docker images and Postman workspaces up to 2 hops out | Description includes "Raw result: [<secret>]" | **Live third-party verification of every found secret, with no cvENGINE gate** (G3). Raw secret at rest and to the AI |
 | D7 | bbot bucket modules | `web` preset (D4) | Bucket names bbot derives | `STORAGE_BUCKET` events shown in the live feed only (`bbot.py:39-40`). Open ones arrive as LOW FINDINGs | Not linked to `bucket_scan` |
 | D8 | Bucket scanner | `cveFeed/bucket_scan.py`, `bucket_probe.py` (background sweep, `cveFeed/tasks.py:83`) | References from CNAMEs, storage server headers, EndPoint URLs, RouteAuth redirects and **stored nuclei responses** (`bucket_scan.py:301-318`), plus name guesses | `bkt_*` hygiene findings. The probe is anonymous, verified HTTPS, GET/HEAD to documented S3/GCS/Azure endpoints only (`bucket_probe.py:131-171`), one listing page, one HEAD, never an object body | No Firebase RTDB, Firestore or registries. Never reads page or JS bodies (they are not stored). Sentinel-run nuclei drops `response` (`agentapi/sentinel_dispatch.py:446-452`), so with Sentinels the "scanner response" tier is empty |
-| D9 | Triage | `cveFeed/triage.py:358-394`, `reNgine/ai_providers.py:855-867` | Vulnerability rows and routes | Payload goes to the AI provider | Route payload is clean: counts only (`triage.py:402-413`). **Nuclei `extracted_results` and the bbot `description` carry raw secrets** |
+| D9 | Triage | `cveFeed/triage.py:358-394`, `cvengine/ai_providers.py:855-867` | Vulnerability rows and routes | Payload goes to the AI provider | Route payload is clean: counts only (`triage.py:402-413`). **Nuclei `extracted_results` and the bbot `description` carry raw secrets** |
 
 Other places a raw secret shows up today (proven):
 
@@ -110,11 +110,11 @@ Other places a raw secret shows up today (proven):
   transit, but it ends up in the same columns.
 
 Logs and activity lines carry only names and severities (`nuclei_scan.py:486-492`), and the bbot stderr redaction covers only cvENGINE's own API keys
-(`reNgine/bbot.py:302-317`).
+(`cvengine/bbot.py:302-317`).
 
 Existing safety machinery this plan reuses:
 
-- `reNgine/crypto_fields.py`: Fernet field encryption, a dedicated `CVENGINE_FIELD_KEY`, `rotate_field_key`.
+- `cvengine/crypto_fields.py`: Fernet field encryption, a dedicated `CVENGINE_FIELD_KEY`, `rotate_field_key`.
 - `tenancy/scope.py` (`SCOPES`): per-model project isolation.
 - `cveFeed/bounty_gate.Gate` (`bounty_gate.py:63-90`), `conductor.bounty_blocked_projects` (`conductor.py:49-58`): bounty scope and automated-testing
   confirmation.
@@ -616,7 +616,7 @@ Sizes are rough added lines including tests.
 - **Proven from code:**
   - every `file:line` above;
   - the raw key in the triage payload, `how_found`, exports and bounty drafts;
-  - bbot deep mode verifying via trufflehog (bbot 3.0.2 module source, `reNgine/bbot.py:31`);
+  - bbot deep mode verifying via trufflehog (bbot 3.0.2 module source, `cvengine/bbot.py:31`);
   - route bodies not stored, and JS fetched but not secret-scanned;
   - `file/keys` templates excluded;
   - the token templates hitting `/` only (upstream count).

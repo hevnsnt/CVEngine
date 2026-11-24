@@ -16,7 +16,7 @@ from django.utils import timezone
 from agentapi import auth
 from agentapi.services import ApiError, get_one_project, paginate
 from cveFeed import host_inventory as store, inventory_schema as schema
-from reNgine.client_ip import client_ip
+from cvengine.client_ip import client_ip
 from tenancy import throttle
 
 logger = logging.getLogger(__name__)

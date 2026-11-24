@@ -25,7 +25,7 @@ from agentapi.models import Agent, SentinelTask
 from agentapi.services import Ctx
 from cveFeed import correlation, ledger, network_detection, source_versions
 from cveFeed.models import CVEEntry, CVEMatch, ProbeObservation
-from reNgine.resources import ScannerUnavailable
+from cvengine.resources import ScannerUnavailable
 from startScan.models import IpAddress, Port, Subdomain
 from tests.test_sentinel_dispatch import DispatchBase
 

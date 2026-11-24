@@ -720,7 +720,7 @@ def run_nmap_sv(check):
     """Service detection on the one port the finding names, run by a scanner (an ``nmap_verify`` task at intensity 5). With no scanner able to take it
     the check ``failed`` (retried later, never read as clean): it never runs here."""
     from agentapi import sentinel_dispatch
-    from reNgine.resources import ScannerUnavailable
+    from cvengine.resources import ScannerUnavailable
     params = check['params']
     port = params['port']
     try:
@@ -760,7 +760,7 @@ def run_http_head(check):
     from agentapi import probe_dispatch
     from cveFeed import probe_scope
     from dashboard.models import Project
-    from reNgine.resources import ScannerUnavailable
+    from cvengine.resources import ScannerUnavailable
     params = check['params']
     url = params['url']
     host = (urlparse(url).hostname or '').lower().rstrip('.')
@@ -795,7 +795,7 @@ def run_fact_probe(check):
     from agentapi import probe_dispatch
     from cveFeed import probes
     from dashboard.models import Project
-    from reNgine.resources import ScannerUnavailable
+    from cvengine.resources import ScannerUnavailable
     params = check['params']
     sub = _current_host(params)
     if sub is None:
@@ -907,7 +907,7 @@ def run_script_read(check):
     from agentapi import probe_dispatch
     from cveFeed import probe_scope
     from dashboard.models import Project
-    from reNgine.resources import ScannerUnavailable
+    from cvengine.resources import ScannerUnavailable
     params = check['params']
     unattended = params.get('unattended', True)
     sub = _current_host(params)
@@ -1831,7 +1831,7 @@ def run_validation(project_id, triage_ids, scan_id=None, runners=None, template_
     import time as _time
     from cveFeed import ledger, notify
     from cveFeed.models import Triage
-    from reNgine import resources
+    from cvengine import resources
     from startScan.models import Subdomain
     from targetApp.target_types import scannable_hosts
     runners = {**RUNNERS, **(runners or {})}

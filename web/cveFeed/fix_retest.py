@@ -376,7 +376,7 @@ def run(job_id):
     reopen the finding when it still reproduces. Never raises for one check's trouble (it is ``not_verified`` and tried again)."""
     from cveFeed import activity, ledger, validation
     from cveFeed.models import FixRetest, Triage
-    from reNgine import resources
+    from cvengine import resources
     now = timezone.now()
     if not FixRetest.objects.filter(pk=job_id, status='queued').update(status='running', started_at=now):
         return {'skipped': 'not queued'}
@@ -492,7 +492,7 @@ def _reopen(row, finding, evidence, names, now):
     accepted risk since then (or reopened it themselves) made a newer decision than this retest."""
     from cveFeed import notify
     from cveFeed.models import FindingAuditEvent
-    from reNgine.state_machines import REMEDIATION
+    from cvengine.state_machines import REMEDIATION
     note = ('Reopened automatically: a retest after it was marked fixed still reproduces it' + (f' (Sentinel {names})' if names else '') + '.')[:2000]
     if not REMEDIATION.move(type(finding)._base_manager.filter(pk=finding.pk), 'open', only_from=('fixed',),
                             remediation_updated_at=now, remediation_by=None, remediation_note=note):

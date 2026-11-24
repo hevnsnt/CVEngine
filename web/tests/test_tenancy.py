@@ -1,7 +1,7 @@
 from django.conf import settings
 from django.contrib.auth import BACKEND_SESSION_KEY, HASH_SESSION_KEY, SESSION_KEY
 from django.contrib.auth.models import User
-from reNgine.hashed_sessions import SessionStore
+from cvengine.hashed_sessions import SessionStore
 from django.test import Client, TestCase, override_settings
 from django.utils import timezone
 
@@ -337,8 +337,8 @@ class MfaFlowTests(TestCase):
 		self.assertContains(r, 'reNgine')
 		self.assertContains(r, 'https://github.com/ACK-J/MailFail')
 		self.assertContains(r, 'Black Hills Information Security')
-		self.assertContains(r, f'<dt>Version</dt><dd>{settings.RENGINE_CURRENT_VERSION}')  # an edition name may follow the version
-		self.assertNotEqual(settings.RENGINE_CURRENT_VERSION, 'unknown')
+		self.assertContains(r, f'<dt>Version</dt><dd>{settings.CVENGINE_CURRENT_VERSION}')  # an edition name may follow the version
+		self.assertNotEqual(settings.CVENGINE_CURRENT_VERSION, 'unknown')
 
 
 @override_settings(ALLOWED_HOSTS=['cve.example.test'])

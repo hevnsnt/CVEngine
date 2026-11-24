@@ -83,7 +83,7 @@ def _wipe(models):
 
 def _clear_files():
     from cveFeed import templategen, updater
-    from reNgine.common_func import SCAN_RESULTS_ROOT, safe_remove_path
+    from cvengine.common_func import SCAN_RESULTS_ROOT, safe_remove_path
     for root in (SCAN_RESULTS_ROOT, templategen.GENERATED_DIR):
         try:
             entries = os.listdir(root)
@@ -106,7 +106,7 @@ def reset(actor, keep_session_key=None):
         User.objects.exclude(pk=actor.pk).delete()
         sessions = Session.objects.all()
         if keep_session_key:
-            from reNgine.hashed_sessions import db_key
+            from cvengine.hashed_sessions import db_key
             sessions = sessions.exclude(session_key=db_key(keep_session_key))
         sessions.delete()
         PeriodicTask.objects.exclude(name__startswith='cvengine-').exclude(name='celery.backend_cleanup').delete()

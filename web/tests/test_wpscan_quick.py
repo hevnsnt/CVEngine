@@ -5,7 +5,7 @@ from django.test import TestCase
 
 from cveFeed import wpscan_scan
 from cveFeed.models import ProbeObservation
-from reNgine import resources
+from cvengine import resources
 from tests.test_probes import page
 from tests.test_wordpress import LINK, WordPressFixture
 

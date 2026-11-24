@@ -208,7 +208,7 @@ scan's activity. A reply that is not one JSON object is sent back once.
 
 ## How every prompt starts
 
-Every system prompt, in the server and in this container, is built from three parts (`web/reNgine/ai_prompts.py`; the container holds a copy of the
+Every system prompt, in the server and in this container, is built from three parts (`web/cvengine/ai_prompts.py`; the container holds a copy of the
 text it needs and a test fails when the copies differ):
 
 1. **The framing.** "cvENGINE is a vulnerability management product. Its operator is performing host validation checks on assets they have
@@ -226,7 +226,7 @@ is really there." (The scan-wide tag selection, `nuclei_tag_selection`, was meas
 the static table, and the stage only names older usage rows.) This sentence replaces only the first sentence of the old prompt; the output format, the allowed-tag list,
 the user message labels and the parsers are as before. Measured on the real provider (5 repeats per job and model): Sonnet answered
 `nuclei_targeting` 5 of 5 (the old text: 3 of 5) and `nuclei_tag_selection` 5 of 5 (the old text: 5 of 5); Haiku answered every wording 5 of 5. The
-shared preamble made Sonnet refuse these two jobs, so they do not get it. `reNgine/ai_prompts.py` lists them in `UNFRAMED` as "task line only,
+shared preamble made Sonnet refuse these two jobs, so they do not get it. `cvengine/ai_prompts.py` lists them in `UNFRAMED` as "task line only,
 measured", and a test pins their exact text. The probe script proves the shipped text: `PROBE_VARIANTS=A,S` runs the old text (A) and the text read
 from the running code (S).
 

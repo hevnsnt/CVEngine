@@ -452,7 +452,7 @@ def _remote_reports(project_id, entries):
     Sentinel can take the kind (it never runs on this server: ``sentinel_dispatch.NEVER_LOCAL``)."""
     from agentapi import probe_dispatch
     from dashboard.models import Project
-    from reNgine.resources import ScannerUnavailable
+    from cvengine.resources import ScannerUnavailable
     gap = min(60.0, max(0.2, slow_web.host_gap(), slow_web.global_gap()))
     try:
         got = probe_dispatch.try_subdirs(Project.objects.get(pk=project_id), _items(project_id, entries), curated_paths(), max_requests(), gap)
@@ -467,7 +467,7 @@ def sweep(project_id, stop=None, vet_ip=None):
     ``skipped`` with the reason when nothing ran)."""
     from cveFeed import activity, exclusions, ledger
     from cveFeed.archive_rediscovery import archived_names
-    from reNgine import resources
+    from cvengine import resources
     summary = {'hosts': 0, 'requests': 0, 'there': 0, 'confirmed': 0, 'versions': 0, 'leads': 0, 'catch_all': 0, 'challenged': 0}
     if not enabled():
         return {**summary, 'skipped': 'subdirectory application discovery is turned off (CVENGINE_SUBDIR_APPS=0)'}

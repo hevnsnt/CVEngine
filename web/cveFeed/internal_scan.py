@@ -21,7 +21,7 @@ from datetime import timedelta
 
 from django.utils import timezone
 
-from reNgine.state_machines import SCAN
+from cvengine.state_machines import SCAN
 
 logger = logging.getLogger(__name__)
 
@@ -240,8 +240,8 @@ def _run(scan_id, dispatch=None, nuclei_stream=None, provider=False, wp_runner=N
     from cveFeed.discovery import FAILED, SUCCESS, _stage, mark_running
     from cveFeed.bounty_gate import Gate
     from cveFeed.exclusions import is_excluded
-    from reNgine.tasks import persist_bbot_result
-    from reNgine import discovery_events as bbot_lib
+    from cvengine.tasks import persist_bbot_result
+    from cvengine import discovery_events as bbot_lib
     from startScan.ip_rows import org_id_of_project
     from startScan.models import ScanActivity, ScanHistory
     from targetApp.target_types import sentinel_only_target
@@ -295,7 +295,7 @@ def _run(scan_id, dispatch=None, nuclei_stream=None, provider=False, wp_runner=N
     status = FAILED if nmap.get('error') else SUCCESS
     error = nmap.get('error') or (('Failed stages: ' + ', '.join(failed_names)) if failed_names else '')
     if not SCAN.move(ScanHistory.objects.filter(pk=scan_id), status, stop_scan_date=timezone.now(), error_message=(error or '')[:290] or None):
-        # a person stopped it while a stage ran (the stop is final: reNgine.state_machines.SCAN); say so instead of a result it no longer has
+        # a person stopped it while a stage ran (the stop is final: cvengine.state_machines.SCAN); say so instead of a result it no longer has
         activity.settle(running, 'skipped', message=f'Internal scan of {ip} was stopped')
         return {'scan_id': scan_id, 'status': 'aborted'}
     activity.settle(running, 'done' if status == SUCCESS else 'failed',

@@ -57,7 +57,7 @@ def record_exposure(scan, sub, state, version=''):
     """Record the finding for a served directory (``listing`` is medium, ``reachable`` low: hardening) on ``sub``. Returns True when one was saved."""
     if state not in (LISTING, REACHABLE):
         return False
-    from reNgine.tasks import save_vulnerability
+    from cvengine.tasks import save_vulnerability
     url = ((sub.http_url or f'https://{sub.name}').split('?')[0]).rstrip('/') + UPGRADE_PATH
     save_vulnerability(
         target_domain=scan.domain, scan_history=scan, subdomain=sub, http_url=url, name=FINDING_NAME, severity=2 if state == LISTING else 1,

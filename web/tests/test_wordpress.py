@@ -42,7 +42,7 @@ class WordPressFixture(RouteFixture):
         """The WordPress scan passes hold a Redis claim per project id (``cvengine:wpscan:thorough:<id>``, ``cvengine:wpscan:quick:<id>``, 5 to 10 minutes). A
         test database starts its ids over, so a claim left by an earlier or interrupted run on the same Redis would make a pass answer "another one is
         running": the tests never depend on what an earlier run left behind."""
-        from reNgine import resources
+        from cvengine import resources
         client = getattr(resources.get_store(), 'r', None)
         if client is not None:
             try:
@@ -379,14 +379,14 @@ class ThoroughPassTests(WordPressFixture, TestCase):
 
     def test_scans_paused_leaves_the_hosts_waiting(self):
         self.quick()
-        with mock.patch('reNgine.resources.global_pause_requested', return_value=True):
+        with mock.patch('cvengine.resources.global_pause_requested', return_value=True):
             result = self.thorough()
         self.assertIn('paused', result['skipped'])
         self.assertEqual(self.thorough_state(), 'pending')
         self.assertEqual(len(self.calls), self.sites)
 
     def test_a_pass_stopped_by_the_resource_gate_leaves_the_host_waiting_and_is_not_a_failure(self):
-        from reNgine.resources import ScanAborted
+        from cvengine.resources import ScanAborted
         self.quick()
 
         def runner(url, token):
@@ -402,7 +402,7 @@ class ThoroughPassTests(WordPressFixture, TestCase):
         @contextmanager
         def taken(key, owner, ttl):
             yield 'thorough-999'
-        with mock.patch('reNgine.resources.redis_claim', taken):
+        with mock.patch('cvengine.resources.redis_claim', taken):
             self.assertIn('another thorough pass', self.thorough()['skipped'])
         self.assertEqual(len(self.calls), self.sites)
 

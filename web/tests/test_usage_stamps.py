@@ -1,4 +1,4 @@
-"""Usage stamps (reNgine.usage_stamps): an API token's ``last_used_at``, an agent's ``last_seen`` and a Sentinel's machine numbers are written at most
+"""Usage stamps (cvengine.usage_stamps): an API token's ``last_used_at``, an agent's ``last_seen`` and a Sentinel's machine numbers are written at most
 once per their threshold, by one caller at a time per stale value, in a transaction of their own whose commit does not wait for the WAL flush. Token
 authentication is unchanged by any of it: a revoked, expired, unknown or out-of-scope token is refused whatever the stamp, and nothing the stamp does
 lets a request in. Security records (a revocation, the audit log) keep a normal commit."""
@@ -18,7 +18,7 @@ from agentapi import auth, sentinel_settings
 from agentapi.auth import LAST_USED_RESOLUTION, create_token
 from agentapi.models import Agent
 from dashboard.models import ApiToken
-from reNgine import usage_stamps
+from cvengine import usage_stamps
 from tests.test_agentapi import call
 
 

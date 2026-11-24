@@ -39,7 +39,7 @@ def _iso(value):
 
 
 def _version():
-    return getattr(settings, 'RENGINE_CURRENT_VERSION', None)
+    return getattr(settings, 'CVENGINE_CURRENT_VERSION', None)
 
 
 def _scanning():
@@ -388,7 +388,7 @@ WARM_DISPATCH_TIMEOUT = 1  # seconds each step of handing the task to the broker
 
 
 def _warm_lock_client():
-    from reNgine import resources
+    from cvengine import resources
     return resources.redis_client()
 
 
@@ -411,7 +411,7 @@ def warm_project_rows(project_ids, token=None):
     this run still holds it."""
 
     from dashboard.models import Project
-    from reNgine import resources
+    from cvengine import resources
     seconds = _cache_seconds()
     try:
         before = _row_fingerprint() if seconds else None  # the inputs as they are before the counts start
@@ -453,7 +453,7 @@ def _warm_rows(project_ids):
         if client is not None and not client.set(WARM_LOCK, token, nx=True, ex=WARM_MAX_SECONDS + 60):
             return
         from cveFeed.tasks import status_warm_rows
-        from reNgine.celery import app
+        from cvengine.celery import app
         options = {'socket_timeout': WARM_DISPATCH_TIMEOUT, 'socket_connect_timeout': WARM_DISPATCH_TIMEOUT}
         with app.connection_for_write(transport_options=options, connect_timeout=WARM_DISPATCH_TIMEOUT) as broker:
             status_warm_rows.apply_async(args=[list(project_ids), token], queue='cve_feed_queue', expires=WARM_MAX_SECONDS, connection=broker, retry=False)
@@ -461,7 +461,7 @@ def _warm_rows(project_ids):
         logger.info('status: could not queue the counting of the projects', exc_info=True)
         try:
             if client is not None:
-                from reNgine import resources
+                from cvengine import resources
                 resources.claim_release(client, WARM_LOCK, token)
         except Exception:  # noqa: BLE001
             pass
@@ -509,11 +509,11 @@ def _database():
 def _broker_client():
     """The Redis client of the broker, with socket timeouts (``resources.redis_client``: 2 s to connect, 3 s a read, one client per URL). The client of
     Celery's own connection has none, and each call of it opened a connection that nothing closed; it is only the fallback for a broker that is not Redis."""
-    from reNgine import resources
+    from cvengine import resources
     client = resources.redis_client()
     if client is not None:
         return client
-    from reNgine.celery import app
+    from cvengine.celery import app
     return app.connection_for_read().default_channel.client
 
 
@@ -580,7 +580,7 @@ def _critical_mb(total_mb):
 
 
 def _memory():
-    from reNgine import resources
+    from cvengine import resources
     snap = resources.cluster_snapshot()
     containers = []
     for c in snap.get('containers', []):
@@ -589,16 +589,16 @@ def _memory():
             'host': c.get('host'), 'total_mb': mem.get('total_mb'), 'used_mb': mem.get('used_mb'),
             'available_mb': mem.get('available_mb'), 'limit_mb': mem.get('limit_mb'), 'report_age_seconds': c.get('age_seconds'),
         })
-    from reNgine import lane_memory
+    from cvengine import lane_memory
     return {'store': snap.get('store'), 'containers': containers, 'lanes': lane_memory.report()}
 
 
 def _disk():
     import os
-    path = settings.RENGINE_RESULTS if os.path.isdir(settings.RENGINE_RESULTS) else settings.RENGINE_HOME
+    path = settings.CVENGINE_RESULTS if os.path.isdir(settings.CVENGINE_RESULTS) else settings.CVENGINE_HOME
     usage = shutil.disk_usage(path)
     mb = 1 << 20
-    return {'path': 'scan results' if path == settings.RENGINE_RESULTS else 'application', 'total_mb': usage.total // mb,
+    return {'path': 'scan results' if path == settings.CVENGINE_RESULTS else 'application', 'total_mb': usage.total // mb,
             'used_mb': usage.used // mb, 'free_mb': usage.free // mb,
             'free_percent': round(usage.free * 100 / usage.total, 1) if usage.total else None}
 
@@ -719,7 +719,7 @@ def _live_cache(notes):
     waited for another request's answer; ``refreshed`` is the refresher's own work). A poll should almost never be a ``miss`` while the
     refresher runs."""
     from cveFeed import snapshot_cache
-    from reNgine import livecache_config
+    from cvengine import livecache_config
     enabled, interval = livecache_config.refresh_enabled(), livecache_config.refresh_seconds()
     last = snapshot_cache.last_beat()
     out = {'refresher': 'off' if not enabled else ('running' if snapshot_cache.refresher_alive() else 'silent'),

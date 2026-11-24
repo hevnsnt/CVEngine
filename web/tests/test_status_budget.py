@@ -169,7 +169,7 @@ class ColdInventoryTests(TestCase):
 class RedisScanTests(SimpleTestCase):
     def test_the_status_scans_ask_for_a_thousand_keys_at_a_time(self):
         """SCAN with no COUNT hint reads ten keys a call: 300000 keys (a day of Celery results) took 3.2 s against 0.28 s with the hint."""
-        from reNgine import resources
+        from cvengine import resources
         client = mock.Mock()
         client.scan_iter.return_value = iter(())
         store = mock.Mock(r=client)

@@ -7,7 +7,7 @@ from django.test import SimpleTestCase
 
 from agentapi import system_status
 from cveFeed import ctmonitor, tasks
-from reNgine import time_limits
+from cvengine import time_limits
 
 
 class QueueTests(SimpleTestCase):

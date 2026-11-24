@@ -176,7 +176,7 @@ class SameBodyTests(NucleiBase):
         self.assertEqual(tagged, {'open-proxy-localhost': True, 'exposed-config': False})
 
     def test_no_scanner_for_the_control_read_leaves_the_chunk_waiting_and_saves_nothing(self):
-        from reNgine.resources import ScannerUnavailable
+        from cvengine.resources import ScannerUnavailable
         control = mock.Mock(side_effect=ScannerUnavailable('page_read', 'no scanner'))
         out, _ = self.run_lines([http_line('open-proxy-localhost', raw_http(503, 'Service Unavailable', HAPROXY_503))], control=control)
         self.assertEqual(self.templates(), [])

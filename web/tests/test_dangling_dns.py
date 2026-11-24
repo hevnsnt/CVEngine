@@ -14,7 +14,7 @@ from django.utils import timezone
 from cveFeed import dangling_dns as dd
 from cveFeed import domain_ownership as own
 from dashboard.models import Org, Project
-from reNgine import discovery_events as bbot_lib
+from cvengine import discovery_events as bbot_lib
 from scanEngine.models import EngineType
 from startScan.models import ScanHistory, Subdomain, Vulnerability
 from targetApp.models import Domain
@@ -101,7 +101,7 @@ class Stored(TestCase):
                 'data_json': {'host': host, 'severity': 'MEDIUM', 'description': description}}
 
     def persist(self, *events):
-        from reNgine.tasks import persist_bbot_result
+        from cvengine.tasks import persist_bbot_result
         from tests.discovery_fixtures import fold_findings
         result = fold_findings(events)
         with self.scanner({e['host']: e['data_json']['description'] for e in events}):

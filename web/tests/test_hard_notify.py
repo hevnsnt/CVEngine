@@ -35,7 +35,7 @@ class FeedAnnouncementTests(TestCase):
 		ip.ports.add(Port.objects.create(number=80, product='nginx', version='1.18.0'))
 		self.sent = []
 		for name in SENDERS:
-			patcher = mock.patch(f'reNgine.common_func.{name}', side_effect=lambda text, n=name: self.sent.append((n, text)))
+			patcher = mock.patch(f'cvengine.common_func.{name}', side_effect=lambda text, n=name: self.sent.append((n, text)))
 			patcher.start()
 			self.addCleanup(patcher.stop)
 		Notification.objects.create(send_to_slack=True, slack_hook_url='https://hooks.invalid/x')

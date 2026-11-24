@@ -81,10 +81,10 @@ def run_authenticated(scan, scope, targets, stream, tags=None, severities=None, 
     dict (``targets``, ``findings``, ``new``, ``error`` when it failed); never raises, so the plain pass's result stands whatever happens here."""
     from cveFeed import activity, ledger, nuclei_fp, template_gates
     from cveFeed.models import DiscoveryEvent
-    from reNgine import resources
-    from reNgine.definitions import NUCLEI_SEVERITY_MAP
-    from reNgine.resources import ScannerUnavailable
-    from reNgine.tasks import parse_nuclei_result, save_vulnerability
+    from cvengine import resources
+    from cvengine.definitions import NUCLEI_SEVERITY_MAP
+    from cvengine.resources import ScannerUnavailable
+    from cvengine.tasks import parse_nuclei_result, save_vulnerability
     from startScan.models import Subdomain
     from targetApp.target_types import scannable_hosts
     domain, project = scan.domain, scan.domain.project_id

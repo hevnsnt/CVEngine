@@ -413,7 +413,7 @@ def persist_report(scan, sub, url, report):
     """Save one site's report; returns ``(new findings, technologies added)``. The open rows of this host that the versions it read are past
     the fix of are closed as fixed (cveFeed.finding_lifecycle.close_fixed_wpscan_rows)."""
     from cveFeed import finding_lifecycle, tech_rows
-    from reNgine.tasks import save_vulnerability
+    from cvengine.tasks import save_vulnerability
     new, seen = 0, {}
     for name, severity, description, cves, refs, component in _vuln_rows(report, url):
         vuln, created = save_vulnerability(
@@ -448,7 +448,7 @@ def plugin_titles(scan, sub, base, report):
     Sentinel could take it): ``record_components`` keeps the titles it already holds. A title is an enrichment, not a verdict, so an unanswered read
     never discards the scan that was just made, and never turns into \"this plugin has no title\"."""
     from agentapi import probe_dispatch
-    from reNgine.resources import ScannerUnavailable
+    from cvengine.resources import ScannerUnavailable
     slugs = [re.sub(r'[^A-Za-z0-9._-]', '', str(slug))[:80] for slug in sorted((report.get('plugins') or {}))[:MAX_TITLE_LOOKUPS]]
     slugs = [slug for slug in dict.fromkeys(slugs) if slug and slug[0].isalnum() and '..' not in slug]
     if not slugs:
@@ -640,7 +640,7 @@ def _ask_wordpress(scan, chosen):
     when no Sentinel can take the work or a task ended with no result: nothing was asked, nothing is recorded."""
     from agentapi import probe_dispatch
     from cveFeed import probes
-    from reNgine import resources
+    from cvengine import resources
     pending = {sub.name.lower(): (sub, list(bases)) for sub, bases in chosen}
     results = {}
     while pending:
@@ -717,7 +717,7 @@ def run_wpscan(scan_id, runner=None, force=False, internal=False, only=None, att
     scan: it is queued as its own background job (``queue_quick``), which asks again a little later, up to ``QUICK_ATTEMPTS`` times. ``only``
     limits the run to those hosts (that job's call); ``attempt`` counts its retries. The summary's ``deferred`` lists the hosts queued."""
     from cveFeed import activity, ledger, wp_correlation
-    from reNgine import resources
+    from cvengine import resources
     from startScan.models import ScanHistory, Subdomain
     scan = ScanHistory.objects.select_related('domain').get(pk=scan_id)
     project, domain = scan.domain.project_id, scan.domain
@@ -945,7 +945,7 @@ def run_quick(scan_id, hosts, attempt=1, runner=None):
     """The queued quick pass: the stage's WordPress scan run for just these hosts, under the same checks (exclusions, bug bounty confirmation, ledger
     freshness, memory), one run per project at a time. Whatever it still cannot reach is queued again by ``run_wpscan`` until the attempts are
     spent. Returns the run's summary, or ``{'skipped': why}``."""
-    from reNgine import resources
+    from cvengine import resources
     from startScan.models import ScanHistory
     scan = ScanHistory.objects.select_related('domain').filter(pk=scan_id).first()
     if scan is None:
@@ -977,7 +977,7 @@ def _resume_quick(context):
 
 def _quick(scan, only, attempt, runner=None):
     from agentapi import stage_runs
-    from reNgine import resources
+    from cvengine import resources
     claim = stage_runs.claim_kwargs('wpscan-quick', f'quick-{os.getpid()}')
     with resources.redis_claim(f'cvengine:wpscan:quick:{scan.domain.project_id}', claim.pop('owner'), 600, **claim) as holder:
         if holder is not True:
@@ -1033,7 +1033,7 @@ def run_thorough(project_id, runner=None):
     classified by ``_classify`` and stored exactly like the quick pass's, nothing in it is trusted or executed. ``runner`` is the seam the tests use
     (``runner(url, token, timeout) -> report``)."""
     from cveFeed import activity, exclusions, ledger, wp_correlation
-    from reNgine import resources
+    from cvengine import resources
     summary = {'done': 0, 'partial': 0, 'blocked': 0, 'failed': 0}
     owner = f'thorough-{os.getpid()}'
     with resources.redis_claim(f'cvengine:wpscan:thorough:{project_id}', owner, 300) as holder:

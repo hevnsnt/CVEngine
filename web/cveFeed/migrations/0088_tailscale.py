@@ -2,7 +2,7 @@
 
 import django.db.models.deletion
 import django.utils.timezone
-import reNgine.crypto_fields
+import cvengine.crypto_fields
 from django.conf import settings
 from django.db import migrations, models
 
@@ -32,7 +32,7 @@ class Migration(migrations.Migration):
                 ("enabled", models.BooleanField(default=True)),
                 (
                     "credentials",
-                    reNgine.crypto_fields.EncryptedJSONField(blank=True, default=dict),
+                    cvengine.crypto_fields.EncryptedJSONField(blank=True, default=dict),
                 ),
                 ("use_local", models.BooleanField(default=True)),
                 (

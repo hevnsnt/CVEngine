@@ -7,9 +7,9 @@ from django.test import SimpleTestCase, TestCase
 from django.test.utils import CaptureQueriesContext
 
 from cveFeed import port_inventory
-from reNgine import common_func, discovery_events as bbot_lib
-from reNgine.common_func import update_or_create_port
-from reNgine.tasks import persist_bbot_result
+from cvengine import common_func, discovery_events as bbot_lib
+from cvengine.common_func import update_or_create_port
+from cvengine.tasks import persist_bbot_result
 from startScan.models import IpAddress, Port
 
 
@@ -48,7 +48,7 @@ class BbotKeepsTheDetectedServiceTests(TestCase):
 	def test_an_nmap_service_name_survives_a_bbot_batch(self):
 		port = self.nmap_port('192.0.2.20', 5353, 'domain')
 		source, description = port.source, port.description
-		with mock.patch('reNgine.tasks.get_port_service_description', return_value=dict(GUESS)):
+		with mock.patch('cvengine.tasks.get_port_service_description', return_value=dict(GUESS)):
 			persist_bbot_result(bbot_lib.BbotResult(ports={('192.0.2.20', 5353)}), ctx={})
 		port.refresh_from_db()
 		self.assertEqual(port.service_name, 'domain')
@@ -59,13 +59,13 @@ class BbotKeepsTheDetectedServiceTests(TestCase):
 
 	def test_an_unknown_port_does_not_clear_the_service_name(self):
 		port = self.nmap_port('192.0.2.21', 49999, 'custom-svc')
-		with mock.patch('reNgine.tasks.get_port_service_description', return_value={'service_name': '', 'description': ''}):
+		with mock.patch('cvengine.tasks.get_port_service_description', return_value={'service_name': '', 'description': ''}):
 			persist_bbot_result(bbot_lib.BbotResult(ports={('192.0.2.21', 49999)}), ctx={})
 		port.refresh_from_db()
 		self.assertEqual(port.service_name, 'custom-svc')
 
 	def test_a_new_port_gets_the_guessed_name_and_bbot_as_source(self):
-		with mock.patch('reNgine.tasks.get_port_service_description', return_value=dict(GUESS)):
+		with mock.patch('cvengine.tasks.get_port_service_description', return_value=dict(GUESS)):
 			persist_bbot_result(bbot_lib.BbotResult(ports={('192.0.2.22', 5353)}), ctx={})
 		port = IpAddress.objects.get(address='192.0.2.22').ports.get(number=5353)
 		self.assertEqual((port.service_name, port.description, port.source), ('mdns', 'Multicast DNS', 'bbot'))
@@ -75,7 +75,7 @@ class BbotKeepsTheDetectedServiceTests(TestCase):
 		ip = IpAddress.objects.create(address='192.0.2.23')
 		port = Port.objects.create(number=5353, service_name='', description='')
 		ip.ports.add(port)
-		with mock.patch('reNgine.tasks.get_port_service_description', return_value=dict(GUESS)):
+		with mock.patch('cvengine.tasks.get_port_service_description', return_value=dict(GUESS)):
 			persist_bbot_result(bbot_lib.BbotResult(ports={('192.0.2.23', 5353)}), ctx={})
 		port.refresh_from_db()
 		self.assertEqual((port.service_name, port.description, port.source), ('mdns', 'Multicast DNS', 'bbot'))
@@ -133,7 +133,7 @@ class WhatportisTableTests(SimpleTestCase):
 		database = mock.Mock()
 		database.all.return_value = [dict(r) for r in self.ROWS]
 		with mock.patch('whatportis.db.get_database', return_value=database), \
-				mock.patch('reNgine.common_func.socket.getservbyport', return_value='ssh'):
+				mock.patch('cvengine.common_func.socket.getservbyport', return_value='ssh'):
 			self.assertEqual(common_func.get_port_service_description(22), {'service_name': 'ssh', 'description': ''})
 
 class DeshareMigrationTests(TestCase):

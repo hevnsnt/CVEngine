@@ -6,7 +6,7 @@ from django.test import TestCase
 from django.utils import timezone
 
 from dashboard.models import Org, Project
-from reNgine.tasks import parse_nuclei_result, save_vulnerability
+from cvengine.tasks import parse_nuclei_result, save_vulnerability
 from scanEngine.models import EngineType
 from startScan.models import ScanHistory, Subdomain, Vulnerability
 from targetApp.models import Domain

@@ -1,4 +1,4 @@
-"""The Sentinel and agent lifecycles as explicit tables (reNgine.state_machines AGENT, SENTINEL_TASK, STAGE_RUN), and the stale-write bugs fixed while
+"""The Sentinel and agent lifecycles as explicit tables (cvengine.state_machines AGENT, SENTINEL_TASK, STAGE_RUN), and the stale-write bugs fixed while
 moving them: a registration or an admin's change that overwrote a newer decision, a late result that revived a cancelled task, a report written after
 the task expired, a stage-run pass that overwrote the pass that took over from it, the self-update request a stale failure wiped, the 403 a Sentinel
 could not tell from a revoked token, and the outcome every expired task was labelled with."""
@@ -14,7 +14,7 @@ from agentapi import sentinel_settings, stage_runs
 from agentapi.models import Agent, SentinelTask, StageRun
 from cveFeed.models import ScanControl
 from dashboard.models import AuditLog
-from reNgine.state_machines import AGENT, SENTINEL_TASK, STAGE_RUN
+from cvengine.state_machines import AGENT, SENTINEL_TASK, STAGE_RUN
 from startScan.models import IpAddress, ScanHistory
 from tests.test_agentapi import call
 from tests.test_sentinels import SentinelBase, register_sentinel

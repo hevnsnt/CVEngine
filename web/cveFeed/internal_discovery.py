@@ -120,7 +120,7 @@ def _discover_range(range_id, dispatch, scan_after):
     from agentapi import sentinel_dispatch, stage_runs
     from cveFeed import activity
     from cveFeed.models import InternalRange
-    from reNgine.resources import redis_claim
+    from cvengine.resources import redis_claim
     dispatch = dispatch or sentinel_dispatch.dispatch_or_none
     row = InternalRange.objects.select_related('project__org').filter(pk=range_id).first()
     if row is None:

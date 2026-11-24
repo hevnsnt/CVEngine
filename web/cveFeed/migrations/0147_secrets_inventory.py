@@ -7,7 +7,7 @@ import django.contrib.postgres.fields
 import django.db.models.deletion
 import django.db.models.functions.datetime
 import django.utils.timezone
-import reNgine.crypto_fields
+import cvengine.crypto_fields
 from django.conf import settings
 from django.db import migrations, models
 
@@ -35,7 +35,7 @@ class Migration(migrations.Migration):
                         verbose_name="ID",
                     ),
                 ),
-                ("key", reNgine.crypto_fields.EncryptedCharField(max_length=1200)),
+                ("key", cvengine.crypto_fields.EncryptedCharField(max_length=1200)),
                 ("created_at", models.DateTimeField(auto_now_add=True)),
             ],
         ),

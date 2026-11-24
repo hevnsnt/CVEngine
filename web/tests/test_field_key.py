@@ -7,7 +7,7 @@ from django.db import connection
 from django.test import TestCase
 
 from dashboard.models import AIProviderSettings
-from reNgine import crypto_fields
+from cvengine import crypto_fields
 
 KEY_A = 'a' * 40
 KEY_B = 'b' * 40

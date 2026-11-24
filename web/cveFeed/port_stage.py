@@ -59,7 +59,7 @@ def discover(ips, scan, runner):
     """Open ports per address for ``ips`` through ``runner(ips) -> {ip: [ports]}`` (``sentinel_dispatch.wrap_naabu_runner``), or None when nothing
     could be discovered. The result for every address also carries the ports the inventory held open before. Never raises: any failure is None."""
     from cveFeed import ledger
-    from reNgine import resources
+    from cvengine import resources
     from targetApp.target_types import scannable_hosts
     ips = scannable_hosts(sorted(set(ips)))
     if not ips or runner is None:
@@ -124,7 +124,7 @@ def run_for_scan(scan_id, force=False):
     from agentapi import sentinel_dispatch
     from cveFeed import activity, hosting, ledger
     from cveFeed.nuclei_scan import scan_targets
-    from reNgine import resources
+    from cvengine import resources
     from startScan.ip_rows import org_id_of_project
     from startScan.models import ScanHistory
     scan = ScanHistory.objects.select_related('domain').get(pk=scan_id)

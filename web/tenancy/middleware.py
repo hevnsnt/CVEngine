@@ -91,7 +91,7 @@ class TenancyMiddleware:
 
 
 class RetireClassicUiMiddleware:
-    """The reNgine screens are gone. Their addresses forward to the matching CVEngine page; anything that
+    """The inherited classic screens are gone. Their addresses forward to the matching CVEngine page; anything that
     would have changed data through them is refused. Downloads (exports, reports), /api/ and /admin/ stay."""
 
     KEEP = re.compile(r'^/(cve/|api/|mcp/|mfa/|login/|logout/|staticfiles/|admin/|swagger|favicon)|/export/|/create_report')

@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 def requeue_unacked(app=None):
     """Return every unacknowledged message to its queue. Returns how many. Never raises: a broker that cannot be reached is left alone."""
     try:
-        from reNgine.celery import app as default_app
+        from cvengine.celery import app as default_app
         with (app or default_app).connection_for_write() as connection:
             channel = connection.default_channel
             client = getattr(channel, 'client', None)
@@ -41,7 +41,7 @@ def requeue_tags(tags, app=None):
     if not tags:
         return 0
     try:
-        from reNgine.celery import app as default_app
+        from cvengine.celery import app as default_app
         with (app or default_app).connection_for_write() as connection:
             channel = connection.default_channel
             if getattr(channel, 'qos', None) is None or getattr(channel, 'client', None) is None:
@@ -147,7 +147,7 @@ def _live_tasks(app=None, inspect_timeout=3):
     a worker - the scan ids being the ScanHistory ids the discovery and internal-scan tasks among them are for, or None when that cannot
     be told (no Redis broker, a long queue, no worker answered). Never raises."""
     try:
-        from reNgine.celery import app as default_app
+        from cvengine.celery import app as default_app
         app = app or default_app
         ids, scans = set(), set()
         with app.connection_for_read() as connection:

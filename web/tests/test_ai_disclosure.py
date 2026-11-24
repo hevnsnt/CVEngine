@@ -11,7 +11,7 @@ from cveFeed import ai_disclosure, host_context, reviewer, threat
 from cveFeed.models import ReviewerSettings, Triage
 from cveFeed.threat import SMOKE
 from dashboard.models import AIProviderSettings
-from reNgine.ai_prompts import STAGES
+from cvengine.ai_prompts import STAGES
 from tests import test_heat_override, test_reviewer
 from tests.test_tenancy import client_for
 
@@ -23,7 +23,7 @@ class CatalogueTests(SimpleTestCase):
 		# a new AI job must say what it sends before it ships: add it to ai_disclosure.JOBS (or RETIRED once nothing calls it)
 		missing = set(STAGES) - ai_disclosure.stage_ids() - ai_disclosure.RETIRED
 		self.assertEqual(missing, set(), f'AI stages with no entry on the AI and your data page: {sorted(missing)}')
-		self.assertEqual(ai_disclosure.stage_ids() - set(STAGES), set(), 'the page describes a stage reNgine.ai_prompts does not name')
+		self.assertEqual(ai_disclosure.stage_ids() - set(STAGES), set(), 'the page describes a stage cvengine.ai_prompts does not name')
 
 	def test_every_job_says_what_it_sends_never_sends_and_how_to_stop_it(self):
 		for job in ai_disclosure.JOBS:

@@ -217,7 +217,7 @@ def _retire(scan, current, resolver, checker, now, tcp_checker=None):
                 break
     if not candidates:
         return [], 0, 0
-    from reNgine.resources import ScannerUnavailable
+    from cvengine.resources import ScannerUnavailable
     errored = {}
     try:
         if resolver is None:  # a Sentinel resolves them (dns_resolve, agentapi.probe_dispatch): the kind has no local path
