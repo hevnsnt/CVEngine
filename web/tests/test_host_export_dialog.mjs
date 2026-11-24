@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import {register} from 'node:module';
 import {test} from 'node:test';
 
-// "Export all hosts" (static/cve/host-export.js): the page-head button, the dialog's choices and the download, against a tiny DOM and a fake server.
+// "Export all hosts" and "Export host" (static/cve/host-export.js): the page-head button, the dialogs' choices and the download, against a tiny DOM
+// and a fake server.
 const hook = `
 export async function resolve(specifier, context, next) {
   if (specifier.startsWith('/staticfiles/cve/')) {
@@ -45,7 +46,13 @@ globalThis.document = {
   body,
 };
 globalThis.localStorage = {getItem: () => null, setItem() {}};
-globalThis.location = {search: ''};
+globalThis.location = {search: '', hash: ''};
+const winListeners = {};
+globalThis.window = {
+  addEventListener: (type, fn) => { (winListeners[type] ||= []).push(fn); },
+  removeEventListener: (type, fn) => { winListeners[type] = (winListeners[type] || []).filter((f) => f !== fn); },
+};
+const fireWindow = (type) => (winListeners[type] || []).slice().forEach((fn) => fn({}));
 globalThis.URL.createObjectURL = () => 'blob:fake';
 globalThis.URL.revokeObjectURL = () => {};
 const timers = [];
@@ -64,11 +71,15 @@ globalThis.fetch = async (url, opts = {}) => {
   calls.push(url);
   if (String(url).startsWith('/api/v1/projects?') || url === '/api/v1/projects') return {ok: true, status: 200, json: async () => ({results: projects})};
   if (fail) return {ok: false, status: 404, json: async () => ({error: fail})};
+  if (/\/hosts\/\d+\/export$/.test(String(url))) {
+    const one = new Map([['Content-Disposition', 'attachment; filename="host-www.example.com-2026-11-24.zip"'], ['X-Export-Findings', '7'], ['X-Export-Screenshots', '2']]);
+    return {ok: true, status: 200, headers: one, blob: async () => new Blob(['zip'])};
+  }
   const headers = new Map([['Content-Disposition', 'attachment; filename="cvengine-hosts-web-2026-11-14.csv"'], ['X-Export-Hosts', '12'], ['X-Export-Entries', '12']]);
   return {ok: true, status: 200, headers, blob: async () => new Blob(['x'])};
 };
 
-const {hostExportButton, openHostExport} = await import('../static/cve/host-export.js');
+const {hostExportButton, openHostExport, openSingleHostExport} = await import('../static/cve/host-export.js');
 const dialogOf = () => find(body, (n) => n.tag === 'dialog').at(-1);
 const toasts = () => find(body, (n) => n.className && n.className.startsWith('toast')).map((t) => t.textContent);
 
@@ -170,6 +181,108 @@ test('the Hosts page puts the button in the page head, replacing an older one, a
   const src = readFileSync(new URL('../static/cve/app.js', import.meta.url), 'utf8');
   assert.match(src, /import \{ hostExportButton \} from "\/staticfiles\/cve\/host-export\.js"/);
   assert.match(src, /document\.querySelector\("\.page-head"\)/);
-  assert.match(src, /pageHead\.append\(hostExportButton\(\{ slug, all: ALL \}\)\)/);
+  assert.match(src, /hostExportButton\(\{ slug, all: ALL, hostOf: \(id\) => byId\.get\(id\) \}\)/);
+  assert.match(src, /pageHead\.append\(exportBtn\)/);
+  assert.match(src, /function showHost\(h\) \{\n\s+current = h && h\.id;\n\s+if \(exportBtn\) exportBtn\.sync\(\);/);  // every selection and deselection repaints it
+  assert.match(src, /window\.addEventListener\("hashchange", followHash\)/);
   assert.match(src, /const csv = exportButton\(\{/);  // the list's CSV of the current filter stays
+});
+
+// --- one host ----------------------------------------------------------------------------------------------------------------------------
+
+const atHash = (hash) => { location.hash = hash; };
+
+test('with no host selected the button says Export all hosts and opens the all-hosts dialog', () => {
+  atHash('');
+  const b = hostExportButton({slug: 'web'});
+  assert.equal(b.textContent, 'Export all hosts');
+  b.onclick();
+  assert.equal(dialogOf().attrs['aria-label'], 'Export all hosts');
+  dialogOf().close();
+});
+
+test('a first load at an address with a host id says Export host at once', () => {
+  atHash('#40413');
+  const b = hostExportButton({slug: 'web'});
+  assert.equal(b.textContent, 'Export host');
+  assert.match(b.attrs.title, /ZIP/);
+  atHash('');
+});
+
+test('the label follows the selection without a reload: a row picked, a hash change, back and forward, deselecting', () => {
+  atHash('');
+  const b = hostExportButton({slug: 'web'});
+  assert.equal(b.textContent, 'Export all hosts');
+  atHash('#12');  // a row is picked: the page writes the id with replaceState and calls sync (no event)
+  b.sync();
+  assert.equal(b.textContent, 'Export host');
+  atHash('');  // the address loses the id (a typed address or Back): the event repaints it on its own
+  fireWindow('hashchange');
+  assert.equal(b.textContent, 'Export all hosts');
+  atHash('#13');
+  fireWindow('popstate');  // Forward
+  assert.equal(b.textContent, 'Export host');
+  atHash('');  // "All hosts": deselected
+  b.sync();
+  assert.equal(b.textContent, 'Export all hosts');
+});
+
+test('a removed button stops listening', () => {
+  const b = hostExportButton({slug: 'web'});
+  const before = (winListeners.hashchange || []).length;
+  b.isConnected = false;
+  fireWindow('hashchange');
+  assert.equal((winListeners.hashchange || []).length, before - 1);
+});
+
+test('with a host selected the button opens the one-host dialog: no choices, what is included, and Download', () => {
+  atHash('#40413');
+  const b = hostExportButton({slug: 'web', hostOf: (id) => (id === 40413 ? {host: 'www.example.com', project: 'web'} : null)});
+  b.onclick();
+  const d = dialogOf();
+  assert.equal(d.attrs['aria-label'], 'Export host');
+  assert.equal(selects(d).length, 0);
+  assert.equal(find(d, (n) => n.tag === 'input').length, 0);
+  assert.match(d.textContent, /www\.example\.com/);
+  assert.match(d.textContent, /host\.json/);
+  assert.match(d.textContent, /Screenshots/);
+  assert.match(d.textContent, /masked/);
+  assert.ok(named(d, 'Download'));
+  assert.ok(named(d, 'Cancel'));
+  d.close();
+  atHash('');
+});
+
+test('Download fetches the one-host route, saves the ZIP the server named and toasts the counts', async () => {
+  calls.length = 0;
+  clicks.length = 0;
+  openSingleHostExport({slug: 'web', id: 40413, name: 'www.example.com'});
+  const d = dialogOf();
+  await named(d, 'Download').onclick();
+  assert.deepEqual(calls, ['/api/v1/projects/web/hosts/40413/export']);
+  assert.equal(clicks.at(-1).attrs.download, 'host-www.example.com-2026-11-24.zip');
+  assert.ok(toasts().includes('Exported www.example.com (7 findings, 2 screenshots)'), toasts().join('|'));
+  assert.equal(d.open, false);
+});
+
+test('a refused one-host export stays in the dialog with the server\'s words', async () => {
+  fail = 'host not found';
+  openSingleHostExport({slug: 'web', id: 99});
+  const d = dialogOf();
+  await named(d, 'Download').onclick();
+  fail = null;
+  assert.match(d.textContent, /host not found/);
+  assert.ok(d.open);
+  assert.equal(named(d, 'Download').disabled, false);
+  d.close();
+});
+
+test('in All projects the one-host export uses the host\'s own project', async () => {
+  calls.length = 0;
+  atHash('#7');
+  const b = hostExportButton({slug: '_all', all: true, hostOf: () => ({host: 'api.example.com', project: 'api'})});
+  b.onclick();
+  await named(dialogOf(), 'Download').onclick();
+  assert.deepEqual(calls, ['/api/v1/projects/api/hosts/7/export']);
+  atHash('');
 });

@@ -210,7 +210,7 @@ class OverviewQueryCeilingTests(Seeded):
             cold = self.count(c, project='sa')
             warm = self.count(c, project='sa')
         self.assertLessEqual(cold, 70, cold)  # every snapshot it reads built in this request: the headline counts, the ranking, the threats, the Sentinel line (79 before)
-        self.assertLessEqual(warm, 10, warm)
+        self.assertLessEqual(warm, 13, warm)  # 10 before every request saved its session again (one UPDATE, plus a savepoint and its release in a test case)
 
 
 class SetupQuestionCountsTests(QuestionsBase):
@@ -280,7 +280,7 @@ class AlertStripTests(QuestionsBase):
             r = self.c.get('/cve/api/settings/alerts')
         self.assertEqual(r.status_code, 200, r.content)
         self.assertEqual(len(r.json()['alerts']), 7)
-        self.assertLessEqual(len(ctx), 15, '\n'.join(q['sql'][:140] for q in ctx))  # 24 before: a query per alert, and the questions' choices and facts
+        self.assertLessEqual(len(ctx), 18, '\n'.join(q['sql'][:140] for q in ctx))  # 24 before: a query per alert, and the questions' choices and facts; 15 before every request saved its session again (one UPDATE, plus a savepoint and its release in a test case)
 
 
 class SentinelLineTests(Fixture):
