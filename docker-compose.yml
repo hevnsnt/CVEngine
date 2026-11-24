@@ -16,6 +16,8 @@ services:
     # The memory settings default to what this file always used (work_mem 4MB and no preloaded library are PostgreSQL's own defaults); a bigger host
     # raises them in .env (docs/DEPLOYMENT.md, Sizing the database). POSTGRES_SHARED_PRELOAD_LIBRARIES=pg_stat_statements turns on query statistics.
     # POSTGRES_TRACK_IO_TIMING (off) and POSTGRES_LOG_MIN_DURATION_STATEMENT (-1, no slow query log) are diagnostics, PostgreSQL's own defaults when unset.
+    # Two diagnostics are on by default (POSTGRES_LOG_LOCK_WAITS, POSTGRES_TRACK_WAL_IO_TIMING; off turns either off): a statement that waits longer
+    # than deadlock_timeout (1s) for a lock is logged with the process that holds it, and the time spent writing and flushing WAL is counted (pg_stat_io).
     # Every login and logout is logged (POSTGRES_LOG_CONNECTIONS, POSTGRES_LOG_DISCONNECTIONS, default on; off turns either off): who connected, from
     # where, as which role. A setting given here wins over one made with ALTER SYSTEM.
     command: ["postgres", "-c", "max_connections=${POSTGRES_MAX_CONNECTIONS:-300}", "-c", "shared_buffers=${POSTGRES_SHARED_BUFFERS:-256MB}",
@@ -23,7 +25,8 @@ services:
               "-c", "random_page_cost=${POSTGRES_RANDOM_PAGE_COST:-1.1}", "-c", "work_mem=${POSTGRES_WORK_MEM:-4MB}",
               "-c", "shared_preload_libraries=${POSTGRES_SHARED_PRELOAD_LIBRARIES:-}", "-c", "track_io_timing=${POSTGRES_TRACK_IO_TIMING:-off}",
               "-c", "log_min_duration_statement=${POSTGRES_LOG_MIN_DURATION_STATEMENT:--1}",
-              "-c", "log_connections=${POSTGRES_LOG_CONNECTIONS:-on}", "-c", "log_disconnections=${POSTGRES_LOG_DISCONNECTIONS:-on}"]
+              "-c", "log_connections=${POSTGRES_LOG_CONNECTIONS:-on}", "-c", "log_disconnections=${POSTGRES_LOG_DISCONNECTIONS:-on}",
+              "-c", "log_lock_waits=${POSTGRES_LOG_LOCK_WAITS:-on}", "-c", "track_wal_io_timing=${POSTGRES_TRACK_WAL_IO_TIMING:-on}"]
     environment:
       - POSTGRES_DB=${POSTGRES_DB}
       - POSTGRES_USER=${POSTGRES_USER}
