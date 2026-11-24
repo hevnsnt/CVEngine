@@ -28,7 +28,8 @@ case " $* " in
       echo "Fix: make the database accept cvengine_app, then run the update again. To run on the owner role until then, set CVENGINE_DB_ALLOW_OWNER_FALLBACK=1 in .env and run it again." >&2
       exit 1; fi
     echo "db_app_role: web, celery and celery-beat run as the database role cvengine_app"; exit 0;;
-  *" config --format json "*) if [ -f "$STUB_DIR/overlay_leaks" ]; then
+  *" config --format json "*) if [ -f "$STUB_DIR/proxy_config" ]; then cat "$STUB_DIR/proxy_config"; exit 0; fi
+    if [ -f "$STUB_DIR/overlay_leaks" ]; then
       echo '{"services": {"db": {"environment": {"POSTGRES_PASSWORD": "canary"}}, "celery": {"environment": {"POSTGRES_PASSWORD": "canary"}}}}'; fi; exit 0;;
   *" ps -q web "*|*" ps -q celery "*|*" ps -q celery-beat "*) if [ -f "$STUB_DIR/old_containers" ]; then echo oldcontainer; fi; exit 0;;
   *" image inspect "*) if [ -f "$STUB_DIR/image_moved" ]; then echo sha256:new; else echo sha256:old; fi; exit 0;;
@@ -41,6 +42,10 @@ case " $* " in
   *" showmigrations "*) if [ -f "$STUB_DIR/migrations_state" ]; then cat "$STUB_DIR/migrations_state"; else echo "[X]  app.0001_initial"; fi; exit 0;;
   *"celery_healthcheck.py"*) if [ -f "$STUB_DIR/workers_down" ]; then echo "classic_worker does not answer"; exit 1; fi; exit 0;;
   *"http.client"*) if [ -f "$STUB_DIR/web_not_serving" ]; then exit 1; fi; exit 0;;
+  *"client-address-probe/update-verify"*) if [ -f "$STUB_DIR/proxy_no_web" ]; then echo 502; else echo 204; fi; exit 0;;
+  *" run --rm --network none "*) case "$*" in *" nginx -t"*) if [ -f "$STUB_DIR/proxy_refuses_new" ]; then
+      echo "nginx: [emerg] could not build map_hash, you should increase map_hash_bucket_size: 64" >&2
+      echo "nginx: configuration file /etc/nginx/nginx.conf test failed" >&2; exit 1; fi;; esac; exit 0;;
   *" exec -T proxy nginx -t "*) if [ -f "$STUB_DIR/proxy_refuses" ]; then
       echo "nginx: [emerg] could not build map_hash, you should increase map_hash_bucket_size: 64" >&2; exit 1; fi; exit 0;;
   *" exec "*) if [ -f "$STUB_DIR/web_down" ]; then exit 1; fi
@@ -760,6 +765,7 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         shutil.copy(SCRIPTS / 'update-deploy.sh', other / 'scripts' / 'update-deploy.sh')
         shutil.copy(SCRIPTS / 'update-disk.sh', other / 'scripts' / 'update-disk.sh')
         shutil.copy(SCRIPTS / 'db-backup.sh', other / 'scripts' / 'db-backup.sh')
+        shutil.copy(SCRIPTS / 'proxy-check.sh', other / 'scripts' / 'proxy-check.sh')
         self.git('add', '-A', cwd=other)
         self.git('commit', '-m', 'the deploy file', cwd=other)
         self.git('push', 'origin', 'master', cwd=other)
@@ -905,6 +911,42 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.assertTrue(self.approved())
         self.assertFalse(self.deployed_marker())
         self.assertNotIn('docker image prune -f', self.calls())
+
+    def test_a_request_through_the_proxy_that_does_not_reach_web_is_not_done(self):
+        (self.stub / 'proxy_no_web').write_text('')
+        self.new = self.publish_deploy_file()
+        self.approve()
+        result = self.run_script(CVENGINE_VERIFY_PROXY_TRIES='2', CVENGINE_VERIFY_POLL='0')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        log = (self.work / 'web' / '.update-log').read_text()
+        self.assertIn('a request through the proxy to the web service got 502', log)
+        self.assertTrue(self.approved())
+        self.assertFalse(self.deployed_marker())
+
+    def test_a_proxy_configuration_nginx_refuses_stops_the_update_before_the_migration_and_keeps_the_previous_version(self):
+        # nginx -t of the new configuration (with the secret the update just wrote) in a throwaway container, before anything is migrated: a
+        # refusal is a failure before the migration, so the previous commit is put back and its proxy keeps serving, and the screen says why
+        (self.stub / 'proxy_config').write_text(json.dumps({'services': {'proxy': {
+            'image': 'nginx:alpine', 'environment': {'CVENGINE_UPSTREAM_SECRET': 'canary-secret-value-0123456789abcdef'},
+            'volumes': [{'type': 'bind', 'source': '/x/config/nginx/rengine.conf', 'target': '/etc/nginx/conf.d/rengine.conf'}]}}}))
+        (self.stub / 'proxy_refuses_new').write_text('')
+        self.new = self.publish_deploy_file()
+        self.approve()
+        result = self.run_script(CVENGINE_VERIFY_POLL='0')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        log = (self.work / 'web' / '.update-log').read_text()
+        self.assertIn('proxy: nginx refuses the new configuration: nginx: [emerg] could not build map_hash', log)
+        self.assertEqual(self.head(), self.prev)  # the previous version is back
+        calls = self.calls()
+        preflight = next(i for i, c in enumerate(calls) if ' run --rm --network none ' in c)
+        self.assertIn(' -e CVENGINE_UPSTREAM_SECRET ', calls[preflight])
+        self.assertNotIn('canary-secret-value', '\n'.join(calls))  # the secret never reaches a command line
+        self.assertIn('-v /x/config/nginx/rengine.conf:/etc/nginx/conf.d/rengine.conf:ro', calls[preflight])
+        first_migrate = [i for i, c in enumerate(calls) if ' migrate --noinput' in c]
+        self.assertTrue(not first_migrate or first_migrate[0] > preflight)
+        phase = json.loads((self.work / 'web' / '.update-phase.json').read_text())
+        self.assertEqual(phase['phase'], 'failed')
+        self.assertIn('nginx refuses the new configuration', phase.get('detail', ''))
 
     def test_a_verified_update_has_checked_the_proxy_after_the_web_service(self):
         self.new = self.publish_deploy_file()

@@ -251,6 +251,8 @@ deploy_steps() {
   if [ -f scripts/client-address.sh ] && . scripts/client-address.sh && cvengine_ensure_upstream_secret "$(cvengine_compose_env_file "${compose[@]}")"; then
     log "generated the upstream secret (CVENGINE_UPSTREAM_SECRET in .env); a host nginx in front of the proxy needs it to pass on the client address: scripts/client-address-check.sh --snippet"
   fi
+  # nginx must accept the proxy configuration it will start with (the new files, the secret just written) before anything is changed for good
+  proxy_preflight || return 1
   # The database's own settings are in the compose file (max_connections). `up -d --no-deps db` recreates the db container only when its
   # definition changed since it was created (once, on the update that brings the change: a restart of a few seconds), and is a no-op otherwise.
   "${compose[@]}" up -d --no-deps db || return 1
@@ -347,30 +349,35 @@ verify_running() {
   return 1
 }
 
-# The bundled proxy must load its configuration and stay up. verify_running saw it "running", which is also what Docker says between two restarts
-# of a proxy nginx refuses to start (a 1.5 develop build did that: its map did not fit nginx's hash bucket), and verify_serving asks the web
-# service directly, not through the proxy. So the update reported "done" and took the maintenance page down while every visitor got no answer.
-# Here nginx checks the configuration it runs with (`nginx -t` in the proxy container) and the container's restart count must not move while it
-# is watched. A proxy that fails is a failed update after the migration: the new code is kept, the deploy retried, the page says it did not finish.
+# The bundled proxy after the restart (scripts/proxy-check.sh): verify_running saw it "running", which is also what Docker says between two restarts
+# of a proxy nginx refuses (the 1.5 upstream secret did that: its map key did not fit nginx's hash bucket), and verify_serving asks the web service
+# directly, not through the proxy, so the update said "done" and took the page down while no visitor got an answer. A proxy that fails here is a
+# failed update after the migration: the new code is kept and the deploy retried, and the page says the update did not finish.
 verify_proxy() {
-  local compose=("${COMPOSE[@]}") attempt id before after said=''
-  for attempt in $(seq 1 "${CVENGINE_VERIFY_PROXY_TRIES:-15}"); do
-    id=$("${compose[@]}" ps -q proxy 2>/dev/null | head -n 1) || id=''
-    before=''
-    [ -z "$id" ] || before=$(docker inspect -f '{{.RestartCount}}' "$id" 2>/dev/null) || before=''
-    if said=$("${compose[@]}" exec -T proxy nginx -t 2>&1); then
-      sleep "${CVENGINE_VERIFY_POLL:-2}"
-      after=''
-      [ -z "$id" ] || after=$(docker inspect -f '{{.RestartCount}}' "$id" 2>/dev/null) || after=''
-      [ "$before" = "$after" ] && return 0
-      said="the proxy container restarted while it was watched (restart count ${before:-?} then ${after:-?})"
-    fi
-    sleep "${CVENGINE_VERIFY_POLL:-2}"
-  done
-  said=$(printf '%s\n' "$said" | grep -iE 'emerg|error|restart' | tail -n 1 || true)
-  [ -n "$said" ] || said=$("${compose[@]}" logs --tail 20 proxy 2>/dev/null | grep -iE 'emerg|error' | tail -n 1 || true)
-  log "after the restart the proxy does not stay up, so visitors get no answer: ${said:-see docker compose logs proxy}"
-  DEPLOY_WHY="The proxy (nginx) does not start with the new configuration: ${said:-see docker compose logs proxy}"
+  local out
+  [ -f scripts/proxy-check.sh ] || return 0
+  . scripts/proxy-check.sh
+  if out=$(cvengine_proxy_verify "${COMPOSE[@]}"); then
+    log "$out"
+    return 0
+  fi
+  log "$out"
+  DEPLOY_WHY="The new version started, but the proxy does not answer for the site (${out#proxy: after the restart the proxy does not answer for the site: }). The maintenance page stays up; see docker compose logs proxy."
+  return 1
+}
+
+# Before anything is migrated or recreated: nginx must accept the proxy configuration the new files and .env give it (scripts/proxy-check.sh).
+# Still DEPLOY_STAGE=datastores, so a refusal puts the previous version back on the unchanged database and its proxy keeps serving.
+proxy_preflight() {
+  local out
+  [ -f scripts/proxy-check.sh ] || return 0
+  . scripts/proxy-check.sh
+  if out=$(cvengine_proxy_preflight "${COMPOSE[@]}"); then
+    [ -z "$out" ] || log "$out"
+    return 0
+  fi
+  log "$out"
+  DEPLOY_WHY="The update stopped before changing anything: ${out#proxy: }. The previous version keeps running."
   return 1
 }
 

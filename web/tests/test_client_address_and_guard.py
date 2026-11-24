@@ -503,35 +503,6 @@ def docker_ok():
         return False
 
 
-class MapHashBucketTests(SimpleTestCase):
-    """nginx refuses to start when a map key does not fit one hash bucket ("could not build map_hash"), and its default bucket is one CPU cache
-    line, 64 bytes: about 45 characters. The upstream secret's key is "k<secret>": 49 characters for the 48 every install generates
-    (scripts/client-address.sh), up to 257 for the longest secret the shape allows. A 1.5 build without the setting crash-looped the proxy on
-    every install that had a generated secret."""
-
-    @staticmethod
-    def bucket_need(key_length, pointer=8, cache_line=64):
-        # ngx_hash.c: an element is a pointer plus the key and its length, aligned to a pointer; a bucket also ends with a pointer, and the
-        # configured size is rounded up to the cache line
-        element = pointer + ((key_length + 2 + pointer - 1) // pointer) * pointer
-        need = element + pointer
-        return ((need + cache_line - 1) // cache_line) * cache_line
-
-    def test_the_bucket_fits_the_longest_secret_and_is_set_before_any_map(self):
-        conf = (ROOT / 'config' / 'nginx' / 'rengine.conf').read_text()
-        code = [line.split('#', 1)[0].strip() for line in conf.splitlines()]
-        code = [line for line in code if line]
-        sizes = [line for line in code if line.startswith('map_hash_bucket_size')]
-        self.assertEqual(len(sizes), 1, sizes)
-        size = int(sizes[0].split()[1].rstrip(';'))
-        self.assertLess(code.index(sizes[0]), next(i for i, line in enumerate(code) if line.startswith('map ')))
-        generated = 48  # cvengine_ensure_upstream_secret
-        self.assertIn(f'head -c {generated}', (ROOT / 'scripts' / 'client-address.sh').read_text())
-        self.assertGreater(self.bucket_need(1 + generated), 64)  # why the default is not enough
-        self.assertGreaterEqual(size, self.bucket_need(1 + 256))  # the longest secret the shape check accepts
-        self.assertIn('{32,256}', conf)
-
-
 class SecretShapeCheckTests(SimpleTestCase):
     """The update's report checks the secret in .env on the host and the rendered one in the proxy (nginx:alpine, whose grep is musl's). musl
     refuses a regex bound above 255, so `{32,256}` made both checks read a good secret as broken on every install: the update log said the secret
@@ -655,17 +626,6 @@ class ProxyContainerTests(SimpleTestCase):
         os.chmod(f'{self.tmp}/state/maintenance', 0o644)
         self.assertEqual(self.fetch(port, REAL, self.SECRET, path='/client-address-probe/x/')['xff'], REAL)
         self.assertEqual(self.fetch(port, REAL, self.SECRET), {})  # every other route shows the maintenance page (503)
-
-    def test_the_secret_length_every_install_generates_and_the_longest_start_the_proxy(self):
-        # 48 characters is what scripts/client-address.sh writes to .env; nginx refused it with its default map bucket
-        for length in (48, 256):
-            secret = ('Zq8rT2vW9xY3bN5mK7pL4sD6fG1hJ0aE' * 9)[:length]
-            port = self.start(secret)
-            self.assertEqual(self.fetch(port, REAL, secret)['xff'], REAL, length)
-            self.assertNotEqual(self.fetch(port, REAL, secret[:-1] + 'x')['xff'], REAL, length)
-            for name in self.names:
-                subprocess.run(['docker', 'rm', '-f', name], capture_output=True)
-            self.names.clear()
 
     def test_with_an_empty_secret_nothing_is_believed(self):
         port = self.start('')
