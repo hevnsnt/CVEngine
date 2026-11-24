@@ -63,7 +63,6 @@ def _apply_reviewer(user, mode):
 
 
 def _host_review_facts():
-    from cveFeed import reviewer
     from cveFeed.models import ReviewerSettings
     row = _reviewer_row() or ReviewerSettings()
     return [f'Host review: the AI reads every open finding of a host that changed, one provider call per host, at most {row.host_review_daily_max:,} a day, and suggests one '

@@ -1,14 +1,10 @@
-import json
-import os
 import re
 import validators
 
 from urllib.parse import urlparse
 from celery.utils.log import get_task_logger
 from django.db import IntegrityError, transaction
-from dotted_dict import DottedDict
 from django.utils import timezone
-from django.shortcuts import get_object_or_404
 
 from reNgine.celery import app
 from reNgine.common_func import *

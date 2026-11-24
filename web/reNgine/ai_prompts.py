@@ -8,7 +8,7 @@ Every prompt the server (or, through the AI job queue, the reviewer container) s
 3. The job's own rules and output format (unchanged by this module).
 
 ``compose(stage, body)`` builds a system prompt from the three. Nothing here touches the fencing of untrusted data (``clean_text``,
-``untrusted_block``, the reviewer container's ``guard.fence``): that stays where it was. The reviewer container cannot import this file
+the reviewer container's ``guard.fence``): that stays where it was. The reviewer container cannot import this file
 (it is a separate image), so ``reviewer/cvengine_reviewer/prompts.py`` holds a copy of ``PREAMBLE`` and of its two task lines, and
 ``tests/test_ai_prompts.py`` fails when the copies differ.
 

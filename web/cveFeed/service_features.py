@@ -405,7 +405,7 @@ def index():
 
     from django.core.cache import cache
 
-    from cveFeed.models import CVEDetection, CVEEntry
+    from cveFeed.models import CVEDetection
     if _INDEX['checked'] and time.monotonic() - _INDEX['checked'] < INDEX_CHECK:
         return _INDEX['value']
     stamp = _stamp()

@@ -6,6 +6,7 @@ from tenancy.views import MFALoginView, SignOutView, admin_login_redirect, invit
 from reNgine.admin_masking import mask_secret_fields
 from django.urls import include, path
 
+from reNgine.client_probe import probe as client_address_probe
 from reNgine.views import serve_protected_media
 
 mask_secret_fields()  # the admin never shows a stored secret
@@ -31,6 +32,7 @@ urlpatterns = [
         include('startScan.urls')),
     path('invite/<str:token>/', invite_view, name='invite'),
     path('unsubscribe/<str:token>/', report_digest_views.unsubscribe, name='report_unsubscribe'),
+    path('client-address-probe/<str:token>/', client_address_probe, name='client_address_probe'),  # open; scripts/client-address-check.sh
     path(
         'login/',
         MFALoginView.as_view(template_name='tenancy/login.html'),

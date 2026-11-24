@@ -29,6 +29,8 @@ services:
     # The memory settings default to what this file always used (work_mem 4MB and no preloaded library are PostgreSQL's own defaults); a bigger host
     # raises them in .env (docs/DEPLOYMENT.md, Sizing the database). POSTGRES_SHARED_PRELOAD_LIBRARIES=pg_stat_statements turns on query statistics.
     # POSTGRES_TRACK_IO_TIMING (off) and POSTGRES_LOG_MIN_DURATION_STATEMENT (-1, no slow query log) are diagnostics, PostgreSQL's own defaults when unset.
+    # Two diagnostics are on by default (POSTGRES_LOG_LOCK_WAITS, POSTGRES_TRACK_WAL_IO_TIMING; off turns either off): a statement that waits longer
+    # than deadlock_timeout (1s) for a lock is logged with the process that holds it, and the time spent writing and flushing WAL is counted (pg_stat_io).
     # Every login and logout is logged (POSTGRES_LOG_CONNECTIONS, POSTGRES_LOG_DISCONNECTIONS, default on; off turns either off): who connected, from
     # where, as which role. A setting given here wins over one made with ALTER SYSTEM.
     command: ["postgres", "-c", "max_connections=${POSTGRES_MAX_CONNECTIONS:-300}", "-c", "shared_buffers=${POSTGRES_SHARED_BUFFERS:-256MB}",
@@ -36,7 +38,8 @@ services:
               "-c", "random_page_cost=${POSTGRES_RANDOM_PAGE_COST:-1.1}", "-c", "work_mem=${POSTGRES_WORK_MEM:-4MB}",
               "-c", "shared_preload_libraries=${POSTGRES_SHARED_PRELOAD_LIBRARIES:-}", "-c", "track_io_timing=${POSTGRES_TRACK_IO_TIMING:-off}",
               "-c", "log_min_duration_statement=${POSTGRES_LOG_MIN_DURATION_STATEMENT:--1}",
-              "-c", "log_connections=${POSTGRES_LOG_CONNECTIONS:-on}", "-c", "log_disconnections=${POSTGRES_LOG_DISCONNECTIONS:-on}"]
+              "-c", "log_connections=${POSTGRES_LOG_CONNECTIONS:-on}", "-c", "log_disconnections=${POSTGRES_LOG_DISCONNECTIONS:-on}",
+              "-c", "log_lock_waits=${POSTGRES_LOG_LOCK_WAITS:-on}", "-c", "track_wal_io_timing=${POSTGRES_TRACK_WAL_IO_TIMING:-on}"]
     environment:
       - POSTGRES_DB=${POSTGRES_DB}
       - POSTGRES_USER=${POSTGRES_USER}
@@ -188,7 +191,7 @@ services:
     environment:
       - DEBUG=0
       - CVENGINE_ALLOW_PRIVATE_TARGETS=${CVENGINE_ALLOW_PRIVATE_TARGETS:-0}
-      - CVENGINE_TRUSTED_PROXIES=${CVENGINE_TRUSTED_PROXIES:-172.16.0.0/12}
+      - CVENGINE_TRUSTED_PROXIES=${CVENGINE_TRUSTED_PROXIES:-${CVENGINE_PROXY_ADDRESS:-172.16.238.10}}  # the bundled proxy alone (its fixed address, networks below)
       - CELERY_BROKER=redis://:${REDIS_PASSWORD:-}@redis:6379/0
       - DISCOVERY_CONCURRENCY=${DISCOVERY_CONCURRENCY:-8}
       - CELERY_BACKEND=redis://:${REDIS_PASSWORD:-}@redis:6379/0
@@ -282,7 +285,7 @@ services:
     environment:
       - DEBUG=0
       - CVENGINE_ALLOW_PRIVATE_TARGETS=${CVENGINE_ALLOW_PRIVATE_TARGETS:-0}
-      - CVENGINE_TRUSTED_PROXIES=${CVENGINE_TRUSTED_PROXIES:-172.16.0.0/12}
+      - CVENGINE_TRUSTED_PROXIES=${CVENGINE_TRUSTED_PROXIES:-${CVENGINE_PROXY_ADDRESS:-172.16.238.10}}  # the bundled proxy alone (its fixed address, networks below)
       - CELERY_BROKER=redis://:${REDIS_PASSWORD:-}@redis:6379/0
       - DISCOVERY_CONCURRENCY=${DISCOVERY_CONCURRENCY:-8}
       - CELERY_BACKEND=redis://:${REDIS_PASSWORD:-}@redis:6379/0
@@ -307,8 +310,9 @@ services:
       - tool_config:/home/cvengine/.config
       - db_owner_fallback:/var/lib/cvengine-db-owner:ro  # empty unless CVENGINE_DB_ALLOW_OWNER_FALLBACK=1 (the migrate service writes it)
       - static_volume:/usr/src/app/staticfiles/:ro  # read only: only celery writes the static files the proxy serves
-    ports:
-      - "127.0.0.1:8000:8000"
+    # No published port: the bundled proxy is the way in, and the built-in scanner and the AI reviewer reach http://web:8000 on their own networks. A
+    # port on 127.0.0.1 let any local process reach the server from the Docker gateway, past the proxy. Opt in with docker-compose.webport.yml (your
+    # own reverse proxy on this host, docs/DEPLOYMENT.md); docker-compose.hostnet.yml publishes it for the scanner it moves to the host network.
     depends_on:
       migrate:  # the one-off owner service: migrations, the app role and its check; nothing starts when it fails
         condition: service_completed_successfully
@@ -319,7 +323,8 @@ services:
       celery-beat:
         condition: service_started
     networks:
-      rengine_network:
+      rengine_network: {}
+      proxy_network:  # the bundled proxy reaches it here, as "rengine" (config/nginx/rengine.conf): the name exists on this network only (see proxy)
         aliases:
           - rengine
       scanner_network: {}  # the built-in scanner reaches the server here (http://web:8000), and nothing else of the stack
@@ -351,10 +356,20 @@ services:
       - ./web/static/cve/maintenance.html:/usr/share/nginx/maintenance/maintenance.html:ro
       - ./config/nginx/state:/etc/nginx/state:ro  # holds the maintenance flag while an update runs
       - ./config/nginx/trusted-upstreams.conf:/etc/nginx/trusted-upstreams.conf:ro  # empty: no peer is believed to have set X-Forwarded-For (HOSTING-ONLINE.md, Cloudflare Tunnel)
+      # rendered at start into conf.d/cvengine-upstream-secret.inc: the secret a host nginx sends to have its X-Forwarded-For believed on 443
+      - ./config/nginx/templates:/etc/nginx/templates:ro
       - static_volume:/usr/src/app/staticfiles/:ro
       - scan_results:/usr/src/scan_results:ro
+    environment:
+      # Empty (the default until an update or make up generates it): no X-Forwarded-For is believed on 443 (config/nginx/rengine.conf, "Client addresses")
+      CVENGINE_UPSTREAM_SECRET: "${CVENGINE_UPSTREAM_SECRET:-}"
     networks:
-      - rengine_network
+      rengine_network: {}  # as before, for anything an install's overlay puts beside it (a cloudflared container); not used to reach web
+      proxy_network:
+        # A fixed address: the web service believes X-Forwarded-For from this one address and no other (CVENGINE_TRUSTED_PROXIES above). It must lie
+        # in CVENGINE_PROXY_SUBNET and outside CVENGINE_PROXY_RANGE, where Docker places the web container. The proxy reaches web by the name
+        # "rengine" (config/nginx/rengine.conf), which web carries on this network only, so its requests always come from this address.
+        ipv4_address: "${CVENGINE_PROXY_ADDRESS:-172.16.238.10}"
     logging: *default-logging
 
   # Optional: attach this install to a Tailscale tailnet so Settings > Tailscale can scan its devices. Off unless COMPOSE_PROFILES=tailscale is
@@ -535,6 +550,16 @@ services:
 
 networks:
   rengine_network:
+  # The bundled proxy and the web service only, on a fixed subnet so the proxy has a fixed address (see proxy). 172.16.0.0/16 is outside Docker's
+  # default pools (172.17 to 172.31, then 192.168), so it does not collide with the networks Docker hands out; move the three values together
+  # (CVENGINE_PROXY_SUBNET, CVENGINE_PROXY_RANGE, CVENGINE_PROXY_ADDRESS, docs/CONFIGURATION.md) when it collides with your LAN or another network.
+  # A network of its own rather than a fixed subnet on rengine_network: an existing network cannot change its subnet while containers are on it,
+  # so an update would have had to take the whole stack off it first. A plain bridge, not `internal: true`: the proxy publishes ports.
+  proxy_network:
+    ipam:
+      config:
+        - subnet: "${CVENGINE_PROXY_SUBNET:-172.16.238.0/24}"
+          ip_range: "${CVENGINE_PROXY_RANGE:-172.16.238.128/25}"
   scanner_network:  # the built-in scanner and the web service only (see scanner above)
   # The database and Redis, and the three services that hold their passwords (web, celery, celery-beat). A plain bridge, not `internal: true`:
   # the database's published port (127.0.0.1:5432) needs a network with a gateway, and an internal one would drop it.

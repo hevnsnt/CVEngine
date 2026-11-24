@@ -267,9 +267,9 @@ class SubmitTests(SimpleTestCase):
 
     def test_credential_check(self):
         get = lambda s: mock.Mock(return_value=mock.Mock(status_code=s))
-        self.assertIs(bounty_submit.check_hackerone('u', 't', get=get(200)), True)
-        self.assertIs(bounty_submit.check_hackerone('u', 't', get=get(401)), False)
-        self.assertIsNone(bounty_submit.check_hackerone('u', 't', get=get(500)))
+        self.assertIs(bounty_submit.verify_hackerone('u', 't', get=get(200))['verified'], True)
+        self.assertIs(bounty_submit.verify_hackerone('u', 't', get=get(401))['verified'], False)
+        self.assertIsNone(bounty_submit.verify_hackerone('u', 't', get=get(500))['verified'])
         self.assertIn('not your email', bounty_submit.verify_hackerone('u', 't', get=get(401))['reason'])
         self.assertIn('inactive', bounty_submit.verify_hackerone('u', 't', get=get(403))['reason'])
         self.assertEqual(bounty_submit.hackerone_username('@granted'), 'granted')

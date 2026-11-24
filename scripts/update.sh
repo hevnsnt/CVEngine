@@ -496,6 +496,10 @@ if [[ -n $conflicts && $conflicts != Note:* ]]; then
     die 'A published port is taken. If a host proxy fronts CVEngine, add its Compose overlay with CVENGINE_COMPOSE_FILES; otherwise free the port.'
 fi
 [[ $conflicts != Note:* ]] || echo "$conflicts"
+# proxy_network's fixed subnet must be free before anything is stopped (scripts/client-address.sh); a clash would stop `up` half way
+if [[ -f scripts/client-address.sh ]] && . scripts/client-address.sh && ! clash=$(cvengine_proxy_network_check "${compose[@]}"); then
+    die "$clash"
+fi
 
 # A former PostgreSQL 12 installation needs an explicit dump/restore. Compose would
 # otherwise create an empty PostgreSQL 18 volume and make a successful HTTP response
@@ -841,6 +845,11 @@ fi
 if [[ -f scripts/db-app-role.sh ]] && . scripts/db-app-role.sh && cvengine_ensure_db_app_password "$compose_env_file"; then
     echo 'The server had no database role of its own: generated its password (CVENGINE_DB_APP_PASSWORD in .env); the migration creates the role.'
 fi
+# The upstream secret a host nginx sends so the proxy believes its X-Forwarded-For (scripts/client-address.sh): generated when there is none; the
+# proxy recreated below loads it. Until the host nginx sends it nothing changes (docs/DEPLOYMENT.md, "Client addresses behind a host proxy").
+if [[ -f scripts/client-address.sh ]] && . scripts/client-address.sh && cvengine_ensure_upstream_secret "$compose_env_file"; then
+    echo 'Generated the upstream secret (CVENGINE_UPSTREAM_SECRET in .env). A host nginx in front of the proxy needs it: scripts/client-address-check.sh --snippet'
+fi
 # The database's own settings are in the compose file (max_connections). `up -d --no-deps db` recreates the db container only when its
 # definition changed since it was created (once, on the update that brings the change: a restart of a few seconds), and is a no-op otherwise.
 "${compose[@]}" up -d --no-deps db
@@ -987,6 +996,8 @@ while (( SECONDS < deadline )); do
         echo "This local check does not validate the public hostname, TLS certificate or task execution."
         # which database role web, celery and celery-beat run as, with a warning when any still uses the owner role (scripts/db-app-role.sh)
         if declare -F cvengine_db_role_report >/dev/null; then cvengine_db_role_report "${compose[@]}" || true; fi
+        # whether the real client address reaches the server (scripts/client-address.sh); a report, never a failure
+        if declare -F cvengine_client_address_report >/dev/null; then cvengine_client_address_report "${compose[@]}" || true; fi
         "${compose[@]}" ps
         rm -f "$diagnostic_log"
         # An install that never had the update watcher cannot act on Approve in Settings > Updates. This is the one manual update such an

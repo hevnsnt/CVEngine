@@ -156,19 +156,6 @@ def sync_global_role(user):
         assign_role(user, GLOBAL_ROLE_FOR[role])
 
 
-LEGACY_TO_TENANCY = {'sys_admin': ADMIN, 'penetration_tester': USER, 'auditor': AUDIT}
-
-
-def grant_from_legacy_role(target_user, legacy_role, org_slug=None):
-    """User-management UI hook: turn a legacy global role into an org membership (default org if unspecified)."""
-    from dashboard.models import Org, OrgMembership
-    role = LEGACY_TO_TENANCY.get(legacy_role)
-    org = (Org.objects.filter(slug=org_slug).first() if org_slug else None) or Org.objects.order_by('id').first()
-    if not (role and org):
-        return
-    OrgMembership.objects.update_or_create(user=target_user, org=org, defaults={'role': role})
-
-
 # ---- who administers what -------------------------------------------------------------
 # App Admin  = Django superuser (instance-wide)
 # Org Admin  = OrgMembership role "admin"

@@ -1,4 +1,3 @@
-from django.apps import apps
 from django.db import models
 from dashboard.models import Project
 from targetApp.alias_note import ALIAS_MAX, NOTE_MAX
@@ -208,12 +207,6 @@ class Domain(models.Model):
 		if host == target:
 			return True
 		return not self.exact_host_only() and host.endswith('.' + target)
-
-	def get_recent_scan_id(self):
-		ScanHistory = apps.get_model('startScan.ScanHistory')
-		obj = ScanHistory.objects.filter(domain__id=self.id).order_by('-id')
-		if obj:
-			return obj[0].id
 
 	def __str__(self):
 		return str(self.name)

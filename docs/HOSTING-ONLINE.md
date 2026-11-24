@@ -81,7 +81,7 @@ Proxy the name through Cloudflare (orange cloud) and set **SSL/TLS mode** to **F
 Things to know when a CDN is in front:
 
 - Only port 443 is needed from Cloudflare. Consider restricting the firewall to [Cloudflare's address ranges](https://www.cloudflare.com/ips/).
-- The bundled proxy overwrites `X-Forwarded-For` with the address it sees connecting, which is Cloudflare's edge. The **IP allowlist** and the abuse guard therefore see Cloudflare's addresses, not your users'. Do not rely on the allowlist for access control behind a CDN; use Cloudflare Access or firewall rules instead.
+- The bundled proxy overwrites `X-Forwarded-For` with the address it sees connecting, which is Cloudflare's edge. The **IP allowlist** and the abuse guard therefore see Cloudflare's addresses, not your users'. Do not rely on the allowlist for access control behind a CDN; use Cloudflare Access or firewall rules instead. To get each visitor's own address, put a host nginx in front of the proxy that takes it from `CF-Connecting-IP` and sends the install's secret ([Client addresses behind a host proxy](DEPLOYMENT.md#client-addresses-behind-a-host-proxy)), or use a tunnel (C below).
 - Static files are versioned by content (`?v=<hash>` on every stylesheet and script). A versioned URL is sent with `Cache-Control: public, max-age=31536000, immutable`, so Cloudflare and browsers keep it for a year; an update changes the URL of every file that changed, so Cloudflare cannot serve one release's stylesheet with another release's pages. Any other `/staticfiles/` URL (the fonts) is sent with `no-cache`. You do not need to purge the cache after an update. If your own proxy or CDN rewrites `Cache-Control` or strips the query string from `/staticfiles/` URLs, keep the query string in the cache key, or a new release can be served an old file.
 - A scan of your own CDN-fronted name finds the CDN, not your server.
 
@@ -128,10 +128,10 @@ docker compose -f docker-compose.yml -f docker-compose.tunnel.yml up -d
   docker network inspect $(docker network ls -q --filter name=rengine_network) --format '{{.Name}} {{(index .IPAM.Config 0).Gateway}}'
   ```
 
-  It looks like `172.18.0.1`. Put that address in the file as `172.18.0.1 1;` (your own number), then `docker compose -f docker-compose.yml -f docker-compose.tunnel.yml exec proxy nginx -s reload`. Anything else on this machine that can reach `127.0.0.1:8443` is believed too, so keep the machine's other users to those you trust.
+  It looks like `172.18.0.1`; the proxy is on two networks, so if the log (step 3) shows another gateway, use that one. Put that address in the file as `172.18.0.1 1;` (your own number), then `docker compose -f docker-compose.yml -f docker-compose.tunnel.yml exec proxy nginx -s reload`. Anything else on this machine that can reach `127.0.0.1:8443` is believed too, so keep the machine's other users to those you trust.
 - **`cloudflared` as a container on the Compose network.** Use that container's address, printed by `docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' <container>`. It can change when the container is recreated, which is why the server-side install is easier to keep right.
 
-Do not list a range such as `172.16.0.0/12`, and do not list Cloudflare's addresses. `CVENGINE_TRUSTED_PROXIES` needs no change: its default, `172.16.0.0/12`, already covers the proxy's own address, which is what the web container sees (add your own subnet to it, never replace it, only if you run Docker with an address pool outside that range).
+Do not list a range such as `172.16.0.0/12`, and do not list Cloudflare's addresses. `CVENGINE_TRUSTED_PROXIES` needs no change: its default is the proxy's own fixed address (`CVENGINE_PROXY_ADDRESS`), which is what the web container sees. An older `.env` that sets it to `172.16.0.0/12` still works, but lets any container choose its address: remove that line.
 
 From now on name both files whenever you run `docker compose` by hand, and do not use `make up` or re-run `install.sh`: both read only `docker-compose.yml`, so they would publish 443 on every address again (harmless to the addresses the server believes, but the tunnel overlay is gone and the open port is back). The updater, the in-app update, the watchdog and the certificate renewal use the setting in `.env`; the updater also refuses to run when a Compose file like `docker-compose.tunnel.yml` sits in the folder and `.env` does not name it.
 
@@ -162,7 +162,7 @@ If it shows a `172.` address (or `127.0.0.1`), the server is treating every visi
 
 Until it is right, one visitor's lockout is everyone's.
 
-**How the address is chosen, and what a visitor can fake.** Cloudflare adds the address that connected to it at the end of `X-Forwarded-For`; if the visitor sent one of its own, it stays in front of that. The bundled proxy keeps the chain from a listed peer and adds the peer at the end, and the application takes the last address that is not a trusted proxy, so what a visitor writes at the front is never picked. A request on port 443, or from a peer that is not listed, has its `X-Forwarded-For` thrown away, as always. Cookies, CSRF and `ALLOWED_HOSTS` need nothing extra: the proxy tells Django the request was HTTPS, the public name is `DOMAIN_NAME`, and secure cookies are on. HSTS is sent by the application as before.
+**How the address is chosen, and what a visitor can fake.** Cloudflare adds the address that connected to it at the end of `X-Forwarded-For`; if the visitor sent one of its own, it stays in front of that. The bundled proxy passes the chain from a listed peer on unchanged, and the application takes the last address in it (the one Cloudflare added), so what a visitor writes at the front is never picked. A request on port 443, or from a peer that is not listed, has its `X-Forwarded-For` thrown away, as always. Cookies, CSRF and `ALLOWED_HOSTS` need nothing extra: the proxy tells Django the request was HTTPS, the public name is `DOMAIN_NAME`, and secure cookies are on. HSTS is sent by the application as before.
 
 **What does not work, or works differently.**
 
@@ -180,7 +180,7 @@ Until it is right, one visitor's lockout is everyone's.
 
 ### D. Your own reverse proxy
 
-If you already run Caddy, nginx, or Traefik on the host and want it to own port 443, it must forward to the web service on `127.0.0.1:8000`, set `X-Forwarded-Proto` and `X-Forwarded-For` itself (replacing anything the client sent), and keep the `Host` header. Then list your public address in `CVENGINE_CSRF_TRUSTED_ORIGINS` (`https://scanner.example.com`) and read **Client addresses** in [DEPLOYMENT.md](DEPLOYMENT.md#https). The bundled proxy also binds 443 on the host, so the two cannot run side by side without changing the proxy's published ports; this recipe has not been tested end to end, so try it on a staging host first.
+If you already run Caddy, nginx, or Traefik on the host and want it to own port 443, the simplest way keeps the bundled proxy behind it: forward to the proxy's port 443 (moved to a loopback port by an overlay) and install the two-line snippet from [Client addresses behind a host proxy](DEPLOYMENT.md#client-addresses-behind-a-host-proxy). To replace the bundled proxy instead, publish the web service with `docker-compose.webport.yml` (`127.0.0.1:8000`), forward to it, set `X-Forwarded-Proto` and `X-Forwarded-For` yourself (replacing anything the client sent), keep the `Host` header, and follow [Your own reverse proxy](DEPLOYMENT.md#your-own-reverse-proxy). Either way list your public address in `CVENGINE_CSRF_TRUSTED_ORIGINS` (`https://scanner.example.com`). The bundled proxy also binds 443 on the host, so the two cannot run side by side without changing the proxy's published ports; this recipe has not been tested end to end, so try it on a staging host first.
 
 ## 4. Check it
 
@@ -194,7 +194,7 @@ The first should answer `HTTP/2 302` (or `200`) with no certificate warning; the
 ## 5. Before you rely on it
 
 - **Raise HSTS** once HTTPS works reliably everywhere: `CVENGINE_HSTS_SECONDS=31536000` in `.env`, then `make up`. It starts at one hour so a mistake is forgiven; a browser holds a longer value for that long.
-- **Keep Docker's published ports tight.** Only 443 (and 8082 for the redirect) should be reachable. The database and `web` ports are bound to `127.0.0.1`; leave them that way.
+- **Keep Docker's published ports tight.** Only 443 (and 8082 for the redirect) should be reachable. The database port is bound to `127.0.0.1` and `web` publishes none unless an overlay opts in, on `127.0.0.1`; leave them that way.
 - **Turn on two-step sign-in** for the admin accounts ([TENANCY.md](TENANCY.md)) and set an IP allowlist under **Settings** if the users come from known addresses (not behind a CDN, see above).
 - **Sentinels call the public name.** A Sentinel you enroll gets `https://` plus `DOMAIN_NAME` as its server address, so that name must resolve and answer on 443 from the machine the Sentinel runs on (an internal network included). Enroll Sentinels after you settle the name, because the address is fixed in the enrollment ([AGENT-API.md](AGENT-API.md#sentinels-scan-stage-agents)).
 - **Back up** the database, and `.env` with `web/secret`, in different places ([DEPLOYMENT.md](DEPLOYMENT.md#backups)). A restored database needs the same keys, but a dump kept next to them is readable by anyone who can read the backup.

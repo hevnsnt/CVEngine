@@ -1,5 +1,5 @@
 import yaml
-from reNgine.crypto_fields import ENCRYPTED_COLUMN_LENGTH, EncryptedCharField, EncryptedJSONField, EncryptedTextField
+from reNgine.crypto_fields import ENCRYPTED_COLUMN_LENGTH, EncryptedCharField, EncryptedTextField
 from django.db import models
 
 
@@ -29,9 +29,6 @@ class EngineType(models.Model):
 
     def __str__(self):
         return self.engine_name
-
-    def get_number_of_steps(self):
-        return len(self.tasks) if self.tasks else 0
 
     @hybrid_property
     def tasks(self):

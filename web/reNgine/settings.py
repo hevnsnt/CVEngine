@@ -27,7 +27,6 @@ RENGINE_RESULTS = env('RENGINE_RESULTS', default=f'{RENGINE_HOME}/scan_results')
 # The host's web/ folder where it is not the source folder: production runs the image's own copy of the source and mounts web/ at this path for the
 # update channel's files and the Django secret (docker-compose.yml sets it and RENGINE_HOME to /var/lib/cvengine/web). Empty: the source folder.
 CVENGINE_HOST_DIR = env('CVENGINE_HOST_DIR', default='')
-RENGINE_RAISE_ON_ERROR = env.bool('RENGINE_RAISE_ON_ERROR', default=False)
 
 # Common env vars
 DEBUG = env.bool('DEBUG', default=False)
@@ -43,14 +42,7 @@ CSRF_COOKIE_SECURE = not DEBUG
 # their public TLS path; never preload or include sibling subdomains implicitly.
 SECURE_HSTS_SECONDS = env.int('CVENGINE_HSTS_SECONDS', default=0 if DEBUG else 3600)
 DOMAIN_NAME = env('DOMAIN_NAME', default='localhost:8000')
-TEMPLATE_DEBUG = env.bool('TEMPLATE_DEBUG', default=False)
 SECRET_FILE = os.path.join(RENGINE_HOME, 'secret')
-DEFAULT_ENABLE_HTTP_CRAWL = env.bool('DEFAULT_ENABLE_HTTP_CRAWL', default=True)
-DEFAULT_RATE_LIMIT = env.int('DEFAULT_RATE_LIMIT', default=150) # requests / second
-DEFAULT_HTTP_TIMEOUT = env.int('DEFAULT_HTTP_TIMEOUT', default=5) # seconds
-DEFAULT_RETRIES = env.int('DEFAULT_RETRIES', default=1)
-DEFAULT_THREADS = env.int('DEFAULT_THREADS', default=30)
-DEFAULT_GET_GPT_REPORT = env.bool('DEFAULT_GET_GPT_REPORT', default=True)
 
 # Globals
 from urllib.parse import urlsplit
@@ -250,6 +242,7 @@ LOGIN_REQUIRED_IGNORE_VIEW_NAMES = [
     'admin_login_redirect',
     'invite',
     'report_unsubscribe',
+    'client_address_probe',  # answers 204 to anyone; records an address only for a token the server issued (reNgine/client_probe.py)
 ]
 
 # A Sentinel's very first call has no bearer token and no session yet: it authenticates with a one-time enrollment
@@ -263,9 +256,6 @@ LOGIN_URL = 'login'
 LOGIN_REDIRECT_URL = 'cve_dashboard'
 LOGOUT_REDIRECT_URL = 'login'
 
-# Number of endpoints that have the same content_length
-DELETE_DUPLICATES_THRESHOLD = 10
-
 '''
 CELERY settings
 '''
@@ -273,9 +263,6 @@ CELERY_BROKER_URL = env("CELERY_BROKER", default="redis://redis:6379/0")
 CELERY_RESULT_BACKEND = env("CELERY_BROKER", default="redis://redis:6379/0")
 CELERY_ENABLE_UTC = False
 CELERY_TIMEZONE = 'UTC'
-CELERY_IGNORE_RESULTS = False
-CELERY_EAGER_PROPAGATES_EXCEPTIONS = True
-CELERY_TRACK_STARTED = True
 CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
 # Scans run for hours and a bulk add queues dozens. A worker takes one task at a time instead of reserving a batch it cannot
 # start for hours, and Redis waits hours (not its default hour) before it hands an unacknowledged task to someone else;
@@ -301,12 +288,6 @@ ROLES and PERMISSIONS
 '''
 ROLEPERMISSIONS_MODULE = 'reNgine.roles'
 ROLEPERMISSIONS_REDIRECT_TO_LOGIN = True
-
-'''
-Cache settings
-'''
-RENGINE_TASK_IGNORE_CACHE_KWARGS = ['ctx']
-
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 

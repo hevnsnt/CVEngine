@@ -14,7 +14,6 @@ ranges, comma separated) are never sent through a proxy (no_proxy semantics), so
 A proxy that is down fails the request: there is no fallback to a direct connection, which would reveal the address the proxy is there to hide.
 A proxy URL's password is never logged or put in an error: log ``describe(spec)``, never the URL.
 """
-import base64
 import ipaddress
 import logging
 import os
@@ -64,10 +63,6 @@ class ProxySpec:
     @property
     def credentials(self):
         return f'{self.username}:{self.password}' if (self.username or self.password) else ''
-
-    def authorization(self):
-        """The ``Proxy-Authorization`` header value of an HTTP proxy, '' without credentials."""
-        return 'Basic ' + base64.b64encode(self.credentials.encode('utf-8')).decode('ascii') if self.credentials else ''
 
 
 def describe(spec):
