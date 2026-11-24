@@ -80,7 +80,7 @@ def _write_blob(text):
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, 'w') as handle:
         handle.write(text)
-    try:  # the scanner container runs as an unprivileged user that must be able to read it
+    try:  # the scanner container runs as an unprivileged user that must be able to read it; given to that user, the file stays 0600
         os.chown(tmp, scanner_uid(), scanner_uid())
     except OSError:
         # This process is not root (the server runs as its own account, docs/DEPLOYMENT.md) and cannot give the file away, so the scanner reads it
