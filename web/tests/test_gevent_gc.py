@@ -125,9 +125,11 @@ class FrozenStartupTests(SimpleTestCase):
         before = gc.get_freeze_count()
         frozen = gevent_gc.freeze_after_load()
         self.assertGreaterEqual(frozen, before + 200)
-        self.assertEqual(gc.get_freeze_count(), frozen)
+        # at most what was frozen: a frozen object that another thread of the process lets go leaves the count (436134 != 436210 on CI),
+        # while a second freeze would add every object made since
+        self.assertLessEqual(gc.get_freeze_count(), frozen)
         self.assertEqual(gevent_gc.freeze_after_load(), 0)  # never a second time
-        self.assertEqual(gc.get_freeze_count(), frozen)
+        self.assertLessEqual(gc.get_freeze_count(), frozen)
         del startup
 
     def test_the_timer_freezes_on_its_first_wake_after_load_and_ticks_after_that(self):
@@ -162,7 +164,7 @@ class FrozenStartupTests(SimpleTestCase):
         gevent_gc.tick()  # the full one
         self.assertEqual(gc.get_stats()[2]['collections'], full_before + 1)
         self.assertEqual(Cycle.freed, 1)  # a full collection leaves the frozen ones alone too
-        self.assertEqual(gc.get_freeze_count(), frozen_count)  # and never freezes again
+        self.assertLessEqual(gc.get_freeze_count(), frozen_count)  # and never freezes again (a frozen object freed elsewhere only lowers it)
 
     def test_a_cycle_that_outlives_a_young_collection_is_freed_by_the_next_full_one(self):
         gevent_gc.freeze_after_load()
