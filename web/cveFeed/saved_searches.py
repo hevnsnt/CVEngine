@@ -28,7 +28,7 @@ from agentapi.services import ApiError, check_search, search_host_rows
 from cveFeed import activity, notify
 from cveFeed.counts import with_host_key
 from cveFeed.models import SavedSearch
-from tenancy import roles
+from tenancy import roles, scope
 
 logger = logging.getLogger(__name__)
 
@@ -118,7 +118,8 @@ def _evaluate(search, now):
     except ApiError as exc:  # a filter changed its rules since the search was saved
         return _disable(search, f'the query is no longer valid ({exc.message})', now)
     try:
-        found, too_broad = current_matches(search.project, terms)
+        with scope.as_user(search.owner):  # a second guard: the search itself is already filtered to the search's project
+            found, too_broad = current_matches(search.project, terms)
     except DatabaseError as exc:  # a timeout or a lost connection: try again at the next time, never loop on it
         return _fail(search, f'{type(exc).__name__}: {exc}', now)
     due = {'last_run_at': now, 'next_run_at': _next_run(search, now), 'last_error': ''}

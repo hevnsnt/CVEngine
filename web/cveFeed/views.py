@@ -556,8 +556,11 @@ def ui_context(request, active, slug=None, remember=True):
     bounty_on = _bounty_allowed(request.user)
     sentinels_on = bool(here and has_sentinels(here['slug'], here['org_slug']))
     nav = navmod.build(active, current, bounty_enabled=bounty_on, sentinels_enabled=sentinels_on, all_projects=slug == ALL_PROJECTS)
-    return {'nav': nav, 'active': active, 'slug': current, 'projects': projects, 'orgs': orgs if len(orgs) >= 2 else [], 'current_org': current_org, 'sections': SECTIONS, 'is_admin': is_admin_anywhere(request.user),
+    is_admin = is_admin_anywhere(request.user)
+    from tenancy import mfa_nag
+    return {'nav': nav, 'active': active, 'slug': current, 'projects': projects, 'orgs': orgs if len(orgs) >= 2 else [], 'current_org': current_org, 'sections': SECTIONS, 'is_admin': is_admin,
             'is_app_admin': request.user.is_superuser,
+            'mfa_nag': mfa_nag.for_request(request, is_admin, active),  # an administrator without two-step sign-in is reminded on every page
             'bounty_enabled': bounty_on,
             'sentinels_enabled': sentinels_on,
             'ai_usage_connected': ai_connected,
@@ -871,7 +874,8 @@ def admin_page(request):
     from tenancy.roles import is_admin_anywhere
     if not is_admin_anywhere(request.user):
         raise PermissionDenied
-    return render(request, 'cveFeed/admin.html', ui_context(request, 'admin'))
+    from tenancy import mfa_nag
+    return render(request, 'cveFeed/admin.html', {**ui_context(request, 'admin'), 'admins_without_mfa': mfa_nag.admins_without_mfa(request.user)})
 
 
 def settings_page(request):
