@@ -362,7 +362,7 @@ verify_proxy() {
     return 0
   fi
   log "$out"
-  DEPLOY_WHY="The new version started, but the proxy does not answer for the site (${out#proxy: after the restart the proxy does not answer for the site: }). The maintenance page stays up; see docker compose logs proxy."
+  DEPLOY_WHY="The new version started, but the proxy does not answer for the site (see the update log). The maintenance page stays up."
   return 1
 }
 
@@ -377,7 +377,7 @@ proxy_preflight() {
     return 0
   fi
   log "$out"
-  DEPLOY_WHY="The update stopped before changing anything: ${out#proxy: }. The previous version keeps running."
+  DEPLOY_WHY="The update stopped before migrating: nginx refuses the new proxy configuration (see the update log). The previous version was put back."
   return 1
 }
 

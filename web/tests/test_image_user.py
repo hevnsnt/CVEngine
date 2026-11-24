@@ -338,6 +338,27 @@ class OwnershipScriptTests(unittest.TestCase):
         self.assertTrue((self.web / '.update-approved').is_symlink())
         self.assertEqual(self.run_it().strip(), f'ownership: every application path already belongs to uid {self.uid}; nothing changed')
 
+    def test_the_update_lock_belongs_to_the_folders_owner_group_app_and_0660(self):
+        # opened in place with O_CREAT by the application, the host and a rolled back root release: fs.protected_regular lets each of them open it
+        # only while it belongs to the folder's owner (it refused root on a 10002-owned lock, so the watchdog read the lock as free)
+        lock = self.web / '.update-lock'
+        self.assertIn('web/.update-lock', self.run_it())
+        info = os.stat(lock)
+        self.assertEqual((info.st_uid, info.st_gid, self.mode(lock)), (os.stat(self.web).st_uid, self.gid, 0o660))
+        os.chmod(lock, 0o600)  # as the application creates it when it is missing
+        self.assertIn('web/.update-lock', self.run_it())
+        self.assertEqual(self.mode(lock), 0o660)
+        self.assertNotIn('.update-lock', self.run_it())
+
+    def test_a_planted_update_lock_link_is_left_alone(self):
+        victim = self.root / 'victim'
+        victim.write_text('keep')
+        os.chmod(victim, 0o600)
+        os.symlink(victim, self.web / '.update-lock')
+        self.run_it()
+        self.assertTrue((self.web / '.update-lock').is_symlink())
+        self.assertEqual(self.mode(victim), 0o600)
+
     def test_a_scanner_blob_readable_by_others_is_closed_to_the_group(self):
         blob = self.root / 'var/lib/cvengine-scanner/blob'
         blob.write_text('enrol')

@@ -905,7 +905,7 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         result = self.run_script(CVENGINE_VERIFY_PROXY_TRIES='2', CVENGINE_VERIFY_POLL='0')
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         log = (self.work / 'web' / '.update-log').read_text()
-        self.assertIn('the proxy does not stay up', log)
+        self.assertIn('the proxy does not answer for the site', log)
         self.assertIn('could not build map_hash', log)
         self.assertEqual(self.head(), self.new)  # after the migration: the new code is kept and retried, never the old code on the new schema
         self.assertTrue(self.approved())
@@ -946,7 +946,8 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.assertTrue(not first_migrate or first_migrate[0] > preflight)
         phase = json.loads((self.work / 'web' / '.update-phase.json').read_text())
         self.assertEqual(phase['phase'], 'failed')
-        self.assertIn('nginx refuses the new configuration', phase.get('detail', ''))
+        self.assertIn('nginx refuses the new proxy configuration', phase.get('detail', ''))
+        self.assertLessEqual(len(phase['detail']), 200)  # what an older update-state.py, which runs the way back, still accepts
 
     def test_a_verified_update_has_checked_the_proxy_after_the_web_service(self):
         self.new = self.publish_deploy_file()
@@ -1730,7 +1731,10 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         migrate = 'docker compose -f docker-compose.yml run --rm --no-deps migrate python3 manage.py migrate --noinput'
         self.assertIn(migrate, calls)
         self.assertIn('docker compose -f docker-compose.yml run --rm --no-deps -T migrate python3 manage.py showmigrations --plan', calls)
-        order = [index(' up -d --no-recreate db redis'), index('pg_dump'), index('config --format json'), index(gate), index(migrate),
+        # the layout is read twice: by the proxy's nginx -t (scripts/proxy-check.sh, before the dump) and by the owner password check (after it)
+        owner_check = max(i for i, c in enumerate(calls) if 'config --format json' in c and i < index(gate))
+        self.assertLess(index('config --format json'), index('pg_dump'))
+        order = [index(' up -d --no-recreate db redis'), index('pg_dump'), owner_check, index(gate), index(migrate),
                  index('up -d --no-deps --force-recreate web celery celery-beat proxy')]
         self.assertEqual(order, sorted(order), calls)
         # nothing runs an owner command in an application container any more

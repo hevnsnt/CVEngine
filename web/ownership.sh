@@ -25,7 +25,7 @@ R=${CVENGINE_OWNERSHIP_ROOT:-}
 HOST_WEB=$R${CVENGINE_HOST_DIR:-/var/lib/cvengine/web}
 INIT=$(dirname "$0")/reNgine/init.py
 # what the web and celery containers write in web/ (cveFeed/updater.py, cveFeed/scanner_plan.py, cveFeed/watchdog.py, agentapi/sentinel_autoupdate.py)
-REQUESTS='.update-approved .update-branch .update-sentinels .update-mode .update-wait-scans .update-source .scanner-update-requested .scanner-plan-wanted .watchdog-action .update-lock'
+REQUESTS='.update-approved .update-branch .update-sentinels .update-mode .update-wait-scans .update-source .scanner-update-requested .scanner-plan-wanted .watchdog-action'
 changed=0
 report=''
 
@@ -99,6 +99,22 @@ if [ -d "$HOST_WEB" ]; then
     done
     if [ -f "$HOST_WEB/secret" ] && [ ! -L "$HOST_WEB/secret" ] && [ "$(stat -c '%a' "$HOST_WEB/secret")" != 600 ]; then
         chmod 0600 "$HOST_WEB/secret"
+    fi
+    # The update lock (web/.update-lock) is opened in place, with O_CREAT, by three parties: the application (uid 10002, cveFeed/scan_control.py
+    # updater_idle), the host (scripts/watchdog.sh, as root or the checkout's owner) and, after an update that failed and put the previous release
+    # back, that release's root containers. In this folder (group writable, sticky) the kernel's fs.protected_regular (2 on Ubuntu) refuses such an
+    # open of a file that belongs to neither the opener nor the folder's owner, root included: with the lock as 10002's the host's watchdog read it
+    # as free and the previous release could not release the update's scan pause. So it belongs to the folder's owner, group 10002, mode 0660,
+    # which every one of them may open. An existing file is only given away and chmodded here, never opened (that open would be refused too).
+    lock="$HOST_WEB/.update-lock"
+    if [ ! -L "$lock" ] && { [ ! -e "$lock" ] || [ -f "$lock" ]; }; then
+        [ -e "$lock" ] || : > "$lock"
+        if [ "$(stat -c '%u:%g %a' "$lock")" != "$owner:$APP_GID 660" ]; then
+            chown -h "$owner:$APP_GID" "$lock"
+            chmod 0660 "$lock"
+            changed=$((changed + 1))
+            report="$report web/.update-lock"
+        fi
     fi
 fi
 
