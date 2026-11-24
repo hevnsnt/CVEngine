@@ -12,10 +12,9 @@ turns into ``{"error": ...}`` and a line in ``problems`` (``<probe>: timed out a
 import json
 import logging
 import os
-import re
 import shutil
 import time
-from datetime import datetime, timedelta, timezone as dt_timezone
+from datetime import datetime, timedelta
 
 from django.conf import settings
 from django.utils import timezone

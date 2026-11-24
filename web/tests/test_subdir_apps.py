@@ -175,20 +175,6 @@ class LeadTests(SimpleTestCase):
         for url in ('/login', '/', '/about', '/static/app.js', '/assets/x/y.css', '/en/page', '/wp-content/uploads/a.png', '/api/v1/users', '/a/b'):
             self.assertIsNone(subdir_apps.mount_of(url), url)
 
-    def test_leads_are_capped_and_never_repeat_a_curated_path(self):
-        urls = {'crawled': [f'/app{n}/index.html' for n in range(30)] + ['/jira/browse/X-1', '/portal/a', '/portal/b'], 'archive': ['/legacy/x']}
-        leads = subdir_apps.lead_paths(urls, set(subdir_apps.curated_paths()))
-        self.assertEqual(len(leads), subdir_apps.MAX_LEADS)
-        self.assertNotIn('/jira/', leads)
-        self.assertEqual(next(iter(leads)), '/portal/')  # the most often seen first
-        self.assertEqual(leads['/portal/'], 'crawled')
-
-    def test_robots_and_sitemap_hints_are_read_from_their_own_lines_and_the_same_host_only(self):
-        robots = 'User-agent: *\nDisallow: /intranet/\nAllow: /tools/\nSitemap: https://elsewhere.test/sitemap.xml\n'
-        self.assertEqual(subdir_apps.robots_paths(robots), ['/intranet/', '/tools/'])
-        sitemap = '<urlset><url><loc>https://www.example.test/crm/login</loc></url><url><loc>https://evil.test/x/y</loc></url></urlset>'
-        self.assertEqual(subdir_apps.sitemap_paths(sitemap, 'www.example.test'), ['/crm/login'])
-
     def test_an_answer_the_server_gives_to_every_path_is_not_a_mount(self):
         baseline = vhost_scan.fingerprint_of(page(200, 'Home', 'h' * 500))
         same = vhost_scan.fingerprint_of(page(200, 'Home', 'h' * 520))

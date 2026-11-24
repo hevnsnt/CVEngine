@@ -31,7 +31,6 @@ IN_FLIGHT_SECONDS = WAIT_SECONDS + 3600  # a sweep whose start is more recent th
 # never pick that IP again (this, not the global claim, is what stops the same host being swept twice if the claim lapses)
 MAX_CANDIDATES = 500  # IPs looked at per pick: the scope checks resolve names, so they are bounded
 MAX_NAMES_CHECKED = 5  # hostnames of one IP resolved to see that none points somewhere a scanner must not touch
-DEFAULT_INTERVAL_MIN = 10
 FAILURE_BACKOFF_HOURS = 6  # after the first failed sweep; doubles per further failure
 MAX_BACKOFF_HOURS = 7 * 24
 DEFAULT_INVESTIGATE_MAX = 50
@@ -55,10 +54,6 @@ def _int_env(name, default, low=1, high=1000):
         return min(high, max(low, int(os.environ.get(name, default))))
     except ValueError:
         return default
-
-
-def interval_minutes():
-    return _int_env('CVENGINE_FULLSCAN_INTERVAL_MIN', DEFAULT_INTERVAL_MIN, 1, 1440)
 
 
 def batch_size():
@@ -150,14 +145,6 @@ def pick():
         except Exception:  # noqa: BLE001 - one odd row must not stop the rotation
             logger.warning('full scan: could not check %s', ip.address, exc_info=True)
     return None
-
-
-def queue_depth():
-    """IPs in scope never swept, and the newest sweep, for a status line."""
-    from startScan.models import IpAddress
-    waiting = candidates().filter(full_scanned_at__isnull=True).count()
-    last = IpAddress.objects.filter(full_scanned_at__isnull=False).order_by('-full_scanned_at').first()
-    return {'never_swept': waiting, 'last_ip': last.address if last else None, 'last_at': last.full_scanned_at if last else None}
 
 
 # ----------------------------------------------------------------------------- the sweep

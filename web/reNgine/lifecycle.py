@@ -60,13 +60,6 @@ class Machine:
         state = self.states.get(value)
         return state[1] if state else str(value)
 
-    def value_of(self, key):
-        """The stored value for a stable name, or ``None``."""
-        for value, (k, *_rest) in self.states.items():
-            if k == key:
-                return value
-        return None
-
     def next_states(self, value):
         return self.moves.get(value, ())
 

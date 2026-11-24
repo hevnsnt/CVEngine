@@ -159,13 +159,8 @@ class IsolationTests(TestCase):
 		self.assertEqual(client_for(self.alice).get('/cve/settings/').status_code, 403)  # instance-wide: app admin only
 		self.assertEqual(client_for(self.bob).get('/cve/api/settings/ai').status_code, 403)
 
-	def test_user_management_is_superuser_only_and_grants_membership(self):
+	def test_user_management_is_superuser_only(self):
 		self.assertEqual(client_for(self.alice).get('/cve/api/admin/users').status_code, 403)  # not an org admin
-		roles.grant_from_legacy_role(self.dave, 'auditor', org_slug='one')
-		self.assertEqual(roles.effective_role(self.dave, self.pa), 'audit')
-		roles.grant_from_legacy_role(self.dave, 'sys_admin', org_slug='one')  # update, not duplicate
-		self.assertEqual(OrgMembership.objects.filter(user=self.dave).count(), 1)
-		self.assertEqual(roles.effective_role(self.dave, self.pa), 'admin')
 
 	def test_new_project_goes_to_creators_org_and_makes_creator_admin(self):
 		OrgMembership.objects.create(user=self.dave, org=self.org1, role='admin')

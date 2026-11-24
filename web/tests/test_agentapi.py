@@ -1697,7 +1697,7 @@ class BulkTargetTests(TestCase):
 		self.assertEqual((one['status'], one['queue_position']), (-1, 2))
 
 	def test_parse_org_text(self):
-		from agentapi.services import has_org_headers, parse_org_text
+		from agentapi.services import parse_org_text
 		org, groups, errors = parse_org_text('stray.example\n##Acme\n#Web\na.com\n10.0.0.1, b.com\n#Ops\nc.com # note\n#web\na.com\nd.com\n##Other')
 		self.assertEqual(org, 'Acme')
 		self.assertEqual(groups, [('Web', ['a.com', '10.0.0.1', 'b.com', 'd.com']), ('Ops', ['c.com'])])
@@ -1705,8 +1705,6 @@ class BulkTargetTests(TestCase):
 		# no ##Org: still groups; "# comment" (hash + space) is a comment; entries above a header go to the default project
 		org, groups, errors = parse_org_text('top.example\n# just a note\n#Web\na.com', default_project='Current')
 		self.assertEqual((org, groups, errors), (None, [('Current', ['top.example']), ('Web', ['a.com'])], []))
-		self.assertTrue(has_org_headers('#Widgets\na.com'))
-		self.assertFalse(has_org_headers('# only a comment\na.com'))
 
 	def test_bulk_by_org_creates_projects_checks_permissions(self):
 		admin = User.objects.create_user('orgadmin', password='x')

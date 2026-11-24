@@ -8,7 +8,6 @@ DB settings), never from files or the environment checked into git.
 import json
 import os
 import re
-import secrets
 import time
 import logging
 from contextlib import contextmanager
@@ -21,7 +20,7 @@ import requests
 
 from cveFeed.secret_redaction import redact_text
 from reNgine import ai_prompts
-from reNgine.ai_profiles import (DEFAULT_REPLY_CAP, NUMBER_SETTINGS, PROFILES, REASONING_LEVELS, SETTING_ENV, STAGE_ANSWER_CAPS, STAGE_REPLY_CAPS, STRUCTURED_MODES,
+from reNgine.ai_profiles import (DEFAULT_REPLY_CAP, NUMBER_SETTINGS, PROFILES, REASONING_LEVELS, STAGE_ANSWER_CAPS, STAGE_REPLY_CAPS, STRUCTURED_MODES,
 	AIRuntime, answer_room, cache_min_tokens, clean_number, reasoning_plan, reply_total, retry_total, setting_applies, stage_cache_ttl,
 	thinking_reserve)
 
@@ -348,12 +347,6 @@ def clean_text(value, limit=200, strict=False):
 	if strict:
 		text = _SAFE_CHARS.sub('', text)
 	return text[:limit]
-
-
-def untrusted_block(label, data):
-	"""Wrap ``data`` (already cleaned) as JSON between random-nonce markers so it cannot close its own delimiter."""
-	nonce = secrets.token_hex(6)
-	return f'<<<{label} {nonce} untrusted data>>>\n{json.dumps(data, indent=1, default=str)}\n<<<end {label} {nonce}>>>'
 
 
 class AIProviderError(Exception):
