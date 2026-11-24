@@ -1698,7 +1698,6 @@ ALERT_STALE_AFTER = timedelta(hours=1)  # the checks run every 30 minutes (the w
 def answering_decision(alert):
     """The id of the newest auto-tuning decision made while this alert was open that answered it (its ``signals['alerts']`` holds the alert's code,
     ``autotune.open_alert_codes``), or None: the alert strip links to that decision's line in Settings, configMaxxing, Auto-tuning."""
-    from cveFeed import autotune
     if alert.code not in OPS_CODES:
         return None
     from cveFeed.models import TuningDecision

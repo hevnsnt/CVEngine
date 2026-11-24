@@ -102,12 +102,6 @@ class CVEEntry(models.Model):
         return f"{self.cve_id} (cvss={self.cvss}, kev={self.kev})"
 
     @property
-    def is_critical(self):
-        """cve.now's 'critical' rule: in KEV, or CVSS >= 9, or CVSS >= 7 with EPSS >= 0.1."""
-        cvss = self.cvss or 0.0
-        return bool(self.kev) or cvss >= 9.0 or (cvss >= 7.0 and bool(self.epss_reached))
-
-    @property
     def attention_tier(self):
         """The legacy fire / smoke / ice rating (KEV, exploit, CVSS, EPSS): what decides which CVEs are looked for and tested, under either
         heat policy (cveFeed.threat.attention_tier)."""

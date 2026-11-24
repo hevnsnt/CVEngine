@@ -21,7 +21,6 @@ import os
 import re
 import shlex
 from datetime import timedelta
-from urllib.parse import urlsplit
 
 from django.utils import timezone
 
@@ -388,8 +387,6 @@ def next_version(body):
     return found.group(1) if found else ''
 
 
-
-
 def _wordpress_signals(responses):
     """``(signals, version)`` for the WordPress probe: every signature found in a response's headers or body, and the core version a
     generator tag, a readme or a core asset states."""
@@ -436,17 +433,6 @@ def allowed_names(sub):
     else:
         names.add(f'www.{sub.name.lower()}')
     return names
-
-
-def served_by(response, base):
-    """Whether ``response`` (a ``fetch`` result) is the page of ``base``'s own host: where its redirects ended (``final_url``) is that host. A
-    host that only redirects to another one serves none of the scripts of the page it sends visitors to."""
-    final = response.get('final_url') or response.get('url') or ''
-    try:
-        here, there = (urlsplit(base).hostname or '').lower().rstrip('.'), (urlsplit(final).hostname or '').lower().rstrip('.')
-    except ValueError:
-        return False
-    return not there or here == there
 
 
 def observations_from_nmap(inventory, port):

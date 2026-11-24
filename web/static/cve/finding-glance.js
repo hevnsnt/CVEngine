@@ -175,7 +175,7 @@ function confidenceCard(d, row) {
       ),
     );
   const live = d.validation || {};
-  // cvENGINE's own read of a library's served file (validation.record_library_read): a completed check, not metadata
+  // cvENGINE's own read of a library's served file (validation.put_library_step): a completed check, not metadata
   const bodyRead = (live.steps || []).some((s) => s.kind === "library_read" && s.result === "reaffirmed");
   const [liveTone, liveText] = bodyRead ? ["for", "the served file states an affected version"] : {
     hit: ["for", "reproduced by a check"],

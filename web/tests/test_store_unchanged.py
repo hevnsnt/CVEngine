@@ -2,7 +2,6 @@
 HygieneFinding (cveFeed.hygiene.store_findings) and the secrets inventory (cveFeed.secrets_inventory.record). A row found again unchanged only has
 its seen time moved. The redirect alias fold reads only the hygiene rows of the hosts it folds (cveFeed.finding_lifecycle)."""
 from datetime import timedelta
-from unittest import mock
 
 from django.db import connection
 from django.test import TestCase
@@ -97,12 +96,6 @@ class UpsertManyTests(Base):
 
 
 class HygieneStoreTests(Base):
-    def setUp(self):
-        super().setUp()
-        patcher = mock.patch('cveFeed.hosting.canonical_name', return_value='')
-        patcher.start()
-        self.addCleanup(patcher.stop)
-
     def found(self, severity=2, evidence=None):
         return [hygiene.Finding('tls_expiring', severity, 'Certificate expires', host='www.example.com:443', evidence=evidence or {'not_after': '2026-12-01'}),
                 hygiene.Finding('dmarc_missing', 2, 'No DMARC record', host='example.com')]

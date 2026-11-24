@@ -10,8 +10,8 @@ Sentinel answers, the step fails and the scan says so, and the next sweep tries 
 
 What it runs: the host record for the address (no network access), an nmap fingerprint, a TLS audit of each TLS port nmap found, the nuclei
 technology pass, CVE correlation, then the AI-targeted nuclei pass. Each stage is the external pipeline's own function (same
-parsing, same persistence); only the execution seam differs. ``internal_scope`` makes the stages treat the address as a target and makes
-every local scanner refuse to run, so a seam that was missed fails loudly. Stages that run from this server directly (route checks,
+parsing, same persistence); only the execution seam differs. ``internal_scope`` makes the stages treat the address as a target; this
+server runs no scan tool of its own, so no stage can reach the address from here. Stages that run from this server directly (route checks,
 probes, hygiene, database exposure, screenshots) have no Sentinel path and are not run. The WordPress scan runs through a Sentinel on the sites the Sentinel-run technology
 pass tagged as WordPress (this server sends no probe of its own), and OpenVAS has its own opt-in sweep (``cveFeed.openvas_scan.internal_batch``).
 """

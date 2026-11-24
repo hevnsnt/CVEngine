@@ -1,27 +1,15 @@
 import functools
-import whatportis
 import socket
 import json
 import os
 import pickle
-import re
-import random
-import glob
 import shutil
-import ipaddress
-import humanize
 import redis
 import requests
-import tldextract
-import xmltodict
 
 from time import sleep
-from bs4 import BeautifulSoup
-from urllib.parse import urlparse
 from celery.utils.log import get_task_logger
 from discord_webhook import DiscordEmbed, DiscordWebhook
-from django.db.models import Q
-from dotted_dict import DottedDict
 
 from reNgine.definitions import *
 from reNgine.settings import *
@@ -29,7 +17,6 @@ from scanEngine.models import *
 from dashboard.models import *
 from startScan.models import *
 from targetApp.models import *
-from reNgine.utilities import is_valid_url
 
 
 logger = get_task_logger(__name__)
@@ -70,15 +57,6 @@ def _unseal(sealed):
 #-------#
 # Utils #
 #-------#
-
-
-def remove_ansi_escape_sequences(text):
-	# Regular expression to match ANSI escape sequences
-	ansi_escape_pattern = r'\x1b\[.*?m'
-
-	# Use re.sub() to replace the ANSI escape sequences with an empty string
-	plain_text = re.sub(ansi_escape_pattern, '', text)
-	return plain_text
 
 
 #--------------------#
