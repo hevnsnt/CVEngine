@@ -717,8 +717,8 @@ def runtime_items(cve):
 def java_cves(cve_by_id):
     """The CVEs of a pool whose affected products name the Java runtime, memoised per pool."""
     memo = _JAVA_POOL
-    if memo.get('id') != id(cve_by_id) or memo.get('size') != len(cve_by_id):
-        memo.update(id=id(cve_by_id), size=len(cve_by_id), cves=[c for c in cve_by_id.values() if runtime_items(c)])
+    if memo.get('pool') is not cve_by_id:  # the pool itself, not its id: a refreshed pool can reuse a freed one's id and size
+        memo.update(pool=cve_by_id, cves=[c for c in cve_by_id.values() if runtime_items(c)])
     return memo['cves']
 
 

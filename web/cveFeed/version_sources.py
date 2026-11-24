@@ -835,7 +835,7 @@ _POOL = {}
 def runtime_cves(cve_by_id):
     """``{runtime: [(cve, [items])]}`` of a correlation pool: the CVEs whose own affected entries name a language runtime, memoised per pool."""
     memo = _POOL
-    if memo.get('id') != id(cve_by_id) or memo.get('size') != len(cve_by_id):
+    if memo.get('pool') is not cve_by_id:  # the pool itself, not its id: a refreshed pool can reuse a freed one's id and size
         out = {}
         for cve in cve_by_id.values():
             hits = {}
@@ -845,7 +845,7 @@ def runtime_cves(cve_by_id):
                     hits.setdefault(key, []).append(item)
             for key, items in hits.items():
                 out.setdefault(key, []).append((cve, items))
-        memo.update(id=id(cve_by_id), size=len(cve_by_id), cves=out)
+        memo.update(pool=cve_by_id, cves=out)
     return memo['cves']
 
 

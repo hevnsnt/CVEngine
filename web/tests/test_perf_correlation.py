@@ -42,13 +42,15 @@ class CorrelationPerfTests(TestCase):
 
 	def test_index_is_built_once_across_two_calls(self):
 		self._host('a.perf.test', self._scan(), tech='nginx')
-		with mock.patch.object(correlation, 'build_product_index', wraps=correlation.build_product_index) as build:
+		with mock.patch.object(correlation, '_full', wraps=correlation._full) as build, \
+				mock.patch.object(correlation, '_refresh', wraps=correlation._refresh) as refresh:
 			correlate_cves()
 			correlate_cves()
 			self.assertEqual(build.call_count, 1)
 			CVEEntry.objects.filter(pk=self.cve.pk).update(synced_at=timezone.now())  # a re-sync moves the key
 			correlate_cves()
-			self.assertEqual(build.call_count, 2)
+			# the pool is refreshed from the re-synced row, not built again (tests.test_cve_pool)
+			self.assertEqual((build.call_count, refresh.call_count), (1, 1))
 
 	def test_only_hosts_with_a_matching_product_are_correlated(self):
 		scan = self._scan()
