@@ -456,8 +456,10 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.approve(newest)
         self.assertEqual(self.run_script().returncode, 0)
         from_file = [c for c in self.calls() if c.startswith('docker compose')]
-        # the deploy file also pulls the proxy image and reads the migration count (the built-in copy, for checkouts older than the deploy file, does not)
-        verification = lambda call: any(x in call for x in ('http.client', 'celery_healthcheck', 'migrate --check', 'image prune', ' info ', ' pull ', 'showmigrations'))
+        # the deploy file also pulls the proxy image, reads the migration count and enables again the accounts the old abuse guard disabled (the
+        # built-in copy, for checkouts older than the deploy file, does not: those checkouts have no such command)
+        verification = lambda call: any(x in call for x in ('http.client', 'celery_healthcheck', 'migrate --check', 'image prune', ' info ', ' pull ', 'showmigrations',
+                                                            'reenable_guard_disabled_users'))
         self.assertEqual([c for c in from_file if not verification(c)], built_in)
 
     def test_the_dev_stack_pulls_nothing(self):
