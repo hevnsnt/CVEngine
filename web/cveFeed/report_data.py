@@ -29,7 +29,7 @@ HEAT_NAMES = {3: 'fire', 2: 'smoke', 1: 'ice'}
 SEVERITY_ORDER = ('critical', 'high', 'medium', 'low')
 STATUS_LABELS = closure.LABELS  # Open, In progress, Fixed, Accepted risk, False positive
 PROVING = ('hit', 'observed', 'reaffirmed')  # the validation results that show the finding on the host
-FALSE_POSITIVES = ('likely_false_positive', 'not_applicable')  # triage classes a client report leaves out
+FALSE_POSITIVES = ('likely_false_positive', 'not_applicable')  # triage classes no count calls open (cveFeed.counts.TRIAGE_DISMISSED)
 HOST_PAGE = 100
 
 # the caps of one report: (environment variable, default, ceiling). docs/CONFIGURATION.md lists them.
@@ -201,7 +201,7 @@ def _sources(project, include_closed, names=None):
     open ones only unless ``include_closed``. Matches the AI ruled out, and findings triage classed as a false positive or not
     applicable, are never listed; ``ruled_out`` counts them so the report can say so. ``names`` limits it to those hosts."""
     from agentapi import services as svc
-    sources = svc._finding_sources(project, {'status': 'all' if include_closed else 'actionable'})
+    sources = svc._finding_sources(project, {'status': 'all' if include_closed else 'actionable'}, keep_dismissed=True)
     out, ruled_out = {}, 0
     for key, qs in sources.items():
         if key == 'cve':
@@ -229,6 +229,21 @@ def _tally(sources):
                 severity[name] += row['n']
             total += row['n']
     return total, {k: heat[k] for k in ('fire', 'smoke', 'ice')}, {k: severity[k] for k in SEVERITY_ORDER}
+
+
+def open_counts(sources):
+    """``{findings, heat, severity, by_kind}`` of the open CVE matches and scanner findings of ``sources`` (``_sources(..., False)``): the one
+    definition of a heat line (``cveFeed.counts.HEAT_KINDS``) that the PDF report's summary and the weekly email both print, so they cannot
+    disagree. Hygiene findings have no heat of their own and are counted apart."""
+    from cveFeed.counts import HEAT_KINDS
+    kinds = {k: v for k, v in sources.items() if k in HEAT_KINDS}
+    by_kind = {}
+    for kind, qs in kinds.items():
+        by_kind[kind] = _tally({kind: qs})
+    heat = {k: sum(t[1][k] for t in by_kind.values()) for k in ('fire', 'smoke', 'ice')}
+    severity = {k: sum(t[2][k] for t in by_kind.values()) for k in SEVERITY_ORDER}
+    return {'findings': sum(t[0] for t in by_kind.values()), 'heat': heat, 'severity': severity,
+            'by_kind': {k: t[0] for k, t in by_kind.items()}}
 
 
 def _status_counts(sources):
@@ -1137,7 +1152,8 @@ def collect(project, host=None, include_closed=False, now=None, kind='findings',
     open_sources = sources
     if include_closed and not hosts_report:
         open_sources, _ = _sources(project, False, names=None if names is None else sorted(names))
-    total, heat, severity = _tally({k: v for k, v in open_sources.items() if k != 'hygiene'})
+    opened = open_counts(open_sources)
+    total, heat, severity = opened['findings'], opened['heat'], opened['severity']
     hygiene_total, _, hygiene_severity = _tally({'hygiene': open_sources['hygiene']})
     # the same open findings as the Findings page and the Overview count them, per host: version-only CVE matches on one product and version of a host
     # are one fix (cveFeed.counts.distinct_issues). Not this report's own issues, which fold one weakness across every host it is found on
@@ -1173,7 +1189,7 @@ def collect(project, host=None, include_closed=False, now=None, kind='findings',
     minor = [i for i in issues if i['level'] not in DETAILED]
     detailed = [i for i in major if i.get('detailed')]
     letters, appendices = _appendices(secrets_total, include_closed and not hosts_report, host)
-    summary = {'findings': total, 'heat': heat, 'heat_policy': _heat_policy(), 'severity': severity, 'hygiene': hygiene_total,
+    summary = {'findings': total, 'heat': heat, 'heat_policy': _heat_policy(), 'severity': severity, 'by_kind': opened['by_kind'], 'hygiene': hygiene_total,
                'hygiene_severity': hygiene_severity, 'ruled_out': ruled_out,
                'hosts_exposed': sum(1 for h in hosts if h['heat'] in ('fire', 'smoke')),
                'status_counts': _status_counts(sources) if not hosts_report else {},

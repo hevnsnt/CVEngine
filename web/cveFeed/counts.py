@@ -14,10 +14,16 @@ Definitions (also shown to the user as the tooltip of each dashboard tile):
   (``archived_host_q``; archiving closed its findings, ``cveFeed.archive_closure``). This is the Hosts page's count.
 * **Live hosts**: hosts that resolved to an IP address or answered over HTTP. These are the tiles of the attack-surface map.
 * **Exposed hosts**: hosts with a CVE match the AI has not ruled out, or an open finding of medium severity or worse.
+* **Open** (every count below): not closed by a person (fixed, accepted risk, false positive) and not dismissed by triage (``dismissed_q``: the
+  triage classed it a likely false positive or not applicable). The PDF report never counted a dismissed finding; the dashboard, the Findings
+  list and the weekly email now leave it out too, so the four agree. It stays in the list under ``status=all`` and keeps its own heat.
 * **CVE matches**: matches the AI has not ruled out. The Matches page opens on the same view. Counted per host: the same jQuery file on
   six sibling hosts is six matches. ``match_group_count`` counts them as the grouped Findings list shows them (one row for the six).
-* **Scanner findings**: open findings of low severity or worse (informational detections and closed findings excluded). The
+* **Scanner findings**: open findings of low severity or worse (informational detections, closed and dismissed findings excluded). The
   Findings page, Scanner type, Actionable status, shows the same set.
+* **Heat line** (fire, smoke, ice, ``HEAT_KINDS``): the open CVE matches and scanner findings by their heat, the two kinds that carry a heat of
+  their own (``cveFeed.threat``; a person can set either by hand). Hygiene findings are counted on their own line. The weekly email, the PDF
+  report and their labels read this one definition (``cveFeed.report_data.open_counts``).
 * **Scans running**: scans marked running that started within ``running_window()``. An older one is stalled (a casualty of a
   restart) and is never shown as running anywhere.
 * **Hygiene, top checks**: the three checks with the most actionable hygiene findings of medium severity or worse, counted over every finding (``hygiene_top_checks``).
@@ -35,6 +41,14 @@ from cveFeed.closure import CLOSED  # remediation states that close a finding: f
 RUNNING_WINDOW_SLACK = timedelta(hours=1)
 CERT_WARNING_DAYS = 30
 RULED_OUT = 'not_affected'  # the AI verdict that takes a CVE match off every list of exposure
+TRIAGE_DISMISSED = ('likely_false_positive', 'not_applicable')  # triage classes that make a finding not open work, of any kind
+HEAT_KINDS = ('cve', 'scanner')  # the kinds a heat line counts: each carries a heat of its own
+
+
+def dismissed_q(prefix='triage__'):
+    """A finding the triage classed a likely false positive or not applicable (``prefix`` reaches its Triage row): not open work anywhere. For a
+    CVE match the same answer also sets the AI verdict ``not_affected``; for a scanner or hygiene finding this is the only mark it carries."""
+    return Q(**{f'{prefix}classification__in': TRIAGE_DISMISSED})
 
 
 def match_is_live(match):
@@ -378,8 +392,9 @@ def exposure_sources():
     is exposed when any of them names it."""
     from cveFeed.models import CVEMatch
     from startScan.models import Vulnerability
-    matches = CVEMatch.objects.exclude(ai_verdict=RULED_OUT).exclude(remediation_status__in=CLOSED).exclude(subdomain=None)
-    findings = Vulnerability.objects.filter(open_status=True, severity__gte=2).exclude(remediation_status__in=CLOSED).exclude(subdomain=None)
+    matches = CVEMatch.objects.exclude(ai_verdict=RULED_OUT).exclude(remediation_status__in=CLOSED).exclude(dismissed_q()).exclude(subdomain=None)
+    findings = (Vulnerability.objects.filter(open_status=True, severity__gte=2).exclude(remediation_status__in=CLOSED).exclude(dismissed_q())
+                .exclude(subdomain=None))
     return matches, findings
 
 
@@ -397,7 +412,8 @@ def exposed_host_count(reps=None):
 def exposed_matches():
     from cveFeed.correlation import latest_scan_q
     from cveFeed.models import CVEMatch
-    return CVEMatch.objects.exclude(ai_verdict=RULED_OUT).exclude(remediation_status__in=CLOSED).filter(latest_scan_q('subdomain__'))
+    return (CVEMatch.objects.exclude(ai_verdict=RULED_OUT).exclude(remediation_status__in=CLOSED).exclude(dismissed_q())
+            .filter(latest_scan_q('subdomain__')))
 
 
 def match_group_count():
@@ -485,14 +501,15 @@ def issues_text(findings, issues):
 
 def actionable_findings(qs):
     """Open scanner findings of low severity or worse. This is the Findings page's Actionable filter for scanner findings:
-    informational detections and closed findings (fixed, an accepted risk or a false positive too) are the rest (``status=all``)."""
-    return qs.filter(open_status=True, severity__gte=1).exclude(remediation_status__in=CLOSED)
+    informational detections, closed findings (fixed, an accepted risk or a false positive too) and dismissed ones (``dismissed_q``) are the rest
+    (``status=all``)."""
+    return qs.filter(open_status=True, severity__gte=1).exclude(remediation_status__in=CLOSED).exclude(dismissed_q())
 
 
 def actionable_hygiene(qs, severity=1):
     """Open hygiene findings of ``severity`` or worse (low by default) that are not closed (fixed, accepted risk, false positive): the Findings page's
     Actionable filter for hygiene findings and the dashboard's Hygiene tile."""
-    return qs.filter(status='open', severity__gte=severity).exclude(remediation_status__in=CLOSED)
+    return qs.filter(status='open', severity__gte=severity).exclude(remediation_status__in=CLOSED).exclude(dismissed_q())
 
 
 HYGIENE_TOP_CHECKS = 3
