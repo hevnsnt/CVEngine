@@ -135,11 +135,14 @@ class BundledProxyTests(SimpleTestCase):
         os.chmod(f'{tmp}/trusted-upstreams.conf', 0o644)
         os.makedirs(f'{tmp}/inc')
         os.chmod(f'{tmp}/inc', 0o755)
-        if secret is not None:
-            template = open(os.path.join(REPO, 'config', 'nginx', 'templates', 'cvengine-upstream-secret.inc.template'), encoding='utf-8').read()
-            with open(f'{tmp}/inc/cvengine-upstream-secret.inc', 'w') as f:
-                f.write(template.replace('${CVENGINE_UPSTREAM_SECRET}', secret))
-            os.chmod(f'{tmp}/inc/cvengine-upstream-secret.inc', 0o644)
+        if secret is not None:  # every shipped template, as the image's entrypoint renders them (the plain match and the case-sensitive one)
+            templates = os.path.join(REPO, 'config', 'nginx', 'templates')
+            for name in sorted(os.listdir(templates)):
+                template = open(os.path.join(templates, name), encoding='utf-8').read()
+                rendered = f'{tmp}/inc/{name[:-len(".template")]}'
+                with open(rendered, 'w') as f:
+                    f.write(template.replace('${CVENGINE_UPSTREAM_SECRET}', secret))
+                os.chmod(rendered, 0o644)
         upstream = HTTPServer(('127.0.0.1', 0), FakeUpstream)
         FakeUpstream.seen = []
         threading.Thread(target=upstream.serve_forever, daemon=True).start()
@@ -147,7 +150,9 @@ class BundledProxyTests(SimpleTestCase):
         plain, tunnel = free_ports(2)
         etc = f'{tmp}' if self.runner == 'local' else '/t'
         head = CONF[:CONF.index('\nserver {')].replace('/etc/nginx/trusted-upstreams.conf', f'{etc}/trusted-upstreams.conf')
-        head = head.replace('/etc/nginx/conf.d/cvengine-upstream-secret*.inc', f'{etc}/inc/cvengine-upstream-secret*.inc')
+        self.assertIn('/etc/nginx/conf.d/cvengine-upstream-secret*.inc', head)
+        self.assertIn('/etc/nginx/conf.d/cvengine-upstream-exact*.inc', head)
+        head = head.replace('/etc/nginx/conf.d/cvengine-upstream-', f'{etc}/inc/cvengine-upstream-')
         self.assertIn('"~^8443:1:[01]:.+"', head)
         self.assertIn('"~^443:[01]:1:.+"', head)
         head = head.replace('"~^8443:1:[01]:.+"', f'"~^{tunnel}:1:[01]:.+"').replace('"~^443:[01]:1:.+"', f'"~^{plain}:[01]:1:.+"')
@@ -247,7 +252,8 @@ class BundledProxyTests(SimpleTestCase):
 
     def test_on_443_a_wrong_or_missing_secret_is_overwritten(self):
         plain, tunnel = self.run_proxy(None, secret=SECRET)
-        for sent in (None, '', SECRET + 'x', SECRET[:-1], SECRET.lower(), 'k' + SECRET, f'{SECRET}, {SECRET}'):
+        # nginx compares map strings without regard to case: the case-sensitive template is what refuses lower, upper and swapped case
+        for sent in (None, '', SECRET + 'x', SECRET[:-1], SECRET.lower(), SECRET.upper(), SECRET.swapcase(), 'k' + SECRET, f'{SECRET}, {SECRET}'):
             self.assertEqual(self.get(plain, ALICE, secret=sent), '127.0.0.1', sent)
 
     def test_the_secret_is_never_passed_on_to_the_application(self):
@@ -258,7 +264,8 @@ class BundledProxyTests(SimpleTestCase):
 
     def test_with_no_secret_nothing_is_believed_on_443(self):
         # no rendered file (the template was never rendered), an empty secret (rendered as "k"), one that is too short, an unrendered template
-        for secret in (None, '', 'short', '${CVENGINE_UPSTREAM_SECRET}'):
+        # and a secret holding regex characters, which the case-sensitive template must not turn into a pattern that matches any header
+        for secret in (None, '', 'short', '${CVENGINE_UPSTREAM_SECRET}', '.{32,256}', '[A-Za-z0-9]+'):
             plain, tunnel = self.run_proxy(None, secret=secret)
             for sent in ('', 'k', 'short', '${CVENGINE_UPSTREAM_SECRET}', SECRET):
                 self.assertEqual(self.get(plain, ALICE, secret=sent), '127.0.0.1', (secret, sent))

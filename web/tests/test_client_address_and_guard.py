@@ -353,6 +353,7 @@ class ComposeLayoutTests(unittest.TestCase):
         self.assertEqual(proxy['environment']['CVENGINE_UPSTREAM_SECRET'], '${CVENGINE_UPSTREAM_SECRET:-}')
         self.assertIn('./config/nginx/templates:/etc/nginx/templates:ro', proxy['volumes'])
         self.assertTrue((ROOT / 'config' / 'nginx' / 'templates' / 'cvengine-upstream-secret.inc.template').is_file())
+        self.assertTrue((ROOT / 'config' / 'nginx' / 'templates' / 'cvengine-upstream-exact.inc.template').is_file())  # the case-sensitive match
         self.assertNotIn('POSTGRES_PASSWORD', json.dumps(proxy))
 
     def test_the_host_snippet_overwrites_the_chain_and_sends_the_secret(self):
@@ -595,6 +596,7 @@ class ProxyContainerTests(SimpleTestCase):
         self.assertNotEqual(stranger['xff'], REAL)  # overwritten with the peer (the gateway)
         self.assertTrue(stranger['xff'].startswith('172.'), stranger)
         self.assertNotEqual(self.fetch(port, REAL)['xff'], REAL)
+        self.assertNotEqual(self.fetch(port, REAL, self.SECRET.swapcase())['xff'], REAL)  # the secret is compared with its case
         # what web then takes, with the trusted set compose gives it for this network
         env = {'CVENGINE_TRUSTED_PROXIES': f'{self.subnet}.10'}
         self.assertEqual(through(vouched['remote'], vouched['xff'], env=env), REAL)

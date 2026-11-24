@@ -267,8 +267,11 @@ class HostProfileTests(Base):
 		self.assertEqual((status, data['alias'], data['note']), (200, '<b>Cam</b> & co', EVIL))  # stored and returned as typed
 		from dashboard.models import AbuseStrike
 		self.assertEqual(AbuseStrike.objects.count(), 0)  # the note held <script> and was not struck
-		self.assertEqual(call(self.token, 'POST', url, {'alias': 'cam; ls -la'})[0], 403)  # an alias is not free text: the input guard still reads it
-		self.assertEqual(AbuseStrike.objects.count(), 1)
+		# an alias is not free text: the input guard still reads it, refuses it (400) and counts it. A token caller at the threshold keeps its token
+		# and is flagged for an admin (review r3 S1), and the test client's address is private, so nothing is banned and the answer stays 400
+		self.assertEqual(call(self.token, 'POST', url, {'alias': 'cam; ls -la'})[0], 400)
+		self.assertEqual(list(AbuseStrike.objects.values_list('field', flat=True)), ['alias'])
+		self.assertGreater(AbuseStrike.objects.get().weight, 0)
 
 
 class SearchTests(Base):
