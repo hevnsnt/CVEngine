@@ -13,6 +13,13 @@ then, exactly as the subqueries did; every lookup of one statement (its subqueri
 A computation that is itself a snapshot of a moment (``snapshot_cache``: the Overview, the headline counts, the situations ranking) runs inside
 ``shared_sets``: there every statement shares one read per connection and scope, for the length of the block. The Overview's summary read the sets
 fourteen times (about 5 ms each) to answer one poll, and a scan that finishes while it is being worked out changes nothing it says.
+
+Under a tenancy scope (``tenancy.scope``) the sets hold the scope's scans and domains only. The scans always were scoped; the domain list used to be every
+domain of the install, so a request limited to one project listed every other project's domain in ``unfull_domains`` (it cannot see their full scans),
+about 1,000 ids instead of 31 on a live install, and the planner then expected tens of thousands of host rows where a few hundred were current. For a
+domain in the scope the answer is the same either way (it has a full scan in the scope or it has none), so every row of the scope is kept or dropped as
+before; only a row of a domain outside the scope can tell the difference, and a scoped caller never reads one (every statement that uses these sets
+reads its rows through the scoped managers or filters by the caller's own project ids).
 """
 import contextvars
 import sys
@@ -25,7 +32,7 @@ from django.db.models import ForeignKey, Lookup
 ScanSets = namedtuple('ScanSets', 'latest_full after_full current full_domains unfull_domains')
 ScanSets.__doc__ = """``latest_full``: the newest successful full scan of each domain that has one. ``after_full``: the successful host-pipeline scans
 newer than their domain's newest full scan (every one, for a domain without a full scan). ``current``: both. ``full_domains``: the domains with a
-successful full scan. ``unfull_domains``: every other domain. Frozensets of ids."""
+successful full scan. ``unfull_domains``: every other domain (of the tenancy scope, when one is active). Frozensets of ids."""
 
 _MEMO = '_cvengine_current_scan_sets'
 _COMPILER_CODES = None
@@ -54,14 +61,17 @@ def current_scan_sets(connection):
     from cveFeed.discovery import HOST_PIPELINE_TASK
     from startScan.models import ScanHistory
     from targetApp.models import Domain
+    from tenancy import scope
 
     # ScanHistory.objects is scoped to the request's projects (tenancy.scope) like the subqueries this replaces; an empty scope compiles to nothing.
     done = ScanHistory.objects.filter(scan_status=2)
     full_sql, full_params = _sql(done.exclude(tasks__contains=[HOST_PIPELINE_TASK]).order_by('domain_id', '-id').distinct('domain_id')
                                  .values_list('domain_id', 'id'))  # the newest of each domain
     pipe_sql, pipe_params = _sql(done.filter(tasks__contains=[HOST_PIPELINE_TASK]).order_by().values_list('id', 'domain_id'))
-    # Every domain, unscoped: "a domain without a full scan" stands for "not a domain with one", which the previous filter said of any domain.
-    domain_sql, domain_params = _sql(Domain._base_manager.order_by().values_list('id'))
+    # The domains of the same scope as the scans (every domain when nothing scopes the call): "a domain without a full scan" stands for "not a domain
+    # with one" for every domain the caller can read. A domain outside the scope is left out instead of being listed as never fully scanned, which it
+    # only seemed to be because its scans are out of sight (see the module text).
+    domain_sql, domain_params = _sql(scope.scope_queryset(Domain._base_manager.order_by()).values_list('id'), width=1)
     sql = (f'WITH full_last (domain_id, last) AS ({full_sql}), pipeline (id, domain_id) AS ({pipe_sql}) '
            'SELECT (SELECT array_agg(last) FROM full_last), (SELECT array_agg(domain_id) FROM full_last), '
            '(SELECT array_agg(p.id) FROM pipeline p LEFT JOIN full_last f ON f.domain_id = p.domain_id WHERE f.last IS NULL OR p.id > f.last), '
@@ -72,11 +82,11 @@ def current_scan_sets(connection):
     return ScanSets(latest_full, after_full, latest_full | after_full, full_domains, unfull_domains)
 
 
-def _sql(queryset):
+def _sql(queryset, width=2):
     try:
         return queryset.query.sql_with_params()
-    except EmptyResultSet:  # a scope with no project: no scan is finished in it
-        return 'SELECT NULL::integer, NULL::integer WHERE false', ()
+    except EmptyResultSet:  # a scope with no project: no scan is finished in it, and it holds no domain
+        return 'SELECT ' + ', '.join(['NULL::integer'] * width) + ' WHERE false', ()
 
 
 def _forget_sets(execute, sql, params, many, context):

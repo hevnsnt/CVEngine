@@ -7,6 +7,7 @@ import argparse
 import importlib.util
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -261,3 +262,70 @@ CV_FIT_NO_DB_RESTART=1 CVENGINE_HOST_MEM_MB=12288 cvengine_fit_review docker com
             # `up -d --no-deps db` (no --no-recreate) recreates the container when its command line, which carries these settings, changed
             self.assertIn('"${compose[@]}" up -d --no-deps db', text, name)
             self.assertLess(text.index(review), text.index('"${compose[@]}" up -d --no-deps db'), name)
+
+
+class DiagnoseRuleTests(Case):
+    """The diagnose rule: the database's lock wait log and WAL timing are on by default in the shipped compose files, reported by the review and
+    never written: on is the default, off in the env file is the owner's own, and a compose file that does not pass them is a warning."""
+
+    def diag(self, result, kind=None):
+        return [f for f in result['findings'] if f['rule'] == 'diagnose' and (kind is None or f['kind'] == kind)]
+
+    def test_the_shipped_compose_files_turn_both_on_with_env_switches(self):
+        for name in ('docker-compose.yml', 'docker-compose.dev.yml'):
+            text = (ROOT / name).read_text()
+            self.assertIn('"-c", "log_lock_waits=${POSTGRES_LOG_LOCK_WAITS:-on}"', text, name)
+            self.assertIn('"-c", "track_wal_io_timing=${POSTGRES_TRACK_WAL_IO_TIMING:-on}"', text, name)
+            self.assertEqual(hr.pg_diagnostic_defaults([str(ROOT / name)]), {'POSTGRES_LOG_LOCK_WAITS': 'on', 'POSTGRES_TRACK_WAL_IO_TIMING': 'on'})
+
+    def test_on_by_default_is_said_and_nothing_is_written(self):
+        for apply in (False, True):
+            result = self.review(apply=apply)
+            said = self.diag(result)
+            self.assertEqual([f['kind'] for f in said], ['info'])
+            self.assertIn('log_lock_waits and track_wal_io_timing on', said[0]['text'])
+        self.assertNotIn('LOCK_WAITS', self.read())
+        self.assertNotIn('WAL_IO_TIMING', self.read())
+
+    def test_an_empty_value_takes_the_default(self):
+        self.env('DB_MEM_LIMIT=2g\nPOSTGRES_LOG_LOCK_WAITS=\n')
+        said = self.diag(self.review(apply=False))
+        self.assertEqual([f['kind'] for f in said], ['info'])
+        self.assertIn('log_lock_waits and track_wal_io_timing on', said[0]['text'])
+
+    def test_off_in_the_env_file_is_the_owners_own_and_left(self):
+        self.env('DB_MEM_LIMIT=2g\nPOSTGRES_TRACK_WAL_IO_TIMING=off\n')
+        said = self.diag(self.review())
+        self.assertEqual(sorted(f['kind'] for f in said), ['info', 'info'])
+        self.assertTrue(any('log_lock_waits on' in f['text'] for f in said))
+        self.assertTrue(any('POSTGRES_TRACK_WAL_IO_TIMING=off' in f['text'] and 'left as it is' in f['text'] for f in said))
+        self.assertIn('POSTGRES_TRACK_WAL_IO_TIMING=off\n', self.read())
+        self.assertEqual(self.read().count('POSTGRES_TRACK_WAL_IO_TIMING='), 1)
+
+    def test_a_compose_file_without_them_is_a_warning_in_the_update_log(self):
+        text = (self.d / 'docker-compose.yml').read_text()
+        text = text.replace(', "-c", "track_wal_io_timing=${POSTGRES_TRACK_WAL_IO_TIMING:-on}"', '')
+        (self.d / 'docker-compose.yml').write_text(text)
+        said = self.diag(self.review())
+        warn = [f for f in said if f['kind'] == 'warn']
+        self.assertEqual(len(warn), 1)
+        self.assertIn('do not pass track_wal_io_timing', warn[0]['text'])
+        self.assertNotIn('log_lock_waits', warn[0]['text'])
+        self.assertNotIn('WAL_IO_TIMING', self.read())  # said, never written
+        out = subprocess.run([sys.executable, str(SCRIPT), '--mem-mb', '12288', '--env-file', str(self.d / '.env.vps'),
+                              '--compose-file', str(self.d / 'docker-compose.yml')], capture_output=True, text=True, check=True).stdout
+        self.assertIn('Warning: The compose files do not pass track_wal_io_timing', out)  # the line cvengine_fit_review copies to the update log
+
+    def test_a_compose_file_that_passes_no_database_setting_is_not_ours_and_says_nothing(self):
+        (self.d / 'docker-compose.yml').write_text('services:\n  db:\n    image: "postgres:18-alpine"\n')
+        self.assertEqual(self.diag(self.review()), [])
+
+    def test_the_docs_name_both_switches(self):
+        config = (ROOT / 'docs' / 'CONFIGURATION.md').read_text()
+        for needle in ('| `POSTGRES_LOG_LOCK_WAITS` | `on` |', '| `POSTGRES_TRACK_WAL_IO_TIMING` | `on` |', 'pg_stat_io'):
+            self.assertIn(needle, config)
+        upgrade = (ROOT / 'docs' / 'UPGRADE.md').read_text()
+        section = upgrade.split('### Lock waits and WAL write times are recorded', 1)[1].split('\n### ', 1)[0]
+        for needle in ('POSTGRES_LOG_LOCK_WAITS', 'POSTGRES_TRACK_WAL_IO_TIMING', 'log_lock_waits=on', 'track_wal_io_timing=on', 'recreates the `db` container once',
+                       'scripts/host-review.py'):
+            self.assertIn(needle, section)

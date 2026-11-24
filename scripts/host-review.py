@@ -22,6 +22,10 @@ What it checks, with the host's cores, memory and free disk in front of it:
            Only a value that is absent or still the shipped default is raised, in the env file Compose reads; a value the owner set is left, nothing
            is lowered, and the sizes always fit inside the container ceiling (the kernel kills a database that reaches it). The update recreates the
            database container once, because its command line changed.
+  diagnose The database's lock wait log and WAL timing (log_lock_waits, track_wal_io_timing), on by default in docker-compose.yml through
+           POSTGRES_LOG_LOCK_WAITS and POSTGRES_TRACK_WAL_IO_TIMING: said, never changed. Off in the env file is the owner's own choice and is left; a compose
+           file that passes the other database settings but not these (PostgreSQL's default is off) is a warning, because a slow write then
+           cannot be told from a lock wait.
   budget   The ceilings together against the host: said, never changed (the ceilings are not use, and the one to lower is the owner's to choose).
   disk     Free space below what an update needs: said.
 
@@ -55,6 +59,9 @@ PG_SORTS = 4                        # sort or hash steps one busy query may hold
 PG_FIT_PERCENT = 90                 # what the settings may plan for, out of the memory the database may use (the rest: connections, the server itself)
 PG_CACHE_PERCENT = 55               # effective_cache_size: at most this share of the host
 PG_NOTE = 'written by the updater: Postgres'
+# diagnose: the database diagnostics docker-compose.yml turns on by default ({env name: the PostgreSQL setting}), reported, never written
+PG_DIAGNOSTICS = {'POSTGRES_LOG_LOCK_WAITS': 'log_lock_waits', 'POSTGRES_TRACK_WAL_IO_TIMING': 'track_wal_io_timing'}
+PG_ON = ('on', 'true', 'yes', '1')
 
 SIZE = re.compile(r'^(\d+(?:\.\d+)?)\s*([kKmMgG]?)[bB]?$')
 
@@ -368,6 +375,50 @@ def postgres_rule(args, facts, env_files, compose_files, stamp, backups, say):
         'docker compose up -d db (with your usual -f files and --env-file).', changes=changes, restart='db')
 
 
+# --- the diagnose rule -------------------------------------------------------------------------------------------------------------------------------
+
+def pg_diagnostic_defaults(compose_files):
+    """{env name: shipped default} of the database diagnostics the compose files pass (``${POSTGRES_LOG_LOCK_WAITS:-on}``); empty when none does."""
+    found = {}
+    for path in compose_files:
+        try:
+            with open(path) as fh:
+                text = fh.read()
+        except OSError:
+            continue
+        for name, default in re.findall(r'\$\{(POSTGRES_[A-Z_]+):?-([^}]*)\}', text):
+            if name in PG_DIAGNOSTICS:
+                found[name] = default
+    return found
+
+
+def diagnose_rule(env_files, compose_files, say):
+    """Say whether the database logs lock waits and times its WAL writes. Never writes: on is the shipped default, and off is the owner's own."""
+    shipped = pg_diagnostic_defaults(compose_files)
+    if not shipped and not pg_defaults(compose_files):
+        return  # compose files that pass the database no settings from the env file at all (not ours): nothing to say, as for the postgres rule
+    target = env_files[:1]  # the env file Compose reads
+    on, own, missing = [], [], []
+    for key, setting in PG_DIAGNOSTICS.items():
+        if key not in shipped:
+            missing.append(setting)
+            continue
+        text = env_value(target, key)
+        value = text if text else shipped[key]  # ${KEY:-on}: an empty value takes the default too
+        if value.strip().lower() in PG_ON:
+            on.append(setting)
+        else:
+            own.append(f'{key}={text}')
+    if on:
+        say('info', 'diagnose', f'The database runs with {" and ".join(on)} on: a lock wait longer than deadlock_timeout is logged with the process '
+            'that holds the lock, and the time spent writing WAL is counted in pg_stat_io.')
+    if own:
+        say('info', 'diagnose', f'{", ".join(own)} in {target[0]} is your own and is left as it is (the shipped default is on).')
+    if missing:
+        say('warn', 'diagnose', f'The compose files do not pass {" and ".join(missing)} to the database, so it runs with PostgreSQL\'s default (off): '
+            'a slow write cannot be told from a lock wait. The shipped docker-compose.yml turns them on (POSTGRES_LOG_LOCK_WAITS, POSTGRES_TRACK_WAL_IO_TIMING).')
+
+
 # --- the review --------------------------------------------------------------------------------------------------------------------------------------
 
 def review(args):
@@ -437,6 +488,9 @@ def review(args):
 
     # postgres (after limits: it sizes against the ceiling that rule raised)
     postgres_rule(args, facts, env_files, compose_files, stamp, backups, say)
+
+    # diagnose
+    diagnose_rule(env_files, compose_files, say)
 
     # budget
     total = 0
