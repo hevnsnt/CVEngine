@@ -296,6 +296,20 @@ class AuditLog(models.Model):
 	def __str__(self):
 		return f'{self.actor_name} {self.action} {self.target}'
 
+	# The routine Sentinel task lifecycle rows (about 20,000 a day on a busy host, the same actions the weekly prune removes): progress records the
+	# Sentinel re-derives, written inside the claim and expiry transactions of the busiest tables. They keep the server wide relaxed commit. Every
+	# other row (credentials, revocations, bans, secret reads, administration) commits durably, so a crash cannot lose it (usage_stamps.durable_commit).
+	RELAXED_ACTIONS = frozenset(('sentinel.task.claim', 'sentinel.task.accept', 'sentinel.task.complete', 'sentinel.task.expire',
+								 'sentinel.task.expire_sweep'))
+
+	def save(self, *args, **kwargs):
+		if self.action in self.RELAXED_ACTIONS:
+			return super().save(*args, **kwargs)
+		from django.db import router
+		from cvengine.usage_stamps import durable_commit
+		with durable_commit(using=kwargs.get('using') or router.db_for_write(type(self), instance=self)):
+			return super().save(*args, **kwargs)
+
 
 class ApiCredential(models.Model):
 	"""An API key for an external OSINT/recon service (Shodan, Censys, ...), scoped to one organization or
