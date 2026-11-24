@@ -168,14 +168,21 @@ POLL_REAP_EVERY = 5  # seconds between the reaper runs of the later rounds of th
 def _touch(agent, now=None):
     """Mark the agent as heard from now. A long poll, a heartbeat and every report each said so, one UPDATE of the agent row each (several a second for
     a Sentinel with many slots, each waiting behind a claim that holds the row). It is written only when the stored time is older than ``TOUCH_EVERY``
-    (or missing, or ahead of ``now``), with the same condition in the UPDATE, so a call that finds a fresh time costs nothing."""
+    (or missing, or ahead of ``now``), with the same condition in the UPDATE, so a call that finds a fresh time costs nothing. Of the calls that read
+    the same stale time, one at a time writes (``usage_stamps.one_writer``; the others set the time on their own copy only) and its commit does not wait for the
+    WAL flush (``usage_stamps.relaxed_commit``): liveness telemetry, which the next call writes again if a crash loses it. Never called inside a
+    claim's transaction; if it were, it would simply join it."""
+    from reNgine import usage_stamps
     now = now or timezone.now()
     seen = agent.last_seen
     if seen is not None and now - TOUCH_EVERY <= seen <= now:
         return
-    stale = Q(last_seen__isnull=True) | Q(last_seen__lt=now - TOUCH_EVERY) | Q(last_seen__gt=now)
-    Agent.objects.filter(stale, pk=agent.pk).update(last_seen=now)
-    agent.last_seen = now
+    with usage_stamps.one_writer('agent', agent.pk, seen, TOUCH_EVERY.total_seconds()) as mine:
+        if mine:
+            stale = Q(last_seen__isnull=True) | Q(last_seen__lt=now - TOUCH_EVERY) | Q(last_seen__gt=now)
+            with usage_stamps.relaxed_commit():
+                Agent.objects.filter(stale, pk=agent.pk).update(last_seen=now)
+    agent.last_seen = now  # also when another call of the same agent writes it: this call's own reads (liveness) see it heard from now, as before
 
 
 def poll_reap_due(key):
