@@ -17,7 +17,7 @@ import time
 from datetime import timedelta
 
 sys.path.insert(0, os.getcwd())
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'reNgine.settings')
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'cvengine.settings')
 import django  # noqa: E402
 
 django.setup()
@@ -202,7 +202,7 @@ def main():
     out = {'label': args.label, 'entries': []}
     plans = open(args.out.replace('.json', '-explain.md'), 'w') if args.explain else None
 
-    from reNgine import settings as rs  # noqa: F401  (the settings are loaded; the import only fails loudly if they are not)
+    from cvengine import settings as rs  # noqa: F401  (the settings are loaded; the import only fails loudly if they are not)
     for entry in endpoints():
         group, label, path = entry[:3]
         mode = entry[3] if len(entry) > 3 else ''
@@ -233,7 +233,7 @@ def main():
         if plans:
             explain(cold['top_sql'], plans, f'{group}: {label}')
 
-    from reNgine.celery import app
+    from cvengine.celery import app
     app.loader.import_default_modules()
     for group, label, dotted in tasks():
         if args.only and args.only not in label and args.only not in group:

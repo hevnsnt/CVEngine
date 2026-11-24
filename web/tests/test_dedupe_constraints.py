@@ -223,7 +223,7 @@ class FindingVocabularyTests(Base):
 				model.objects.create(name=name)
 
 	def test_a_finding_save_that_loses_the_race_links_the_winners_row(self):
-		from reNgine.tasks import save_vulnerability
+		from cvengine.tasks import save_vulnerability
 		sub = self.host()
 		winners = {model_name: apps.get_model('startScan', model_name).objects.create(name=name) for model_name, _c, _m, _f, name in self.CASES}
 		get = QuerySet.get

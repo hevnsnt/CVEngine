@@ -170,7 +170,7 @@ def _remember(result):
     try:
         import json
 
-        from reNgine import resources
+        from cvengine import resources
         client = getattr(resources.get_store(), 'r', None)
         if client is not None:
             client.set(ROUND_KEY, json.dumps(result), ex=24 * 3600)
@@ -182,7 +182,7 @@ def last_round():
     try:
         import json
 
-        from reNgine import resources
+        from cvengine import resources
         client = getattr(resources.get_store(), 'r', None)
         raw = client.get(ROUND_KEY) if client is not None else None
         return json.loads(raw) if raw else None

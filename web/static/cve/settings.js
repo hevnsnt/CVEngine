@@ -1362,7 +1362,7 @@ const sections = {
       el(
         "p",
         "note",
-        "Every scan runs the same fixed pipeline (discovery, nmap, the read-only checks, correlation, triage). There are no per-scan engines to edit: earlier versions listed editable engine configurations inherited from reNgine, but nothing ever read them, so they were removed.",
+        "Every scan runs the same fixed pipeline (discovery, nmap, the read-only checks, correlation, triage). There are no per-scan engines to edit: earlier versions listed editable engine configurations inherited from the upstream project, but nothing ever read them, so they were removed.",
       ),
     );
   },

@@ -30,7 +30,7 @@ DEFAULT_BACKLOG_MAX = 500  # CVENGINE_CT_BACKLOG_MAX: messages the sweep lets wa
 
 def _client():
     try:
-        from reNgine import resources
+        from cvengine import resources
         return getattr(resources.get_store(), 'r', None)
     except Exception:  # noqa: BLE001 - bookkeeping must never stop a lookup being queued
         return None

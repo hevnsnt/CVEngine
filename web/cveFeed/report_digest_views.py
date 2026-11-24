@@ -36,7 +36,7 @@ def _mask(email):
 
 
 def _limited(request):
-    from reNgine.client_ip import client_ip
+    from cvengine.client_ip import client_ip
     key = f'report-unsub:{client_ip(request) or "unknown"}'  # the client, not the proxy every request comes from (review r3 S2)
     throttle.count(key, 60)
     return throttle.exceeded(key, PER_MINUTE + 1)

@@ -388,7 +388,7 @@ def rescore_if_heat_cap_changed():
     sweep claim (``rescore_all_hosts(force=True)``): a claim taken by the daily pass minutes before the change must not leave the scores on
     the old cap until the next day. Returns whether it queued. Never raises."""
     from cveFeed.threat import heat_signature
-    from reNgine import resources
+    from cvengine import resources
     try:
         client = getattr(resources.get_store(), 'r', None)
         if client is None:

@@ -333,7 +333,7 @@ class TrufflehogBountyTests(TestCase):
 		self.assertEqual((target['trufflehog'], target['exclude_modules']), (True, []))
 
 	def test_a_bug_bounty_project_never_gets_it_even_with_the_setting_on(self):
-		from reNgine.discovery_events import trufflehog_allowed
+		from cvengine.discovery_events import trufflehog_allowed
 		self.bounty()
 		with mock.patch.dict('os.environ', {'CVENGINE_BBOT_TRUFFLEHOG': '1'}):
 			self.assertFalse(trufflehog_allowed(self.project.id))
@@ -635,7 +635,7 @@ class NucleiStageTests(TestCase):
 		self.assertEqual(seen[1], (['nginx', 'php'], ['high']))  # the next scan: the static tag stays, the unknown ones are gone
 
 	def test_a_model_that_answers_with_no_text_leaves_the_scan_on_the_standard_templates_and_says_why(self):
-		from reNgine import ai_providers
+		from cvengine import ai_providers
 		self._fresh_ai()
 		fake = mock.Mock(model='m')
 		fake.name = 'anthropic'
@@ -1043,8 +1043,8 @@ class BbotUrlTests(TestCase):
 		self.addCleanup(mock.patch.stopall)
 
 	def persist(self, urls, names=('www.url.test',)):
-		from reNgine import discovery_events as bbot_lib
-		from reNgine.tasks import persist_bbot_result
+		from cvengine import discovery_events as bbot_lib
+		from cvengine.tasks import persist_bbot_result
 		persist_bbot_result(bbot_lib.BbotResult(subdomains=set(names), urls=set(urls)), ctx=self.ctx)
 
 	def test_a_url_event_with_a_status_tag_becomes_an_endpoint_and_fills_the_root_host_fields(self):
@@ -1070,7 +1070,7 @@ class BbotUrlTests(TestCase):
 		self.assertFalse(Subdomain.objects.get(name='www.url.test').http_url)
 
 	def test_the_per_scan_cap_holds(self):
-		from reNgine import tasks
+		from cvengine import tasks
 		from startScan.models import EndPoint
 		urls = {(f'https://www.url.test/p{i}', 200) for i in range(8)}
 		with mock.patch.object(tasks, 'MAX_BBOT_URLS_PER_SCAN', 5):

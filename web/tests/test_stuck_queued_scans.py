@@ -102,19 +102,19 @@ class ExpireStuckQueuedTests(Rows):
         self.assertEqual(row.scan_status, -1)
 
     def test_a_closed_row_may_still_become_a_success_if_its_task_turns_up(self):
-        from reNgine.state_machines import SCAN, SUCCESS
+        from cvengine.state_machines import SCAN, SUCCESS
         row = self.scan(24, PIPELINE)
         reaper.expire_stuck_queued(now=NOW, found=(set(), set()))
         self.assertEqual(SCAN.move(ScanHistory.objects.filter(pk=row.pk), SUCCESS), 1)
 
     def test_a_host_pipeline_row_is_never_sent_again_as_a_discovery(self):
-        from reNgine import resources
+        from cvengine import resources
         client = resources.get_store().r
         [client.delete(k) for k in client.scan_iter('cvengine:scan:redispatch:*')]
         self.addCleanup(lambda: [client.delete(k) for k in client.scan_iter('cvengine:scan:redispatch:*')])
         self.scan(2, PIPELINE)  # no Celery id recorded: the redispatch used to send it as run_bbot_discovery of the whole target
         lost = self.scan(2, tasks=None)
-        with mock.patch('reNgine.celery.app.send_task') as send:
+        with mock.patch('cvengine.celery.app.send_task') as send:
             self.assertEqual(reaper.redispatch_queued_scans(now=NOW, live=set()), 1)
         send.assert_called_once_with('run_bbot_discovery', args=[lost.pk, 'standard'], queue='discovery_queue')
 
@@ -122,7 +122,7 @@ class ExpireStuckQueuedTests(Rows):
         from cveFeed.tasks import reap_stuck_jobs
         orphan = self.scan(24 * 12, PIPELINE, celery_ids=['gone'])
         ancient = self.scan(49, tasks=None)  # no Celery id: the redispatch would send it again if it ran first
-        with mock.patch('cveFeed.broker_recovery.live_tasks', return_value=(set(), set())), mock.patch('reNgine.celery.app.send_task') as send:
+        with mock.patch('cveFeed.broker_recovery.live_tasks', return_value=(set(), set())), mock.patch('cvengine.celery.app.send_task') as send:
             result = reap_stuck_jobs()
         send.assert_not_called()
         self.assertEqual(result['ScanHistory:queued_stuck'], 2)

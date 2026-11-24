@@ -18,7 +18,7 @@ from agentapi.auth import create_token
 from cveFeed import autotune, autotune_policy as policy, autotune_signals as signals, scan_concurrency as sc, tunables
 from cveFeed.models import AutoTuneSettings, ScanConcurrency, TunableSettings, TuningDecision
 from dashboard.models import AuditLog, Org, OrgMembership
-from reNgine import resources
+from cvengine import resources
 from tests.test_agentapi import call, tool_call
 from tests.test_settings import send
 from tests.test_scan_concurrency import FakeApp
@@ -776,7 +776,7 @@ class ReviewFixTests(Isolated, TestCase):
         return summary, resize
 
     def test_when_the_database_does_not_answer_twice_the_pool_backs_off_once_from_redis_holds_and_is_recorded_later(self):
-        from reNgine import celery as celery_module
+        from cvengine import celery as celery_module
         row = AutoTuneSettings.current()
         row.values = {'discovery_concurrency': 24, 'work_depth': 8}
         row.save()

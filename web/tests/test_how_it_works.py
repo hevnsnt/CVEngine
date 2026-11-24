@@ -12,7 +12,7 @@ class HowItWorksTests(TestCase):
 	def test_page_is_reviewed_for_the_current_release(self):
 		# The marketing page makes claims about the pipeline. Whoever moves web/.version must reread cveFeed/how.html and bump
 		# HOW_REVIEWED_VERSION in cveFeed/views.py; a pre-release suffix such as -dev does not count as a new version.
-		current = re.sub(r'-.*$', '', settings.RENGINE_CURRENT_VERSION)
+		current = re.sub(r'-.*$', '', settings.CVENGINE_CURRENT_VERSION)
 		self.assertEqual(HOW_REVIEWED_VERSION, current, 'Reread web/cveFeed/templates/cveFeed/how.html and bump HOW_REVIEWED_VERSION in cveFeed/views.py')
 
 	def test_page_opens_for_any_signed_in_user_and_shows_the_version(self):

@@ -17,7 +17,7 @@ from agentapi.models import SentinelTask
 from cveFeed import web_shot
 from cveFeed.models import HostExclusion, HostScreenshot, HostState, InternalRange
 from dashboard.models import Org, Project, ProjectMembership
-from reNgine import resources
+from cvengine import resources
 from startScan.models import IpAddress, Port, Subdomain
 from targetApp.models import Domain
 from tests.fake_scanner import FakeScanner, LocalFallback, assert_ran_nowhere_locally
@@ -835,7 +835,7 @@ class StatusTests(ReadFixture, TestCase):
 class WiringTests(TestCase):
 	def test_the_tasks_have_a_queue_of_their_own_which_the_classic_worker_consumes(self):
 		from cveFeed import tasks
-		from reNgine import time_limits
+		from cvengine import time_limits
 		from tests.test_entrypoint import worker_commands
 		self.assertEqual(tasks.drain_screenshots.queue, 'screenshot_queue')
 		self.assertEqual(tasks.screenshot_backfill.queue, 'screenshot_queue')
@@ -1253,7 +1253,7 @@ class NoScannerTests(ShotFixture, TestCase):
 		other = self.project_with_hosts('two', 1)
 		web_shot.queue_for_subs(list(Subdomain.objects.filter(target_domain__project=other)), other.pk)
 		from agentapi import sentinel_dispatch
-		from reNgine.resources import ScannerUnavailable
+		from cvengine.resources import ScannerUnavailable
 		original = sentinel_dispatch.scanner_or_local
 
 		def gate(project, kind):
@@ -1329,7 +1329,7 @@ class DrainTests(ShotFixture, TestCase):
 
 	def test_nothing_runs_while_scanning_is_paused_and_the_pages_stay_queued(self):
 		self.make_row()
-		with Scanner() as scanner, mock.patch('reNgine.resources.global_pause_requested', return_value=True):
+		with Scanner() as scanner, mock.patch('cvengine.resources.global_pause_requested', return_value=True):
 			out = web_shot.drain()
 		self.assertEqual(out['skipped'], 'scanning is paused')
 		self.assertEqual(scanner.tasks, [])
@@ -1342,7 +1342,7 @@ class DrainTests(ShotFixture, TestCase):
 		@contextmanager
 		def taken(key, owner, ttl):
 			yield 'drain-other'
-		with Scanner() as scanner, mock.patch('reNgine.resources.redis_claim', taken):
+		with Scanner() as scanner, mock.patch('cvengine.resources.redis_claim', taken):
 			out = web_shot.drain()
 		self.assertEqual(out['skipped'], 'another drain is running')
 		self.assertEqual(scanner.tasks, [])

@@ -545,7 +545,7 @@ class SweepTests(Fixture, TestCase):
         self.assertFalse(AgentActivity.objects.filter(message__contains='203.0.113.9').exists())
 
     def test_nothing_is_requested_while_scanning_is_paused(self):
-        with mock.patch('reNgine.resources.global_pause_requested', return_value=True):
+        with mock.patch('cvengine.resources.global_pause_requested', return_value=True):
             out = self.sweep(self.listing)
         self.assertIn('paused', out['skipped'])
         self.assertEqual((self.listing.calls, ServiceRun.objects.count()), ([], 0))
@@ -553,7 +553,7 @@ class SweepTests(Fixture, TestCase):
     def test_a_pause_that_starts_mid_sweep_stops_it(self):
         self.host('b.example.test', cname='ex-b.s3.amazonaws.com')
         answers = iter([False, True, True])
-        with mock.patch('reNgine.resources.global_pause_requested', side_effect=lambda **kw: next(answers)):
+        with mock.patch('cvengine.resources.global_pause_requested', side_effect=lambda **kw: next(answers)):
             out = self.sweep(self.listing)
         self.assertEqual((out['checked'], 'paused' in out['skipped']), (1, True))
 
@@ -620,7 +620,7 @@ class SweepTests(Fixture, TestCase):
         self.assertFalse([u for _m, u in self.net.calls if 'example.test/' in u.split('?')[0] and 'amazonaws' not in u and 'googleapis' not in u and 'windows' not in u])
 
     def test_a_project_is_swept_by_one_worker_at_a_time(self):
-        with mock.patch('reNgine.resources.redis_claim') as claim:
+        with mock.patch('cvengine.resources.redis_claim') as claim:
             claim.return_value.__enter__.return_value = 'another worker'
             out = self.sweep(self.listing)
         self.assertIn('another bucket sweep', out['skipped'])

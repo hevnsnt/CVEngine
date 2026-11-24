@@ -2,7 +2,7 @@
 
 import django.db.models.deletion
 import django.utils.timezone
-import reNgine.crypto_fields
+import cvengine.crypto_fields
 from django.conf import settings
 from django.db import migrations, models
 
@@ -173,7 +173,7 @@ class Migration(migrations.Migration):
                 ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
                 ('platform', models.CharField(max_length=16)),
                 ('username', models.CharField(max_length=200)),
-                ('token', reNgine.crypto_fields.EncryptedCharField(max_length=1200)),
+                ('token', cvengine.crypto_fields.EncryptedCharField(max_length=1200)),
                 ('created_at', models.DateTimeField(auto_now_add=True)),
                 ('last_used_at', models.DateTimeField(blank=True, null=True)),
                 ('user', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='+', to=settings.AUTH_USER_MODEL)),

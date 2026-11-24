@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from cveFeed import ledger, udp_scan
-from reNgine import resources
+from cvengine import resources
 from tests.test_udp_empty_report import REAL_NO_ROUTE, host_xml, report
 from tests.test_udp_ipv6_unreachable import Ipv6UdpBase
 from tests.test_udp_scan import run_udp

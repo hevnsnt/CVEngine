@@ -1,6 +1,6 @@
 celery==5.7.0
 # celery's broker stack, pinned so CI and the images run the same one. kombu decides how a dropped Redis connection is handled
-# (reNgine/broker_acks.py, reNgine/gevent_pidbox.py): run tests/test_gevent_worker_e2e.py on the new version before bumping any of these
+# (cvengine/broker_acks.py, cvengine/gevent_pidbox.py): run tests/test_gevent_worker_e2e.py on the new version before bumping any of these
 kombu==5.7.0
 amqp==5.4.2
 billiard==4.3.2

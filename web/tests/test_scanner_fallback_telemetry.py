@@ -12,7 +12,7 @@ from agentapi import sentinel_dispatch as dispatch, system_status
 from agentapi.auth import create_token
 from agentapi.models import Agent, SentinelTask
 from dashboard.models import ProjectMembership
-from reNgine import resources
+from cvengine import resources
 from tests.test_agentapi import call
 from tests.test_sentinel_dispatch import DispatchBase, _answer_queued_task
 from tests.test_system_status import patched

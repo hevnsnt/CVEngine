@@ -294,7 +294,7 @@ class BackfillTests(Base):
 
     def test_it_reads_the_findings_the_template_scanner_files(self):
         from cveFeed import panel_versions
-        from reNgine.definitions import NUCLEI
+        from cvengine.definitions import NUCLEI
         self.assertEqual(panel_versions.FINDING_SOURCE, NUCLEI)
 
     def test_it_is_registered_before_the_rescore(self):

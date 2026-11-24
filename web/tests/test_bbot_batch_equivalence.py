@@ -1,4 +1,4 @@
-"""The batched discovery ingest (``reNgine.tasks.persist_bbot_result``) stores exactly what the one-row-at-a-time ingest stored: the same hosts,
+"""The batched discovery ingest (``cvengine.tasks.persist_bbot_result``) stores exactly what the one-row-at-a-time ingest stored: the same hosts,
 addresses, links, ports (filled, dated, sourced), technologies, Shodan readings, URLs, HTTP fields, findings and labels, for new hosts and for hosts an
 earlier streaming batch stored, excluded and internal ones refused alike. Both run on the same database state, rolled back in between, and every
 table they write is compared by its natural keys. The number of statements a batch takes no longer grows with its hosts."""
@@ -9,8 +9,8 @@ from django.utils import timezone
 
 from cveFeed.models import HostExclusion, HostLabel, ProbeObservation
 from dashboard.models import Org, Project
-from reNgine import discovery_events as bbot_lib
-from reNgine.tasks import persist_bbot_result
+from cvengine import discovery_events as bbot_lib
+from cvengine.tasks import persist_bbot_result
 from scanEngine.models import EngineType
 from startScan.models import EndPoint, IpAddress, Port, ScanHistory, SubScan, Subdomain, SubdomainTechnology, Vulnerability
 from targetApp.models import Domain

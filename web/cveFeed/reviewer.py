@@ -154,7 +154,7 @@ def config(now=None):
     of each job, the request settings, its limits. The pipeline's jobs (cveFeed.ai_jobs) are served whenever an AI provider is configured,
     whatever the review setting says; the finding review and the operations check need it on too."""
     from cveFeed import ai_jobs
-    from reNgine.ai_providers import reachable_url
+    from cvengine.ai_providers import reachable_url
     row, provider = settings_row(), provider_row()
     on = enabled(row, provider)
     jobs_on, jobs_why = ai_jobs.serving()
@@ -688,7 +688,7 @@ def apply_finding_verdict(triage, parsed, key, host_review=None, extra_injection
             text = closure.clip_note(text)
             before = finding.remediation_status
             # only from the status the gate read: the AI reviewer is an automatic actor and never writes over a person's newer decision
-            from reNgine.state_machines import REMEDIATION
+            from cvengine.state_machines import REMEDIATION
             if not REMEDIATION.move(type(finding)._base_manager.filter(pk=finding.pk), 'false_positive', only_from=(before,),
                                     remediation_updated_at=now, remediation_by=None, remediation_note=text):
                 outcome, held = 'held', 'a person changed the status meanwhile'
@@ -1456,7 +1456,7 @@ def _resolve_heard(now):
     for a in rows:
         if a.code == 'generated_templates':
             from agentapi import sentinel_dispatch
-            from reNgine.resources import ScannerUnavailable
+            from cvengine.resources import ScannerUnavailable
             try:
                 sentinel_dispatch.nuclei_validate_ready(None)
             except ScannerUnavailable:

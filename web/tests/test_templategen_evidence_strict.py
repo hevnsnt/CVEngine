@@ -115,7 +115,7 @@ class LaterResultsTests(TemplateHitTests):
                 mock.patch('cveFeed.validation.approved_template', return_value=(APACHE_TRAVERSAL, '')), \
                 mock.patch.object(templategen, '_test_chunk', return_value=outcome), \
                 mock.patch('targetApp.target_types.scannable_hosts', side_effect=lambda hosts, **kw: list(hosts)), \
-                mock.patch('reNgine.ai_settings.get_configured_provider', side_effect=RuntimeError('none')), \
+                mock.patch('cvengine.ai_settings.get_configured_provider', side_effect=RuntimeError('none')), \
                 mock.patch('cveFeed.notify._send', return_value=True):
             from cveFeed.tasks import template_test_for_cve
             template_test_for_cve(self.entry.pk, [HOST], project_id=self.project.pk)
@@ -129,7 +129,7 @@ class LaterResultsTests(TemplateHitTests):
                 mock.patch('cveFeed.validation.approved_template', return_value=(APACHE_TRAVERSAL, '')), \
                 mock.patch.object(templategen, '_test_chunk', return_value=outcome), \
                 mock.patch('targetApp.target_types.scannable_hosts', side_effect=lambda hosts, **kw: list(hosts)), \
-                mock.patch('reNgine.ai_settings.get_configured_provider', side_effect=RuntimeError('none')), \
+                mock.patch('cvengine.ai_settings.get_configured_provider', side_effect=RuntimeError('none')), \
                 mock.patch('cveFeed.notify._send', return_value=True):
             from cveFeed.tasks import template_test_for_cve
             template_test_for_cve(self.entry.pk, [HOST], project_id=self.project.pk)

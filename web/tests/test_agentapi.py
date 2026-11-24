@@ -103,7 +103,7 @@ class AgentApiTests(TestCase):
 
 	def test_csrf_enforced_for_sessions_but_not_tokens(self):
 		from django.contrib.auth import BACKEND_SESSION_KEY, HASH_SESSION_KEY, SESSION_KEY
-		from reNgine.hashed_sessions import SessionStore
+		from cvengine.hashed_sessions import SessionStore
 		from django.conf import settings
 		ss = SessionStore()
 		ss[SESSION_KEY], ss[HASH_SESSION_KEY] = str(self.alice.pk), self.alice.get_session_auth_hash()
@@ -809,7 +809,7 @@ class AgentApiTests(TestCase):
 	def test_mcp_server_info_reports_the_release_version(self):
 		from django.conf import settings
 		status, data = rpc(self.t_alice, 'initialize', {})
-		self.assertEqual(data['result']['serverInfo'], {'name': 'cvengine', 'version': settings.RENGINE_CURRENT_VERSION})
+		self.assertEqual(data['result']['serverInfo'], {'name': 'cvengine', 'version': settings.CVENGINE_CURRENT_VERSION})
 		self.assertNotEqual(data['result']['serverInfo']['version'], '1.0.0')
 		self.assertNotEqual(data['result']['serverInfo']['version'], 'unknown')
 

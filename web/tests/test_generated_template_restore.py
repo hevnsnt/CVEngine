@@ -74,7 +74,7 @@ class RestoreGeneratedTemplatesTests(TestCase):
 		self.assertEqual(templategen.restore_missing_files(), {'restored': 0, 'skipped': 0})
 
 	def test_the_worker_start_hook_restores_and_never_raises(self):
-		from reNgine.celery import restore_generated_templates
+		from cvengine.celery import restore_generated_templates
 		tmpl = self.valid()
 		restore_generated_templates()
 		self.assertTrue(os.path.exists(tmpl.path))

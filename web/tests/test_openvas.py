@@ -182,7 +182,7 @@ class OffByDefaultTests(Fixture, TestCase):
         self.assertIn('openvas_queue', entry.split('classic_queues+=')[1].splitlines()[0])
         from agentapi import system_status
         self.assertIn('openvas_queue', system_status.QUEUES)
-        from reNgine.celery import app
+        from cvengine.celery import app
         import cveFeed.tasks  # noqa: F401
         self.assertEqual(app.tasks['openvas_sweep'].queue, 'openvas_queue')
         self.assertNotIn('openvas_check', app.tasks)  # no worker opens a GMP session any more

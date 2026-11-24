@@ -9,7 +9,7 @@ from django.utils import timezone
 from agentapi import sentinel_broker as sb
 from agentapi import sentinel_dispatch as dispatch
 from agentapi.models import Agent, SentinelTask
-from reNgine.resources import ScannerUnavailable
+from cvengine.resources import ScannerUnavailable
 from tests.test_agentapi import call, tool_call
 from tests.test_sentinel_dispatch import DispatchBase
 from tests.test_sentinels import build_world, register_sentinel, reset_rates

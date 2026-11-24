@@ -13,7 +13,7 @@ from django.dispatch import receiver
 from django.db.models import Value
 from django.db.models.functions import Lower, Now
 
-from reNgine.crypto_fields import ENCRYPTED_COLUMN_LENGTH, EncryptedCharField, EncryptedJSONField
+from cvengine.crypto_fields import ENCRYPTED_COLUMN_LENGTH, EncryptedCharField, EncryptedJSONField
 from django.utils import timezone
 from targetApp.alias_note import ALIAS_MAX, NOTE_MAX
 from django.utils.dateparse import parse_datetime

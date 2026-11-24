@@ -15,8 +15,8 @@ from django.core.cache import cache
 from django.utils import timezone
 
 from cveFeed import scanner_wait, snapshot_cache
-from reNgine import discovery_events as bbot_lib
-from reNgine.state_machines import SCAN
+from cvengine import discovery_events as bbot_lib
+from cvengine.state_machines import SCAN
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +48,7 @@ RECOMMENDED_ENGINE = 'CVEngine Recommended'
 
 def pick_engine():
     """The ScanHistory.scan_type row a new scan is filed under. It is only a label: every scan runs the fixed pipeline below, and nothing
-    reads an engine's YAML (the editable engines were inherited from reNgine and never did anything). All the inherited engines are flagged
+    reads an engine's YAML (the editable engines were inherited from cvengine and never did anything). All the inherited engines are flagged
     default, so "the first default" used to file every scan under "Full Scan", one-second host retests included; the recommended one is
     taken by name and the order of the rest is fixed."""
     from scanEngine.models import EngineType
@@ -172,7 +172,7 @@ def _flush(scan, ctx, batch, observed, stored=0):
     """Persist what the stream has produced since the last flush. ``stored`` is how many events the scan already has
     (the caller keeps the running count, so a flush never needs a COUNT(*)); returns the new total."""
     from cveFeed.models import DiscoveryEvent
-    from reNgine.tasks import persist_bbot_result
+    from cvengine.tasks import persist_bbot_result
     persist_bbot_result(batch, ctx=ctx)
     room = MAX_EVENTS_PER_SCAN - stored
     if room > 0 and observed:
@@ -341,7 +341,7 @@ def _discover_on_sentinel(scan, mode, ctx, extra_args, stored, shown):
                                           secret_ref=sentinel_stream.keys_ref(domain.project_id) if api_keys and domain.project_id else None,
                                           bbot_keys=api_keys)
     if out is None:  # unreachable while the kind is in NEVER_LOCAL (dispatch_stream raises); never let a missing answer read as a finished run
-        from reNgine.resources import ScannerUnavailable
+        from cvengine.resources import ScannerUnavailable
         raise ScannerUnavailable(sentinel_stream.KIND)
     final = out['result'] or {}
     return {'stored': state['stored'], 'mode': final.get('mode') or mode, 'scan_name': final.get('scan_name') or '',
@@ -399,7 +399,7 @@ def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, finalize=True):
     refused = False  # the private-address guard refused the target: shown as skipped, never as a failure
     from cveFeed import activity
     from cveFeed.models import DiscoveryEvent
-    from reNgine.resources import ScanAborted, ScannerUnavailable
+    from cvengine.resources import ScanAborted, ScannerUnavailable
     stored = DiscoveryEvent.objects.filter(scan=scan).count()  # once; _flush is then told the running total
     running = activity.log('discovery', f'Discovering {scan.domain.name}', project=scan.domain.project_id,
                            status='running', scan_id=scan.id)
@@ -438,7 +438,7 @@ def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, finalize=True):
         status, error = FAILED, str(exc)[:290]
     SCAN.move(ScanActivity.objects.filter(scan_of=scan, name='bbot_discovery'), field='status', target=FAILED if partial else status, time=timezone.now(), error_message=(partial or error) or None)
     if finalize or status == FAILED:
-        # only from a state that may take it: a scan a person stopped meanwhile stays stopped (reNgine.state_machines.SCAN)
+        # only from a state that may take it: a scan a person stopped meanwhile stays stopped (cvengine.state_machines.SCAN)
         if SCAN.move(ScanHistory.objects.filter(pk=scan.pk), status, stop_scan_date=timezone.now(), error_message=error or None):
             snapshot_cache.bump_on_commit()  # a scan that ended changes which hosts are current
         scan.refresh_from_db(fields=['scan_status', 'stop_scan_date', 'error_message'])
@@ -493,7 +493,7 @@ def domain_lock(domain_id, scan_id, keep=None, resumed=False):
     the id of the scan that does. A task the queue delivers twice, or the same domain queued twice, then cannot run in
     parallel and compete for memory. A pipeline whose stages wait on Sentinels without a worker (``agentapi.stage_runs``) keeps the lock
     while it waits (``keep``), and the pass that continues it takes it back (``resumed``)."""
-    from reNgine import resources
+    from cvengine import resources
     with resources.redis_claim(_lock_key(domain_id), scan_id, LOCK_TTL, adopt=resumed, hold=resumed, keep=keep) as holder:
         yield holder
 
@@ -527,7 +527,7 @@ def run_pipeline(scan_id, *args, **kwargs):
     keep = {}
     with domain_lock(scan.domain_id, scan_id, keep=keep) as holder:
         if holder is True:
-            from reNgine import resources
+            from cvengine import resources
             from agentapi import stage_runs
             with resources.scan_context(scan_id):  # a stop of this scan reaches the heavy jobs it starts
                 out = _run_pipeline(scan_id, *args, **kwargs)
@@ -566,8 +566,8 @@ def discover_ip(scan, ptr=None, certificate=None):
     ``ptr`` and ``certificate`` (``ip -> [names]``) are injectable so tests need no network. Returns the discovery result."""
     from cveFeed import activity
     from cveFeed.models import DiscoveryEvent
-    from reNgine.resources import ScannerUnavailable
-    from reNgine.tasks import persist_bbot_result
+    from cvengine.resources import ScannerUnavailable
+    from cvengine.tasks import persist_bbot_result
     from startScan.models import ScanActivity
     domain, ip = scan.domain, scan.domain.name
     running = activity.log('discovery', f'Looking up {ip}: reverse DNS and certificate names (no subdomain discovery for a bare IP)',
@@ -676,7 +676,7 @@ def reuse_discovery(scan, source, parent):
 
 def stopped(scan_id):
     """Whether a person stopped this scan (its row says aborted, or the stop flag is up)."""
-    from reNgine import resources
+    from cvengine import resources
     from startScan.models import ScanHistory
     return resources.abort_requested(scan_id) or ScanHistory.objects.filter(pk=scan_id, scan_status=ABORTED).exists()
 
@@ -776,7 +776,7 @@ def _run_pipeline(scan_id, mode=bbot_lib.DEFAULT_MODE, light_stream=None, target
 @stage_runs_adapter('pipeline')
 def _resume_pipeline(context):
     """The completion callback of a discovery's stages: take the target's lock back and run the stages again from where they stopped."""
-    from reNgine import resources
+    from cvengine import resources
     scan_id = context['scan_id']
     with domain_lock(context['domain_id'], scan_id, resumed=True) as holder:
         if holder is not True:
@@ -800,7 +800,7 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, port_st
     validation checks, one task per project) and (unless ``hygiene`` is off) the hygiene sweep of the target. Shared by a full discovery and by the new-hosts pipeline;
     the stop flag is honoured between stages."""
     from cveFeed import db_exposure, nuclei_scan, service_intel
-    from reNgine import resources
+    from cvengine import resources
     from startScan.models import ScanActivity, ScanHistory
     gone = {'scan_id': scan_id, 'status': 'aborted'}
     if stopped(scan_id):
@@ -1071,7 +1071,7 @@ def run_host_pipeline(domain_id, names, resolver=None, celery_id=None, retest=Fa
     finishes the stages and hands the result to the continuation ``then`` (``(name, {args})``), which is where a caller does with it what it
     would have done with the return value."""
     from cveFeed import activity
-    from reNgine.tasks import persist_bbot_result
+    from cvengine.tasks import persist_bbot_result
     from startScan.models import ScanActivity, ScanHistory
     from targetApp.models import Domain
     domain = Domain.objects.get(pk=domain_id)
@@ -1124,7 +1124,7 @@ def run_host_pipeline(domain_id, names, resolver=None, celery_id=None, retest=Fa
     step = ScanActivity.objects.create(scan_of=scan, title='Resolve and record new hosts', name='host_resolve', time=now, status=QUEUED)
     mark_running(scan.id)
     ScanActivity.objects.filter(pk=step.pk).update(status=RUNNING, time=timezone.now())
-    from reNgine import resources
+    from cvengine import resources
     try:
         with resources.scan_context(scan.id):
             found = {'scan_id': scan.id, 'status': SUCCESS, 'error': '', 'hosts': len(wanted)}
@@ -1206,7 +1206,7 @@ def run_host_pipeline(domain_id, names, resolver=None, celery_id=None, retest=Fa
 @stage_runs_adapter('pipeline.host')
 def _resume_host_pipeline(context):
     """The completion callback of a host pipeline's stages: run them again from where they stopped, ending the scan as ``run_host_pipeline`` does."""
-    from reNgine import resources
+    from cvengine import resources
     from startScan.models import ScanActivity, ScanHistory
     scan_id, per_host = context['scan_id'], context.get('per_host') or {}
     try:

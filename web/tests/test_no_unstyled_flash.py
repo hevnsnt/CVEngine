@@ -115,7 +115,7 @@ class CriticalStyleTests(SimpleTestCase):
 
 
 class StaticCachePolicyTests(SimpleTestCase):
-	conf = staticmethod(lambda: read(REPO, 'config', 'nginx', 'rengine.conf'))
+	conf = staticmethod(lambda: read(REPO, 'config', 'nginx', 'cvengine.conf'))
 
 	def test_only_a_well_formed_content_version_earns_a_year(self):
 		conf = self.conf()

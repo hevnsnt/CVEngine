@@ -94,7 +94,7 @@ class IpPerOrganizationTests(Fixture, TestCase):
 		self.assertNotIn('SECRET', ' '.join(rows[self.org_b.id].ports.values_list('banner', flat=True)))
 
 	def test_a_host_only_reads_its_own_organizations_ip_data(self):
-		from reNgine.tasks import save_ip_address
+		from cvengine.tasks import save_ip_address
 		sa = Subdomain.objects.create(name='www.ip.example.com', target_domain=self.da)
 		sb = Subdomain.objects.create(name='www.ip.example.com', target_domain=self.db)
 		ip_a, _ = save_ip_address('203.0.113.51', subdomain=sa)

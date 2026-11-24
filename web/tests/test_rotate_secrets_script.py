@@ -15,7 +15,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = ROOT / 'scripts'
-ROTATED = ('POSTGRES_PASSWORD', 'REDIS_PASSWORD', 'CVENGINE_DB_APP_PASSWORD', 'CVENGINE_FIELD_KEY', 'CVENGINE_FIELD_KEY_PREVIOUS', 'RENGINE_SECRET_KEY')
+ROTATED = ('POSTGRES_PASSWORD', 'REDIS_PASSWORD', 'CVENGINE_DB_APP_PASSWORD', 'CVENGINE_FIELD_KEY', 'CVENGINE_FIELD_KEY_PREVIOUS', 'CVENGINE_SECRET_KEY')
 
 DOCKER = r'''#!/usr/bin/env python3
 import json, os, re, sys
@@ -169,12 +169,12 @@ class RotateSecretsScriptTests(unittest.TestCase):
             shutil.copy(SCRIPTS / name, self.repo / 'scripts' / name)
         for name in ('docker-compose.yml', 'docker-compose.vps.yml'):
             (self.repo / name).write_text('services: {}\n')
-        self.dotenv = ('POSTGRES_USER=rengine\nPOSTGRES_DB=rengine\n'
+        self.dotenv = ('POSTGRES_USER=cvengine\nPOSTGRES_DB=cvengine\n'
                        f"POSTGRES_PASSWORD={V_PG}\nREDIS_PASSWORD={V_REDIS}\n"
                        f"CVENGINE_DB_APP_PASSWORD={V_APP}\nCVENGINE_FIELD_KEY={V_FIELD}\n"
                        'CVENGINE_COMPOSE_FILES=docker-compose.yml,docker-compose.vps.yml\nCVENGINE_COMPOSE_ENV_FILE=.env.vps\n'
                        'CVENGINE_COMPOSE_PROJECT=cvengine\nDOMAIN_NAME=example.org\n')
-        self.vps = ('POSTGRES_USER=rengine\nPOSTGRES_DB=rengine\n'
+        self.vps = ('POSTGRES_USER=cvengine\nPOSTGRES_DB=cvengine\n'
                     f"POSTGRES_PASSWORD={V_PG}\nREDIS_PASSWORD={V_REDIS}\n"
                     f"CVENGINE_DB_APP_PASSWORD={V_APP}\nCVENGINE_FIELD_KEY={V_FIELD}\n")
         (self.repo / '.env').write_text(self.dotenv)
@@ -182,7 +182,7 @@ class RotateSecretsScriptTests(unittest.TestCase):
         (self.repo / 'web' / 'secret').write_text(V_DJANGO)
         (self.repo / 'web' / 'secret').chmod(0o600)
         (self.state / 'running').write_text('db\nredis\nweb\ncelery\ncelery-beat\nproxy\nreviewer\n')
-        (self.state / 'db.json').write_text(json.dumps({'pg': {'rengine': V_PG, 'cvengine_app': V_APP},
+        (self.state / 'db.json').write_text(json.dumps({'pg': {'cvengine': V_PG, 'cvengine_app': V_APP},
                                                          'redis': V_REDIS}))
         self.env = {k: v for k, v in os.environ.items() if not k.startswith(('CVENGINE_', 'COMPOSE_', 'DOCKER_')) and k not in ROTATED}
         self.env.update(PATH=f'{stub}:{os.environ["PATH"]}', FOO_UNRELATED='leak-me', CVENGINE_ROTATE_WAIT='5')
@@ -207,7 +207,7 @@ class RotateSecretsScriptTests(unittest.TestCase):
     def test_a_dry_run_prints_the_plan_the_warning_and_the_checklist_and_changes_nothing(self):
         proc = self.run_script('--dry-run')
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        for needle in ('Plan', 'ALTER ROLE rengine and cvengine_app', 'redis web celery celery-beat reviewer', 'Restart the proxy',
+        for needle in ('Plan', 'ALTER ROLE cvengine and cvengine_app', 'redis web celery celery-beat reviewer', 'Restart the proxy',
                        'signs EVERYONE out', 'recovery codes', 'What this script cannot rotate', 'admin login password', 'MCP and agent API tokens',
                        'Sentinel tokens', "root password", 'control panel password', 'Third party API keys'):
             self.assertIn(needle, proc.stdout)
@@ -253,7 +253,7 @@ class RotateSecretsScriptTests(unittest.TestCase):
         self.assertRegex(secret, r'^[A-Za-z0-9]{64}$')
         self.assertEqual(stat.S_IMODE((self.repo / 'web' / 'secret').stat().st_mode), 0o600)
         db = json.loads((self.state / 'db.json').read_text())
-        self.assertEqual(db['pg'], {'rengine': dotenv['POSTGRES_PASSWORD'], 'cvengine_app': dotenv['CVENGINE_DB_APP_PASSWORD']})
+        self.assertEqual(db['pg'], {'cvengine': dotenv['POSTGRES_PASSWORD'], 'cvengine_app': dotenv['CVENGINE_DB_APP_PASSWORD']})
         self.assertEqual(db['redis'], dotenv['REDIS_PASSWORD'])
 
         # backups: the old keys in one 0700 folder, the dump in another
@@ -306,7 +306,7 @@ class RotateSecretsScriptTests(unittest.TestCase):
             joined = ' '.join(call['argv'])
             for value in new_values + [OLD['POSTGRES_PASSWORD'], OLD['REDIS_PASSWORD']]:
                 self.assertNotIn(value, joined)
-        for needle in ('the old password of rengine is refused', 'Redis refuses a client without the password', 'Stored secrets: 3 under the current key',
+        for needle in ('the old password of cvengine is refused', 'Redis refuses a client without the password', 'Stored secrets: 3 under the current key',
                        'signs EVERYONE out', 'What this script cannot rotate'):
             self.assertIn(needle, proc.stdout)
 
@@ -359,7 +359,7 @@ class RotateSecretsScriptTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertEqual(env_values(self.repo / '.env.vps')['CVENGINE_DB_APP_PASSWORD'], OLD['CVENGINE_DB_APP_PASSWORD'])
         alter = next(c['stdin'] for c in self.calls() if 'ALTER ROLE' in (c.get('stdin') or ''))
-        self.assertIn('ALTER ROLE "rengine"', alter)
+        self.assertIn('ALTER ROLE "cvengine"', alter)
         self.assertNotIn('cvengine_app', alter)
 
     def test_a_redis_that_answers_without_a_password_fails_the_verification(self):

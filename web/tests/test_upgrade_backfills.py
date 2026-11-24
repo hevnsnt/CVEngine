@@ -74,7 +74,7 @@ class RunNextTests(TestCase):
         @contextlib.contextmanager
         def held(*args):
             yield 'other-worker'
-        with mock.patch('reNgine.resources.redis_claim', held):
+        with mock.patch('cvengine.resources.redis_claim', held):
             self.assertEqual(upgrade_backfills.run_next(call=call)['state'], 'held')
         self.assertEqual(call.names, [])
 
@@ -100,7 +100,7 @@ class RealCommandsTests(TestCase):
 
 class WorkerStartTests(TestCase):
     def test_a_worker_start_queues_the_run_while_backfills_are_pending_and_not_after(self):
-        from reNgine.celery import run_pending_backfills
+        from cvengine.celery import run_pending_backfills
         with mock.patch('cveFeed.tasks.run_upgrade_backfills.apply_async') as queued:
             run_pending_backfills()
         queued.assert_called_once()

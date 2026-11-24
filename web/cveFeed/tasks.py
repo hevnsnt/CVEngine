@@ -1,6 +1,6 @@
 """Celery tasks for syncing the cve.now feed.
 
-Autodiscovered by the reNgine.tasks celery app; routed to cve_feed_queue, which
+Autodiscovered by the cvengine.tasks celery app; routed to cve_feed_queue, which
 a dedicated worker consumes (see web/celery-entrypoint.sh). Schedule it with
 django_celery_beat (e.g. every 30 minutes).
 """
@@ -9,7 +9,7 @@ import os
 import re
 import time
 
-from reNgine.celery import app
+from cvengine.celery import app
 from cveFeed import cve_now
 from cveFeed.cve_now import CVENowClient
 from cveFeed.models import CVEEntry
@@ -254,7 +254,7 @@ def sync_cve_now_feed(max_new=200, catch_up_after=40, max_scan=5000, refresh_max
     * A few CVEs with open matches not read for a day are read again anyway (``refresh_max``): a safety net while the changes lag.
     One run at a time (a Redis claim): a run that finds another running returns at once.
     """
-    from reNgine import resources
+    from cvengine import resources
     with resources.redis_claim(SYNC_LOCK, _sync_owner(), SYNC_LOCK_TTL) as holder:
         if holder is not True:
             return {'status': 'running', 'holder': str(holder)}
@@ -1555,7 +1555,7 @@ SETTLE_SECONDS = 60  # one run of settle_library_proven_task works this long, th
 @app.task(name='settle_library_proven', bind=False, queue='cve_feed_queue')
 def settle_library_proven_task(seconds=SETTLE_SECONDS, clock=None):
     """Bring the CVE matches judged before the library rule in line with it (``triage.settle_library_proven``), once per install, off the
-    worker's start: queued by ``reNgine.celery.settle_library_proven_answers``. One worker at a time holds the cursor row (``SELECT ... FOR
+    worker's start: queued by ``cvengine.celery.settle_library_proven_answers``. One worker at a time holds the cursor row (``SELECT ... FOR
     UPDATE SKIP LOCKED``: another run that finds it held returns at once), works batches in pk order for ``seconds``, saves the cursor after
     each batch and queues the next run to resume from it; the last batch records the done lane, and any later run returns at once.
     Idempotent: a batch that is run twice writes nothing the second time. Returns the counts."""
@@ -1592,7 +1592,7 @@ def settle_library_proven_task(seconds=SETTLE_SECONDS, clock=None):
 @app.task(name='run_upgrade_backfills', bind=False, queue='cve_feed_queue', time_limit=3600, soft_time_limit=3300)
 def run_upgrade_backfills():
     """Apply the next backfill this install has not finished (``cveFeed.upgrade_backfills``), then queue the next run while any remain.
-    Queued by ``reNgine.celery.run_pending_backfills`` when a worker starts, so an update needs nobody to run a command. A run that finds
+    Queued by ``cvengine.celery.run_pending_backfills`` when a worker starts, so an update needs nobody to run a command. A run that finds
     another one holding the claim returns; that one queues the rest. Returns the outcome."""
     from cveFeed import upgrade_backfills
     result = upgrade_backfills.run_next()
@@ -2344,7 +2344,7 @@ def weekly_deep_nuclei():
 def _weekly_deep_host(context):
     """One host of the weekly deep Nuclei pass (``weekly_deep_nuclei``), and the completion callback of one that waited on Sentinels."""
     from cveFeed import activity, ledger, nuclei_scan
-    from reNgine import resources
+    from cvengine import resources
     from startScan.models import Subdomain
     sub = Subdomain.objects.select_related('scan_history', 'target_domain').filter(pk=context['sub_id']).first()
     if sub is None:
@@ -2641,8 +2641,8 @@ def write_cve_guidance_now(count=200):
 @app.task(name="report_resources", bind=False, queue="cve_feed_queue")
 def report_resources():
     """Every 30 seconds: publish this container's memory and budget so Settings > Resources (served by another
-    container) can show it. See reNgine/resources.py."""
-    from reNgine import resources
+    container) can show it. See cvengine/resources.py."""
+    from cvengine import resources
     resources.report_state()
     from cveFeed import scan_concurrency
     scan_concurrency.reconcile()  # republish the saved scan concurrency and resize the discovery worker if it differs (never raises)

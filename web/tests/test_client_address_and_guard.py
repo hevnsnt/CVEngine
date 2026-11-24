@@ -4,7 +4,7 @@ host nginx, and only the bundled proxy can name the client address.
 * S1 (input guard): the review's demonstration tests, inverted. A GET a link can start (Sec-Fetch-Site none or same-origin) is refused and kept
   for the record but never counted; at the threshold the guard ends the offending browser session and bans a public address, and never disables
   an account or revokes a token.
-* S2 and S3 (client address): reNgine.client_ip over the shipped default (CVENGINE_TRUSTED_PROXIES = the proxy's fixed address), the production
+* S2 and S3 (client address): cvengine.client_ip over the shipped default (CVENGINE_TRUSTED_PROXIES = the proxy's fixed address), the production
   chain, spoofing peers, the gateway and IPv6; the compose layout that gives the proxy that address; the probe route and the check script; and
   the proxy container itself (nginx:alpine, the shipped conf and template, a fixed-subnet network) end to end.
 """
@@ -31,9 +31,9 @@ from django.utils import timezone
 
 from agentapi.auth import create_token
 from dashboard.models import AbuseBan, AbuseStrike, ApiToken, AuditLog, Org, OrgMembership, Project
-from reNgine import client_probe
-from reNgine import input_guard as guard
-from reNgine.client_ip import client_ip
+from cvengine import client_probe
+from cvengine import input_guard as guard
+from cvengine.client_ip import client_ip
 
 try:
     import yaml
@@ -49,7 +49,7 @@ SHIPPED = {'CVENGINE_TRUSTED_PROXIES': PROXY}
 OLD_RANGE = {'CVENGINE_TRUSTED_PROXIES': '172.16.0.0/12'}  # the default before this change
 GATEWAY = '172.16.238.1'   # what the proxy sees when a host nginx connects through Docker's port publishing
 SCANNER = '172.20.0.3'     # the built-in scanner on scanner_network, which reaches web:8000 directly
-REVIEWER = '172.18.0.6'    # the AI reviewer on rengine_network
+REVIEWER = '172.18.0.6'    # the AI reviewer on cvengine_network
 REAL, OTHER = '8.8.4.4', '9.9.9.9'  # public addresses (the documentation ranges count as private, and private addresses are never banned)
 
 
@@ -329,10 +329,10 @@ class ComposeLayoutTests(unittest.TestCase):
         on = sorted(name for name, svc in services.items() if 'proxy_network' in (svc.get('networks') or {}))
         self.assertEqual(on, ['proxy', 'web'])
         web = services['web']['networks']
-        self.assertEqual(web['proxy_network']['aliases'], ['rengine'])  # the name config/nginx/rengine.conf proxies to
-        self.assertFalse((web['rengine_network'] or {}).get('aliases'))  # so the proxy always reaches web from its fixed address
-        conf = (ROOT / 'config' / 'nginx' / 'rengine.conf').read_text()
-        self.assertEqual(set(re.findall(r'\$cvengine_web (http://[^;]+);', conf)), {'http://rengine:8000'})
+        self.assertEqual(web['proxy_network']['aliases'], ['cvengine'])  # the name config/nginx/cvengine.conf proxies to
+        self.assertFalse((web['cvengine_network'] or {}).get('aliases'))  # so the proxy always reaches web from its fixed address
+        conf = (ROOT / 'config' / 'nginx' / 'cvengine.conf').read_text()
+        self.assertEqual(set(re.findall(r'\$cvengine_web (http://[^;]+);', conf)), {'http://cvengine:8000'})
 
     def test_web_and_celery_trust_the_proxy_alone_by_default(self):
         for svc in ('web', 'celery'):
@@ -344,7 +344,7 @@ class ComposeLayoutTests(unittest.TestCase):
         services = compose()['services']
         web_nets = set(services['web']['networks'])
         self.assertIn('scanner_network', set(services['scanner']['networks']) & web_nets)
-        self.assertIn('rengine_network', set(services['reviewer']['networks']) & web_nets)
+        self.assertIn('cvengine_network', set(services['reviewer']['networks']) & web_nets)
         self.assertEqual(services['reviewer']['environment']['CVENGINE_REVIEWER_SERVER'], 'http://web:8000')
         self.assertIn('web', services['scanner']['environment']['NO_PROXY'])
 
@@ -540,7 +540,7 @@ class SecretShapeCheckTests(SimpleTestCase):
 
 class ProxyContainerTests(SimpleTestCase):
     """The bundled proxy as compose runs it: nginx:alpine with the shipped conf, the template rendered by the image's own entrypoint from
-    CVENGINE_UPSTREAM_SECRET, a fixed address on a fixed-subnet network, and a fake web container named "rengine" that echoes what it receives. The
+    CVENGINE_UPSTREAM_SECRET, a fixed address on a fixed-subnet network, and a fake web container named "cvengine" that echoes what it receives. The
     test client connects through the published port, as a host nginx does through docker-proxy, so the proxy sees the gateway."""
 
     def setUp(self):
@@ -567,9 +567,9 @@ class ProxyContainerTests(SimpleTestCase):
     def start(self, secret):
         certs = f'{self.tmp}/certs'
         os.makedirs(certs, exist_ok=True)
-        subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', f'{certs}/rengine_rsa.key', '-out', f'{certs}/rengine.pem',
-                        '-subj', '/CN=rengine', '-days', '2'], check=True, capture_output=True)
-        shutil.copy(f'{certs}/rengine.pem', f'{certs}/rengine_chain.pem')
+        subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', f'{certs}/cvengine_rsa.key', '-out', f'{certs}/cvengine.pem',
+                        '-subj', '/CN=cvengine', '-days', '2'], check=True, capture_output=True)
+        shutil.copy(f'{certs}/cvengine.pem', f'{certs}/cvengine_chain.pem')
         for name in os.listdir(certs):
             os.chmod(f'{certs}/{name}', 0o644)
         state = f'{self.tmp}/state'
@@ -582,14 +582,14 @@ class ProxyContainerTests(SimpleTestCase):
         os.chmod(echo, 0o644)
         web = f'{self.tag}-web'
         self.names.append(web)
-        subprocess.run(['docker', 'run', '-d', '--name', web, '--network', f'{self.tag}-net', '--network-alias', 'rengine', '-v',
+        subprocess.run(['docker', 'run', '-d', '--name', web, '--network', f'{self.tag}-net', '--network-alias', 'cvengine', '-v',
                         f'{echo}:/etc/nginx/conf.d/default.conf:ro', 'nginx:alpine'], check=True, capture_output=True)
         proxy = f'{self.tag}-proxy'
         self.names.append(proxy)
         nginx = ROOT / 'config' / 'nginx'
         subprocess.run(['docker', 'run', '-d', '--name', proxy, '--network', f'{self.tag}-net', '--ip', f'{self.subnet}.10', '-p', '127.0.0.1::443',
                         '-e', f'CVENGINE_UPSTREAM_SECRET={secret}',
-                        '-v', f'{nginx}/rengine.conf:/etc/nginx/conf.d/rengine.conf:ro', '-v', f'{nginx}/templates:/etc/nginx/templates:ro',
+                        '-v', f'{nginx}/cvengine.conf:/etc/nginx/conf.d/cvengine.conf:ro', '-v', f'{nginx}/templates:/etc/nginx/templates:ro',
                         '-v', f'{nginx}/trusted-upstreams.conf:/etc/nginx/trusted-upstreams.conf:ro', '-v', f'{certs}:/etc/nginx/certs:ro',
                         '-v', f'{state}:/etc/nginx/state:ro',
                         '-v', f'{ROOT / "web" / "static" / "cve" / "maintenance.html"}:/usr/share/nginx/maintenance/maintenance.html:ro',
@@ -607,7 +607,7 @@ class ProxyContainerTests(SimpleTestCase):
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
-        headers = {'Host': 'rengine', **more}
+        headers = {'Host': 'cvengine', **more}
         if xff:
             headers['X-Forwarded-For'] = xff
         if secret is not None:

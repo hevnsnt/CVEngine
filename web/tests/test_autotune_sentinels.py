@@ -13,7 +13,7 @@ from agentapi.models import Agent, SentinelTask
 from cveFeed import autotune, autotune_policy as policy, autotune_sentinels as at, autotune_signals as signals
 from cveFeed.models import AutoTuneSettings, TuningDecision
 from dashboard.models import AuditLog
-from reNgine import resources
+from cvengine import resources
 from tests.test_agentapi import call
 from tests.test_autotune import BASE, Isolated, merge
 from tests.test_sentinels import build_world, register_sentinel, reset_rates

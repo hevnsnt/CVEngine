@@ -547,7 +547,7 @@ class RescoreOnCapChangeTests(SimpleTestCase):
 				old, Redis.value = Redis.value, value
 				return old
 		store = SimpleNamespace(r=Redis())
-		with mock.patch('reNgine.resources.get_store', return_value=store), \
+		with mock.patch('cvengine.resources.get_store', return_value=store), \
 				mock.patch('cveFeed.tasks.rescore_all_hosts.apply_async') as queue:
 			# first sight (the upgrade, or a Redis with no volume after docker compose down/up): recorded, no forced full rescore
 			self.assertFalse(scoring.rescore_if_heat_cap_changed())
@@ -575,15 +575,15 @@ class RescoreOnCapChangeTests(SimpleTestCase):
 
 			def set(self, key, value):
 				Redis.value = value
-		with mock.patch('reNgine.resources.get_store', return_value=SimpleNamespace(r=Redis())), \
+		with mock.patch('cvengine.resources.get_store', return_value=SimpleNamespace(r=Redis())), \
 				mock.patch('cveFeed.tasks.rescore_all_hosts.apply_async', side_effect=RuntimeError('broker down')):
 			self.assertFalse(scoring.rescore_if_heat_cap_changed())
 		self.assertEqual(Redis.value, 'fire')
 
 	def test_no_redis_no_rescore_and_never_raises(self):
-		with mock.patch('reNgine.resources.get_store', return_value=SimpleNamespace()):
+		with mock.patch('cvengine.resources.get_store', return_value=SimpleNamespace()):
 			self.assertFalse(scoring.rescore_if_heat_cap_changed())
-		with mock.patch('reNgine.resources.get_store', side_effect=RuntimeError('down')):
+		with mock.patch('cvengine.resources.get_store', side_effect=RuntimeError('down')):
 			self.assertFalse(scoring.rescore_if_heat_cap_changed())
 
 

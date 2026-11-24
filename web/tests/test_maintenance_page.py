@@ -13,7 +13,7 @@ def read(*parts):
 
 class MaintenancePageTests(SimpleTestCase):
 	def test_the_proxy_answers_with_the_page_while_the_flag_exists_and_when_the_app_is_down(self):
-		conf = read('config', 'nginx', 'rengine.conf')
+		conf = read('config', 'nginx', 'cvengine.conf')
 		self.assertIn('if (-f /etc/nginx/state/maintenance) { return 503; }', conf)
 		self.assertRegex(conf, r'error_page\s+502 503 504 /maintenance\.html;')
 		self.assertRegex(conf, r'proxy_intercept_errors\s+on;')
@@ -59,7 +59,7 @@ class MaintenancePageTests(SimpleTestCase):
 		self.assertIn('maintenance_failed', wrapper)
 
 	def test_the_proxy_says_the_update_did_not_finish_when_the_failure_flag_exists(self):
-		conf = read('config', 'nginx', 'rengine.conf')
+		conf = read('config', 'nginx', 'cvengine.conf')
 		block = conf[conf.index('location = /maintenance.html'):]
 		block = block[:block.index('\n    }')]
 		self.assertIn('if (-f /etc/nginx/state/maintenance-failed) { set $maint_state failed; }', block)
@@ -73,7 +73,7 @@ class MaintenancePageTests(SimpleTestCase):
 		self.assertNotRegex(page, '[–—]')
 
 	def test_the_proxy_serves_the_live_status_file_from_its_own_folder(self):
-		conf = read('config', 'nginx', 'rengine.conf')
+		conf = read('config', 'nginx', 'cvengine.conf')
 		block = conf[conf.index('location = /maintenance-status.json'):]
 		block = block[:block.index('\n    }')]
 		self.assertIn('alias                                       /etc/nginx/state/status.json;', block)
@@ -92,7 +92,7 @@ class MaintenancePageTests(SimpleTestCase):
 			self.assertIn(reason, apply + deploy)
 
 	def test_sentinel_and_api_locations_answer_503_with_a_retry_after_while_the_flag_exists(self):
-		conf = read('config', 'nginx', 'rengine.conf')
+		conf = read('config', 'nginx', 'cvengine.conf')
 		for location in ('location / {', 'location ~ ^/api/v1/sentinel/tasks/[0-9]+/(result|partial)$ {', 'location = /cve/api/settings/cve_seed/import {'):
 			block = conf[conf.index(location):]
 			block = block[:block.index('proxy_pass')]

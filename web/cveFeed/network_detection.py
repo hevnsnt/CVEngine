@@ -299,7 +299,7 @@ def run_for_scan(scan_id, stream, force=False):
     ``ScannerUnavailable`` (from the stream) when no Sentinel can take it: the ports stay due. The pipeline's correlation stage, which runs after this one,
     matches what was stored."""
     from cveFeed import activity, ledger, nuclei_scan
-    from reNgine.resources import ScannerUnavailable
+    from cvengine.resources import ScannerUnavailable
     from startScan.models import ScanHistory
     scan = ScanHistory.objects.select_related('domain').get(pk=scan_id)
     project = scan.domain.project_id

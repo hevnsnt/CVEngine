@@ -144,7 +144,7 @@ def check_lanes(ctx):
     status = snapshot.lane_status(snap)
     silent = [p for p, lane in status.items() if lane['present'] is False]
     try:
-        from reNgine import lane_memory
+        from cvengine import lane_memory
         finished = lane_memory.recent_progress()
         running = lane_memory.in_flight()
         beating = lane_memory.alive()
@@ -207,7 +207,7 @@ def _lane_signs(absent):
     """What the silent lanes' own records say, for the log: the age of each one's liveness record, what it had in flight, the worst garbage collection it published."""
     out = {'beat': {}, 'gc_worst_s': {}}
     try:
-        from reNgine import lane_memory
+        from cvengine import lane_memory
         now = time.time()
         beats = lane_memory.beats(now)
         for p in absent:
@@ -282,7 +282,7 @@ def check_hung(ctx, state=None):
     windows = dict((state.data or {}).get('windows') or {}) if state else {}
     hung, busy, notes = [], [], []
     try:
-        from reNgine import lane_memory
+        from cvengine import lane_memory
         # the record of a task counts only when the worker that wrote it is the one answering now (a restarted worker has another process id)
         pids = {p.removesuffix('_worker'): {work[n]['pid'] for n in lane['workers'] if n in (work or {}) and work[n].get('pid')} for p, lane in status.items()}
         running = lane_memory.in_flight(pids={k: v for k, v in pids.items() if v})
@@ -555,7 +555,7 @@ def held_task_ids(lanes=None):
     its messages, so a partial list is never a list of what nobody holds."""
     if not lanes:
         return None
-    from reNgine.celery import app
+    from cvengine.celery import app
     held = set()
     for call in ('active', 'reserved', 'scheduled'):
         found = getattr(app.control.inspect(timeout=snapshot.PING_SECONDS), call)()
@@ -1313,8 +1313,8 @@ def tick(now=None, probes=None, limit=TICK_SECONDS, alarm=True):
 
 
 def _tick(now, probes, out):
-    try:  # the web container cannot publish its own memory from a Celery task: this tick runs in it (reNgine/container_signals.py); it only measures
-        from reNgine import container_signals
+    try:  # the web container cannot publish its own memory from a Celery task: this tick runs in it (cvengine/container_signals.py); it only measures
+        from cvengine import container_signals
         container_signals.publish('web', client=probes.redis() if probes else None, force=True)
     except Exception:  # noqa: BLE001
         logger.debug('watchdog: could not publish the web container memory', exc_info=True)

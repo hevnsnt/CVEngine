@@ -40,7 +40,7 @@ def open_window(started_ago=timedelta(minutes=8), ended_ago=None, grace=600):
 
 class UpdateWindowTests(OwnUpdateLock, TestCase):
     def test_another_process_holding_the_shared_lock_file_does_not_stop_this_one(self):
-        # the "other process" holds the lock of another home that is the test's own (never the shared RENGINE_HOME, which a parallel test process or a
+        # the "other process" holds the lock of another home that is the test's own (never the shared CVENGINE_HOME, which a parallel test process or a
         # developer's own stack may hold: taking that one made this test fail with BlockingIOError at random)
         with tempfile.TemporaryDirectory() as other_home, open(os.path.join(other_home, '.update-lock'), 'a+') as other:
             fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)

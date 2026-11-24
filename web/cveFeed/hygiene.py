@@ -444,7 +444,7 @@ def _remote_review(domain, targets, hosts):
     did not answer for (not reported, refused by the policy or failed: never read as "nothing there"), ``review['mail']`` maps each reviewed name to
     ``(findings, has_mx)``, ``review['mail_hosts']`` lists them in order and ``review['unknown_mail']`` the names that had to be reviewed and were not."""
     from agentapi import probe_dispatch
-    from reNgine.resources import ScannerUnavailable
+    from cvengine.resources import ScannerUnavailable
     own, extra = mail_candidates(domain)
     if hosts is not None:
         own, extra = ([domain.name] if domain.name in hosts and not is_ip(domain.name) else []), []

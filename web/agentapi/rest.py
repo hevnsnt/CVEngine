@@ -35,7 +35,7 @@ from agentapi import secrets_api
 from agentapi import internal_ranges, sentinel_settings, tailscale
 from agentapi import auth
 from tenancy import roles
-from reNgine import schema_guard
+from cvengine import schema_guard
 from agentapi.auth import create_token
 from tenancy import audit
 from agentapi.services import ApiError, Ctx
@@ -166,7 +166,7 @@ def _sentinel_instance_enroll(request, ctx, **_):
 
 
 def _sentinel_bootstrap(request, ctx, **_):
-    from reNgine.client_ip import client_ip
+    from cvengine.client_ip import client_ip
     sentinels.limit_address(client_ip(request))  # before the body is read: this call has no token, so the address is what is counted
     out = sentinels.bootstrap(_body(request))
     return out, 201

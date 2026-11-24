@@ -418,7 +418,7 @@ def _remote_reports(project_id, items):
     no Sentinel can take the kind (it never runs on this server: ``sentinel_dispatch.NEVER_LOCAL``)."""
     from agentapi import probe_dispatch
     from dashboard.models import Project
-    from reNgine.resources import ScannerUnavailable
+    from cvengine.resources import ScannerUnavailable
     gap = min(60.0, max(0.2, slow_web.host_gap(), slow_web.global_gap()))
     try:
         got = probe_dispatch.try_vhosts(Project.objects.get(pk=project_id), items, gap)
@@ -433,7 +433,7 @@ def sweep(project_id, vet_ip=None, stop=None):
     reason when nothing ran)."""
     from cveFeed import activity, exclusions, fullscan, ledger
     from cveFeed.archive_rediscovery import archived_names
-    from reNgine import resources
+    from cvengine import resources
     summary = {'ips': 0, 'asked': 0, 'distinct': 0, 'added': 0, 'challenged': 0, 'default_site': 0, 'same_app': 0, 'no_answer': 0, 'out_of_scope': 0}
     if not enabled():
         return {**summary, 'skipped': 'virtual host discovery is turned off (CVENGINE_VHOST=0)'}

@@ -1,5 +1,5 @@
 """A celery app of its own for ``tests/test_gevent_worker_e2e.py``: started as a real ``celery worker --pool=gevent --autoscale=N,1`` subprocess
-with the worker settings ``reNgine.celery`` uses (passed in the environment by the test) and what importing ``reNgine.celery`` sets up, so the
+with the worker settings ``cvengine.celery`` uses (passed in the environment by the test) and what importing ``cvengine.celery`` sets up, so the
 consumer, its QoS (prefetch) and the broker connection are celery's and kombu's own, as in a CVEngine worker. Its one task is acks_late, like ``run_bbot_discovery`` and ``run_internal_scan``, and counts how many run at once."""
 import os
 import time
@@ -20,9 +20,9 @@ app.conf.update(
 )
 if os.environ.get('E2E_AUTOSCALER'):
     app.conf.worker_autoscaler = os.environ['E2E_AUTOSCALER']
-# Every CVEngine worker runs with what importing reNgine.celery sets up besides the worker settings above (``celery -A reNgine``), such as
-# reNgine/broker_acks.py's guard of kombu's acks
-import reNgine.celery  # noqa: F401
+# Every CVEngine worker runs with what importing cvengine.celery sets up besides the worker settings above (``celery -A cvengine``), such as
+# cvengine/broker_acks.py's guard of kombu's acks
+import cvengine.celery  # noqa: F401
 
 counter = redis.Redis.from_url(BROKER)
 ENTER = counter.register_script("local n = redis.call('incr', KEYS[1]) if n > tonumber(redis.call('get', KEYS[2]) or '0') then "

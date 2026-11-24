@@ -221,7 +221,7 @@ def run_page(run_id=None, *, resolver=None, tcp_probe=None):
     rows = list(HostState.objects.filter(pk__gt=run.cursor_hoststate_id, archived_at__isnull=False, archived_by_user=False)
                 .select_related('domain', 'project').order_by('pk')[:PAGE])
     if (resolver is None or tcp_probe is None) and rows:
-        from reNgine.resources import ScannerUnavailable
+        from cvengine.resources import ScannerUnavailable
         try:
             reads = Reads(rows, dns=resolver is None, tcp=tcp_probe is None)
         except ScannerUnavailable as exc:  # no Sentinel can take the reads and they never run here: nothing was asked, the page waits for the next run

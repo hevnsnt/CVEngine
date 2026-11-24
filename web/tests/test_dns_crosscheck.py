@@ -11,7 +11,7 @@ from agentapi import address_guard, dns_crosscheck, probe_dispatch, services, se
 from agentapi import sentinel_dispatch as dispatch
 from agentapi.models import Agent, DnsReading, SentinelTask
 from cveFeed.models import AgentActivity
-from reNgine.resources import AddressExcluded
+from cvengine.resources import AddressExcluded
 from startScan.models import IpAddress, Subdomain
 from targetApp.models import Domain
 from tests.test_address_guard import IN, OUT, World

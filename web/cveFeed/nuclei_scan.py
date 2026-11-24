@@ -280,9 +280,9 @@ def _run_nuclei(scan_id, stream, tags=None, targets=None, severities=None, servi
     ``severities`` narrows what is reported."""
     from cveFeed import activity, ledger, nuclei_fp, template_gates
     from cveFeed.models import DiscoveryEvent
-    from reNgine.resources import ScannerUnavailable
-    from reNgine.definitions import NUCLEI_SEVERITY_MAP
-    from reNgine.tasks import parse_nuclei_result, save_vulnerability
+    from cvengine.resources import ScannerUnavailable
+    from cvengine.definitions import NUCLEI_SEVERITY_MAP
+    from cvengine.tasks import parse_nuclei_result, save_vulnerability
     from startScan.models import ScanHistory, Subdomain
 
     scan = ScanHistory.objects.select_related('domain').get(pk=scan_id)
@@ -598,7 +598,7 @@ def run_light_nuclei(scan_id, stream, force=False):
     and the AI see them. Hosts this project's light pass covered inside the TTL are not scanned again: they take the
     technologies recorded then. Returns ``{'targets', 'technologies', 'hosts', 'techs': {host: [names]}}``."""
     from cveFeed import activity, ledger
-    from reNgine.resources import ScannerUnavailable
+    from cvengine.resources import ScannerUnavailable
     from startScan.models import ScanHistory, Subdomain
     scan = ScanHistory.objects.select_related('domain').get(pk=scan_id)
     domain, project = scan.domain, scan.domain.project_id

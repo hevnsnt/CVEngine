@@ -6,7 +6,7 @@
 #   ./scripts/rotate-secrets.sh --keep-django-secret    leave web/secret as it is, so nobody is signed out
 # What it rotates: the database owner's password (POSTGRES_PASSWORD), the password of the role the server runs as (CVENGINE_DB_APP_PASSWORD,
 # when the installation has that role), the Redis password (REDIS_PASSWORD), the key that encrypts stored secrets (CVENGINE_FIELD_KEY) and the
-# Django secret (web/secret, or RENGINE_SECRET_KEY when the env file sets it). In order:
+# Django secret (web/secret, or CVENGINE_SECRET_KEY when the env file sets it). In order:
 #   1. backs up .env, the Compose env file and web/secret into backups/keys-<time> (mode 0700) and dumps the database into the dump folder
 #      (scripts/db-backup-daily.sh, backups/db by default): two folders, so the old keys and the dump they decrypt are never in one place;
 #   2. writes the new values to .env and the Compose env file (the old field key goes to CVENGINE_FIELD_KEY_PREVIOUS, which only decrypts);
@@ -24,7 +24,7 @@
 set -Eeuo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-ROTATED=(POSTGRES_PASSWORD REDIS_PASSWORD CVENGINE_DB_APP_PASSWORD CVENGINE_FIELD_KEY CVENGINE_FIELD_KEY_PREVIOUS RENGINE_SECRET_KEY)
+ROTATED=(POSTGRES_PASSWORD REDIS_PASSWORD CVENGINE_DB_APP_PASSWORD CVENGINE_FIELD_KEY CVENGINE_FIELD_KEY_PREVIOUS CVENGINE_SECRET_KEY)
 dry_run=0 assume_yes=0 keep_secret=0
 args=("$@")
 while (( $# )); do
@@ -123,7 +123,7 @@ if ! grep -qE '^CVENGINE_DB_APP_USER=[[:space:]]*$' "$EFFECTIVE" && [[ -n $(valu
     [[ $app_user =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "CVENGINE_DB_APP_USER '$app_user' is not a plain role name."
 fi
 secret_in_env=''
-for file in "${ENV_FILES[@]}"; do has_line RENGINE_SECRET_KEY "$file" && secret_in_env="${secret_in_env:+$secret_in_env }$file"; done
+for file in "${ENV_FILES[@]}"; do has_line CVENGINE_SECRET_KEY "$file" && secret_in_env="${secret_in_env:+$secret_in_env }$file"; done
 running=$(compose ps --status running --services 2>/dev/null || true)
 is_running() { grep -qx "$1" <<<"$running"; }
 first=(redis web celery celery-beat)
@@ -299,7 +299,7 @@ phase='the second recreate'
 for file in "${ENV_FILES[@]}"; do drop_line CVENGINE_FIELD_KEY_PREVIOUS "$file"; done
 if (( ! keep_secret )); then
     if [[ -n $secret_in_env ]]; then
-        for file in $secret_in_env; do set_value RENGINE_SECRET_KEY "$new_secret" "$file"; done
+        for file in $secret_in_env; do set_value CVENGINE_SECRET_KEY "$new_secret" "$file"; done
     else
         (umask 077; printf '%s\n' "$new_secret" > web/secret.rotating)
         chmod 600 web/secret.rotating

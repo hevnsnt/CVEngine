@@ -51,10 +51,10 @@ def is_reserved_project(*values):
 # so only superusers may open it. Per-project settings below need the admin role.
 SUPERUSER_ONLY = re.compile(
     r'^/(admin/|cve/(api/)?(setup|settings|welcome)(/|$)|[^/]+/admin_interface|'
-    r'scanEngine/[^/]+/(tool_settings|api_vault|tool_arsenal|ai_settings|llm_toolkit|rengine_settings|'
+    r'scanEngine/[^/]+/(tool_settings|api_vault|tool_arsenal|ai_settings|llm_toolkit|'
     r'notification_settings|proxy_settings|report_settings|hackerone_settings|add|delete|update|wordlist|interesting|testHackerone))')
 # Per-project settings that need the admin role (none yet: notification, proxy and report
-# settings are global singletons in reNgine, so they are instance-wide above).
+# settings are global singletons in the inherited code, so they are instance-wide above).
 ADMIN_ONLY = re.compile(r'^/(?!)')
 # Bug bounty workflow: the program catalogue and report pages (/cve/bounty, /cve/api/bounty).
 # App Admins always have it; any other user only after an App Admin authorized that user (UserProfile.bugbounty_enabled,
@@ -140,7 +140,7 @@ GLOBAL_ROLE_FOR = {ADMIN: 'sys_admin', PENTESTER: 'penetration_tester', USER: 'p
 
 
 def sync_global_role(user):
-    """Keep reNgine's legacy global role equal to the user's highest tenancy role.
+    """Keep the inherited legacy global role equal to the user's highest tenancy role.
 
     The legacy decorators check that global role; tenancy's per-project rules
     (middleware) then tighten it for the project actually being accessed.

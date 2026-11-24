@@ -604,7 +604,7 @@ def execute_batch(batch_id, dispatch=None):
     from cveFeed.bounty_gate import Gate
     from cveFeed.models import PlannerBatch
     from cveFeed.scan_control import pause_requested
-    from reNgine.resources import AddressExcluded, ScannerUnavailable
+    from cvengine.resources import AddressExcluded, ScannerUnavailable
     now = timezone.now()
     if not PlannerBatch.objects.filter(pk=batch_id, status='queued').update(status='running', started_at=now):
         return {'status': 'ignored'}

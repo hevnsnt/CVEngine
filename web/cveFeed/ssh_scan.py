@@ -182,7 +182,7 @@ def run_for_scan(scan_id, force=False, dispatch=None):
     those endpoints stay due and the stage waits (nothing runs on this server)."""
     from agentapi import sentinel_dispatch
     from cveFeed import activity
-    from reNgine.resources import ScannerUnavailable
+    from cvengine.resources import ScannerUnavailable
     from startScan.models import ScanHistory
     scan = ScanHistory.objects.select_related('domain__project').get(pk=scan_id)
     project = scan.domain.project
@@ -242,7 +242,7 @@ def run_for_hosts(project, host_names, keys=None, dispatch=None, priority=1):
     endpoints the planner chose; what is not due (a fresh ledger row, a changed banner aside) is not sent. ``dispatch(project, chunk)`` replaces the
     Sentinel call in tests. Returns the summary of ``run_for_scan``; raises ``ScannerUnavailable`` as it does, after filing the answered endpoints."""
     from agentapi import probe_dispatch, sentinel_dispatch
-    from reNgine.resources import ScannerUnavailable
+    from cvengine.resources import ScannerUnavailable
     summary = {'endpoints': 0, 'inspected': 0, 'incomplete': 0, 'findings': 0, 'waiting': 0}
     if not enabled():
         return {**summary, 'skipped': 'disabled'}
@@ -349,7 +349,7 @@ def _store_banner(sub, port, row):
 def _file_finding(scan, sub, address, port, row):
     """The one finding of the kind: the host key is on the badkeys blocklist. High severity, decided here. One row per host name and endpoint: a rescan
     updates it."""
-    from reNgine.tasks import save_vulnerability
+    from cvengine.tasks import save_vulnerability
     proof = '; '.join(f"{h['id']}{(' ' + h['proof']) if h['proof'] else ''}" for h in row['check_hits'][:5])
     if not proof:
         proof = '; '.join(o['evidence'] for o in row['observations'] if o['id'] == HIT_ID and o['verified'])[:300]

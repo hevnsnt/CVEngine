@@ -349,7 +349,7 @@ def queue_scans(link, pending, now):
 def sync_link(link_id, scan=True):
     """Run one sync of a link. Returns a summary dict; never raises for a Tailscale problem (it is recorded on the link)."""
     from cveFeed.models import TailscaleLink
-    from reNgine import resources
+    from cvengine import resources
     link = TailscaleLink.objects.select_related('project', 'anchor_domain').filter(pk=link_id).first()
     if link is None:
         return {'status': 'missing'}

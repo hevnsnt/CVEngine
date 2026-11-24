@@ -13,7 +13,7 @@ from django.utils import timezone
 
 from cveFeed import detection
 from cveFeed.models import CVEDetection, CVEEntry
-from reNgine import ai_prompts
+from cvengine import ai_prompts
 
 logger = logging.getLogger(__name__)
 
@@ -290,7 +290,7 @@ def input_hash(cve):
 def user_parts(cve, current=None, guidance=''):
     """The user message of one detection question, as the parts of an AI job (cveFeed.ai_jobs): what cvENGINE says itself as text, the
     CVE feed's data, the current record and an administrator's guidance fenced by the AI reviewer container."""
-    from reNgine.ai_providers import clean_text
+    from cvengine.ai_providers import clean_text
     from cveFeed.correlation import clean_affected, prepared_ranges
     affected = []
     for item in clean_affected(cve.affected)[:10]:
@@ -454,7 +454,7 @@ def job_answer(job, text):
         if job.attempt == 1:
             # sent back once with why the validator refused it (as a triage answer is); the second answer is the one that counts
             from cveFeed import ai_jobs
-            from reNgine.ai_providers import repair_parts
+            from cvengine.ai_providers import repair_parts
             return ai_jobs.Retry('cve_detection', repair_parts(job.packet.get('parts') or [], text, '; '.join(problems[:5]) or 'not a usable detection record'))
         # an answer outside the schema is a failed ask, not an answer: counted, backed off and asked again later (``_record_failure``). It used to
         # set ``ai_model``, which ``due_q`` reads as "answered": the record was never asked again and counted as written.

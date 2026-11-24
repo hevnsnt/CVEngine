@@ -8,7 +8,7 @@ from django.http import FileResponse, HttpResponse, JsonResponse, StreamingHttpR
 from django.test import Client, SimpleTestCase, TestCase, override_settings
 
 from cveFeed import updater
-from reNgine.middleware import HtmlRevalidateMiddleware
+from cvengine.middleware import HtmlRevalidateMiddleware
 
 A, B = 'a' * 40, 'b' * 40
 

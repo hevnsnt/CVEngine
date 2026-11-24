@@ -1,10 +1,10 @@
 # The built-in scan engines, kept as labels (a scan records which one it was started with). Every scan runs the same fixed pipeline: the
-# reNgine engine configurations these rows held are gone. load_default_fixtures adds a missing row and never changes an existing one.
+# The inherited engine configurations these rows held are gone. load_default_fixtures adds a missing row and never changes an existing one.
 - model: scanEngine.enginetype
   pk: 1
   fields:
     engine_name: Full Scan
-    yaml_configuration: '# a label only: every scan runs the same fixed pipeline (the reNgine engine settings this held are gone)
+    yaml_configuration: '# a label only: every scan runs the same fixed pipeline (the inherited engine settings this held are gone)
 
       '
     default_engine: true
@@ -12,7 +12,7 @@
   pk: 2
   fields:
     engine_name: Subdomain Scan
-    yaml_configuration: '# a label only: every scan runs the same fixed pipeline (the reNgine engine settings this held are gone)
+    yaml_configuration: '# a label only: every scan runs the same fixed pipeline (the inherited engine settings this held are gone)
 
       '
     default_engine: true
@@ -20,7 +20,7 @@
   pk: 3
   fields:
     engine_name: OSINT
-    yaml_configuration: '# a label only: every scan runs the same fixed pipeline (the reNgine engine settings this held are gone)
+    yaml_configuration: '# a label only: every scan runs the same fixed pipeline (the inherited engine settings this held are gone)
 
       '
     default_engine: true
@@ -28,7 +28,7 @@
   pk: 4
   fields:
     engine_name: Vulnerability Scan
-    yaml_configuration: '# a label only: every scan runs the same fixed pipeline (the reNgine engine settings this held are gone)
+    yaml_configuration: '# a label only: every scan runs the same fixed pipeline (the inherited engine settings this held are gone)
 
       '
     default_engine: true
@@ -36,7 +36,7 @@
   pk: 5
   fields:
     engine_name: Port Scan
-    yaml_configuration: '# a label only: every scan runs the same fixed pipeline (the reNgine engine settings this held are gone)
+    yaml_configuration: '# a label only: every scan runs the same fixed pipeline (the inherited engine settings this held are gone)
 
       '
     default_engine: true
@@ -44,7 +44,7 @@
   pk: 6
   fields:
     engine_name: CVEngine Recommended
-    yaml_configuration: '# a label only: every scan runs the same fixed pipeline (the reNgine engine settings this held are gone)
+    yaml_configuration: '# a label only: every scan runs the same fixed pipeline (the inherited engine settings this held are gone)
 
       '
     default_engine: true

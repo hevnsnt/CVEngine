@@ -4,7 +4,7 @@ or any text from a scanned host, so the same dictionary can be shown on the page
 Every probe is wrapped: one that fails leaves its numbers out (None), and a rule that needs a number it does not have never raises the setting
 (``cveFeed.autotune_policy``). What is read:
 
-* memory: per worker container, the share of memory free (the lowest over the interval, from the 30 second history ``reNgine.resources``
+* memory: per worker container, the share of memory free (the lowest over the interval, from the 30 second history ``cvengine.resources``
   keeps) and the smallest container's total (no scanner runs on the server, so nothing per scanner kind);
 * the database: client connections in use and ``max_connections``;
 * the CPU: the share of the container's CPU limit (cgroup v2 ``cpu.max`` or v1 CFS quota) it used since the last measurement, from the
@@ -41,9 +41,9 @@ def _probe(name, fn, default=None):
 
 
 def memory(now, interval=INTERVAL_SECONDS):
-    """The worker containers' memory: the lowest share free over the interval (the 30 second history ``reNgine.resources.report_state`` keeps),
+    """The worker containers' memory: the lowest share free over the interval (the 30 second history ``cvengine.resources.report_state`` keeps),
     the smallest container's total, and the budget the sizing rules read (three quarters of it). Nothing per scanner kind: no scanner runs here."""
-    from reNgine import resources
+    from cvengine import resources
     out = {'reported': False, 'free_frac': None, 'budget_mb': None, 'total_mb': None}
     store = resources.get_store()
     if not isinstance(store, resources.RedisStore):
@@ -154,7 +154,7 @@ def load(now=None, root=CGROUP, store=None):
 
 
 def _redis():
-    from reNgine import resources
+    from cvengine import resources
     return resources.redis_client()
 
 
@@ -167,8 +167,8 @@ def size():
     from cveFeed.models import HostState
     from targetApp.models import Domain
     out = {'hosts': HostState.objects.count(), 'targets': Domain.objects.exclude(project=None).count(), 'disk_free_percent': None}
-    path = getattr(settings, 'RENGINE_RESULTS', None)
-    path = path if path and os.path.isdir(path) else getattr(settings, 'RENGINE_HOME', '/')
+    path = getattr(settings, 'CVENGINE_RESULTS', None)
+    path = path if path and os.path.isdir(path) else getattr(settings, 'CVENGINE_HOME', '/')
     usage = shutil.disk_usage(path)
     if usage.total:
         out['disk_free_percent'] = round(usage.free * 100 / usage.total, 1)
@@ -194,7 +194,7 @@ def _discovery_queue():
 
 
 def _discovery_active(names):
-    from reNgine.celery import app
+    from cvengine.celery import app
     active = app.control.inspect(timeout=1.5, destination=names).active() or {}
     if not active:
         return None

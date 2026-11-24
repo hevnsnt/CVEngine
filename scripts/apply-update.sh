@@ -134,7 +134,7 @@ log_once() {
   log "$*"
 }
 
-# The maintenance page (see config/nginx/rengine.conf): the proxy answers 503 with web/static/cve/maintenance.html, from its own container, for as
+# The maintenance page (see config/nginx/cvengine.conf): the proxy answers 503 with web/static/cve/maintenance.html, from its own container, for as
 # long as config/nginx/state/maintenance exists, and says "the update did not finish" when config/nginx/state/maintenance-failed exists too.
 # Set BEFORE anything the running containers can read is changed, because ./web is a bind mount: the old image would run the new code. A
 # flag that cannot be written stops the update before anything changes (a page that cannot be shown is not a safe window to change files in).

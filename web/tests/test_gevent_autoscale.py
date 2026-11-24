@@ -1,6 +1,6 @@
 """The discovery worker (and every other worker) runs a gevent pool under ``--autoscale=N,1``. Celery's own autoscaler never let such a worker run a
 second task while the first one ran: a discovery run or a host assessment waiting on Sentinels held the only slot for hours while hundreds of
-messages waited (the "Sentinels idle, 360 assessments pending" report). ``reNgine.gevent_autoscale.GeventAutoscaler`` is the fix; these tests drive
+messages waited (the "Sentinels idle, 360 assessments pending" report). ``cvengine.gevent_autoscale.GeventAutoscaler`` is the fix; these tests drive
 celery's real gevent ``TaskPool`` and gevent's real ``Pool``, with the worker's reserved requests stood in for."""
 import unittest
 from unittest import mock
@@ -11,7 +11,7 @@ from celery.worker import autoscale as celery_autoscale
 from celery.worker.autoscale import Autoscaler
 from gevent.event import Event
 
-from reNgine.gevent_autoscale import GeventAutoscaler
+from cvengine.gevent_autoscale import GeventAutoscaler
 
 
 class Harness:
@@ -156,8 +156,8 @@ class GeventAutoscalerTests(unittest.TestCase):
 class WorkerConfigurationTests(unittest.TestCase):
 
     def test_every_worker_of_the_app_uses_it(self):
-        from reNgine.celery import app
-        self.assertEqual(app.conf.worker_autoscaler, 'reNgine.gevent_autoscale:GeventAutoscaler')
+        from cvengine.celery import app
+        self.assertEqual(app.conf.worker_autoscaler, 'cvengine.gevent_autoscale:GeventAutoscaler')
         from celery.utils.imports import symbol_by_name
         self.assertIs(symbol_by_name(app.conf.worker_autoscaler), GeventAutoscaler)
         self.assertFalse(app.conf.worker_enable_prefetch_count_reduction)  # its restore reads the greenlets running (test_gevent_worker_e2e)

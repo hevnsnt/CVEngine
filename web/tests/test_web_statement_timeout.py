@@ -32,7 +32,7 @@ class SettingTests(SimpleTestCase):
         import importlib
         import os
 
-        from reNgine import settings
+        from cvengine import settings
         with mock.patch.dict(os.environ, {'CVENGINE_WEB_STATEMENT_TIMEOUT_MS': '30000'}):
             importlib.reload(settings)
             self.assertIn('-c statement_timeout=30000', settings.DATABASES['default']['OPTIONS']['options'])

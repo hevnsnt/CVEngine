@@ -72,7 +72,7 @@ class EntrypointTests(unittest.TestCase):
         directory = os.path.join(self.base, 'first')
         out = self.run_script(directory)
         self.assertIn('cert-result: issued', out)
-        pem = os.path.join(directory, 'rengine.pem')
+        pem = os.path.join(directory, 'cvengine.pem')
         self.assertEqual(self.lifetime_days(pem), 396)  # valid for 397 days from a moment ago: 396 whole days remain
         self.assertEqual(openssl('verify', '-CAfile', os.path.join(directory, 'ca.crt'), pem).returncode, 0)
         san = openssl('x509', '-in', pem, '-noout', '-ext', 'subjectAltName').stdout
@@ -82,10 +82,10 @@ class EntrypointTests(unittest.TestCase):
 
     def test_a_ten_year_certificate_is_reissued_once_with_the_same_key_authority_names_and_file(self):
         directory = self.fresh_copy()
-        pem, key = os.path.join(directory, 'rengine.pem'), os.path.join(directory, 'rengine_rsa.key')
+        pem, key = os.path.join(directory, 'cvengine.pem'), os.path.join(directory, 'cvengine_rsa.key')
         self.assertGreater(self.lifetime_days(pem), 3000)
         before = {'key': sha(key), 'ca': sha(os.path.join(directory, 'ca.crt')), 'cakey': sha(os.path.join(directory, 'ca.key')),
-                  'pub': self.pubkey(pem), 'inode': os.stat(pem).st_ino, 'chain_inode': os.stat(os.path.join(directory, 'rengine_chain.pem')).st_ino,
+                  'pub': self.pubkey(pem), 'inode': os.stat(pem).st_ino, 'chain_inode': os.stat(os.path.join(directory, 'cvengine_chain.pem')).st_ino,
                   'san': openssl('x509', '-in', pem, '-noout', '-ext', 'subjectAltName').stdout}
         out = self.run_script(directory)
         self.assertIn('cert-result: issued', out)
@@ -99,14 +99,14 @@ class EntrypointTests(unittest.TestCase):
         self.assertEqual(openssl('verify', '-CAfile', os.path.join(directory, 'ca.crt'), pem).returncode, 0)
         # in place: the proxy's bind mounts follow the file, so a new file would stay invisible to it
         self.assertEqual(os.stat(pem).st_ino, before['inode'])
-        self.assertEqual(os.stat(os.path.join(directory, 'rengine_chain.pem')).st_ino, before['chain_inode'])
+        self.assertEqual(os.stat(os.path.join(directory, 'cvengine_chain.pem')).st_ino, before['chain_inode'])
         again = self.run_script(directory)  # and it is now left alone
         self.assertIn('cert-result: kept', again)
 
     def test_a_certificate_with_plenty_of_time_is_left_alone(self):
         directory = self.fresh_copy()
         self.run_script(directory)  # now a 397 day one
-        pem = os.path.join(directory, 'rengine.pem')
+        pem = os.path.join(directory, 'cvengine.pem')
         before = sha(pem)
         out = self.run_script(directory)
         self.assertIn('cert-result: kept', out)
@@ -115,7 +115,7 @@ class EntrypointTests(unittest.TestCase):
     def test_a_certificate_with_fewer_than_30_days_left_is_renewed_and_one_with_more_is_not(self):
         directory = self.fresh_copy()
         self.run_script(directory, CERT_VALID_DAYS='29')
-        pem = os.path.join(directory, 'rengine.pem')
+        pem = os.path.join(directory, 'cvengine.pem')
         self.assertEqual(self.lifetime_days(pem), 28)
         out = self.run_script(directory)
         self.assertIn('cert-result: issued', out)
@@ -123,14 +123,14 @@ class EntrypointTests(unittest.TestCase):
         self.assertEqual(self.lifetime_days(pem), 396)
         again = self.fresh_copy()
         self.run_script(again, CERT_VALID_DAYS='60')
-        before = sha(os.path.join(again, 'rengine.pem'))
+        before = sha(os.path.join(again, 'cvengine.pem'))
         self.assertIn('cert-result: kept', self.run_script(again))
-        self.assertEqual(sha(os.path.join(again, 'rengine.pem')), before)
+        self.assertEqual(sha(os.path.join(again, 'cvengine.pem')), before)
 
     def test_new_names_get_a_new_certificate_for_the_same_key(self):
         directory = self.fresh_copy()
         self.run_script(directory)
-        pem = os.path.join(directory, 'rengine.pem')
+        pem = os.path.join(directory, 'cvengine.pem')
         pub = self.pubkey(pem)
         out = self.run_script(directory, CERT_EXTRA_SANS='scan.example.test')
         self.assertIn('it does not cover scan.example.test', out)
@@ -144,26 +144,26 @@ class EntrypointTests(unittest.TestCase):
         self.run_script(directory)
         other = os.path.join(self.base, 'other-authority')
         self.run_script(other)  # a second authority
-        shutil.copyfile(os.path.join(other, 'rengine.pem'), os.path.join(directory, 'rengine.pem'))
+        shutil.copyfile(os.path.join(other, 'cvengine.pem'), os.path.join(directory, 'cvengine.pem'))
         out = self.run_script(directory)
         self.assertIn('not signed by this authority', out)
-        self.assertEqual(openssl('verify', '-CAfile', os.path.join(directory, 'ca.crt'), os.path.join(directory, 'rengine.pem')).returncode, 0)
+        self.assertEqual(openssl('verify', '-CAfile', os.path.join(directory, 'ca.crt'), os.path.join(directory, 'cvengine.pem')).returncode, 0)
 
     def test_renewing_only_ours_never_replaces_a_certificate_another_authority_issued_and_never_creates_an_authority(self):
         directory = self.fresh_copy()
         other = os.path.join(self.base, 'other-authority-by-name')
         self.run_script(other, AUTHORITY_NAME='Some Public CA')
-        pem = os.path.join(directory, 'rengine.pem')
-        shutil.copyfile(os.path.join(other, 'rengine.pem'), pem)  # as a Let's Encrypt certificate someone installed would be
+        pem = os.path.join(directory, 'cvengine.pem')
+        shutil.copyfile(os.path.join(other, 'cvengine.pem'), pem)  # as a Let's Encrypt certificate someone installed would be
         before = {name: sha(os.path.join(directory, name)) for name in os.listdir(directory)}
         out = self.run_script(directory, CERT_ONLY_OURS='1', CERT_FORCE='1')
         self.assertIn('cert-result: external', out)
         self.assertEqual({name: sha(os.path.join(directory, name)) for name in os.listdir(directory)}, before)
         bare = os.path.join(self.base, 'bare')
         os.makedirs(bare)
-        shutil.copyfile(pem, os.path.join(bare, 'rengine.pem'))
+        shutil.copyfile(pem, os.path.join(bare, 'cvengine.pem'))
         self.assertIn('cert-result: external', self.run_script(bare, CERT_ONLY_OURS='1'))
-        self.assertEqual(os.listdir(bare), ['rengine.pem'])  # no authority was made
+        self.assertEqual(os.listdir(bare), ['cvengine.pem'])  # no authority was made
         # asked for explicitly (make certs, the installer) it replaces it, as it always did
         self.assertIn('cert-result: issued', self.run_script(directory))
 
@@ -180,7 +180,7 @@ class EntrypointTests(unittest.TestCase):
     def test_a_failed_signature_leaves_the_certificate_in_place(self):
         directory = self.fresh_copy()
         self.run_script(directory)
-        pem = os.path.join(directory, 'rengine.pem')
+        pem = os.path.join(directory, 'cvengine.pem')
         before = sha(pem)
         done = subprocess.run(['sh', str(ENTRYPOINT)], capture_output=True, text=True,
                               env={**os.environ, **self.ENV, 'CERT_DIR': directory, 'CERT_FORCE': '1', 'AUTHORITY_PASSWORD': 'wrong password'})
@@ -214,7 +214,7 @@ class RenewScriptTests(unittest.TestCase):
             shutil.copy(ROOT / 'scripts' / name, self.dir / 'scripts' / name)
         (self.dir / 'web').mkdir()
         (self.dir / 'secrets' / 'certs').mkdir(parents=True)
-        (self.dir / 'secrets' / 'certs' / 'rengine.pem').write_text('x')
+        (self.dir / 'secrets' / 'certs' / 'cvengine.pem').write_text('x')
         for name in ('docker-compose.yml', 'docker-compose.setup.yml'):
             (self.dir / name).write_text('services: {}\n')
         self.stub = self.dir / 'stub'
@@ -312,7 +312,7 @@ class RenewScriptTests(unittest.TestCase):
         self.assertGreater(len(self.calls()), first)
 
     def test_an_install_without_the_bundled_authority_is_left_alone(self):
-        (self.dir / 'secrets' / 'certs' / 'rengine.pem').unlink()
+        (self.dir / 'secrets' / 'certs' / 'cvengine.pem').unlink()
         done = self.run_script()
         self.assertEqual((done.returncode, self.calls(), (self.dir / 'web' / '.cert-status.json').exists()), (0, [], False))
 

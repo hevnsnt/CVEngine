@@ -136,7 +136,7 @@ class SettingsApiTests(TestCase):
 	@mock.patch('socket.getaddrinfo', side_effect=socket.gaierror)
 	def test_model_listing_does_not_send_the_stored_key_to_another_address(self, _lookup):
 		send(self.c, 'PUT', 'ai', {'provider': 'openai', 'base_url': 'https://llm.example.com/v1', 'api_key': 'sk-keep-me'})
-		with mock.patch('reNgine.ai_providers.get_provider') as get_provider:
+		with mock.patch('cvengine.ai_providers.get_provider') as get_provider:
 			get_provider.return_value.list_models.return_value = []
 			send(self.c, 'POST', 'ai/models', {'provider': 'openai', 'base_url': 'https://evil.example.net/v1'})
 			self.assertIsNone(get_provider.call_args.kwargs['api_key'])
@@ -145,7 +145,7 @@ class SettingsApiTests(TestCase):
 
 	def test_model_listing_refuses_metadata_addresses_like_saving_does(self):
 		from unittest import mock
-		with mock.patch('reNgine.ai_providers.get_provider') as get_provider:
+		with mock.patch('cvengine.ai_providers.get_provider') as get_provider:
 			for url in ('http://169.254.169.254/latest', 'http://2852039166/', 'http://metadata.google.internal/'):
 				status, _ = send(self.c, 'POST', 'ai/models', {'provider': 'openai', 'base_url': url})
 				self.assertEqual(status, 400, url)
@@ -213,7 +213,7 @@ class SettingsApiTests(TestCase):
 		self.assertEqual(pick_engine().id, EngineType.objects.filter(default_engine=True).order_by('id').first().id)  # no recommended one: the lowest id, always
 
 	def test_ip_allowlist_requires_an_entry_and_your_own_ip_before_enabling(self):
-		from reNgine import ip_allowlist as ipa
+		from cvengine import ip_allowlist as ipa
 		self.addCleanup(ipa.invalidate_cache)
 		self.assertEqual(send(self.c, 'PUT', 'ip_allowlist', {'enabled': True})[0], 400)  # no entries yet
 		status, e = send(self.c, 'POST', 'ip_allowlist/entries', {'cidr': '10.0.0.0/8', 'label': 'office'})
@@ -227,7 +227,7 @@ class SettingsApiTests(TestCase):
 		self.assertEqual((status, data['enabled']), (200, True))
 
 	def test_ip_allowlist_rejects_bad_cidr_and_lists_entries(self):
-		from reNgine import ip_allowlist as ipa
+		from cvengine import ip_allowlist as ipa
 		self.addCleanup(ipa.invalidate_cache)
 		self.assertEqual(send(self.c, 'POST', 'ip_allowlist/entries', {'cidr': 'not-an-ip'})[0], 400)
 		send(self.c, 'POST', 'ip_allowlist/entries', {'cidr': '203.0.113.4', 'label': 'vpn'})
@@ -236,7 +236,7 @@ class SettingsApiTests(TestCase):
 		self.assertEqual(data['your_ip'], '127.0.0.1')
 
 	def test_ip_allowlist_delete_guard_prevents_self_lockout(self):
-		from reNgine import ip_allowlist as ipa
+		from cvengine import ip_allowlist as ipa
 		self.addCleanup(ipa.invalidate_cache)
 		send(self.c, 'POST', 'ip_allowlist/entries', {'cidr': '127.0.0.1'})
 		send(self.c, 'PUT', 'ip_allowlist', {'enabled': True})

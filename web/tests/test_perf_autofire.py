@@ -130,7 +130,7 @@ class MemoisedConfirmTests(TestCase):
 	def test_no_provider_stores_nothing(self):
 		self._host('a.memo.test')
 		self._correlate()
-		with mock.patch('reNgine.ai_settings.get_configured_provider', return_value=None):
+		with mock.patch('cvengine.ai_settings.get_configured_provider', return_value=None):
 			confirm_matches(list(CVEMatch.objects.select_related('subdomain')), self.cve)
 		self.assertEqual(MatchVerdict.objects.count(), 0)
 

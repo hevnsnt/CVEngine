@@ -100,7 +100,7 @@ class ComposeLayoutTests(SimpleTestCase):
                 self.assertNotIn('/usr/src/app', mounts, 'the image runs its own copy of the source')
                 self.assertFalse([t for t, (s, _) in mounts.items() if s == './web' and t != HOST], 'web/ is mounted at one path only')
                 self.assertEqual(env(self.services[name]).get('CVENGINE_HOST_DIR'), HOST)
-                self.assertEqual(env(self.services[name]).get('RENGINE_HOME'), HOST)
+                self.assertEqual(env(self.services[name]).get('CVENGINE_HOME'), HOST)
         self.assertEqual(volumes(self.services['migrate'])[HOST], ('./web', True))
         self.assertEqual(volumes(self.services['celery-beat'])[HOST], ('./web', True))
         # web and celery write their update requests there (Settings > Updates, the watchdog, the scanner plan); the folder's sticky bit keeps

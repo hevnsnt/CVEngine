@@ -52,7 +52,7 @@ from agentapi.auth import SCOPE_SENTINEL, create_token
 from agentapi.models import SENTINEL_ACTIVE_STATUSES, Agent, SentinelEnrollment, SentinelTask
 from agentapi.services import ApiError, AssetFilter
 from dashboard.models import AuditLog
-from reNgine.state_machines import SENTINEL_TASK
+from cvengine.state_machines import SENTINEL_TASK
 from tenancy import audit, roles
 
 logger = logging.getLogger(__name__)
@@ -223,7 +223,7 @@ def _limit(token, action, limit=None):
 
 def limit_address(address, action='bootstrap'):
     """Count one call of ``action`` against the caller's address (``agent_broker._hit``: every call counts, a refused or failed one too), 429 with ``Retry-After`` past it.
-    For the call that has no token to count against. ``address`` is ``reNgine.client_ip.client_ip`` (behind a trusted proxy, the real client)."""
+    For the call that has no token to count against. ``address`` is ``cvengine.client_ip.client_ip`` (behind a trusted proxy, the real client)."""
     limit, window = RATES[action]
     name = f'agentapi:{action}:addr:{address or "unknown"}'
     if not broker._hit(name, limit, window):
@@ -2485,7 +2485,7 @@ def _stored_credential(credential_id, task, now):
 
 def _credential_payload(credential_id, project_id, now):
     """The decrypted credential of one task, in the shape the authenticated scanner pass consumes: the header
-    pairs and the cookie, plus where they may be sent. Decrypted by the encrypted field itself (``reNgine.crypto_fields``, the field-key ring)."""
+    pairs and the cookie, plus where they may be sent. Decrypted by the encrypted field itself (``cvengine.crypto_fields``, the field-key ring)."""
     from cveFeed import auth_checks
     from cveFeed.models import AuthCredential
     cred = AuthCredential.objects.select_related('domain').filter(pk=credential_id, project_id=project_id).first()
@@ -3151,7 +3151,7 @@ MAX_TEMPLATE_OUTCOMES = 64  # matches sentinel_dispatch.MAX_ADDRESSES: the most 
 
 
 def _clean_hit(hit):
-    """The first result line of a host, cut to the fields ``reNgine.tasks.parse_nuclei_result``
+    """The first result line of a host, cut to the fields ``cvengine.tasks.parse_nuclei_result``
     and the validation record read. Anything else is dropped."""
     if not isinstance(hit, dict):
         return None

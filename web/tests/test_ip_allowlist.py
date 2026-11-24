@@ -2,7 +2,7 @@ from django.contrib.auth.models import User
 from django.test import Client, TestCase
 
 from dashboard.models import IpAccessControl, IpAllowlistEntry
-from reNgine import ip_allowlist as ipa
+from cvengine import ip_allowlist as ipa
 
 
 class IsAllowedTests(TestCase):

@@ -725,7 +725,7 @@ def _precheck(row, ctx):
 
 
 def _kill_switch():
-    from reNgine import resources
+    from cvengine import resources
     return resources.global_pause_requested(fail_closed=True)
 
 
@@ -776,7 +776,7 @@ def process(rows, summary=None):
     pages queued (``ScannerUnavailable``): nothing is recorded for them. Returns the summary; ``summary['waiting']`` lists those projects."""
     from agentapi import sentinel_dispatch
     from cveFeed.models import HostScreenshot
-    from reNgine.resources import ScanAborted, ScannerUnavailable
+    from cvengine.resources import ScanAborted, ScannerUnavailable
     summary = summary if summary is not None else {}
     for key in ('captured', 'failed', 'blocked', 'dropped'):
         summary.setdefault(key, 0)
@@ -824,7 +824,7 @@ def drain(budget_seconds=DRAIN_SECONDS, now_fn=time.monotonic, batch=BATCH_PAGES
     """Hand the queued pages to Sentinels, a batch at a time, until none are left or the budget is spent (then ask for another drain). One at a time: a
     second call while one runs returns at once, and the running one picks up what was queued meanwhile. A project that has no scanner for the kind is
     left alone for the rest of this drain and its pages stay queued."""
-    from reNgine import resources
+    from cvengine import resources
     summary = {'captured': 0, 'failed': 0, 'blocked': 0, 'dropped': 0}
     reason = unavailable_reason()
     if reason:

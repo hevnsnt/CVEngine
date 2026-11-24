@@ -38,23 +38,23 @@ fill() {
 }
 
 # The Compose project name of a NEW installation (an existing .env keeps its own: volumes, networks and the update scripts are named by it). The example
-# says "rengine". A name given for this run (COMPOSE_PROJECT_NAME=... ./install.sh) is used; else, when another checkout on this host already runs the
-# project "rengine", this one gets a name of its own made from its directory, so a second stack never shares the first one's volumes and network.
-if [ "$created" = 1 ] && grep -q '^COMPOSE_PROJECT_NAME=rengine$' .env; then
+# says "cvengine". A name given for this run (COMPOSE_PROJECT_NAME=... ./install.sh) is used; else, when another checkout on this host already runs the
+# project "cvengine", this one gets a name of its own made from its directory, so a second stack never shares the first one's volumes and network.
+if [ "$created" = 1 ] && grep -q '^COMPOSE_PROJECT_NAME=cvengine$' .env; then
   chosen=${COMPOSE_PROJECT_NAME:-}
   if ! [[ $chosen =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
     chosen=''
     if command -v docker >/dev/null 2>&1; then
-      elsewhere=$(docker ps -a --filter 'label=com.docker.compose.project=rengine' --format '{{.Label "com.docker.compose.project.working_dir"}}' 2>/dev/null | grep -vxF -e "$(pwd)" -e "$(pwd -P)" | head -n 1) || elsewhere=''
+      elsewhere=$(docker ps -a --filter 'label=com.docker.compose.project=cvengine' --format '{{.Label "com.docker.compose.project.working_dir"}}' 2>/dev/null | grep -vxF -e "$(pwd)" -e "$(pwd -P)" | head -n 1) || elsewhere=''
       if [ -n "$elsewhere" ]; then
-        chosen=rengine-$(basename "$(pwd -P)" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-*//; s/-*$//' | cut -c1-30)
-        [[ $chosen =~ ^rengine-[a-z0-9][a-z0-9-]*$ ]] || chosen=rengine-$(random | tr 'A-Z' 'a-z' | head -c 6)
+        chosen=cvengine-$(basename "$(pwd -P)" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-*//; s/-*$//' | cut -c1-30)
+        [[ $chosen =~ ^cvengine-[a-z0-9][a-z0-9-]*$ ]] || chosen=cvengine-$(random | tr 'A-Z' 'a-z' | head -c 6)
       fi
     fi
   fi
-  if [ -n "$chosen" ] && [ "$chosen" != rengine ]; then
+  if [ -n "$chosen" ] && [ "$chosen" != cvengine ]; then
     set_value COMPOSE_PROJECT_NAME "$chosen"
-    echo "Compose project name: $chosen (another checkout on this host already uses \"rengine\")."
+    echo "Compose project name: $chosen (another checkout on this host already uses \"cvengine\")."
   fi
 fi
 

@@ -5,9 +5,9 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-from reNgine import ai_providers as ai
-from reNgine import ai_profiles as profiles
-from reNgine.ai_profiles import AIRuntime
+from cvengine import ai_providers as ai
+from cvengine import ai_profiles as profiles
+from cvengine.ai_profiles import AIRuntime
 
 OPENAI_OK = {'choices': [{'message': {'content': 'ok'}, 'finish_reason': 'stop'}]}
 ANTHROPIC_OK = {'content': [{'type': 'text', 'text': 'ok'}], 'stop_reason': 'end_turn'}
@@ -197,7 +197,7 @@ class ContextSettingTests(unittest.TestCase):
 
 	def test_a_prompt_that_nearly_fills_the_page_s_window_is_reported(self):
 		with mock.patch('requests.post', return_value=Reply({'message': {'content': 'ok'}, 'prompt_eval_count': 4000})), \
-				mock.patch.object(ai.logger, 'disabled', False), self.assertLogs('reNgine.ai_providers', level='WARNING') as logs:
+				mock.patch.object(ai.logger, 'disabled', False), self.assertLogs('cvengine.ai_providers', level='WARNING') as logs:
 			ai.get_provider('ollama', model='m', base_url='http://h:11434', runtime=AIRuntime(context_tokens=4096)).complete('s', 'u')
 		self.assertIn('4000 prompt tokens of a 4096 token context window', logs.output[0])
 
@@ -251,7 +251,7 @@ class ReasoningSettingTests(unittest.TestCase):
 		self.assertEqual(send('openai', AIRuntime(reasoning='default'), env=env, model='gpt-5'), send('openai', model='gpt-5'))
 
 	def test_a_model_without_the_control_is_left_alone_and_the_log_names_the_setting(self):
-		with mock.patch.object(ai.logger, 'disabled', False), self.assertLogs('reNgine.ai_providers', level='WARNING') as logs:
+		with mock.patch.object(ai.logger, 'disabled', False), self.assertLogs('cvengine.ai_providers', level='WARNING') as logs:
 			self.assertEqual(send('openai', AIRuntime(reasoning='low'), model='gpt-4o'), send('openai', model='gpt-4o'))
 		self.assertIn('the reasoning setting (low) is ignored for openai gpt-4o', logs.output[0])
 

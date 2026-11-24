@@ -27,7 +27,7 @@ import uuid
 from django.core.cache import cache
 
 from cveFeed import snapshot_cache
-from reNgine import livecache_config
+from cvengine import livecache_config
 from tenancy import scope as tenancy_scope
 
 logger = logging.getLogger(__name__)
@@ -109,7 +109,7 @@ def backlog():
     """``(own, classic)``: refreshes waiting for a slot, and messages waiting in the other queues the classic worker consumes. ``(0, 0)`` when the
     broker cannot be asked (a refresh is then not held back for want of an answer)."""
     try:
-        from reNgine.celery import app
+        from cvengine.celery import app
         with app.connection_for_read() as connection:
             client = connection.default_channel.client
             return client.llen('live_cache_queue'), sum(client.llen(q) for q in CLASSIC_QUEUES)

@@ -180,7 +180,7 @@ class ControlReadTests(Base):
         self.assertEqual(([len(t['target']['reads']) for t in fake.served], len(got)), ([10, 2], 12))
 
     def test_with_no_scanner_able_to_take_it_nothing_is_decided(self):
-        from reNgine.resources import ScannerUnavailable
+        from cvengine.resources import ScannerUnavailable
         with self.assertRaises(ScannerUnavailable):
             probe_dispatch.control_reads(self.project, None, self.URLS)
         with FakeScanner(kinds=['page_read'], mode='offline'), self.assertRaises(ScannerUnavailable):

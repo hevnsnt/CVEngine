@@ -192,7 +192,7 @@ def _draft_targets(ctx):
     if not rows or ctx.paused or not ai_jobs.provider_row():
         return []
     from agentapi import sentinel_dispatch
-    from reNgine.resources import ScannerUnavailable
+    from cvengine.resources import ScannerUnavailable
     try:
         sentinel_dispatch.nuclei_validate_ready(ctx.project.pk)  # no scanner could check a draft: the AI is not asked for one
     except ScannerUnavailable:
@@ -324,7 +324,7 @@ def _start_screenshot(ctx, target):
 
 def _start_draft(ctx, target):
     from cveFeed import templategen
-    from reNgine.resources import ScannerUnavailable
+    from cvengine.resources import ScannerUnavailable
     row = ctx.row_for(target)
     if row.kind != 'cve_match' or not row.match_id:
         raise Refused('a check is written for a CVE match')

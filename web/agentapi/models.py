@@ -179,12 +179,12 @@ class SentinelTask(models.Model):
 
     def save(self, *args, **kwargs):
         """A new task is checked against the organization's do-not-scan address list before it is written, whoever creates it: the one place a kind added
-        later cannot go around (``agentapi.address_guard``). Raises ``reNgine.resources.AddressExcluded``; nothing is stored."""
+        later cannot go around (``agentapi.address_guard``). Raises ``cvengine.resources.AddressExcluded``; nothing is stored."""
         if self._state.adding and self.project_id:
             from agentapi import address_guard
             refusal = address_guard.dispatch_refusal(self.project_id, self.kind, self.target, self.host, self.ips, scan=self.scan if self.scan_id else None)
             if refusal:
-                from reNgine.resources import AddressExcluded
+                from cvengine.resources import AddressExcluded
                 raise AddressExcluded(self.kind, refusal)
         super().save(*args, **kwargs)
 

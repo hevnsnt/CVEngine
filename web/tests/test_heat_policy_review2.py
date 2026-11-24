@@ -25,7 +25,7 @@ from agentapi import services
 from cveFeed import hot_validation, match_policy, notify, scoring, threat, triage
 from cveFeed.models import BackgroundCursor, CVEEntry, CVEMatch, Triage
 from cveFeed.threat import FIRE, HEAT_RANK, ICE, SMOKE
-from reNgine.tasks import parse_nuclei_result, save_vulnerability
+from cvengine.tasks import parse_nuclei_result, save_vulnerability
 from startScan.models import CveId, ScanHistory, Subdomain, Vulnerability
 from tests.test_heat_policy import LEGACY
 from tests.test_heat_policy_review import JENKINS, Base
@@ -407,7 +407,7 @@ class ClosedPairsScopeTests(Base):
 		results = {'source': 'existing', 'results': [{'host': self.sub.name, 'vulnerable': True}]}
 		with mock.patch('cveFeed.templategen.run_cve_tests', return_value=results), \
 				mock.patch('cveFeed.templategen.is_confirmed', return_value=True), \
-				mock.patch('reNgine.ai_settings.get_configured_provider', side_effect=RuntimeError('none')), \
+				mock.patch('cvengine.ai_settings.get_configured_provider', side_effect=RuntimeError('none')), \
 				mock.patch('cveFeed.conductor.bounty_blocked_projects', return_value=set()), \
 				mock.patch.object(notify, 'template_hits') as hits:
 			tasks.template_test_for_cve(cve.pk, [self.sub.name], project_id=self.project.pk)

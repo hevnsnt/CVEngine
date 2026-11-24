@@ -6,7 +6,7 @@ from django.contrib.auth.models import User
 from django.db import connection, transaction
 from django.test import TestCase
 
-from reNgine import schema_guard
+from cvengine import schema_guard
 from tests.test_tenancy import client_for
 
 

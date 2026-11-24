@@ -258,7 +258,7 @@ class ModelChoiceTests(unittest.TestCase):
 
 class JobModelTests(unittest.TestCase):
     """The nuclei targeting job's ``model`` and ``haiku`` options: the server's rule for that job before it became an AI job
-    (``reNgine.ai_nuclei_model``), applied here."""
+    (``cvengine.ai_nuclei_model``), applied here."""
     LISTING = {'data': [{'id': 'claude-sonnet-9', 'created_at': '2026-03-01T00:00:00Z'}, {'id': 'claude-haiku-9-20260101', 'created_at': '2026-02-01T00:00:00Z'},
                         {'id': 'claude-haiku-9', 'created_at': '2026-01-01T00:00:00Z'}]}
 

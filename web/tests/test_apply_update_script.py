@@ -688,7 +688,7 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.assertIn('full deploy: web/README is not on the documentation allowlist', (self.work / 'web' / '.update-log').read_text())
 
     def test_unlisted_paths_are_a_full_deploy(self):
-        for path in ('docker-compose.yml', 'config/nginx/rengine.conf', 'scripts/x.sh', 'docs/notes.txt', 'docs/run.sh', 'README.txt', 'Makefile',
+        for path in ('docker-compose.yml', 'config/nginx/cvengine.conf', 'scripts/x.sh', 'docs/notes.txt', 'docs/run.sh', 'README.txt', 'Makefile',
                      'web/requirements.txt', 'web/Dockerfile', 'scanner.lock.json', 'docs-extra/a.md', 'sub/README.md'):
             with self.subTest(path=path):
                 self.setUp()
@@ -928,7 +928,7 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         # refusal is a failure before the migration, so the previous commit is put back and its proxy keeps serving, and the screen says why
         (self.stub / 'proxy_config').write_text(json.dumps({'services': {'proxy': {
             'image': 'nginx:alpine', 'environment': {'CVENGINE_UPSTREAM_SECRET': 'canary-secret-value-0123456789abcdef'},
-            'volumes': [{'type': 'bind', 'source': '/x/config/nginx/rengine.conf', 'target': '/etc/nginx/conf.d/rengine.conf'}]}}}))
+            'volumes': [{'type': 'bind', 'source': '/x/config/nginx/cvengine.conf', 'target': '/etc/nginx/conf.d/cvengine.conf'}]}}}))
         (self.stub / 'proxy_refuses_new').write_text('')
         self.new = self.publish_deploy_file()
         self.approve()
@@ -941,7 +941,7 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         preflight = next(i for i, c in enumerate(calls) if ' run --rm --network none ' in c)
         self.assertIn(' -e CVENGINE_UPSTREAM_SECRET ', calls[preflight])
         self.assertNotIn('canary-secret-value', '\n'.join(calls))  # the secret never reaches a command line
-        self.assertIn('-v /x/config/nginx/rengine.conf:/etc/nginx/conf.d/rengine.conf:ro', calls[preflight])
+        self.assertIn('-v /x/config/nginx/cvengine.conf:/etc/nginx/conf.d/cvengine.conf:ro', calls[preflight])
         first_migrate = [i for i, c in enumerate(calls) if ' migrate --noinput' in c]
         self.assertTrue(not first_migrate or first_migrate[0] > preflight)
         phase = json.loads((self.work / 'web' / '.update-phase.json').read_text())
@@ -2108,7 +2108,7 @@ class UpgradePostgresScriptTests(unittest.TestCase):
         result = self.run_script()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('already done', result.stdout)
-        self.assertIn('rengine_postgres_data', result.stdout)
+        self.assertIn('cvengine_postgres_data', result.stdout)
         self.assertFalse([c for c in self.calls() if c.startswith('docker run')])
 
     def test_env_without_the_variables_still_gets_the_defaults(self):
@@ -2117,8 +2117,8 @@ class UpgradePostgresScriptTests(unittest.TestCase):
         result = self.run_script()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         calls = self.calls()
-        self.assertTrue(any('pg_isready -U rengine -d rengine' in c for c in calls))
-        self.assertTrue(any('rengine_postgres_data:/var/lib/postgresql/data' in c for c in calls))
+        self.assertTrue(any('pg_isready -U cvengine -d cvengine' in c for c in calls))
+        self.assertTrue(any('cvengine_postgres_data:/var/lib/postgresql/data' in c for c in calls))
 
     def test_db_container_and_other_users_of_the_old_volume_are_stopped_before_pg12_starts(self):
         (self.stub / 'old_volume').write_text('')

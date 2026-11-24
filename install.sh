@@ -253,7 +253,7 @@ address=${address:-localhost}
 ok "address: https://$address/"
 
 # the certificate is made once, and again only when the address changed
-cert_file=secrets/certs/rengine.pem
+cert_file=secrets/certs/cvengine.pem
 needs_cert=1
 if [ -s "$cert_file" ] && have openssl; then
   host=${address%%:*}

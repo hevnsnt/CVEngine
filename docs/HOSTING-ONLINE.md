@@ -26,11 +26,11 @@ The proxy reads three files from `secrets/certs/`:
 
 | File | Put there |
 | --- | --- |
-| `rengine.pem` | the certificate **and** its intermediates (Let's Encrypt's `fullchain.pem`) |
-| `rengine_rsa.key` | the private key (`privkey.pem`) |
-| `rengine_chain.pem` | the intermediates only (`chain.pem`) |
+| `cvengine.pem` | the certificate **and** its intermediates (Let's Encrypt's `fullchain.pem`) |
+| `cvengine_rsa.key` | the private key (`privkey.pem`) |
+| `cvengine_chain.pem` | the intermediates only (`chain.pem`) |
 
-**The key must be RSA.** The proxy's cipher list is RSA-only (`aRSA` in `config/nginx/rengine.conf`) for TLS 1.2, and the proxy speaks TLS 1.2 and 1.3, so an ECDSA certificate (certbot's default since 2.0) makes TLS 1.2 handshakes fail. Ask for RSA explicitly.
+**The key must be RSA.** The proxy's cipher list is RSA-only (`aRSA` in `config/nginx/cvengine.conf`) for TLS 1.2, and the proxy speaks TLS 1.2 and 1.3, so an ECDSA certificate (certbot's default since 2.0) makes TLS 1.2 handshakes fail. Ask for RSA explicitly.
 
 Port 80 is not used by the stack, so certbot can answer the challenge itself while the proxy keeps running:
 
@@ -45,9 +45,9 @@ Install the files and restart the proxy:
 
 ```bash
 L=/etc/letsencrypt/live/scanner.example.com
-sudo install -m 600 $L/fullchain.pem secrets/certs/rengine.pem
-sudo install -m 600 $L/privkey.pem   secrets/certs/rengine_rsa.key
-sudo install -m 644 $L/chain.pem     secrets/certs/rengine_chain.pem
+sudo install -m 600 $L/fullchain.pem secrets/certs/cvengine.pem
+sudo install -m 600 $L/privkey.pem   secrets/certs/cvengine_rsa.key
+sudo install -m 644 $L/chain.pem     secrets/certs/cvengine_chain.pem
 docker compose up -d --force-recreate proxy
 ```
 
@@ -60,9 +60,9 @@ sudo tee /etc/letsencrypt/renewal-hooks/deploy/cvengine.sh >/dev/null <<'HOOK'
 #!/bin/sh
 L=/etc/letsencrypt/live/scanner.example.com
 D=/path/to/CVEngine
-install -m 600 $L/fullchain.pem $D/secrets/certs/rengine.pem
-install -m 600 $L/privkey.pem   $D/secrets/certs/rengine_rsa.key
-install -m 644 $L/chain.pem     $D/secrets/certs/rengine_chain.pem
+install -m 600 $L/fullchain.pem $D/secrets/certs/cvengine.pem
+install -m 600 $L/privkey.pem   $D/secrets/certs/cvengine_rsa.key
+install -m 644 $L/chain.pem     $D/secrets/certs/cvengine_chain.pem
 cd $D && docker compose up -d --force-recreate proxy
 HOOK
 sudo chmod +x /etc/letsencrypt/renewal-hooks/deploy/cvengine.sh
@@ -75,7 +75,7 @@ With the standalone challenge, certbot needs port 80 free at renewal time too; t
 
 Proxy the name through Cloudflare (orange cloud) and set **SSL/TLS mode** to **Full (strict)**, so the connection to your server is encrypted and verified. The origin needs a certificate Cloudflare accepts:
 
-- Create a **Cloudflare Origin CA** certificate for the name (RSA, up to 15 years), save it as `secrets/certs/rengine.pem` with its key as `rengine_rsa.key`, and put Cloudflare's origin CA root in `rengine_chain.pem`. Then `docker compose up -d --force-recreate proxy`. Browsers never see this certificate; Cloudflare's own does the talking to them. Or use a Let's Encrypt certificate as in A.
+- Create a **Cloudflare Origin CA** certificate for the name (RSA, up to 15 years), save it as `secrets/certs/cvengine.pem` with its key as `cvengine_rsa.key`, and put Cloudflare's origin CA root in `cvengine_chain.pem`. Then `docker compose up -d --force-recreate proxy`. Browsers never see this certificate; Cloudflare's own does the talking to them. Or use a Let's Encrypt certificate as in A.
 - **Full** (not strict) also works with the installer's private certificate, but it does not verify the origin, so prefer strict.
 
 Things to know when a CDN is in front:
@@ -125,7 +125,7 @@ docker compose -f docker-compose.yml -f docker-compose.tunnel.yml up -d
 - **`cloudflared` on the server itself (recommended).** A connection to `127.0.0.1:8443` reaches the proxy through the Docker bridge, so the proxy sees the bridge's gateway. Print it:
 
   ```bash
-  docker network inspect $(docker network ls -q --filter name=rengine_network) --format '{{.Name}} {{(index .IPAM.Config 0).Gateway}}'
+  docker network inspect $(docker network ls -q --filter name=cvengine_network) --format '{{.Name}} {{(index .IPAM.Config 0).Gateway}}'
   ```
 
   It looks like `172.18.0.1`; the proxy is on two networks, so if the log (step 3) shows another gateway, use that one. Put that address in the file as `172.18.0.1 1;` (your own number), then `docker compose -f docker-compose.yml -f docker-compose.tunnel.yml exec proxy nginx -s reload`. Anything else on this machine that can reach `127.0.0.1:8443` is believed too, so keep the machine's other users to those you trust.

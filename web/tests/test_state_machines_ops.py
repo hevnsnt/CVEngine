@@ -20,8 +20,8 @@ from cveFeed import ai_jobs, scan_control, updater
 from cveFeed import watchdog as wd
 from cveFeed.models import AIJob, ScanControl, UpdateSettings
 from dashboard.models import AuditLog
-from reNgine import lifecycle
-from reNgine.state_machines import AI_JOB
+from cvengine import lifecycle
+from cvengine.state_machines import AI_JOB
 from tests import test_apply_update_script as harness
 from tests.test_updater import NEW, OLD, fake_github
 
@@ -32,7 +32,7 @@ class _UpdaterFiles(TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
-        override = override_settings(BASE_DIR=self.dir, RENGINE_HOME=self.dir)
+        override = override_settings(BASE_DIR=self.dir, CVENGINE_HOME=self.dir)
         override.enable()
         self.addCleanup(override.disable)
         self.admin = User.objects.create_superuser('root', 'r@x.test', 'x')
@@ -259,7 +259,7 @@ class PauseOwnerTests(TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
-        override = override_settings(BASE_DIR=self.dir, RENGINE_HOME=self.dir)
+        override = override_settings(BASE_DIR=self.dir, CVENGINE_HOME=self.dir)
         override.enable()
         self.addCleanup(override.disable)
 

@@ -5,9 +5,9 @@ from django.db import models
 from django.db.models import Value
 from django.db.models.functions import Coalesce, Lower, MD5 as Md5, Upper
 from django.utils import timezone
-from reNgine.definitions import (CELERY_TASK_STATUSES,
+from cvengine.definitions import (CELERY_TASK_STATUSES,
 								 NUCLEI_REVERSE_SEVERITY_MAP)
-from reNgine.utilities import *
+from cvengine.utilities import *
 from scanEngine.models import EngineType
 from targetApp.models import Domain
 

@@ -13,7 +13,7 @@ from django.utils import timezone
 
 from cveFeed import reviewer, templatefixture, templategen, templatevalidate, validation
 from cveFeed.models import AgentActivity, AIJob, CVEEntry, GeneratedTemplate, ReviewerSettings
-from reNgine.resources import ScannerUnavailable
+from cvengine.resources import ScannerUnavailable
 
 GOOD = '''id: cve-2099-1234
 info: {name: ExampleApp version check, severity: high, tags: cve-2099-1234}

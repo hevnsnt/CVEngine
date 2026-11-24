@@ -260,7 +260,7 @@ def request_confirmation(project, domain, names, avoid_agent, scan=None, now=Non
 
 def release(project_id, pairs):
     """Add confirmed ``pairs`` to the newest inventory row of each name (the host as shown). An address the inventory never stores (internal, loopback) stays out."""
-    from reNgine.tasks import save_ip_address
+    from cvengine.tasks import save_ip_address
     from startScan.ip_rows import org_id_of_project
     from startScan.models import Subdomain
     by_name = {}

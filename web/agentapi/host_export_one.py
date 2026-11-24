@@ -497,7 +497,7 @@ def build(ctx, slug, host_id):
     record = {
         'schema': SCHEMA,
         'exported_at': _iso(datetime.now(timezone.utc)),
-        'cvengine_version': getattr(settings, 'RENGINE_CURRENT_VERSION', ''),
+        'cvengine_version': getattr(settings, 'CVENGINE_CURRENT_VERSION', ''),
         'project': {'slug': project.slug, 'name': project.name, 'organization': project.org.name if project.org_id else None},
         'host': {**identity, 'state': _state(project, names),
                  'heat': row.get('heat'), 'heat_reasons': row.get('heat_reasons'), 'score': row.get('score'), 'score_detail': row.get('score_detail'),

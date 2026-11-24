@@ -11,7 +11,7 @@ from agentapi import sentinel_broker as broker
 from agentapi.models import SentinelTask
 from cveFeed import discovery, probe_scope, setup_flow, ssh_scan
 from cveFeed.models import HostExclusion, ProbeObservation, ServiceRun
-from reNgine.resources import ScannerUnavailable
+from cvengine.resources import ScannerUnavailable
 from startScan.models import IpAddress, Port, Vulnerability
 from tests.fake_scanner import FakeScanner, assert_ran_nowhere_locally, fixture
 from tests.test_route_auth import RouteFixture

@@ -66,7 +66,7 @@ cvengine_proxy_verify() {
     before=''
     [ -z "$id" ] || before=$(docker inspect -f '{{.RestartCount}}' "$id" 2>/dev/null || true)
     if said=$("${compose[@]}" exec -T proxy nginx -t 2>&1); then
-      # through the proxy to web: only the web service answers this route, and it passes the maintenance page (config/nginx/rengine.conf)
+      # through the proxy to web: only the web service answers this route, and it passes the maintenance page (config/nginx/cvengine.conf)
       code=$("${compose[@]}" exec -T proxy sh -c 'command -v curl >/dev/null 2>&1 || { echo nocurl; exit 0; }; curl -sk -o /dev/null -w "%{http_code}" --max-time 10 https://127.0.0.1/client-address-probe/update-verify/' 2>/dev/null | tr -dc '0-9a-z' || true)
       sleep "${CVENGINE_VERIFY_POLL:-2}"
       after=''

@@ -210,11 +210,11 @@ web_python() {
 }
 
 # Celery's command line, run in a throwaway container of the image built for this update. The checkout is fast-forwarded before the build and ./web is
-# bind-mounted, so the running (old) containers already read the NEW code on their old image; the CLI imports the whole application (reNgine.tasks
+# bind-mounted, so the running (old) containers already read the NEW code on their old image; the CLI imports the whole application (cvengine.tasks
 # loads every installed app), so inside a running old container it dies on whatever the new code needs and the old image lacks (1.3.x to 1.4:
 # ModuleNotFoundError cvengine_scanner) and every inspection reads as "worker state unknown". The one-off container has an image and code that agree,
 # and asks the same broker, so it sees the same workers. A worker that cannot be inspected still fails the command: nothing here hides an error.
-celery_cli() { "${compose[@]}" run --rm --no-deps -T --entrypoint celery celery -A reNgine.tasks "$@"; }
+celery_cli() { "${compose[@]}" run --rm --no-deps -T --entrypoint celery celery -A cvengine.tasks "$@"; }
 
 # consumer_control add_consumer|cancel_consumer WORKER QUEUE. A worker busy with CPU work (the correlation and template passes right
 # after it starts) can miss a short reply window, so it is asked up to three times with a longer wait each time. Both commands are safe
@@ -241,7 +241,7 @@ scan_stop_code=$(cat <<'PY'
 import base64, json
 from django.contrib.auth import get_user_model
 from agentapi.services import _abort_scan
-from reNgine.celery import app
+from cvengine.celery import app
 from startScan.models import ScanActivity, ScanHistory
 modes = {}
 def note(args):
@@ -940,7 +940,7 @@ fi
 
 worker_queues_ready() {
     local queues
-    queues=$("${compose[@]}" exec -T celery celery -A reNgine.tasks inspect active_queues -j -t 5 2>/dev/null) || return 1
+    queues=$("${compose[@]}" exec -T celery celery -A cvengine.tasks inspect active_queues -j -t 5 2>/dev/null) || return 1
     printf '%s' "$queues" | python3 -c '
 import json, sys
 try:

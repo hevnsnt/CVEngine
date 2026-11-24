@@ -1,7 +1,7 @@
 """Accounts the old abuse guard disabled, enabled again by the update (``reenable_guard_disabled_users``, an update step in
 cveFeed.upgrade_backfills; docs/UPGRADE.md).
 
-Before 1.5.0 the input guard (reNgine.input_guard) disabled an account at its strike threshold, revoked every API token the account held, and
+Before 1.5.0 the input guard (cvengine.input_guard) disabled an account at its strike threshold, revoked every API token the account held, and
 wrote ``abuse.account_disabled`` to the audit log with that account as actor and its username as target. A link opened from a mail or chat app
 was enough to trip it, and the guard no longer disables anyone, so the update enables those accounts again. Only those: an account is enabled
 again when all of these hold (``review``):

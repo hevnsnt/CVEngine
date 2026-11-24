@@ -342,7 +342,7 @@ class ProviderFailureLedgerTests(TestCase):
 		self.addCleanup(ready.stop)
 		provider = mock.Mock(model='m')
 		provider.name = 'test'
-		from reNgine.ai_providers import AIProviderError
+		from cvengine.ai_providers import AIProviderError
 		from tests import ai_queue
 		provider.complete.side_effect = AIProviderError('provider down', category='provider_network')
 		cve = CVEEntry.objects.create(cve_id='CVE-2099-0303', cvss=9.8, title='t', published_at=timezone.now())
@@ -444,7 +444,7 @@ class ValidateBeforeSaveTests(TestCase):
 			templategen.generate_template(None, candidate_only=False)
 
 	def test_with_no_scanner_the_ai_is_not_asked_for_a_template_nothing_could_check(self):
-		from reNgine.resources import ScannerUnavailable
+		from cvengine.resources import ScannerUnavailable
 		from cveFeed.models import AIJob
 		with mock.patch('agentapi.sentinel_dispatch.nuclei_validate_ready', side_effect=ScannerUnavailable('nuclei_validate', 'no live built-in scanner')):
 			with self.assertRaises(ScannerUnavailable):
@@ -454,7 +454,7 @@ class ValidateBeforeSaveTests(TestCase):
 	def test_a_scanner_that_went_away_leaves_a_draft_waiting_for_its_check_never_a_valid_one(self):
 		"""The answer was paid for: it is not thrown away (nor the CVE blocked for a week) because no Sentinel could check it at that moment.
 		It waits in the syntax stage, and the automatic validator checks it again when a Sentinel can."""
-		from reNgine.resources import ScannerUnavailable
+		from cvengine.resources import ScannerUnavailable
 		from cveFeed import templatevalidate
 		from tests import ai_queue
 		with mock.patch('agentapi.sentinel_dispatch.try_nuclei_validate', side_effect=ScannerUnavailable('nuclei_validate', 'gone')):

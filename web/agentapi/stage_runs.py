@@ -43,7 +43,7 @@ from django.db import transaction
 from django.db.models import F, Q
 from django.utils import timezone
 
-from reNgine.state_machines import RUN_DONE, RUN_FAILED, RUN_READY, RUN_RUNNING, RUN_WAITING, STAGE_RUN
+from cvengine.state_machines import RUN_DONE, RUN_FAILED, RUN_READY, RUN_RUNNING, RUN_WAITING, STAGE_RUN
 
 logger = logging.getLogger(__name__)
 
@@ -500,7 +500,7 @@ def _settle_leftovers(p):
 
 
 def _redis():
-    from reNgine import resources
+    from cvengine import resources
     return getattr(resources.get_store(), 'r', None)
 
 
@@ -508,7 +508,7 @@ def _release_claims(claims):
     client = _redis()
     if client is None:
         return
-    from reNgine import resources
+    from cvengine import resources
     for key, owner in claims:
         try:
             resources.claim_release(client, key, owner)
@@ -520,7 +520,7 @@ def _renew_claims(claims):
     client = _redis()
     if client is None:
         return
-    from reNgine import resources
+    from cvengine import resources
     for key, owner in claims:
         try:
             resources.claim_refresh(client, key, owner, HOLD_SECONDS)

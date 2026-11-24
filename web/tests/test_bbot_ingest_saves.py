@@ -7,8 +7,8 @@ from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
 from dashboard.models import Org, Project
-from reNgine import discovery_events as bbot_lib
-from reNgine.tasks import persist_bbot_result, save_ip_address, save_subdomain
+from cvengine import discovery_events as bbot_lib
+from cvengine.tasks import persist_bbot_result, save_ip_address, save_subdomain
 from scanEngine.models import EngineType
 from startScan.models import IpAddress, Port, ScanHistory, Subdomain
 from targetApp.models import Domain

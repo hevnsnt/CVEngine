@@ -24,8 +24,8 @@ from django.utils import timezone
 
 from cveFeed import check_allowlist
 from cveFeed.safeyaml import load_template
-from reNgine import ai_prompts
-from reNgine.ai_providers import UNTRUSTED_NOTICE, clean_text
+from cvengine import ai_prompts
+from cvengine.ai_providers import UNTRUSTED_NOTICE, clean_text
 
 logger = logging.getLogger(__name__)
 
@@ -1141,7 +1141,7 @@ def job_answer(job, text):
     paid answer is not thrown away and the CVE is not blocked for a week by a check that never ran."""
     from cveFeed.models import CVEEntry, GeneratedTemplate
     from cveFeed import activity, ai_jobs
-    from reNgine.resources import ScannerUnavailable
+    from cvengine.resources import ScannerUnavailable
     cve = CVEEntry.objects.filter(pk=job.context.get('cve')).first()
     if cve is None:
         return None
@@ -1227,7 +1227,7 @@ def record_outcomes(cve, outcomes, project=None, template_id=""):
     from django.db.models import Q
 
     from cveFeed.models import CVEMatch
-    from reNgine.tasks import parse_nuclei_result, save_vulnerability
+    from cvengine.tasks import parse_nuclei_result, save_vulnerability
     from startScan.models import Subdomain
     if project is None or not outcomes:
         return 0
@@ -1340,7 +1340,7 @@ def close_version_hit_findings(cve, host, project, template_ids, note=VERSION_HI
     no ``remediation_by``): one a person changed keeps their decision. Each closure is written to the finding's audit trail with no user.
     Returns the ids closed."""
     from cveFeed.models import FindingAuditEvent
-    from reNgine.state_machines import REMEDIATION
+    from cvengine.state_machines import REMEDIATION
     from startScan.models import Vulnerability
     ids = [t for t in template_ids if t]
     if not ids or project is None:
@@ -1447,7 +1447,7 @@ def run_cve_tests(cve, hosts, ai=False, project=None):
     Returns {'source': 'existing'|'candidate'|'none', 'template': path/id, 'results': [...]}.
     """
     from cveFeed import activity
-    from reNgine.resources import ScannerUnavailable
+    from cvengine.resources import ScannerUnavailable
     with activity.step('run_check', f'Checking nuclei template coverage for {cve.cve_id}', project=project,
                        cve_id=cve.cve_id) as handle:
         from cveFeed.validation import resolve_template

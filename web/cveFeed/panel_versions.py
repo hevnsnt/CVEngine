@@ -36,7 +36,7 @@ from urllib.parse import urlsplit
 logger = logging.getLogger(__name__)
 
 PANEL_TAG = 'panel'
-FINDING_SOURCE = 'nuclei'  # Vulnerability.source of a template finding (reNgine.definitions.NUCLEI)
+FINDING_SOURCE = 'nuclei'  # Vulnerability.source of a template finding (cvengine.definitions.NUCLEI)
 MAX_VERSION = 30
 INFO = 'info'
 # what a panel template's name says about the page, not the product: "Grafana Login Panel - Detect", "Jenkins Login Detected", "Zabbix Admin"

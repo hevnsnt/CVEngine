@@ -60,7 +60,7 @@ the finding) and the scanner runs the tool. A Sentinel declares these kinds only
 | `cveFeed/db_exposure.py` | one credential-less connect per database | `db_probe` | the finding is made here; `open: null` (no client for that database on the scanner) runs here when it may |
 | `cveFeed/path_probe.py` | the plain SYN and the FIN+PSH+URG probe | `path_probe` | the built-in scanner while the install has one (`sentinel_broker.BUILTIN_KINDS`): it measures the path the scans leave from. With none, the project's own Sentinels run it and each one's verdict is kept as its own (`os_detection.record_sentinel_path`). One task per project that holds the addresses |
 | `cveFeed/templategen.py` | `nuclei -validate`, the benign loopback fixture, an approved template's test | `nuclei_validate` | the built-in scanner while the install has one; with none, the project's own Sentinels of contract 4 under `agentapi.ai_checks` (approved, read-only, own target and port, bound by `template_sha256` and `GET sentinel/tasks/{id}/check`). The test is filed under the hosts' own project and never carries a signed-in run; with no scanner and no local nuclei, no AI template is written |
-| `reNgine/discovery_events.py`, `cveFeed/discovery.py` | the discovery, a streaming producer for up to six hours | `bbot_discovery` | deleted locally (`NEVER_LOCAL`): a streamed task, also contract version 3 (see **bbot** under Target shape); the server keeps the modes table and the rules that name and file what comes back |
+| `cvengine/discovery_events.py`, `cveFeed/discovery.py` | the discovery, a streaming producer for up to six hours | `bbot_discovery` | deleted locally (`NEVER_LOCAL`): a streamed task, also contract version 3 (see **bbot** under Target shape); the server keeps the modes table and the rules that name and file what comes back |
 
 ### C. In-process network probes (Python in server workers)
 
@@ -87,7 +87,7 @@ constants (`-etags dos`, UDP port list, probe ports), `heavy_process.py` (the su
 
 Status (phase 6). The library (`cvengine_scanner`, hevnsnt/cvENGINE-sentinel#34) holds all of the above except `heavy_process.py`, which
 runs processes and stays on the server until phase 8. The server pins the library in `web/requirements.txt` and no longer has its own
-`cveFeed/fingerprint.py`, `cms.py`, `versions.py`, `soft404.py` or `reNgine/nmap_service.py`; `port_inventory.parse_xml` is the library's reader,
+`cveFeed/fingerprint.py`, `cms.py`, `versions.py`, `soft404.py` or `cvengine/nmap_service.py`; `port_inventory.parse_xml` is the library's reader,
 re-exported under its old name. Two parts stay on the server because they are not pure:
 - reading a page's scripts (`cveFeed/js_libraries.py`: `script_sources`, `from_script_urls`, `from_script_body`). It fetches files, and it
   hands what it read to the library's `fingerprint.from_response` as `from_scripts` pairs;
@@ -120,7 +120,7 @@ which send nothing to the target and need no vantage point.
   the index for what it needs to know. The server also looks no target name up any more: the Sentinel that runs the work judges every address a
   name resolves to (an outside task says `external`, so an internal Sentinel holds it to public space), and the TLS audit and OpenVAS name a stored
   address. `tests/test_no_local_tools.py` fails a server-side lookup and a scan tool in the server image.
-- `reNgine/tasks.py` starts no subprocess any more (the legacy `run_command` and its `geoiplookup` caller are gone); the memory gate (`heavy_job`) and its per-tool `heavy.<kind>` settings are removed as well.
+- `cvengine/tasks.py` starts no subprocess any more (the legacy `run_command` and its `geoiplookup` caller are gone); the memory gate (`heavy_job`) and its per-tool `heavy.<kind>` settings are removed as well.
 - Anything run from `fullscan`, `probes` and `route_auth` that today shares Redis claims or ledgers with the server needs those
   claims moved to the server side of the contract (the server takes the claim, the task carries the answer).
 

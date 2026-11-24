@@ -25,8 +25,8 @@ from agentapi import services as svc
 from agentapi.auth import SCOPE_SENTINEL
 from agentapi.models import ACTIVE_TASK_STATUSES, Agent, AgentTask
 from agentapi.services import ApiError, AssetFilter
-from reNgine.lifecycle import Refused
-from reNgine.state_machines import AGENT
+from cvengine.lifecycle import Refused
+from cvengine.state_machines import AGENT
 from tenancy import audit, roles
 
 logger = logging.getLogger(__name__)
@@ -55,7 +55,7 @@ MAX_CHECK_OUTPUT = 2000
 MAX_CHECKS = 20
 MAX_NOTE = 200
 RATES = {'register': (30, 3600), 'heartbeat': (120, 60), 'claim': (60, 60), 'report': (120, 60), 'release': (120, 60), 'queue': (30, 60)}
-ADMIN_STATUSES = ('active', 'suspended', 'revoked')  # what a person may set (reNgine.state_machines.AGENT says from which state)
+ADMIN_STATUSES = ('active', 'suspended', 'revoked')  # what a person may set (cvengine.state_machines.AGENT says from which state)
 # ``code`` in the body of a 403 an agent acts on (beside ``error``, which stays the sentence it always was). ``token_revoked``: an administrator
 # revoked this agent; its token will never work again, so a Sentinel has to be enrolled again. ``agent_blocked``: the agent is fine and its token
 # too, but no work can be assigned now (it is pending or suspended, or its user is disabled, has to set up two-step sign-in, or its token is read
@@ -172,7 +172,7 @@ def _touch(agent, now=None):
     the same stale time, one at a time writes (``usage_stamps.one_writer``; the others set the time on their own copy only) and its commit does not wait for the
     WAL flush (``usage_stamps.relaxed_commit``): liveness telemetry, which the next call writes again if a crash loses it. Never called inside a
     claim's transaction; if it were, it would simply join it."""
-    from reNgine import usage_stamps
+    from cvengine import usage_stamps
     now = now or timezone.now()
     seen = agent.last_seen
     if seen is not None and now - TOUCH_EVERY <= seen <= now:
@@ -886,7 +886,7 @@ def _int(value):
 # --- results ----------------------------------------------------------------------------------------
 
 def _text(value, limit):
-    from reNgine.ai_providers import clean_text
+    from cvengine.ai_providers import clean_text
     return clean_text(value, limit) if isinstance(value, str) else ''
 
 
@@ -925,7 +925,7 @@ def _apply_result(task, agent, user, result):
     if task.kind == 'remediate' and result['outcome'] == 'fixed':
         # The task ran for a while: a person may have closed the finding meanwhile (a false positive, an accepted risk). Their decision
         # stands; the comment above still says what the agent reported.
-        from reNgine.state_machines import AGENT_MAY_FIX
+        from cvengine.state_machines import AGENT_MAY_FIX
         before = match.remediation_status
         if svc._apply_remediation(match, 'fixed', f'Fixed by agent {agent.name}: {summary}', user, only_from=AGENT_MAY_FIX):
             svc._record_status_change(task.project, 'match', match.pk, before, 'fixed', user, match.remediation_note)

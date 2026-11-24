@@ -465,7 +465,7 @@ class QueryCountTests(Seeded):
 	def test_a_slow_warm_up_does_not_change_the_count(self):
 		# the cause of the 17 != 15 seen on CI: the middleware's ban list is cached for ten seconds of real time, so when the warm-up request ranks every host and takes
 		# longer than that, the measured request reads the list again
-		from reNgine import input_guard, ip_allowlist
+		from cvengine import input_guard, ip_allowlist
 		clock = {'t': 1000.0}
 		original = self.api
 		calls = []

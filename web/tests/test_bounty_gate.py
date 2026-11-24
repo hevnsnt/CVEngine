@@ -112,14 +112,14 @@ def _pipeline_scans(w):
 
 
 def host_pipeline_unattended(self, w):
-    with mock.patch('cveFeed.discovery._run_stages', return_value={'status': 2}), mock.patch('reNgine.tasks.persist_bbot_result'):
+    with mock.patch('cveFeed.discovery._run_stages', return_value={'status': 2}), mock.patch('cvengine.tasks.persist_bbot_result'):
         discovery.run_host_pipeline(w.domain.id, [w.host], resolver=lambda names: {(n, PUBLIC_IP) for n in names})
     return _pipeline_scans(w) > 0
 
 
 def retest_hosts_task(self, w):
     from cveFeed.tasks import retest_hosts
-    with mock.patch('cveFeed.discovery._run_stages', return_value={'status': 2}), mock.patch('reNgine.tasks.persist_bbot_result'), \
+    with mock.patch('cveFeed.discovery._run_stages', return_value={'status': 2}), mock.patch('cvengine.tasks.persist_bbot_result'), \
             mock.patch('agentapi.probe_dispatch.resolve_for', side_effect=lambda domain, names, errors=None, scan=None: {(n, PUBLIC_IP) for n in names}):
         retest_hosts(w.domain.id, [w.host])
     return _pipeline_scans(w) > 0
@@ -321,7 +321,7 @@ class GateSemanticsTests(Gated):
             sent.return_value.id = 'task'
             job, created = enqueue(w.project, w.sub, user=user)
         self.assertTrue(created)
-        with mock.patch('cveFeed.discovery._run_stages', return_value={'status': 2}), mock.patch('reNgine.tasks.persist_bbot_result'):
+        with mock.patch('cveFeed.discovery._run_stages', return_value={'status': 2}), mock.patch('cvengine.tasks.persist_bbot_result'):
             discovery.run_host_pipeline(w.domain.id, [IN_HOST], resolver=lambda names: {(n, PUBLIC_IP) for n in names}, by_person=True)
         self.assertEqual(_pipeline_scans(w), 1)
 

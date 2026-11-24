@@ -19,9 +19,9 @@ DC="$DC $COMPOSE_FILE_ARG"
 
 # empty (not a failure under pipefail) when .env or the variable is missing, so the defaults below apply
 env_value() { grep -E "^$1=" .env 2>/dev/null | head -n1 | cut -d= -f2- || true; }
-PROJECT=$(env_value COMPOSE_PROJECT_NAME); PROJECT=${PROJECT:-rengine}
-PGUSER=$(env_value POSTGRES_USER); PGUSER=${PGUSER:-rengine}
-PGDB=$(env_value POSTGRES_DB); PGDB=${PGDB:-rengine}
+PROJECT=$(env_value COMPOSE_PROJECT_NAME); PROJECT=${PROJECT:-cvengine}
+PGUSER=$(env_value POSTGRES_USER); PGUSER=${PGUSER:-cvengine}
+PGDB=$(env_value POSTGRES_DB); PGDB=${PGDB:-cvengine}
 OLD_VOLUME="${PROJECT}_postgres_data"
 NEW_VOLUME="${PROJECT}_postgres18_data"
 OLD_IMAGE="postgres:12.3-alpine"

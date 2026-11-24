@@ -7,7 +7,7 @@ from django.test import SimpleTestCase
 
 from agentapi import sentinel_dispatch as dispatch
 from agentapi.models import SentinelTask
-from reNgine import resources
+from cvengine import resources
 from tests.test_sentinel_dispatch import DispatchBase, _answer_queued_task
 
 ENV = 'CVENGINE_LOCAL_FALLBACK'  # ignored since 1.4: every test below sets it to prove it changes nothing

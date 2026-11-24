@@ -18,7 +18,7 @@ from agentapi.auth import create_token
 from cveFeed import auth_checks, auth_nuclei, auth_routes, nuclei_scan, route_auth as ra
 from cveFeed.auth_checks import AuthScope, CredentialError
 from cveFeed.models import AgentActivity, AuthCredential, HostExclusion, RouteAuth, ScanControl, ServiceRun
-from reNgine import crypto_fields
+from cvengine import crypto_fields
 from dashboard.models import AuditLog, Org, OrgMembership, Project, ProjectMembership
 from scanEngine.models import EngineType
 from startScan.models import IpAddress, Port, ScanHistory, Subdomain, Vulnerability
@@ -723,7 +723,7 @@ class SignedRouteTests(Fixture):
 		self.assertTrue(RouteAuth.objects.get(url='https://app.example.test/').evidence.get('authenticated'))
 
 	def test_with_no_scanner_able_to_take_it_the_pass_waits_and_records_nothing(self):
-		from reNgine.resources import ScannerUnavailable
+		from cvengine.resources import ScannerUnavailable
 		self.make(host='app.example.test')
 		scan = self.scan()
 		ra.run_route_auth(scan.id)
@@ -891,7 +891,7 @@ class NucleiTests(Fixture):
 		self.assertEqual((self.signed_runs(), out['authenticated']['skipped']), ([], 'a signed-in pass runs only on the built-in scanner'))
 
 	def test_with_no_scanner_able_to_read_the_sign_in_the_pass_waits_and_the_targets_stay_due(self):
-		from reNgine.resources import ScannerUnavailable
+		from cvengine.resources import ScannerUnavailable
 		self.make()
 		plain = self.stream(error=ScannerUnavailable('nuclei_targeted', 'no live built-in scanner'))
 		out = nuclei_scan.run_nuclei(self.scan().id, stream=plain)

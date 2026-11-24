@@ -9,9 +9,9 @@ from agentapi.services import Ctx, host_group, list_vulnerabilities
 from cveFeed.labels import record_label
 from cveFeed.models import HostLabel
 from dashboard.models import Org, Project
-from reNgine.discovery_events import BbotResult, is_informational, label_for
+from cvengine.discovery_events import BbotResult, is_informational, label_for
 from tests.discovery_fixtures import fold_findings
-from reNgine.tasks import _persist_bbot_findings
+from cvengine.tasks import _persist_bbot_findings
 from scanEngine.models import EngineType
 from startScan.models import ScanHistory, Subdomain, Vulnerability
 from targetApp.models import Domain

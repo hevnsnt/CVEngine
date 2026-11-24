@@ -44,7 +44,7 @@ def read_scripts(result, probe, scan_id, budget=None, project=None, gate=None, r
 
     from cveFeed import js_libraries
     from cvengine_scanner import fingerprint
-    from reNgine import resources
+    from cvengine import resources
     evidence = result.get('evidence') or {}
     page = evidence.pop('page_scripts', None) or {}
     entries, page_url = page.get('scripts') or [], page.get('page') or ''

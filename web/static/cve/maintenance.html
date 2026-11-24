@@ -674,7 +674,7 @@
       })();
     </script>
     <script>
-      // The proxy fills data-maint (sub_filter, config/nginx/rengine.conf): "failed" when the update did not finish. Anything else, including the
+      // The proxy fills data-maint (sub_filter, config/nginx/cvengine.conf): "failed" when the update did not finish. Anything else, including the
       // unreplaced placeholder of a file opened by hand, is the ordinary "we are rebuilding" text above.
       (function () {
         if (document.documentElement.getAttribute("data-maint") !== "failed") return;

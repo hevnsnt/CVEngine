@@ -56,13 +56,13 @@ BATCH_HOSTS_PER_FACTOR = 4  # a batch of this many hosts (or fewer) is given the
 def batch_shield(hours, now):
     """The running host assessments of a batch (``host_assessment.enqueue_batch``: its rows share one Celery task id) that are past ``hours`` but
     still inside the longer limit a batch gets: ``hours`` for each ``BATCH_HOSTS_PER_FACTOR`` hosts, never longer than the discovery queue's hard
-    time limit (``reNgine.time_limits``, just under the broker's redelivery window), which ends the one task they share. A batch is one pipeline
+    time limit (``cvengine.time_limits``, just under the broker's redelivery window), which ends the one task they share. A batch is one pipeline
     over all its hosts, so it takes longer than one host does; the age limit is only the backstop for a task that is gone, which
     ``expire_orphaned_running`` closes within a tick whenever the broker can be asked. Returns the pks to leave alone."""
     from django.db.models import Count, Q
 
     from cveFeed.models import HostAssessment
-    from reNgine import time_limits
+    from cvengine import time_limits
     cutoff = now - timedelta(hours=hours)
     rows = list(HostAssessment._base_manager.filter(Q(started_at__lt=cutoff) | Q(started_at__isnull=True, created_at__lt=cutoff), status='running')
                 .exclude(celery_id='').values_list('pk', 'celery_id', 'started_at', 'created_at'))
@@ -97,7 +97,7 @@ def redispatch_queued_assessments(now=None):
     from cveFeed.models import HostAssessment
     from cveFeed.scan_control import pause_requested
     from cveFeed.tasks import assess_host
-    from reNgine import resources
+    from cvengine import resources
     if pause_requested():  # waiting on purpose
         return 0
     from cveFeed import broker_recovery
@@ -150,7 +150,7 @@ def redispatch_queued_scans(now=None, live=None):
     from cveFeed import broker_recovery, ledger
     from cveFeed.discovery import QUEUED
     from cveFeed.scan_control import pause_requested
-    from reNgine import resources
+    from cvengine import resources
     from startScan.models import ScanHistory
     if pause_requested():  # waiting on purpose
         return 0
@@ -175,7 +175,7 @@ def redispatch_queued_scans(now=None, live=None):
                 continue
         except Exception:  # noqa: BLE001 - no Redis, no way to rate-limit: leave it
             continue
-        from reNgine.celery import app
+        from cvengine.celery import app
         # a scan of an internal target (cveFeed.internal_scan) is its own task; sent by name so this module needs no import of it
         name = 'run_internal_scan' if 'internal_pipeline' in (scan.tasks or []) else 'run_bbot_discovery'
         args = [scan.pk] if name == 'run_internal_scan' else [scan.pk, redispatch_mode(scan)]
@@ -236,7 +236,7 @@ def expire_stuck_queued(now=None, found=None):
     from cveFeed import counts
     from cveFeed.discovery import HOST_PIPELINE_TASK, QUEUED
     from cveFeed.scan_control import pause_requested
-    from reNgine.state_machines import FAILED, SCAN
+    from cvengine.state_machines import FAILED, SCAN
     from startScan.models import ScanActivity, ScanHistory
     if pause_requested():  # waiting on purpose
         return []

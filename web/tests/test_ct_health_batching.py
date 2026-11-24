@@ -235,10 +235,10 @@ class FailureAndShutdownTests(Batching, TestCase):
 		ours = [r for r in worker_ready.receivers if r[0][0] == 'ct-health-batch']
 		with mock.patch.object(worker_ready, 'receivers', ours), mock.patch.object(worker_ready, 'sender_receivers_cache', {}), \
 				mock.patch('gevent.spawn') as spawn, mock.patch.object(ct_health.threading, 'Thread') as thread:
-			with mock.patch('reNgine.lane_memory.lane_name', return_value=''):
+			with mock.patch('cvengine.lane_memory.lane_name', return_value=''):
 				worker_ready.send(sender=None)  # a test or a shell: written at once, no timer
 			self.assertFalse(ct_health._state['batching'])
-			with mock.patch('reNgine.lane_memory.lane_name', return_value='classic'):
+			with mock.patch('cvengine.lane_memory.lane_name', return_value='classic'):
 				worker_ready.send(sender=None)
 			self.assertTrue(ct_health._state['batching'])
 			self.assertEqual(spawn.call_count + thread.call_count, 1)

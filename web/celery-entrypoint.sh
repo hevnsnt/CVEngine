@@ -33,7 +33,7 @@ python3 manage.py collectstatic --no-input
 # is never overwritten (this used to be `loaddata`, which rewrote every field).
 python3 manage.py load_default_fixtures fixtures/default_scan_engines.yaml
 
-# update whatportis (its table is in HOME; the fix for https://github.com/yogeshojha/rengine/issues/984 is applied when the image is built, web/Dockerfile)
+# update whatportis (its table is in HOME; the fix for upstream issue 984 is applied when the image is built, web/Dockerfile)
 yes | whatportis --update
 
 # store scan_results
@@ -60,8 +60,8 @@ generate_worker_command() {
     local queue=$1
     local concurrency=$2
     local worker_name=$3
-    local app=${4:-"reNgine.tasks"}
-    local directory=${5:-"/usr/src/app/reNgine/"}
+    local app=${4:-"cvengine.tasks"}
+    local directory=${5:-"/usr/src/app/cvengine/"}
     local include=$6
 
     local base_command="celery -A $app worker --pool=gevent --optimization=fair --autoscale=$concurrency,1 --loglevel=$loglevel -Q $queue -n $worker_name"

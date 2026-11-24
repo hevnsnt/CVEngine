@@ -108,7 +108,7 @@ class EveryAutomaticEntryPointTests(PlainWorld):
 class APersonsRequestStillReachesTheHost(PlainWorld):
     def test_a_person_rescanning_hosts_of_a_manual_only_target_runs_the_pipeline(self):
         w = self.plain(MANUAL)
-        with mock.patch('cveFeed.discovery._run_stages', return_value={'status': 2}) as stages, mock.patch('reNgine.tasks.persist_bbot_result'):
+        with mock.patch('cveFeed.discovery._run_stages', return_value={'status': 2}) as stages, mock.patch('cvengine.tasks.persist_bbot_result'):
             discovery.run_host_pipeline(w.domain.id, [w.host], resolver=lambda names: {(n, PUBLIC_IP) for n in names}, by_person=True)
         stages.assert_called_once()
         self.assertEqual(gate_tests._pipeline_scans(w), 1)

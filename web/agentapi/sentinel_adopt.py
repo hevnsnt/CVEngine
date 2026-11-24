@@ -10,7 +10,7 @@ What each kind lands through is the persistence the stage itself uses (never a s
 
 * ``nmap``: ``cveFeed.port_inventory.persist_inventory`` on the hosts of the chunk, then the ledger says the fingerprint pass is done for them;
 * ``naabu``: ``cveFeed.port_stage.persist_open_ports`` (a tarpit is left out, as the stage does), then the ledger says discovery is done;
-* ``nuclei_*``: every finding through ``reNgine.tasks.save_vulnerability`` (one row per finding, so a repeat changes nothing). The stage's catch-all
+* ``nuclei_*``: every finding through ``cvengine.tasks.save_vulnerability`` (one row per finding, so a repeat changes nothing). The stage's catch-all
   screening needs control reads from a Sentinel and cannot be made now, so the findings carry the ``unscreened-same-body`` tag the stage uses for the same
   case. An info-level panel hit is also read as the stage reads it (``cveFeed.panel_versions.Collector``): a version reading when it extracted a
   version, else an identity reading and a technology with no version, and the hosts that changed are correlated again. A ``nuclei_light`` result is
@@ -120,7 +120,7 @@ def _nuclei(task, result, agent):
     from agentapi import sentinel_dispatch
     from cveFeed import nuclei_fp
     from cvengine_scanner.flags import host_of
-    from reNgine.tasks import parse_nuclei_result, save_vulnerability
+    from cvengine.tasks import parse_nuclei_result, save_vulnerability
     from startScan.models import Subdomain
     scan = task.scan
     if scan is None:

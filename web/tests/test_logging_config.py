@@ -1,4 +1,4 @@
-"""The logging configuration is applied several times in one process (django.setup() again from reNgine.celery, again when a Celery worker starts), so it
+"""The logging configuration is applied several times in one process (django.setup() again from cvengine.celery, again when a Celery worker starts), so it
 must never switch off a logger that already exists: a module's own log lines would vanish from then on."""
 import logging
 from logging.config import dictConfig

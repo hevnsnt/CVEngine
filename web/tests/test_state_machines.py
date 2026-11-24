@@ -1,4 +1,4 @@
-"""Explicit state machines (reNgine.lifecycle, reNgine.state_machines): the tables are consistent, a move happens only from an allowed state,
+"""Explicit state machines (cvengine.lifecycle, cvengine.state_machines): the tables are consistent, a move happens only from an allowed state,
 and the scan lifecycle keeps a person's Stop whatever finishes afterwards."""
 from unittest import mock
 
@@ -6,9 +6,9 @@ from django.contrib.auth import get_user_model
 from django.test import TestCase
 from django.utils import timezone
 
-from reNgine import lifecycle
-from reNgine.lifecycle import Machine, Refused
-from reNgine.state_machines import ABORTED, FAILED, QUEUED, RUNNING, SCAN, SUCCESS
+from cvengine import lifecycle
+from cvengine.lifecycle import Machine, Refused
+from cvengine.state_machines import ABORTED, FAILED, QUEUED, RUNNING, SCAN, SUCCESS
 from tests.test_internal_scan import NMAP_RESULT, Base, iter_none
 
 

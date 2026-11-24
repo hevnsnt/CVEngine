@@ -275,7 +275,7 @@ class DiscoveryIngestionTests(EnforcementBase):
 		self.assertTrue(DiscoveryEvent.objects.filter(scan=scan, host='www.wide.test').exists())
 
 	def test_save_subdomain_refuses_a_child_of_an_exact_host_target(self):
-		from reNgine.tasks import save_subdomain
+		from cvengine.tasks import save_subdomain
 		scan = self.scan(self.exact)
 		self.assertEqual(save_subdomain('www.exact.test', ctx={'scan_history_id': scan.id, 'domain_id': self.exact.id}), (None, False))
 		self.assertEqual(save_subdomain('www.exact.test', ctx={'scan_history_id': scan.id}), (None, False))  # the scan's own target decides
@@ -300,7 +300,7 @@ class CertificateTransparencyTests(EnforcementBase):
 		self.assertIn('new.wide.test', self.names(self.wide))
 
 	def test_the_sweep_leaves_exact_host_targets_out(self):
-		from reNgine import resources
+		from cvengine import resources
 		client = getattr(resources.get_store(), 'r', None)
 		if client is not None:
 			client.delete('cvengine:sweep:ct-watch')

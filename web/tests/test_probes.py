@@ -308,9 +308,9 @@ class StageTests(RouteFixture, TestCase):
         self.assertFalse([u for u in self.requests if 'plain.rt.test' in u])
 
     def test_a_stopped_scan_or_a_pause_ends_the_stage_before_anything_is_handed_to_the_scanner(self):
-        with mock.patch('reNgine.resources.abort_requested', return_value=True):
+        with mock.patch('cvengine.resources.abort_requested', return_value=True):
             self.assertEqual(self.stage()['probes'], 0)
-        with mock.patch('reNgine.resources.global_pause_requested', return_value=True):
+        with mock.patch('cvengine.resources.global_pause_requested', return_value=True):
             self.assertEqual(self.stage()['probes'], 0)
         self.assertEqual((self.tasks, self.requests), ([], []))
 

@@ -5,7 +5,7 @@
 # The least privilege app role (CVENGINE_DB_APP_USER, default cvengine_app), which the one-off migrate service created and checked before this
 # container started. These containers have no owner password: the owner role (POSTGRES_USER, exported as CVENGINE_DB_ROLE=owner) is used only
 # when CVENGINE_DB_ALLOW_OWNER_FALLBACK=1 made the migrate service hand its password over (the db_owner_fallback volume) and the app role does
-# not log in within WAIT_SECONDS (reNgine/db_roles.py, choose). The choice is written to /tmp/cvengine-db-role, which every later process of
+# not log in within WAIT_SECONDS (cvengine/db_roles.py, choose). The choice is written to /tmp/cvengine-db-role, which every later process of
 # the container reads (docker compose exec, the watchdog), and `manage.py db_app_role status` prints it (the update scripts report it).
 cvengine_db_role() {
   local role

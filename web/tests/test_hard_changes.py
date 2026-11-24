@@ -3,8 +3,8 @@ from django.utils import timezone
 
 from cveFeed import changes, port_inventory, retest
 from dashboard.models import Org, Project
-from reNgine import discovery_events as bbot_lib
-from reNgine.tasks import persist_bbot_result
+from cvengine import discovery_events as bbot_lib
+from cvengine.tasks import persist_bbot_result
 from startScan.models import IpAddress, Subdomain, Technology
 from targetApp.models import Domain
 from tests.test_port_inventory import _report

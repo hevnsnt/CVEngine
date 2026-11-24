@@ -15,7 +15,7 @@ STUBS = {
 echo "make $1" >> "$STUB_DIR/calls"
 case "$1" in
  admin) printf 'docker compose exec -T web python3 manage.py create_admin\\n====\\n  CVEngine admin account\\n    Password  : Abc123Xyz\\n====\\n';;
- certs) mkdir -p secrets/certs; echo x > secrets/certs/rengine.pem;;
+ certs) mkdir -p secrets/certs; echo x > secrets/certs/cvengine.pem;;
  build) [ -e "$STUB_DIR/build_fails" ] && exit 2;;
 esac
 exit 0

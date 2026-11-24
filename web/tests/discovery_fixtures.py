@@ -1,5 +1,5 @@
 """Test helpers for the discovery results the server stores: what a Sentinel's batch carries, built without a scanner."""
-from reNgine.discovery_events import BbotResult, is_informational, short_title
+from cvengine.discovery_events import BbotResult, is_informational, short_title
 
 SEVERITIES = {'INFO': 0, 'LOW': 1, 'MEDIUM': 2, 'HIGH': 3, 'CRITICAL': 4}
 

@@ -29,7 +29,7 @@ from importlib import import_module
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
-from reNgine.state_machines import AI_ANSWERED, AI_APPLIED, AI_APPLYING, AI_EXPIRED, AI_FAILED, AI_JOB, AI_LEASED, AI_QUEUED
+from cvengine.state_machines import AI_ANSWERED, AI_APPLIED, AI_APPLYING, AI_EXPIRED, AI_FAILED, AI_JOB, AI_LEASED, AI_QUEUED
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +106,7 @@ def provider_row():
     """The configured AI provider, or None when AI is off or its settings cannot make a request (no key where one is needed, no server
     address for a self-hosted one): the stages then behave as they always did without AI."""
     from dashboard.models import AIProviderSettings
-    from reNgine.ai_profiles import PROFILES
+    from cvengine.ai_profiles import PROFILES
     row = AIProviderSettings.objects.filter(enabled=True).first()
     profile = PROFILES.get(getattr(row, 'provider', None))
     if row is None or profile is None:
@@ -139,8 +139,8 @@ def serving(row=None):
 def runtime_block(row):
     """The operator's request settings as one request needs them, every layer resolved here (the Settings page, then the CVENGINE_AI_*
     variables of this server's .env, then nothing: the container falls back to the provider's own default)."""
-    from reNgine.ai_profiles import AIRuntime
-    from reNgine.ai_providers import _layered, reasoning_level, structured_mode
+    from cvengine.ai_profiles import AIRuntime
+    from cvengine.ai_providers import _layered, reasoning_level, structured_mode
     runtime = AIRuntime.from_row(row)
     out = {name: _layered(name, runtime)[0] for name in ('request_timeout', 'connect_timeout', 'max_tokens', 'context_tokens')}
     out.update(structured_mode=structured_mode(runtime), reasoning=reasoning_level(runtime), keep_alive=runtime.keep_alive or '')
@@ -150,7 +150,7 @@ def runtime_block(row):
 def provider_block(row):
     """The job block of the reviewer's configuration: the provider, its address and key, the model chosen (empty: the container picks the
     provider's default as the server used to), and the request settings."""
-    from reNgine.ai_providers import reachable_url
+    from cvengine.ai_providers import reachable_url
     return {'provider': row.provider, 'base_url': reachable_url(row.base_url) if row.base_url else '', 'api_key': row.api_key or '',
             'model': row.model or '', 'runtime': runtime_block(row)}
 
@@ -191,7 +191,7 @@ def enqueue(kind, stage, *, system, parts, schema=None, options=None, image=None
     from cveFeed.models import AIJob
     if kind not in HANDLERS:
         raise ValueError(f'unknown AI job kind {kind!r}')
-    from reNgine.ai_profiles import STAGE_ANSWER_CAPS, stage_cache_ttl
+    from cvengine.ai_profiles import STAGE_ANSWER_CAPS, stage_cache_ttl
     if stage not in STAGE_ANSWER_CAPS:  # tests/test_ai_truncation.py fails for a stage that is not in the table: a new stage must name its room
         logger.warning('AI job stage %r has no answer room in ai_profiles.STAGE_ANSWER_CAPS: it gets the default', stage)
     # every stage is sent with its own answer room and the one automatic retry of a cut-off reply (a stage may say ``retry_truncated: False``)
@@ -341,7 +341,7 @@ def submit(job_id, body, now=None):
     Refused (JobError) for an unknown job (404), a lease that is not the job's current one (409) or a malformed body (400). Returns
     ``{accepted: true}``; the stage continues in a Celery task."""
     from cveFeed.models import AIJob
-    from reNgine.ai_profiles import PROFILES
+    from cvengine.ai_profiles import PROFILES
     if not isinstance(body, dict):
         raise JobError('body must be a JSON object')
     has_text, error = isinstance(body.get('text'), str), body.get('error')

@@ -14,7 +14,7 @@ from django.test import TestCase
 from cveFeed import conductor, config_maxxing, scan_concurrency as sc
 from cveFeed.models import ScanConcurrency
 from dashboard.models import AuditLog, Org, OrgMembership
-from reNgine import resources as res
+from cvengine import resources as res
 from tests.test_settings import send
 from tests.test_tenancy import client_for
 from tests.steady import expiring_caches
@@ -262,7 +262,7 @@ class SavingTests(Isolated, TestCase):
 
 	def test_a_broker_that_is_down_does_not_fail_the_save(self):
 		sc.update({'discovery_concurrency': 12}, self.root)
-		with mock.patch('reNgine.celery.app.send_task', side_effect=OSError('broker down')):
+		with mock.patch('cvengine.celery.app.send_task', side_effect=OSError('broker down')):
 			REAL_REQUEST_APPLY()  # logs and returns
 		self.assertEqual(ScanConcurrency.current().values, {'discovery_concurrency': 12})
 
@@ -403,7 +403,7 @@ class LiveResizeTests(Isolated, TestCase):
 		self.root = User.objects.create_superuser('conc_root', 'c@x.io', 'x')
 
 	def test_the_resize_is_queued_on_the_feed_queue(self):
-		with mock.patch('reNgine.celery.app.send_task') as send_task:
+		with mock.patch('cvengine.celery.app.send_task') as send_task:
 			REAL_REQUEST_APPLY()
 		send_task.assert_called_once_with('apply_scan_concurrency', queue='cve_feed_queue')
 
@@ -464,7 +464,7 @@ class LiveResizeTests(Isolated, TestCase):
 	def test_the_30_second_tick_republishes_the_saved_values_and_resizes_and_never_raises(self):
 		ScanConcurrency.current(); ScanConcurrency.objects.update(values={'heavy.nmap': 4, 'discovery_concurrency': 10})
 		app = FakeApp({'discovery_worker@celery': 8})
-		with mock.patch('reNgine.celery.app', app):
+		with mock.patch('cvengine.celery.app', app):
 			sc.reconcile()
 		self.assertEqual(json.loads(sc._redis().get(sc.VALUES_KEY))['values'], {'discovery_concurrency': 10})  # a scanner limit left in the row is not published
 		self.assertEqual(app.calls[0][1], {'max': 10})

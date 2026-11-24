@@ -11,9 +11,9 @@ from django.shortcuts import get_object_or_404
 from django.template.loader import get_template
 from rolepermissions.decorators import has_permission_decorator
 
-from reNgine.charts import *
-from reNgine.common_func import *
-from reNgine.definitions import *
+from cvengine.charts import *
+from cvengine.common_func import *
+from cvengine.definitions import *
 from scanEngine.models import *
 from startScan.models import *
 from targetApp.models import *
@@ -176,7 +176,7 @@ def create_report(request, id):
         data['company_address'] = report.company_address
         data['company_email'] = report.company_email
         data['company_website'] = report.company_website
-        data['show_rengine_banner'] = report.show_rengine_banner
+        data['show_cvengine_banner'] = report.show_cvengine_banner
         data['show_footer'] = report.show_footer
         data['footer_text'] = report.footer_text
         data['show_executive_summary'] = report.show_executive_summary

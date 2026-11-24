@@ -9,7 +9,7 @@ from jsonschema import Draft202012Validator
 
 from agentapi import scanner_state, sentinel_broker, sentinel_contract
 from agentapi import sentinel_dispatch as dispatch
-from reNgine import resources
+from cvengine import resources
 from agentapi.auth import create_token
 from agentapi.models import Agent, SentinelTask
 from cveFeed import auth_routes, probe_scope, route_auth as ra

@@ -1,7 +1,7 @@
 from django.test import SimpleTestCase
 
-from reNgine import time_limits
-from reNgine.time_limits import QueueTimeLimits, limits_for
+from cvengine import time_limits
+from cvengine.time_limits import QueueTimeLimits, limits_for
 
 
 class QueueTimeLimitTests(SimpleTestCase):
@@ -20,7 +20,7 @@ class QueueTimeLimitTests(SimpleTestCase):
             self.assertEqual(limits_for(queue, {})[1], longest, queue)
         for queue in ('api_queue', 'send_notif_queue'):
             self.assertEqual(limits_for(queue, {})[1], 30 * 60, queue)
-        for gone in ('run_command_queue', 'geo_localize_queue'):  # the reNgine command runner and its geoiplookup caller are gone
+        for gone in ('run_command_queue', 'geo_localize_queue'):  # the inherited command runner and its geoiplookup caller are gone
             self.assertIsNone(limits_for(gone, {}), gone)
 
     def test_openvas_and_unknown_queues_have_no_default_limit(self):
@@ -56,7 +56,7 @@ class QueueTimeLimitTests(SimpleTestCase):
         self.assertEqual(QueueTimeLimits().annotate(Plain())['time_limit'], 12 * 3600 - time_limits.VISIBILITY_MARGIN)
 
     def test_the_registered_tasks_get_the_limits_of_their_queue(self):
-        from reNgine.celery import app
+        from cvengine.celery import app
         app.loader.import_default_modules()
         longest = 12 * 3600 - time_limits.VISIBILITY_MARGIN
         self.assertEqual(app.tasks['validate_match_on_demand'].time_limit, longest)

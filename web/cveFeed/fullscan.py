@@ -180,7 +180,7 @@ def sweep_ip(ip, pipeline=None):
     Nothing runs on this server: with no scanner able to take the sweep it waits and the address is swept later."""
     from agentapi import sentinel_dispatch
     from cveFeed import activity, port_inventory, port_stage
-    from reNgine.resources import ScannerUnavailable
+    from cvengine.resources import ScannerUnavailable
     address = ip.address
     project = _project_of(ip)
     before = set(port_stage.known_open_ports([address], ip.org_id).get(address, []))
@@ -193,7 +193,7 @@ def sweep_ip(ip, pipeline=None):
         activity.settle(running, 'done', message=f'Background full port scan of {address} is waiting: no scanner could take this work ({exc.kind})')
         return {'ip': address, 'ok': False, 'error': 'ScannerUnavailable'}
     except Exception as exc:  # noqa: BLE001 - failure remains visible and retryable after the in-flight lease or the backoff
-        from reNgine.resources import MemoryBusy, ScanAborted
+        from cvengine.resources import MemoryBusy, ScanAborted
         logger.warning('background full scan of %s failed', address, exc_info=True)
         retry = None if isinstance(exc, (MemoryBusy, ScanAborted)) else _back_off(ip)
         activity.settle(running, 'failed', message=activity.diagnostic(f'Background full port scan of {address}',
@@ -348,7 +348,7 @@ def run(pipeline=None):
     address gets a full 65,535-port sweep. The next firing checks again.
     """
     from cveFeed import coverage_topup
-    from reNgine import resources
+    from cvengine import resources
     if not enabled():
         return {'skipped': 'CVENGINE_FULLSCAN is off'}
     if coverage_topup.backlog_exists():

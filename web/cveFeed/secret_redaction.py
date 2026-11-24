@@ -39,7 +39,7 @@ def _fingerprint_key():
     key = (os.environ.get('CVENGINE_FIELD_KEY') or '').strip()
     if not key:
         try:
-            from reNgine.crypto_fields import dedicated_keys
+            from cvengine.crypto_fields import dedicated_keys
             key = (dedicated_keys() or ('',))[0]
         except Exception:  # noqa: BLE001 - no Django here (a unit test, a script)
             key = ''

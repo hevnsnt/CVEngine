@@ -127,7 +127,7 @@ applied_migrations() {
 run_migrations() {
   local before after
   before=$(applied_migrations) || before=''
-  # as the database's owner role, in the migrate service; the migrate also creates or updates the app role and grants it (web/reNgine/db_roles.py)
+  # as the database's owner role, in the migrate service; the migrate also creates or updates the app role and grants it (web/cvengine/db_roles.py)
   owner_run manage.py migrate --noinput && return 0
   after=$(applied_migrations) || after=''
   if [ -z "$before" ] || [ "$before" != "$after" ]; then
@@ -306,7 +306,7 @@ deploy_steps() {
     while IFS= read -r line; do [ -z "$line" ] || log "$line"; done < <(cvengine_db_role_report "${compose[@]}")
   fi
   # Whether the real client address reaches the server (scripts/client-address.sh): one probe through the public name, compared with what
-  # Cloudflare saw. A report in the update log, never a failure; the probe route passes the maintenance page (config/nginx/rengine.conf).
+  # Cloudflare saw. A report in the update log, never a failure; the probe route passes the maintenance page (config/nginx/cvengine.conf).
   if declare -F cvengine_client_address_report >/dev/null; then
     while IFS= read -r line; do [ -z "$line" ] || log "$line"; done < <(cvengine_client_address_report "${compose[@]}" 2>/dev/null)
   fi
