@@ -370,6 +370,7 @@ The outer watchdog ([WATCHDOG.md](WATCHDOG.md)) is on by default. **Watchdog** i
 | `CVENGINE_UPDATE_MISSING_POLLS` | `12` | Drain checks in a row a worker may miss before it counts as gone. |
 | `CVENGINE_UPDATE_STOP_SCANS` | `0` | `1` makes `scripts/update.sh` behave as if `--stop-scans` was given. The approval updater stops scans only when the drain limit above passes. |
 | `CVENGINE_UPDATE_BACKUPS` | `3` | Database dumps kept in `.git/cvengine-update/backups`, taken just before the migrations by `scripts/update.sh` and the in-app updater. `0` takes none. A dump that fails stops the update before the database is touched. |
+| `CVENGINE_DB_BACKUP_DIR`, `CVENGINE_DB_BACKUP_DAYS` | `backups/db`, `7` | Where the nightly dump (`make db-backup-schedule`, custom format) and the dump before `make rotate-secrets` go, and how many days a nightly dump is kept (`0` turns the nightly dump off). Keys are never written there ([DEPLOYMENT.md](DEPLOYMENT.md#nightly-dump)). |
 | `CVENGINE_UPDATE_MAX_ATTEMPTS` | `3` | Runs of the in-app updater for the same commit that may fail after the migration before the approval is removed, 1 to 999. |
 | `CVENGINE_UPDATE_BRANCHES`, `CVENGINE_UPDATE_REQUIRE_SIGNED` | any branch; `0` | Host-side limits on what an approval can make the server run: the branches the in-app updater accepts (comma separated), and whether the commit must pass `git verify-commit` ([UPDATES.md](UPDATES.md#what-the-host-trusts)). |
 | `CVENGINE_UPDATE_MIN_FREE_MB` | computed: `14000` for the first 1.3 to 1.4 update, `8900` when the scanner image is here or the scanner is off | Free space (MB) the updater wants where Docker keeps its data before it builds, and the Update screen shows before you approve ([UPDATES.md](UPDATES.md#small-hosts-disk-memory-and-stuck-scans)). Setting it replaces the figure; `0` skips the check. Below it the updater first removes untagged images and the build cache |
@@ -412,6 +413,40 @@ Production runs Gunicorn; the development compose file keeps Django's auto-reloa
 The AI key, the instance-wide Chaos, Netlas and HackerOne keys, per-organization and per-project API keys, update token, webhook URLs, Telegram bot token, the proxy list (its passwords), the two-step sign-in seeds, the Tailscale credentials, the OpenVAS login and the headers and cookies stored for authenticated checks are encrypted in the database. New installs get a dedicated key, `CVENGINE_FIELD_KEY` in `.env`, separate from the Django secret in `web/secret` (which signs sessions) and outside the `web/` directory every container mounts. An installation that predates it keeps reading its old values with the key derived from `web/secret`, and `make rotate-field-key` moves everything under a dedicated key: it writes a new key to `.env`, keeps the old one in `CVENGINE_FIELD_KEY_PREVIOUS` (which only decrypts), recreates the services and re-encrypts every stored secret. Back up `.env` and `web/secret` too, but not beside the database dumps: a restored database needs the same keys (with another key the stored secrets read as empty and must be entered again), and a dump stored together with its key is readable by anyone who can read the backup. To keep the key in a Docker secret instead, point `CVENGINE_FIELD_KEY_FILE` at the mounted file.
 
 What this protects: a database dump, a backup, or SQL injection reads only ciphertext, and a file read in `web/` no longer includes the key. What it does not: code execution inside a container that decrypts the secrets (the web service or a worker) can use the key that container holds. The settings API never returns a secret, only whether one is set.
+
+### Rotating secrets
+
+`make rotate-secrets` (`scripts/rotate-secrets.sh`) replaces every secret the host holds for cvENGINE in one run: the database owner's password (`POSTGRES_PASSWORD`), the password of the role the server runs as (`CVENGINE_DB_APP_PASSWORD`, when the installation has that role), the Redis password (`REDIS_PASSWORD`), the field key (`CVENGINE_FIELD_KEY`) and the Django secret (`web/secret`, or `RENGINE_SECRET_KEY` when the env file sets it). Run `make rotate-secrets ARGS=--dry-run` first: it prints the plan and changes nothing. Then `make rotate-secrets`, which asks you to type `yes` (`ARGS=--yes` skips the question, for a run without a terminal). In this order it:
+
+1. stops at once when the shell exports any of `POSTGRES_PASSWORD`, `REDIS_PASSWORD`, `CVENGINE_DB_APP_PASSWORD`, `CVENGINE_FIELD_KEY`, `CVENGINE_FIELD_KEY_PREVIOUS` or `RENGINE_SECRET_KEY`. Docker Compose takes a variable from the shell before the env file, so the containers would start with the old password while the database expects the new one. Run `unset` on the names it gives and start again;
+2. stops when a stored secret cannot be read with the keys the installation has now (re-encrypting would save it as empty);
+3. copies `.env`, the Compose env file (such as `.env.vps`) and `web/secret` into `backups/keys-<time>` (mode 0700, files 0600) and dumps the database into the dump folder (`backups/db`, `CVENGINE_DB_BACKUP_DIR`), so the old keys and the dump they decrypt are in two different folders;
+4. writes new random values to `.env` and to the Compose env file; the old field key moves to `CVENGINE_FIELD_KEY_PREVIOUS`, which only decrypts;
+5. sets the new database passwords with `ALTER ROLE` in one transaction, sent to psql on its standard input (never on a command line). If that fails, the env files are put back and nothing else has changed;
+6. recreates `redis`, `web`, `celery` and `celery-beat` (and the built-in scanner and the AI reviewer when they run) with `env -i`, so nothing from the shell reaches Compose: the script itself starts again with only `PATH`, `HOME` and Docker's own connection settings;
+7. runs `manage.py rotate_field_key`, then `rotate_field_key --check --strict`, which fails while any stored secret still needs the old key. Then, and only then, it removes `CVENGINE_FIELD_KEY_PREVIOUS`, writes a new 64 character Django secret and recreates `web`, `celery`, `celery-beat` (and the reviewer);
+8. restarts the proxy, which otherwise can answer 502 for a while with the old address of `web`;
+9. checks: the site answers (through the proxy's published port), the owner and the app role log in over the network with the new passwords and the owner's old password is refused, Redis answers with the new password and refuses a client without one, `rotate_field_key --check` finds no unreadable secret, and `web`, `celery` and `celery-beat` still run as the app role. It exits with status 1 when a check fails and names it.
+
+`CVENGINE_ROTATE_WAIT` (seconds, default 300) is how long it waits for the web service after each recreate.
+
+**It signs everyone out.** A new Django secret ends every session and voids the two-step sign-in recovery codes made so far (they are keyed with the secret; the authenticator apps keep working). Tell your users, and ask everyone with two-step sign-in to make new recovery codes after signing in. `--keep-django-secret` rotates everything else and signs nobody out. Tasks queued in Redis when it restarts are lost, as with any broker restart: run it while scans are idle.
+
+**Afterwards.** The run ends with the paths of both backups. They hold the old keys and the data they decrypt, so move `backups/keys-<time>` to a password manager or another store with different access, and delete both once the site works. Stored third party keys were re-encrypted, not changed.
+
+**What it cannot rotate**, printed at the end of every run with where to change each:
+
+| Secret | Where to change it |
+| --- | --- |
+| Third party API keys stored in the app (AI provider, Chaos, Netlas, HackerOne, WordPress data, runZero), webhook URLs, the Telegram bot token | Make a new key at the provider, enter it under **Settings, API keys**, **Settings, AI model** or **Settings, Notifications**, then revoke the old one at the provider |
+| The admin login password | Your account page, or `make admin-password` for a new random one. `DJANGO_SUPERUSER_PASSWORD` in `.env` is read only when the first account is made |
+| MCP and agent API tokens | **Settings, API keys**: make a new token, put it in each client, revoke the old one |
+| Sentinel tokens | **API keys, Agents in your organizations, Manage**: enroll the Sentinel again, then revoke the old token |
+| The host's root password and SSH keys | On the host (`passwd`, `~/.ssh/authorized_keys`) |
+| The hosting provider's control panel password | The provider's panel; turn on its two step sign-in too |
+| The HTTPS certificate key and a Tailscale auth key | `make certs`, and the Tailscale admin console |
+
+An installation that keeps the field key in a file (`CVENGINE_FIELD_KEY_FILE`) is refused: rotate that key by hand with `manage.py rotate_field_key` as above. `make rotate-field-key` still rotates only the field key.
 
 ## AI requests
 

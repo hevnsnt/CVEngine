@@ -8,6 +8,65 @@ Older installs (reNgine and pre-release cvENGINE builds) ran PostgreSQL 12. The 
 
 To roll back, check out the previous commit and start it. It still uses the untouched old volume, without anything written since the upgrade.
 
+## Rolling back
+
+This covers going back from the 1.5.0 changes (everything after 1.4.2: the pinned Python in the image, the migrations listed below, the database role split, the separate network for the database and Redis, and the log limits) to 1.4.2. Going back means building and running the previous image again; the database keeps what the migrations did, so read the migration list before you start.
+
+**Before you go back**
+
+1. Stop updates from bringing the new version straight back: set **Settings, Updates** to Manual and approve nothing until you are ready.
+2. Run the two statements under "Migrations that 1.4.2 cannot live with" below. Each is safe to run on 1.5.0 too.
+3. Save what you need from the container logs (`docker compose logs --no-color web > web.log`): every container is recreated, and Docker deletes a container's log when it does that.
+
+**Return to the previous image.** The images are built on the host from the checkout, and the in-app updater removes the replaced image once an update is verified, so the old image is built again from the old commit:
+
+```bash
+git checkout v1.4.2
+env -i PATH="$PATH" HOME="$HOME" docker compose up -d --build
+```
+
+Add the `-p`, `--env-file` and `-f` options your installation uses (for example `-p cvengine --env-file .env.vps -f docker-compose.yml -f docker-compose.vps.yml`), and keep `env -i`: Docker Compose takes a variable exported in your shell before the one in the env file, and a stale password in the shell breaks the database login. On a plain installation `make up` does the same. The build takes a few minutes, and the containers are recreated on the 1.4.2 Compose file. To come forward again later, `git checkout master` and update as usual.
+
+**What each 1.5.0 change means for the way back**
+
+- **Python in the image.** 1.4.2's image runs Ubuntu's CPython 3.14.4, whose garbage collector crashes the celery workers now and then (*Fatal Python error: Segmentation fault*, see [The application image runs Python 3.14.10](#the-application-image-runs-python-31410)). Going back brings those crashes back; the workers restart by themselves, but come forward again as soon as you can. Nothing in the database depends on the interpreter.
+- **Database roles.** 1.4.2 ignores `CVENGINE_DB_APP_USER` and `CVENGINE_DB_APP_PASSWORD` and connects as the owner (`POSTGRES_USER`), as it always did; nothing has to be changed for it. The role `cvengine_app` stays in the database unused, and the next update to 1.5.0 uses it again. To stay on 1.5.0 and only go back to the owner role, you do not need a rollback at all: set `CVENGINE_DB_APP_USER=` (empty) in `.env` and in the Compose env file, then recreate `web`, `celery` and `celery-beat` ([Database roles](#database-roles-the-server-no-longer-runs-as-the-database-owner)).
+- **Networks.** 1.4.2 puts the database and Redis back on `rengine_network` with every other service (the proxy and the AI reviewer can reach them again). The `<project>_data_network` network is left behind empty; `docker network rm <project>_data_network` removes it.
+- **Log limits.** 1.4.2's Compose file sets no log rotation, so each container's log grows again until Docker's own default limits it (none, unless `/etc/docker/daemon.json` sets one). PostgreSQL stops logging connections, because 1.4.2's command line does not ask for it (a value set earlier with `ALTER SYSTEM` comes back).
+
+**Migrations already run.** 1.4.2 has none of the 1.5.0 migrations, so `migrate` on 1.4.2 neither applies nor reverses them: their rows stay in `django_migrations`, and the next update to 1.5.0 skips them. What each leaves behind:
+
+| Migrations | What they did | On 1.4.2 |
+| --- | --- | --- |
+| `agentapi` 0026, `cveFeed` 0186, 0187, 0188, 0189, 0192, `dashboard` 0038, `startScan` 0029, 0030 | Indexes only, built concurrently | Harmless. They are used where they help and cost a little disk and write time. |
+| `agentapi` 0027, `cveFeed` 0190 | Autovacuum settings of the busiest tables | Harmless; keep them. |
+| `cveFeed` 0180, 0182, 0185, 0191 | New tables (email reports and their deliveries, the Zero Wire briefings and their settings, the MCP call history, the certificate transparency rollup) | Harmless: 1.4.2 never reads them, and they are there again when you come forward. |
+| `cveFeed` 0179, 0184, `dashboard` 0039 | New columns with a database default or nullable (report scope and format, the needs attention count of a snapshot, the CT fallback switch) | Harmless: 1.4.2 writes rows without them. 1.4.2 does not show the organization reports made on 1.5.0. |
+| `cveFeed` 0178 | `front` on the host assessment: NOT NULL with **no database default** | **Breaks host assessments on 1.4.2** until fixed: see below. |
+| `cveFeed` 0181, 0183 | Two beat schedules, `cvengine-report-digests` and `cvengine-zero-wire`, for tasks 1.4.2 does not have | Each run is an "unregistered task" error in the worker log: disable them, below. |
+| `startScan` 0031 to 0035 | Merged duplicate hosts, technology names and finding tags, CVE ids and CWE ids, then made those keys unique | **Not reversible**: the merged rows stay merged, also after a restore of nothing but the code. The unique constraints stay; 1.4.2 can then fail with *duplicate key value violates unique constraint "uniq_..."* where it used to store a second row. |
+
+**Migrations that 1.4.2 cannot live with.** As the owner (`docker compose exec db psql -U "$POSTGRES_USER" "$POSTGRES_DB"`), before or right after you go back:
+
+```sql
+ALTER TABLE "cveFeed_hostassessment" ALTER COLUMN front SET DEFAULT false;
+UPDATE django_celery_beat_periodictask SET enabled = false WHERE name IN ('cvengine-report-digests', 'cvengine-zero-wire');
+```
+
+The first lets 1.4.2 queue host assessments again (without it every new assessment fails with *null value in column "front"*). The second stops the two schedules; coming forward to 1.5.0 does not switch them on again by itself, so set `enabled = true` for both after that update. Only if 1.4.2 then reports *duplicate key value violates unique constraint* for one of the keys above, drop that constraint (the merge stays):
+
+```sql
+ALTER TABLE "startScan_subdomain" DROP CONSTRAINT IF EXISTS uniq_sub_scan_dom_name;
+ALTER TABLE "startScan_technology" DROP CONSTRAINT IF EXISTS uniq_technology_name;
+ALTER TABLE "startScan_vulnerabilitytags" DROP CONSTRAINT IF EXISTS uniq_vulntag_name;
+ALTER TABLE "startScan_cveid" DROP CONSTRAINT IF EXISTS uniq_cveid_name;
+ALTER TABLE "startScan_cweid" DROP CONSTRAINT IF EXISTS uniq_cweid_name;
+```
+
+and when you come forward again, before the update, delete the `django_migrations` row of each migration whose constraint you dropped (0031 hosts, 0032 technology names, 0033 tags, 0034 CVE ids, 0035 CWE ids), for example `DELETE FROM django_migrations WHERE app = 'startScan' AND name = '0032_uniq_technology_name';`. The update then runs that migration again: it merges the duplicates written meanwhile and builds the constraint again. Leave the rows of the constraints you kept, because adding a constraint that exists fails.
+
+**To undo the migrations themselves**, the only complete way back is the database dump the update took just before it migrated (`.git/cvengine-update/backups`, or `.git/cvengine-auto-deploy/backups` with automatic deployment, or a nightly dump from before the update, [DEPLOYMENT.md](DEPLOYMENT.md#backups)). Restoring it loses everything written since. Reversing the migrations with `manage.py migrate APP NUMBER` works only while 1.5.0's code is still checked out (1.4.2 does not have the migration files), drops the new tables with their data, and for `cveFeed` 0179 fails once an organization report exists; it is not needed for any of the above.
+
 ## Upgrading to 1.4
 
 ### Each Sentinel is auto-tuned
