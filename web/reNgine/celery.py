@@ -94,6 +94,14 @@ def clear_untrusted_os_guesses(*args, **kwargs):
 
 
 @worker_ready.connect()
+def start_warmup(*args, **kwargs):
+    """Build in the background, once per lane, what the first task would otherwise build (cveFeed/warmup.py: the shared service feature index).
+    Returns at once and never raises; CVENGINE_WARMUP=0 turns it off. Beat and the health check never send worker_ready, so they never run it."""
+    from cveFeed import warmup
+    warmup.start('celery')
+
+
+@worker_ready.connect()
 def recap_version_only_answers(*args, **kwargs):
     """Answers stored before the ceiling that says a match on a version string alone is needs_validation at most (cveFeed.triage.ceiling)
     are brought in line with it, with no model call. Idempotent. Never stops the worker from starting."""
