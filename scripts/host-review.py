@@ -26,6 +26,9 @@ What it checks, with the host's cores, memory and free disk in front of it:
            POSTGRES_LOG_LOCK_WAITS and POSTGRES_TRACK_WAL_IO_TIMING: said, never changed. Off in the env file is the owner's own choice and is left; a compose
            file that passes the other database settings but not these (PostgreSQL's default is off) is a warning, because a slow write then
            cannot be told from a lock wait.
+  commit   Whether a commit waits for its WAL flush (synchronous_commit, POSTGRES_SYNCHRONOUS_COMMIT, off by default in docker-compose.yml): said with
+           who set it (the shipped default, or the owner's own value in the env file), never changed. A compose file that passes the other database
+           settings but not this one runs with PostgreSQL's default (on), which is safe: said, not a warning.
   budget   The ceilings together against the host: said, never changed (the ceilings are not use, and the one to lower is the owner's to choose).
   disk     Free space below what an update needs: said.
 
@@ -62,6 +65,8 @@ PG_NOTE = 'written by the updater: Postgres'
 # diagnose: the database diagnostics docker-compose.yml turns on by default ({env name: the PostgreSQL setting}), reported, never written
 PG_DIAGNOSTICS = {'POSTGRES_LOG_LOCK_WAITS': 'log_lock_waits', 'POSTGRES_TRACK_WAL_IO_TIMING': 'track_wal_io_timing'}
 PG_ON = ('on', 'true', 'yes', '1')
+# commit: whether a commit waits for its WAL flush, off by default in docker-compose.yml; reported, never written
+PG_COMMIT = 'POSTGRES_SYNCHRONOUS_COMMIT'
 
 SIZE = re.compile(r'^(\d+(?:\.\d+)?)\s*([kKmMgG]?)[bB]?$')
 
@@ -419,6 +424,44 @@ def diagnose_rule(env_files, compose_files, say):
             'a slow write cannot be told from a lock wait. The shipped docker-compose.yml turns them on (POSTGRES_LOG_LOCK_WAITS, POSTGRES_TRACK_WAL_IO_TIMING).')
 
 
+# --- the commit rule ---------------------------------------------------------------------------------------------------------------------------------
+
+def pg_commit_default(compose_files):
+    """The shipped default of POSTGRES_SYNCHRONOUS_COMMIT in the compose files (``${POSTGRES_SYNCHRONOUS_COMMIT:-off}``), None when none passes it."""
+    found = None
+    for path in compose_files:
+        try:
+            with open(path) as fh:
+                text = fh.read()
+        except OSError:
+            continue
+        for name, default in re.findall(r'\$\{(POSTGRES_[A-Z_]+):?-([^}]*)\}', text):
+            if name == PG_COMMIT:
+                found = default
+    return found
+
+
+def commit_rule(env_files, compose_files, say):
+    """Say whether the database's commits wait for their WAL flush, and who set it. Never writes: off is the shipped default, on is the owner's own."""
+    shipped = pg_commit_default(compose_files)
+    if shipped is None and not pg_defaults(compose_files) and not pg_diagnostic_defaults(compose_files):
+        return  # compose files that pass the database no settings from the env file at all (not ours): nothing to say, as for the postgres rule
+    if shipped is None:
+        say('info', 'commit', 'The compose files do not pass synchronous_commit to the database, so every commit waits for its WAL flush (PostgreSQL\'s '
+            'default, on, unless an ALTER SYSTEM value says otherwise). The shipped docker-compose.yml turns it off (POSTGRES_SYNCHRONOUS_COMMIT).')
+        return
+    target = env_files[:1]  # the env file Compose reads
+    text = env_value(target, PG_COMMIT)
+    value = (text if text else shipped).strip()  # ${KEY:-off}: an empty value takes the default too
+    waits = value.lower() not in ('off', 'false', 'no', '0')
+    how = ('every commit waits for its WAL flush' if waits else
+           'a commit does not wait for its WAL flush: a crash can lose about the last 0.6 s of acknowledged writes, never corrupt the database; '
+           'audit rows, token revocations, address bans and validation budget reservations still wait for theirs')
+    who = (f'{PG_COMMIT}={text} in {target[0]}, your own, left as it is' if text else
+           f'the shipped default; {PG_COMMIT}={"off" if waits else "on"} in .env turns it {"off" if waits else "back on"}')
+    say('info', 'commit', f'The database runs with synchronous_commit={value} ({who}): {how}.')
+
+
 # --- the review --------------------------------------------------------------------------------------------------------------------------------------
 
 def review(args):
@@ -491,6 +534,9 @@ def review(args):
 
     # diagnose
     diagnose_rule(env_files, compose_files, say)
+
+    # commit
+    commit_rule(env_files, compose_files, say)
 
     # budget
     total = 0
