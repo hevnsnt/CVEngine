@@ -3807,7 +3807,8 @@ def _activity(a):
 
 
 def list_activity(ctx, slug, params):
-    """What the AI engine did, newest first: this project's entries plus the system-wide ones (no project). ?kind= filters."""
+    """What the AI engine did, newest first: this project's entries plus the system-wide ones (no project). ?kind= filters. The system-wide
+    ones reach an unrestricted caller (an App Admin) only: under a scope of project ids the scoped manager leaves them out (tenancy.scope)."""
     from django.db.models import Q
 
     from cveFeed.models import AgentActivity

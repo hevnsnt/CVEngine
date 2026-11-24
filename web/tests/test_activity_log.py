@@ -30,27 +30,30 @@ class ActivityLogTests(TestCase):
 	def get(self, query=''):
 		return call(self.tok, 'GET', f'/api/v1/projects/act-a/activity{query}')
 
-	def test_scoped_to_project_plus_system_rows(self):
+	def test_scoped_to_project_and_system_rows_only_for_an_app_admin(self):
 		status, data = self.get('?page_size=100')
 		self.assertEqual(status, 200)
 		messages = [r['message'] for r in data['results']]
+		self.assertNotIn('system wide line', messages)  # a line with no project describes the instance: an App Admin's only (tenancy.scope)
+		self.assertNotIn('secret of project b', messages)
+		self.assertEqual(data['count'], 45)
+		_, root_tok = create_token(User.objects.create_superuser('act-root', 'r@x.io', 'x'), 'root')
+		messages = [r['message'] for r in call(root_tok, 'GET', '/api/v1/projects/act-a/activity?page_size=100')[1]['results']]
 		self.assertIn('system wide line', messages)
 		self.assertNotIn('secret of project b', messages)
-		self.assertEqual(data['count'], 46)
 
 	def test_other_project_is_not_visible(self):
 		self.assertEqual(call(self.tok, 'GET', '/api/v1/projects/act-b/activity')[0], 404)
 
 	def test_newest_first_and_paged(self):
 		first = self.get('?page_size=20')[1]
-		self.assertEqual(first['count'], 46)
+		self.assertEqual(first['count'], 45)
 		ids = [r['id'] for r in first['results']]
 		self.assertEqual(len(ids), 20)
 		self.assertEqual(ids, sorted(ids, reverse=True))
-		self.assertEqual(first['results'][0]['message'], 'system wide line')
-		self.assertIsNone(first['results'][0]['project'])
+		self.assertEqual(first['results'][0]['message'], 'a line 44')
 		third = self.get('?page_size=20&page=3')[1]
-		self.assertEqual(len(third['results']), 6)
+		self.assertEqual(len(third['results']), 5)
 		self.assertLess(max(r['id'] for r in third['results']), min(ids))
 
 	def test_kind_filter_and_validation(self):

@@ -6,4 +6,5 @@ urlpatterns = [
     path('verify/', views.verify_view, name='mfa_verify'),
     path('setup/', views.setup_view, name='mfa_setup'),
     path('disable/', views.disable_view, name='mfa_disable'),
+    path('remind-later/', views.nag_snooze_view, name='mfa_nag_snooze'),
 ]

@@ -222,6 +222,22 @@ def disable_view(request):
     return redirect(reverse('cve_account') + '#security')
 
 
+@login_required
+def nag_snooze_view(request):
+    """"Remind me later" on the two-step sign-in reminder (tenancy.mfa_nag): hidden for the rest of this session only. A POST, so a
+    link or an image on another site cannot hide it."""
+    from django.http import HttpResponseNotAllowed
+
+    from tenancy import mfa_nag
+    if request.method != 'POST':
+        return HttpResponseNotAllowed(['POST'])
+    request.session[mfa_nag.SNOOZE_KEY] = True
+    target = request.POST.get('next', '')
+    if not url_has_allowed_host_and_scheme(target, allowed_hosts={request.get_host()}, require_https=request.is_secure()):
+        target = reverse('cve_dashboard')
+    return redirect(target)
+
+
 # --- onboarding link ---------------------------------------------------------------------------------
 
 INVITE_FAILURES = 20  # unreadable or used links per address per window; a real link is a long signed value, so this only slows guessing
