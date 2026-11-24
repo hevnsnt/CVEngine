@@ -207,11 +207,12 @@ def rep_ids(rows=None):
     return [sub_id for _rank, _name, _project, sub_id in best.values()]
 
 
-def shared_host_counts(rows=None):
+def shared_host_counts(rows=None, names_out=None):
     """``{'hosts': {project_id: n}, 'exposed': {project_id: n}}`` for every project, the numbers ``compute_snapshot`` gets for each alone. ``rows``: the
-    current inventory (``current_rows``) when the caller has read it."""
+    current inventory (``current_rows``) when the caller has read it. ``names_out`` (a dict) receives the host key of every name from the same collapse
+    (``_collapse``), so a caller that also needs the Hosts page's fold of names (the distinct issues of the system status) does not collapse again."""
     rows = _active(current_rows() if rows is None else rows)
-    best, host_key = _collapse(rows)
+    best, host_key = _collapse(rows, names_out=names_out)
     exposed_ids = _exposed_ids([r[0] for r in rows])
     exposed_keys, exposed_names = set(), set()
     for i, (sub_id, name, _scan, project_id, _domain) in enumerate(rows):

@@ -321,6 +321,7 @@ deploy_builtin() {
   if listed=$("${compose[@]}" config --services 2>/dev/null); then
     if grep -qx proxy <<<"$listed"; then services+=(proxy); fi
   else
+    listed=''
     services+=(proxy)
   fi
   DEPLOY_STAGE=build
@@ -344,7 +345,13 @@ deploy_builtin() {
   for _ in $(seq 1 60); do "${compose[@]}" exec -T db pg_isready -q >/dev/null 2>&1 && break; sleep 1; done
   DEPLOY_STAGE=migrate
   phase applying "$DEPLOY_STAGE"
-  "${compose[@]}" run --rm --no-deps --entrypoint python3 web manage.py migrate --noinput || return 1
+  # as the database's owner role: in the one-off migrate service where the checkout has one (the only container with the owner's password), else
+  # in a one-off web container, as the checkouts older than scripts/update-deploy.sh did
+  if grep -qx migrate <<<"$listed"; then
+    "${compose[@]}" run --rm --no-deps migrate python3 manage.py migrate --noinput || return 1
+  else
+    "${compose[@]}" run --rm --no-deps -e CVENGINE_DB_ROLE=owner --entrypoint python3 web manage.py migrate --noinput || return 1
+  fi
   DEPLOY_STAGE=migrated
   phase applying "$DEPLOY_STAGE"
   "${compose[@]}" run --rm --no-deps --entrypoint python3 web manage.py collectstatic --noinput || return 1

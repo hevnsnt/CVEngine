@@ -832,6 +832,11 @@ if . scripts/redis-password.sh && cvengine_ensure_redis_password "$compose_env_f
 else
     "${compose[@]}" up -d --no-recreate db redis
 fi
+# The least privilege database role the server runs as (scripts/db-app-role.sh): its password is generated when there is none; the migrate below
+# (as the owner role) creates the role and grants it, and the application recreated after it runs as it.
+if [[ -f scripts/db-app-role.sh ]] && . scripts/db-app-role.sh && cvengine_ensure_db_app_password "$compose_env_file"; then
+    echo 'The server had no database role of its own: generated its password (CVENGINE_DB_APP_PASSWORD in .env); the migration creates the role.'
+fi
 # The database's own settings are in the compose file (max_connections). `up -d --no-deps db` recreates the db container only when its
 # definition changed since it was created (once, on the update that brings the change: a restart of a few seconds), and is a no-op otherwise.
 "${compose[@]}" up -d --no-deps db
@@ -844,13 +849,37 @@ if backup_file=$(scripts/db-backup.sh "$STATE" -- "${compose[@]}"); then
 else
     die 'The database backup failed, so the database was not migrated and nothing was changed. Fix that (disk space, the database container), or set CVENGINE_UPDATE_BACKUPS=0 to update without one.'
 fi
+# The database owner's commands run in a one-off container of the migrate service (docker-compose.yml, web/migrate-entrypoint.sh), the only
+# container with the owner's password; a Compose layout without that service keeps the old way (a one-off web container as the owner).
+owner_service=migrate
+if owner_listed=$("${compose[@]}" config --services 2>/dev/null) && [[ -n $owner_listed ]] && ! grep -qx migrate <<< "$owner_listed"; then
+    owner_service=web
+fi
+owner_run() {  # owner_run [-T] manage.py ARGS...
+    local tty=()
+    if [[ ${1:-} == -T ]]; then tty=(-T); shift; fi
+    if [[ $owner_service == migrate ]]; then
+        "${compose[@]}" run --rm --no-deps ${tty[@]+"${tty[@]}"} migrate python3 "$@"
+    else
+        "${compose[@]}" run --rm --no-deps ${tty[@]+"${tty[@]}"} -e CVENGINE_DB_ROLE=owner --entrypoint python3 web "$@"
+    fi
+}
+# Before the database is migrated and the application recreated: the application must run without the owner's password. No overlay may still
+# hand it to another service, and the app role must be created, granted and able to log in (manage.py db_app_role gate in the migrate service).
+# When it is not, the update stops here with the one-line fix and the previous version keeps running (CVENGINE_DB_ALLOW_OWNER_FALLBACK=1 in .env is
+# the explicit way to run on the owner role instead).
+if [[ $owner_service == migrate && -f scripts/db-app-role.sh ]]; then
+    . scripts/db-app-role.sh
+    cvengine_owner_password_check "${compose[@]}" || die 'The update stopped before migrating: an overlay still gives the database owner password to the application (the Fix: line above says what to change).'
+    cvengine_db_gate "${compose[@]}" || die 'The update stopped before migrating: the database role the server runs as cannot be used, and the server is not started with the owner password instead (the Fix: line above says what to do).'
+fi
 applied_migrations() {
     local plan
-    plan=$("${compose[@]}" run --rm --no-deps -T --entrypoint python3 web manage.py showmigrations --plan 2>/dev/null) || return 1
+    plan=$(owner_run -T manage.py showmigrations --plan 2>/dev/null) || return 1
     grep -c '^\[X\]' <<< "$plan" || true
 }
 migrations_before=$(applied_migrations) || migrations_before=''
-if ! "${compose[@]}" run --rm --no-deps --entrypoint python3 web manage.py migrate --noinput; then
+if ! owner_run manage.py migrate --noinput; then
     # Each migration runs in a transaction of its own, so a failed batch can leave the first ones applied. The previous code must not be put back on a
     # schema that is part migrated: when the count of applied migrations changed (or cannot be read) the checkout stays on the new commit.
     migrations_after=$(applied_migrations) || migrations_after=''
@@ -951,6 +980,8 @@ while (( SECONDS < deadline )); do
         echo "Local HTTP returned $status at $ready_url; every worker queue and Celery Beat are running."
         [[ -z $requeued ]] || echo "Queued ${requeued#REQUEUED } stopped scan(s) again."
         echo "This local check does not validate the public hostname, TLS certificate or task execution."
+        # which database role web, celery and celery-beat run as, with a warning when any still uses the owner role (scripts/db-app-role.sh)
+        if declare -F cvengine_db_role_report >/dev/null; then cvengine_db_role_report "${compose[@]}" || true; fi
         "${compose[@]}" ps
         rm -f "$diagnostic_log"
         # An install that never had the update watcher cannot act on Approve in Settings > Updates. This is the one manual update such an

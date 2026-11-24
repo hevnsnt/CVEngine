@@ -1641,11 +1641,11 @@ class ComposeProfileTests(SimpleTestCase):
 
     def test_the_rest_of_the_stack_is_unchanged_without_the_profile(self):
         services = self.compose['services']
-        self.assertEqual({n for n, s in services.items() if 'profiles' not in s}, {'db', 'redis', 'celery', 'celery-beat', 'web', 'proxy', 'reviewer', 'scanner'})  # the AI reviewer and the built-in scanner are part of the default stack
+        self.assertEqual({n for n, s in services.items() if 'profiles' not in s}, {'db', 'redis', 'migrate', 'celery', 'celery-beat', 'web', 'proxy', 'reviewer', 'scanner'})  # the AI reviewer and the built-in scanner are part of the default stack; migrate is the one-off owner service web, celery and celery-beat wait for
         for name in ('celery', 'web'):
             self.assertNotIn('cap_add', services[name])
             self.assertNotIn('network_mode', services[name])
-        self.assertEqual(services['celery']['networks'], ['rengine_network'])
+        self.assertEqual(services['celery']['networks'], ['rengine_network', 'data_network'])  # data_network: the database and Redis
 
     def test_env_example_documents_the_profile_without_a_secret(self):
         text = (ROOT / '.env.example').read_text()

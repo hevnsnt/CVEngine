@@ -1,3 +1,12 @@
+# Every container's log rotates: Docker's json-file driver keeps at most CVENGINE_LOG_MAX_FILE files of CVENGINE_LOG_MAX_SIZE each per container
+# (default 5 x 50 MB), instead of one file that grows until the disk is full. The database writes its connection log here too (log_connections).
+# A change recreates the containers once (an update does that for the application anyway; db and redis once, on the update that brings it).
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "${CVENGINE_LOG_MAX_SIZE:-50m}"
+    max-file: "${CVENGINE_LOG_MAX_FILE:-5}"
+
 services:
   db:
     restart: always
@@ -7,11 +16,14 @@ services:
     # The memory settings default to what this file always used (work_mem 4MB and no preloaded library are PostgreSQL's own defaults); a bigger host
     # raises them in .env (docs/DEPLOYMENT.md, Sizing the database). POSTGRES_SHARED_PRELOAD_LIBRARIES=pg_stat_statements turns on query statistics.
     # POSTGRES_TRACK_IO_TIMING (off) and POSTGRES_LOG_MIN_DURATION_STATEMENT (-1, no slow query log) are diagnostics, PostgreSQL's own defaults when unset.
+    # Every login and logout is logged (POSTGRES_LOG_CONNECTIONS, POSTGRES_LOG_DISCONNECTIONS, default on; off turns either off): who connected, from
+    # where, as which role. A setting given here wins over one made with ALTER SYSTEM.
     command: ["postgres", "-c", "max_connections=${POSTGRES_MAX_CONNECTIONS:-300}", "-c", "shared_buffers=${POSTGRES_SHARED_BUFFERS:-256MB}",
               "-c", "effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-768MB}", "-c", "maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM:-64MB}",
               "-c", "random_page_cost=${POSTGRES_RANDOM_PAGE_COST:-1.1}", "-c", "work_mem=${POSTGRES_WORK_MEM:-4MB}",
               "-c", "shared_preload_libraries=${POSTGRES_SHARED_PRELOAD_LIBRARIES:-}", "-c", "track_io_timing=${POSTGRES_TRACK_IO_TIMING:-off}",
-              "-c", "log_min_duration_statement=${POSTGRES_LOG_MIN_DURATION_STATEMENT:--1}"]
+              "-c", "log_min_duration_statement=${POSTGRES_LOG_MIN_DURATION_STATEMENT:--1}",
+              "-c", "log_connections=${POSTGRES_LOG_CONNECTIONS:-on}", "-c", "log_disconnections=${POSTGRES_LOG_DISCONNECTIONS:-on}"]
     environment:
       - POSTGRES_DB=${POSTGRES_DB}
       - POSTGRES_USER=${POSTGRES_USER}
@@ -23,8 +35,10 @@ services:
       # PostgreSQL 18 images keep PGDATA in a version directory under /var/lib/postgresql, so mount there.
       # A new volume: the old PostgreSQL 12 data cannot be opened by 18 (see scripts/upgrade-postgres.sh).
       - postgres18_data:/var/lib/postgresql
+    # Only the services that hold its password are on data_network (web, celery, celery-beat): not the proxy, the AI reviewer or the scanner.
     networks:
-      - rengine_network
+      - data_network
+    logging: *default-logging
 
   redis:
     restart: always
@@ -36,7 +50,53 @@ services:
     # on the Docker network who does not have it. Without one it is open, as it always was.
     command: ["sh", "-c", "if [ -n \"$$REDIS_PASSWORD\" ]; then exec redis-server --requirepass \"$$REDIS_PASSWORD\"; else exec redis-server; fi"]
     networks:
-      - rengine_network
+      - data_network  # as the database: only web, celery and celery-beat reach it
+    logging: *default-logging
+
+  # The one-off database owner service. It is the ONLY container that gets the owner role's password (POSTGRES_PASSWORD: the role the
+  # database image created, a superuser on a stock install) and DJANGO_SUPERUSER_PASSWORD (from .env). It runs, then exits (web/migrate-entrypoint.sh): the
+  # migrations, then `manage.py db_app_role gate`, which creates or updates the least privilege app role web, celery and celery-beat connect as,
+  # grants it, and checks that it logs in. `docker compose up` runs it before them (their depends_on), and the update scripts and `make up` run
+  # it before they start them. Other owner commands run here too: `docker compose run --rm migrate python3 manage.py createsuperuser` (make
+  # username, make admin, make migrate, make test). When the app role cannot be used the gate exits 1 with the one-line fix and the application
+  # is not started: it is never given the owner password by accident. CVENGINE_DB_ALLOW_OWNER_FALLBACK=1 in .env is the explicit way to run it
+  # on the owner role: the gate then writes the owner password to the db_owner_fallback volume, which web, celery and celery-beat mount
+  # read-only, and removes it again once the app role works (docs/CONFIGURATION.md, Database roles). Not long running: restart "no".
+  migrate:
+    build:  # the same image as web (cvengine/web:latest), built with it
+      context: ./web
+      args:
+        SENTINEL_REF: "${SENTINEL_REF:-main}"
+        SENTINEL_SHA: "${SENTINEL_SHA:-}"
+    image: cvengine/web:latest
+    entrypoint: /usr/src/app/migrate-entrypoint.sh
+    restart: "no"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      - DEBUG=0
+      - CELERY_BROKER=redis://:${REDIS_PASSWORD:-}@redis:6379/0
+      - CELERY_BACKEND=redis://:${REDIS_PASSWORD:-}@redis:6379/0
+      - DOMAIN_NAME=${DOMAIN_NAME}
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_PORT=${POSTGRES_PORT}
+      - POSTGRES_HOST=${POSTGRES_HOST}
+      - CVENGINE_DB_ROLE=owner
+      - CVENGINE_DB_APP_USER=${CVENGINE_DB_APP_USER-cvengine_app}
+      - CVENGINE_DB_APP_PASSWORD=${CVENGINE_DB_APP_PASSWORD:-}
+      - CVENGINE_DB_OWNER_FALLBACK_FILE=/var/lib/cvengine-db-owner/password
+    volumes:
+      - ./web:/usr/src/app
+      - db_owner_fallback:/var/lib/cvengine-db-owner
+    depends_on:
+      - db
+      - redis
+    networks:
+      - data_network  # the database (and Redis, which Django's settings name), nothing else
+    logging: *default-logging
 
   celery:
     mem_limit: "${CELERY_MEM_LIMIT:-4g}"  # container ceiling; heavy scanner jobs queue inside it (reNgine/resources.py)
@@ -67,6 +127,7 @@ services:
       - scan_results:/usr/src/scan_results
       - generated_templates:/root/cvengine-generated-templates  # validated AI-written templates survive an update
       - tool_config:/root/.config
+      - db_owner_fallback:/var/lib/cvengine-db-owner:ro  # empty unless CVENGINE_DB_ALLOW_OWNER_FALLBACK=1 (the migrate service writes it)
       - static_volume:/usr/src/app/staticfiles/
       - tailscale_status:/var/run/tailscale-status:ro  # the optional tailscale profile's published node status, read-only (docs/TAILSCALE.md); empty without it
       - scanner_bootstrap:/var/lib/cvengine-scanner  # where the server leaves the built-in scanner's one-time enrollment (agentapi/builtin_scanner.py); empty unless CVENGINE_BUILTIN_SCANNER=1
@@ -86,14 +147,24 @@ services:
       - DOMAIN_NAME=${DOMAIN_NAME}
       - POSTGRES_DB=${POSTGRES_DB}
       - POSTGRES_USER=${POSTGRES_USER}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_PASSWORD=  # empty on purpose: the owner password is only in the one-off migrate service (this also blanks the one .env would pass)
       - POSTGRES_PORT=${POSTGRES_PORT}
       - POSTGRES_HOST=${POSTGRES_HOST}
+      - CVENGINE_DB_APP_USER=${CVENGINE_DB_APP_USER-cvengine_app}  # the least privilege role the server runs as (docs/CONFIGURATION.md, Database roles)
+      - CVENGINE_DB_APP_PASSWORD=${CVENGINE_DB_APP_PASSWORD:-}  # generated by the update and make up (scripts/db-app-role.sh)
+      - DJANGO_SUPERUSER_PASSWORD=  # empty: only make admin needs it, and that runs in the migrate service
+      - CVENGINE_DB_OWNER_FALLBACK_FILE=/var/lib/cvengine-db-owner/password  # absent unless CVENGINE_DB_ALLOW_OWNER_FALLBACK=1 (docs/CONFIGURATION.md)
     depends_on:
-      - db
-      - redis
+      migrate:  # the one-off owner service: migrations, the app role and its check; nothing starts when it fails
+        condition: service_completed_successfully
+      db:
+        condition: service_started
+      redis:
+        condition: service_started
     networks:
       - rengine_network
+      - data_network  # the database and Redis
+    logging: *default-logging
 
   celery-beat:
     mem_limit: "${BEAT_MEM_LIMIT:-512m}"  # container ceiling; heavy scanner jobs queue inside it (reNgine/resources.py)
@@ -113,19 +184,30 @@ services:
       - CELERY_BACKEND=redis://:${REDIS_PASSWORD:-}@redis:6379/0
       - POSTGRES_DB=${POSTGRES_DB}
       - POSTGRES_USER=${POSTGRES_USER}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_PASSWORD=  # empty on purpose: the owner password is only in the one-off migrate service (this also blanks the one .env would pass)
       - POSTGRES_PORT=${POSTGRES_PORT}
       - POSTGRES_HOST=${POSTGRES_HOST}
+      - CVENGINE_DB_APP_USER=${CVENGINE_DB_APP_USER-cvengine_app}  # the least privilege role the server runs as (docs/CONFIGURATION.md, Database roles)
+      - CVENGINE_DB_APP_PASSWORD=${CVENGINE_DB_APP_PASSWORD:-}  # generated by the update and make up (scripts/db-app-role.sh)
+      - DJANGO_SUPERUSER_PASSWORD=  # empty: only make admin needs it, and that runs in the migrate service
+      - CVENGINE_DB_OWNER_FALLBACK_FILE=/var/lib/cvengine-db-owner/password  # absent unless CVENGINE_DB_ALLOW_OWNER_FALLBACK=1 (docs/CONFIGURATION.md)
     depends_on:
-      - celery
-      - db
+      migrate:  # the one-off owner service: migrations, the app role and its check; nothing starts when it fails
+        condition: service_completed_successfully
+      celery:
+        condition: service_started
+      db:
+        condition: service_started
     volumes:
       - ./web:/usr/src/app
       - scan_results:/usr/src/scan_results
       - generated_templates:/root/cvengine-generated-templates  # validated AI-written templates survive an update
       - tool_config:/root/.config
+      - db_owner_fallback:/var/lib/cvengine-db-owner:ro  # empty unless CVENGINE_DB_ALLOW_OWNER_FALLBACK=1 (the migrate service writes it)
     networks:
       - rengine_network
+      - data_network  # the database and Redis
+    logging: *default-logging
 
   web:
     mem_limit: "${WEB_MEM_LIMIT:-1g}"  # container ceiling; heavy scanner jobs queue inside it (reNgine/resources.py)
@@ -158,27 +240,38 @@ services:
       - DOMAIN_NAME=${DOMAIN_NAME}
       - POSTGRES_DB=${POSTGRES_DB}
       - POSTGRES_USER=${POSTGRES_USER}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_PASSWORD=  # empty on purpose: the owner password is only in the one-off migrate service (this also blanks the one .env would pass)
       - POSTGRES_PORT=${POSTGRES_PORT}
       - POSTGRES_HOST=${POSTGRES_HOST}
-      - DJANGO_SUPERUSER_PASSWORD=${DJANGO_SUPERUSER_PASSWORD}
+      - CVENGINE_DB_APP_USER=${CVENGINE_DB_APP_USER-cvengine_app}  # the least privilege role the server runs as (docs/CONFIGURATION.md, Database roles)
+      - CVENGINE_DB_APP_PASSWORD=${CVENGINE_DB_APP_PASSWORD:-}  # generated by the update and make up (scripts/db-app-role.sh)
+      - DJANGO_SUPERUSER_PASSWORD=  # empty: only make admin needs it, and that runs in the migrate service
+      - CVENGINE_DB_OWNER_FALLBACK_FILE=/var/lib/cvengine-db-owner/password  # absent unless CVENGINE_DB_ALLOW_OWNER_FALLBACK=1 (docs/CONFIGURATION.md)
     volumes:
       - ./web:/usr/src/app
       - scan_results:/usr/src/scan_results
       - generated_templates:/root/cvengine-generated-templates  # validated AI-written templates survive an update
       - tool_config:/root/.config
+      - db_owner_fallback:/var/lib/cvengine-db-owner:ro  # empty unless CVENGINE_DB_ALLOW_OWNER_FALLBACK=1 (the migrate service writes it)
       - static_volume:/usr/src/app/staticfiles/
     ports:
       - "127.0.0.1:8000:8000"
     depends_on:
-      - db
-      - celery
-      - celery-beat
+      migrate:  # the one-off owner service: migrations, the app role and its check; nothing starts when it fails
+        condition: service_completed_successfully
+      db:
+        condition: service_started
+      celery:
+        condition: service_started
+      celery-beat:
+        condition: service_started
     networks:
       rengine_network:
         aliases:
           - rengine
       scanner_network: {}  # the built-in scanner reaches the server here (http://web:8000), and nothing else of the stack
+      data_network: {}  # the database and Redis (the proxy, the AI reviewer and the scanner are not on it)
+    logging: *default-logging
 
   proxy:
     restart: always
@@ -209,6 +302,7 @@ services:
       - scan_results:/usr/src/scan_results:ro
     networks:
       - rengine_network
+    logging: *default-logging
 
   # Optional: attach this install to a Tailscale tailnet so Settings > Tailscale can scan its devices. Off unless COMPOSE_PROFILES=tailscale is
   # in .env (or `docker compose --profile tailscale up -d`); the rest of the stack is the same either way. docs/TAILSCALE.md has the steps.
@@ -268,6 +362,7 @@ services:
     volumes:
       - tailscale_state:/var/lib/tailscale
       - tailscale_status:/status
+    logging: *default-logging
 
   # The built-in scanner ("CVEngine Scanner", docs/BUILTIN-SCANNER.md): the cvENGINE Sentinel image running next to the server, enrolled by it with nobody
   # typing a secret, and where every scan tool runs (docs/SCANNER-ARCHITECTURE.md). On by default; CVENGINE_BUILTIN_SCANNER=0 in .env turns it off (the
@@ -345,6 +440,7 @@ services:
       - scanner_state:/var/lib/cvengine-sentinel
     depends_on:
       - web
+    logging: *default-logging
 
   # The AI reviewer (docs/AI-REVIEWER.md): reviews every open finding once and checks the server's operations a few times a day, with the
   # provider and models chosen in Settings > AI model. It is boxed in on purpose: its own small image (./reviewer) with no cvENGINE source,
@@ -379,15 +475,21 @@ services:
       - reviewer_bootstrap:/bootstrap:ro
     depends_on:
       - web
+    # web only (http://web:8000) and the AI provider: it is not on data_network, so it cannot even reach the database's or Redis's login.
     networks:
       - rengine_network
+    logging: *default-logging
 
 networks:
   rengine_network:
   scanner_network:  # the built-in scanner and the web service only (see scanner above)
+  # The database and Redis, and the three services that hold their passwords (web, celery, celery-beat). A plain bridge, not `internal: true`:
+  # the database's published port (127.0.0.1:5432) needs a network with a gateway, and an internal one would drop it.
+  data_network:
 
 volumes:
   tool_config:
+  db_owner_fallback:  # the owner password, only while CVENGINE_DB_ALLOW_OWNER_FALLBACK=1 needs it (see migrate above)
   postgres18_data:
   generated_templates:
   scan_results:

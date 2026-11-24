@@ -65,13 +65,13 @@ class BuildWiringTests(TestCase):
 
     def test_every_build_passes_the_arguments_and_every_build_path_resolves_the_commit_first(self):
         compose = (ROOT / 'docker-compose.yml').read_text()
-        self.assertEqual(compose.count('SENTINEL_REF: "${SENTINEL_REF:-main}"'), 2)  # web and celery: the two builds of ./web
-        self.assertEqual(compose.count('SENTINEL_SHA: "${SENTINEL_SHA:-}"'), 2)
+        self.assertEqual(compose.count('SENTINEL_REF: "${SENTINEL_REF:-main}"'), 3)  # web, celery and migrate: the builds of ./web
+        self.assertEqual(compose.count('SENTINEL_SHA: "${SENTINEL_SHA:-}"'), 3)
         for script in ('scripts/update.sh', 'scripts/apply-update.sh', 'scripts/update-deploy.sh'):
             text = (ROOT / script).read_text()
             self.assertLess(text.index('scripts/sentinel-ref.sh'), text.index('build web celery celery-beat'), script)
         makefile = (ROOT / 'Makefile').read_text()
-        self.assertEqual(makefile.count('${SENTINEL_BUILD_ENV}'), 2)  # make up and make build
+        self.assertEqual(makefile.count('${SENTINEL_BUILD_ENV}'), 3)  # make up (the web build before migrate, then the rest) and make build
 
     def test_the_ref_script_takes_a_full_sha_as_it_is_and_refuses_what_is_not_a_ref(self):
         run = lambda ref: subprocess.run(['bash', str(ROOT / 'scripts' / 'sentinel-ref.sh')], capture_output=True, text=True, env={'PATH': '/usr/bin:/bin', 'SENTINEL_REF': ref}, timeout=30)

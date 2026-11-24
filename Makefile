@@ -16,7 +16,7 @@ $(info Using: $(shell echo "$(DOCKER_COMPOSE)"))
 
 # --------------------------
 
-.PHONY: check-env check-secrets certs up build admin admin-password username changepassword migrate down stop restart rm test logs images help inventory-sync uninstall-updater scanner-build scanner-update scanner-logs
+.PHONY: rotate-secrets db-backup db-backup-schedule restore-check check-env check-secrets certs up build admin admin-password username changepassword migrate dbshell down stop restart rm test logs images help inventory-sync uninstall-updater scanner-build scanner-update scanner-logs
 
 # .env is not tracked. Create it on first use, with the passwords generated and DOMAIN_NAME set to this machine's address.
 check-env:
@@ -38,7 +38,16 @@ up: check-env		## Build and start all services.
 	@python3 scripts/update-state.py upstream || true
 	@# a broker without a password gets one (Redis and its clients are recreated below, as their settings changed)
 	@bash -c '. scripts/redis-password.sh && cvengine_ensure_redis_password "$(CVENGINE_COMPOSE_ENV_FILE)" && echo "The Redis broker had no password: generated one (REDIS_PASSWORD in .env)." || true'
-	${SENTINEL_BUILD_ENV} ${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} up -d --build ${SERVICES}
+	@# the least privilege database role the server runs as gets its password; the migrate service below creates the role (docs/CONFIGURATION.md)
+	@bash -c '. scripts/db-app-role.sh && cvengine_ensure_db_app_password "$(CVENGINE_COMPOSE_ENV_FILE)" && echo "Generated the password of the database role the server runs as (CVENGINE_DB_APP_PASSWORD in .env)." || true'
+	@# Only the one-off migrate service gets the database owner's password. It runs here, before the application starts, in the foreground so its
+	@# output shows: the migrations, then the app role's grants and login check, which stops make up with the one-line fix when the role cannot be
+	@# used (CVENGINE_DB_ALLOW_OWNER_FALLBACK=1 in .env is the explicit way to run on the owner role instead).
+	@bash -c '. scripts/db-app-role.sh && cvengine_owner_password_check ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES}'
+	${SENTINEL_BUILD_ENV} ${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} build web
+	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} up -d db redis
+	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} run --rm -e CVENGINE_DB_ALLOW_OWNER_FALLBACK=$$(bash -c '. scripts/db-app-role.sh && cvengine_db_owner_fallback "$(CVENGINE_COMPOSE_ENV_FILE)"') migrate
+	${SENTINEL_BUILD_ENV} ${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} up -d --build --no-deps ${SERVICES}
 	@# the old in-stack OpenVAS containers (no longer in docker-compose.yml) are stopped and removed; their volumes are kept
 	@bash -c '. scripts/retire-openvas.sh && cvengine_retire_openvas'
 	@# The built-in scanner (docs/BUILTIN-SCANNER.md), on its own network: the newest published image is fetched and the scanner recreated, and the optional
@@ -51,10 +60,10 @@ build: check-env		## Build all services.
 	${SENTINEL_BUILD_ENV} ${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} build ${SERVICES}
 
 admin:		## Create the admin account; its password is generated and printed once (after make up).
-	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} exec -T web python3 manage.py create_admin
+	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} run --rm --no-deps -T migrate python3 manage.py create_admin
 
 admin-password:	## Lost the admin password? Generate a new one and print it once.
-	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} exec -T web python3 manage.py create_admin --reset
+	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} run --rm --no-deps -T migrate python3 manage.py create_admin --reset
 
 export-cve-seed:	## Write this instance's whole CVE catalog to web/cve-seed.jsonl.gz (see docs/PIPELINE.md, Seeding the catalog).
 	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} exec -T web python3 manage.py export_cve_seed --out /usr/src/app/cve-seed.jsonl.gz
@@ -65,18 +74,33 @@ redis-auth:	## Put a password on the Redis broker of an older installation (see 
 rotate-field-key:	## Rotate the key that encrypts stored API keys and webhook URLs (see docs/CONFIGURATION.md).
 	./scripts/rotate-field-key.sh
 
+rotate-secrets:	## Rotate the database, Redis and field keys and the Django secret, then verify (ARGS=--dry-run shows the plan; docs/CONFIGURATION.md).
+	./scripts/rotate-secrets.sh $(ARGS)
+
+db-backup:	## Dump the database now into the nightly dump folder (backups/db; see docs/DEPLOYMENT.md, Backups).
+	./scripts/db-backup-daily.sh
+
+db-backup-schedule:	## Dump the database every night at 03:17 and keep CVENGINE_DB_BACKUP_DAYS days (a crontab line; see docs/DEPLOYMENT.md, Backups).
+	./scripts/install-db-backup.sh
+
+restore-check:	## Restore the newest dump into a throwaway database, count rows, drop it (see docs/DEPLOYMENT.md, Backups).
+	./scripts/restore-check.sh
+
 username: check-secrets	## Create an admin account of your own choosing (asks for the password; use after make up).
 ifeq ($(isNonInteractive), true)
-	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} exec web python3 manage.py createsuperuser --username ${DJANGO_SUPERUSER_USERNAME} --email ${DJANGO_SUPERUSER_EMAIL} --noinput
+	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} run --rm --no-deps migrate python3 manage.py createsuperuser --username ${DJANGO_SUPERUSER_USERNAME} --email ${DJANGO_SUPERUSER_EMAIL} --noinput
 else
-	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} exec web python3 manage.py createsuperuser
+	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} run --rm --no-deps migrate python3 manage.py createsuperuser
 endif
 
 changepassword:	## Change password for user
 	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} exec web python3 manage.py changepassword
 
-migrate:		## Apply migrations
-	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} exec web python3 manage.py migrate
+migrate:		## Apply migrations as the database's owner role, in the one-off migrate service (which also grants and checks the app role the server runs as)
+	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} run --rm --no-deps -e CVENGINE_DB_ALLOW_OWNER_FALLBACK=$$(bash -c '. scripts/db-app-role.sh && cvengine_db_owner_fallback "$(CVENGINE_COMPOSE_ENV_FILE)"') migrate
+
+dbshell:		## A psql prompt as the database's owner role, inside the db container (no password leaves it)
+	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} exec db sh -c 'exec psql -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"'
 
 down:			## Down all services.
 	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} down
@@ -90,8 +114,8 @@ restart:		## Restart all services.
 rm:				## Remove all services containers.
 	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} $(COMPOSE_ALL_FILES) rm -f ${SERVICES}
 
-test:			## Run the test suite (the stack must be running).
-	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} $(COMPOSE_ALL_FILES) exec celery python3 manage.py test tests
+test:			## Run the test suite (the stack must be running; as the owner role, which creates the test database, in the migrate service).
+	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} $(COMPOSE_ALL_FILES) run --rm --no-deps migrate python3 manage.py test tests
 
 uninstall-updater:	## Remove the host's update watcher (the cron line install.sh added); run with sudo if install.sh ran as root (docs/UPDATES.md).
 	bash scripts/uninstall-updater.sh
