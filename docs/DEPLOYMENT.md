@@ -126,9 +126,8 @@ On macOS or Windows, install Docker Desktop (with the WSL 2 backend on Windows),
 ```bash
 ./scripts/init-env.sh
 docker compose -f docker-compose.setup.yml run --rm certs
-docker compose up -d --build
-# wait until web has finished migrating (docker compose logs -f web), then:
-docker compose exec -T web python3 manage.py create_admin
+docker compose up -d --build   # runs the one-off migrate service first (migrations, the database role check), then the rest
+docker compose run --rm -T migrate python3 manage.py create_admin
 ```
 
 `.env` must exist first, because the database will not start with an empty password. A plain `docker compose up` does not record the installed commit for the updater, so the in-app update check shows it as unknown (`make up` records it). It also does not install the update watcher: run `sudo scripts/install-updater.sh` once so the Approve button works.
@@ -328,7 +327,19 @@ The fallback is `apparmor=unconfined` in place of `apparmor=cvengine-scanner` in
 
 ## Database roles, networks and logs
 
-The server runs as the least privilege database role `cvengine_app`, not as `POSTGRES_USER` (the owner, used for migrations and backups only); every update and `make up` set it up by themselves, and nothing has to be done by hand ([CONFIGURATION.md](CONFIGURATION.md#database-roles-and-logs), [UPGRADE.md](UPGRADE.md#database-roles-the-server-no-longer-runs-as-the-database-owner)). `docker compose exec web python3 manage.py db_app_role status` says which role a container runs as. The database and Redis sit on `data_network` with `web`, `celery` and `celery-beat` only. PostgreSQL logs every connection and disconnection (`log_connections`, `log_disconnections`), and every container's Docker log rotates at 5 files of 50 MB (`CVENGINE_LOG_MAX_FILE`, `CVENGINE_LOG_MAX_SIZE`).
+The server runs as the least privilege database role `cvengine_app`, not as `POSTGRES_USER` (the owner, used for migrations and backups only); every update and `make up` set it up by themselves, and nothing has to be done by hand ([CONFIGURATION.md](CONFIGURATION.md#database-roles-and-logs), [UPGRADE.md](UPGRADE.md#database-roles-the-server-no-longer-runs-as-the-database-owner)). `docker compose exec web python3 manage.py db_app_role status` says which role a container runs as.
+
+The owner's password (`POSTGRES_PASSWORD`) is in one container only: the one-off `migrate` service, which runs the migrations and checks the app role, then exits. `web`, `celery` and `celery-beat` do not have it, and do not start when the app role cannot log in, unless `CVENGINE_DB_ALLOW_OWNER_FALLBACK=1` is in `.env` ([UPGRADE.md](UPGRADE.md#the-owner-password-leaves-the-application-containers)). Owner commands therefore run in that service or in the `db` container, never with `docker compose exec web`:
+
+| To | Run |
+| --- | --- |
+| apply migrations (and check the app role) | `make migrate`, or `docker compose run --rm migrate` |
+| create an admin account | `make admin` or `make username` (`docker compose run --rm migrate python3 manage.py createsuperuser`) |
+| any other owner command | `docker compose run --rm migrate python3 manage.py <command>` |
+| a psql prompt as the owner | `make dbshell` (`docker compose exec db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'`) |
+| a backup | `scripts/db-backup.sh` and the updaters run `pg_dump` inside the `db` container with `docker exec` |
+
+An install that starts the stack with its own `docker compose up` gets the `migrate` service first through `depends_on`; when its check fails, `docker compose up` reports `service "migrate" didn't complete successfully` and `docker compose logs migrate` shows the `Fix:` line. An overlay must not list `POSTGRES_PASSWORD` under `web`, `celery` or `celery-beat`: Compose would merge it back in, and the updaters refuse such a layout. The database and Redis sit on `data_network` with `web`, `celery` and `celery-beat` only. PostgreSQL logs every connection and disconnection (`log_connections`, `log_disconnections`), and every container's Docker log rotates at 5 files of 50 MB (`CVENGINE_LOG_MAX_FILE`, `CVENGINE_LOG_MAX_SIZE`).
 
 ## Backups
 
@@ -378,12 +389,13 @@ docker compose exec -T db sh -c 'pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB
 | `make up` | Creates `.env` if it is missing, clears a leftover maintenance flag, moves a PostgreSQL 12 database to 18 ([UPGRADE.md](UPGRADE.md)), records the installed commit, then builds and starts the core services, and fetches the newest published built-in scanner image and starts it on its own network, with the Tailscale sidecar in its namespace when that profile is on ([BUILTIN-SCANNER.md](BUILTIN-SCANNER.md)). |
 | `make build` | Records the installed commit and builds the images. |
 | `make certs` | Creates the HTTPS certificate ([HTTPS](#https)). Refuses while the database or certificate password still says `change-me`. |
-| `make admin`, `make admin-password` | Create the admin account with a generated password, or reset that account's password and print a new one. |
-| `make username`, `make changepassword` | Create an admin account of your own choosing, or change a user's password. |
-| `make migrate` | Applies migrations. |
+| `make admin`, `make admin-password` | Create the admin account with a generated password, or reset that account's password and print a new one (in the one-off `migrate` service). |
+| `make username`, `make changepassword` | Create an admin account of your own choosing (`createsuperuser`, in the `migrate` service), or change a user's password. |
+| `make migrate` | Applies migrations and checks the database role the server runs as, in the one-off `migrate` service, the only container with the owner's password ([Database roles](#database-roles-networks-and-logs)). |
+| `make dbshell` | A `psql` prompt as the database owner, inside the `db` container (`docker exec`); no password leaves it. |
 | `make down`, `make stop`, `make restart`, `make rm` | Take the stack down, stop, restart or remove its containers. Volumes stay. |
 | `make logs`, `make images` | Follow the logs (last 1000 lines), or show the images. |
-| `make test` | Runs the test suite in the running `celery` container. |
+| `make test` | Runs the test suite in a one-off `migrate` container (the test runner creates its database as the owner). |
 | `make redis-auth`, `make rotate-field-key` | One-time hardening of an older install ([CONFIGURATION.md](CONFIGURATION.md#templates-and-secrets), [UPGRADE.md](UPGRADE.md#upgrading-to-12)). |
 | `make rotate-secrets` | Rotates the database passwords, the Redis password, the field key and the Django secret, then verifies the site; `ARGS=--dry-run` prints the plan ([CONFIGURATION.md](CONFIGURATION.md#rotating-secrets)). |
 | `make db-backup`, `make db-backup-schedule`, `make restore-check` | Dump the database now, dump it every night, or prove the newest dump restores ([Backups](#nightly-dump)). |
@@ -413,9 +425,8 @@ A single-machine stack on `http://localhost:8000` with Django's auto-reloading s
 ```bash
 ./scripts/init-env.sh
 docker compose -f docker-compose.dev.yml build web celery celery-beat
-docker compose -f docker-compose.dev.yml up -d db redis web celery celery-beat
-# wait until web has finished migrating, then:
-docker compose -f docker-compose.dev.yml exec web python3 manage.py createsuperuser
+docker compose -f docker-compose.dev.yml up -d db redis web celery celery-beat   # the migrate service runs first
+docker compose -f docker-compose.dev.yml run --rm migrate python3 manage.py createsuperuser
 ```
 
 `make admin` only targets the production file, so use `createsuperuser` here.

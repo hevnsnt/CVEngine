@@ -4,7 +4,9 @@ Two roles share the database:
 
 * the OWNER role (``POSTGRES_USER``, the role the database image created; a superuser on a stock install) owns every table. It is used only by
   the migrations, ``createsuperuser``, the test runner, ``showmigrations`` and ``dbshell`` (``OWNER_COMMANDS``), by any process started with
-  ``CVENGINE_DB_ROLE=owner``, and by the backups and the database image's own tools, which run inside the db container.
+  ``CVENGINE_DB_ROLE=owner``, and by the backups and the database image's own tools, which run inside the db container. Its password
+  (``POSTGRES_PASSWORD``) is given to ONE container only: the one-off ``migrate`` service of docker-compose.yml, which runs the migrations and
+  ``gate`` and exits. web, celery and celery-beat do not have it.
 * the APP role (``CVENGINE_DB_APP_USER``, default ``cvengine_app``, password ``CVENGINE_DB_APP_PASSWORD``) is what web, celery, celery-beat and
   every management command they run use. It is ``NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS`` and holds only what the code
   needs at run time (``grant_statements``): CONNECT, USAGE on the schema, SELECT INSERT UPDATE DELETE on every table, USAGE SELECT UPDATE on
@@ -12,11 +14,15 @@ Two roles share the database:
   from a Celery task. So an SQL injection or a bug in the application can no longer run ``COPY ... TO PROGRAM``, read or write server files,
   create roles, ``ALTER SYSTEM`` or drop a table.
 
-Fallback, so an update never locks anyone out: with ``CVENGINE_DB_APP_USER`` or ``CVENGINE_DB_APP_PASSWORD`` empty the owner role is used, as
-before this existed. Every ``migrate`` that runs as the owner creates or updates the app role and grants it (``ensure``, called from the
-``post_migrate`` signal and by ``manage.py db_app_role ensure``), idempotently. The container entrypoints then ``choose``: when the app role
-cannot log in but the owner can (the role was never created, its password differs) the container keeps the owner role, says so in its log and
-writes that choice to ``STATE_FILE``, which every later process of the same container (``docker compose exec``) reads through ``resolve``.
+No silent fallback: every ``migrate`` that runs as the owner creates or updates the app role and grants it (``ensure``, called from the
+``post_migrate`` signal and by ``manage.py db_app_role ensure``), idempotently, and ``gate`` (``manage.py db_app_role gate``, run by the migrate
+service before the application starts) checks that the app role logs in. When it does not (or ``CVENGINE_DB_APP_USER`` or
+``CVENGINE_DB_APP_PASSWORD`` is empty) the gate fails with the one-line fix and the application is not started, unless
+``CVENGINE_DB_ALLOW_OWNER_FALLBACK=1``: only then does it hand the owner password to the application, as a file in the ``db_owner_fallback``
+volume (``CVENGINE_DB_OWNER_FALLBACK_FILE``), which web, celery and celery-beat mount read-only and which is removed again once the app role
+works. The container entrypoints then ``choose``: when the app role cannot log in but the owner can (only possible with that file) the
+container keeps the owner role, says so in its log and writes that choice to ``STATE_FILE``, which every later process of the same container
+(``docker compose exec``) reads through ``resolve``.
 
 This module imports nothing from Django at import time: settings.py calls ``resolve`` while the settings are being built.
 """
@@ -40,6 +46,11 @@ TABLE_PRIVILEGES = 'SELECT, INSERT, UPDATE, DELETE'
 SEQUENCE_PRIVILEGES = 'USAGE, SELECT, UPDATE'
 ROLE_ATTRIBUTES = 'LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS INHERIT'
 MAINTAIN_SINCE = 170000  # pg_maintain is a PostgreSQL 17 role
+# The owner password the application may read ONLY when CVENGINE_DB_ALLOW_OWNER_FALLBACK=1 made the gate write it (docker-compose.yml mounts the
+# db_owner_fallback volume read-only in web, celery and celery-beat, and read-write in the migrate service, which writes and removes it).
+FALLBACK_FILE_ENV = 'CVENGINE_DB_OWNER_FALLBACK_FILE'
+ALLOW_FALLBACK_ENV = 'CVENGINE_DB_ALLOW_OWNER_FALLBACK'
+FALLBACK_HINT = 'To run on the owner role until then, set CVENGINE_DB_ALLOW_OWNER_FALLBACK=1 in .env and run it again (docs/UPGRADE.md, Database roles).'
 
 
 class RoleError(Exception):
@@ -102,16 +113,41 @@ def secret(environ, name):
     return ''
 
 
+def owner_password(environ):
+    """The owner role's password: ``POSTGRES_PASSWORD`` (or ``POSTGRES_PASSWORD_FILE``), which only the migrate service has, else the fallback file
+    the gate writes when ``CVENGINE_DB_ALLOW_OWNER_FALLBACK=1`` (``CVENGINE_DB_OWNER_FALLBACK_FILE``), else ''."""
+    value = secret(environ, 'POSTGRES_PASSWORD')
+    if value:
+        return value
+    path = (environ.get(FALLBACK_FILE_ENV) or '').strip()
+    if path:
+        try:
+            with open(path, encoding='utf-8') as handle:
+                return handle.read().strip()
+        except OSError:
+            return ''
+    return ''
+
+
+def fallback_allowed(environ):
+    """Whether ``CVENGINE_DB_ALLOW_OWNER_FALLBACK=1``: the explicit permission to run the application on the owner role. Anything else is no."""
+    return (environ.get(ALLOW_FALLBACK_ENV) or '').strip() == '1'
+
+
 def resolve(environ=None, argv=None, state_file: 'str | None' = ''):
     """``{role, user, password, reason, app_user}``: the credentials this process uses. ``role`` is ``app`` or ``owner``."""
     environ = os.environ if environ is None else environ
     if state_file == '':  # the default: where the entrypoint writes it
         state_file = environ.get('CVENGINE_DB_ROLE_STATE') or STATE_FILE
-    owner = {'user': environ.get('POSTGRES_USER', ''), 'password': secret(environ, 'POSTGRES_PASSWORD')}
+    owner = {'user': environ.get('POSTGRES_USER', ''), 'password': owner_password(environ)}
     name = app_user(environ)
     password = secret(environ, 'CVENGINE_DB_APP_PASSWORD')
 
     def use_owner(reason):
+        if environ is os.environ and owner['password'] and not environ.get('POSTGRES_PASSWORD'):
+            # settings.py reads the owner's password from POSTGRES_PASSWORD, which the application containers have empty: with the fallback file
+            # (CVENGINE_DB_ALLOW_OWNER_FALLBACK=1) it is put there for this process only
+            environ['POSTGRES_PASSWORD'] = owner['password']
         return {'role': 'owner', **owner, 'reason': reason, 'app_user': name}
 
     if not name:
@@ -272,7 +308,7 @@ def choose(environ=None, *, wait=0, connect=None, sleep=time.sleep, clock=time.m
         except Exception as app_error:  # noqa: BLE001 - any failure: ask whether the owner gets in
             reason = str(app_error).strip().splitlines()[0] if str(app_error).strip() else type(app_error).__name__
         try:
-            connect(environ, environ.get('POSTGRES_USER', ''), secret(environ, 'POSTGRES_PASSWORD')).close()
+            connect(environ, environ.get('POSTGRES_USER', ''), owner_password(environ)).close()
             owner_in = True
         except Exception:  # noqa: BLE001
             owner_in = False
@@ -281,6 +317,109 @@ def choose(environ=None, *, wait=0, connect=None, sleep=time.sleep, clock=time.m
                 return 'owner', f"the role {runtime['user']} cannot log in yet ({reason})"
             return 'app', ''
         sleep(3)
+
+
+# The gate: the app role must work before the application starts.
+
+def _not_configured(environ, name):
+    """``(problem, fix)`` when no usable app role is configured."""
+    raw = environ.get('CVENGINE_DB_APP_USER')
+    if raw is not None and not raw.strip():
+        return ('CVENGINE_DB_APP_USER is set empty, which asks for the owner role',
+                'Fix: delete the line CVENGINE_DB_APP_USER= from .env (and from the Compose env file, if the install has one), then run the update again.')
+    if not ROLE_NAME.match(name) or name == environ.get('POSTGRES_USER'):
+        return (f'CVENGINE_DB_APP_USER {name!r} is not a plain role name other than the owner {environ.get("POSTGRES_USER", "")}',
+                'Fix: delete the CVENGINE_DB_APP_USER line from .env (the default is cvengine_app) or set it to a plain name of letters, digits and _, '
+                'then run the update again.')
+    return ('CVENGINE_DB_APP_PASSWORD is empty',
+            "Fix: run  bash -c '. scripts/db-app-role.sh && cvengine_ensure_db_app_password'  in the install directory (it writes "
+            'CVENGINE_DB_APP_PASSWORD to .env), then run the update again.')
+
+
+def _first_line(exc):
+    text = str(exc).strip()
+    return text.splitlines()[0].strip() if text else type(exc).__name__
+
+
+def _replace_fallback(path, password):
+    """Write (``password``) or remove (None) the fallback file; ``''`` when done, else why not."""
+    if not path:
+        return f'{FALLBACK_FILE_ENV} is not set in this container'
+    if password is None:
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            return str(exc)
+        return ''
+    if not password:
+        return 'this container has no POSTGRES_PASSWORD to hand on'
+    temp = f'{path}.tmp'
+    try:
+        fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+            handle.write(password + '\n')
+        os.replace(temp, path)
+    except OSError as exc:
+        return str(exc)
+    return ''
+
+
+def gate(environ=None, *, connect=None, ensure_role=None):
+    """The check the migrate service runs before the application starts (``manage.py db_app_role gate``). ``(ok, role, lines)``:
+
+    * the app role is configured, ``ensure_role(name, password)`` (create and grant it, as the owner) works and the role logs in: ``ok``, ``app``,
+      and the fallback file is removed (the application never sees the owner password);
+    * otherwise, with ``CVENGINE_DB_ALLOW_OWNER_FALLBACK=1``: ``ok``, ``owner``, a warning, and the owner password is written to the fallback file
+      for web, celery and celery-beat;
+    * otherwise: not ``ok``, the fallback file is removed, and ``lines`` ends with the one-line fix. The caller exits non-zero, so the update and
+      ``docker compose up`` stop before the application starts.
+    """
+    environ = os.environ if environ is None else environ
+    connect = connect or _connect
+    runtime = resolve({k: v for k, v in environ.items() if k != 'CVENGINE_DB_ROLE'}, argv=['manage.py', 'runserver'], state_file=None)
+    name, owner = runtime['app_user'], environ.get('POSTGRES_USER', '')
+    path = (environ.get(FALLBACK_FILE_ENV) or '').strip()
+    problem = fix = None
+    if runtime['role'] != 'app':
+        problem, fix = _not_configured(environ, name)
+    else:
+        if ensure_role is not None:
+            try:
+                ensure_role(name, runtime['password'])
+            except RoleError as exc:
+                problem = f'the database role {name} could not be created or granted ({exc})'
+                fix = (f'Fix: let the owner role {owner} create roles (it needs SUPERUSER or CREATEROLE), or create {name} as a superuser with the '
+                       'grants in docs/CONFIGURATION.md (Database roles), then run the update again.')
+        if problem is None:
+            try:
+                connect(environ, name, runtime['password']).close()
+            except Exception as exc:  # noqa: BLE001 - any failure to log in is the answer
+                problem = f'the database role {name} cannot log in ({_first_line(exc)})'
+                fix = (f'Fix: make the database accept {name} (docker compose logs db shows why it refused the login: pg_hba.conf, CONNECT on the '
+                       'database), then run the update again.')
+    if problem is None:
+        why = _replace_fallback(path, None) if path else ''
+        lines = [f'db_app_role: web, celery and celery-beat run as the database role {name}; the owner password stays in the migrate service']
+        if why:
+            lines.append(f'db_app_role: warning: could not remove the owner fallback file {path}: {why}')
+        return True, 'app', lines
+    if fallback_allowed(environ):
+        why = _replace_fallback(path, secret(environ, 'POSTGRES_PASSWORD'))
+        if why:
+            return False, None, [f'db_app_role: ERROR: {problem}; CVENGINE_DB_ALLOW_OWNER_FALLBACK=1, but the owner password could not be handed '
+                                 f'to the application ({why}).',
+                                 'Fix: run the update (or make up) again with the docker-compose.yml of this release, which mounts the '
+                                 'db_owner_fallback volume.']
+        return True, 'owner', [f'db_app_role: WARNING: {problem}. CVENGINE_DB_ALLOW_OWNER_FALLBACK=1, so web, celery and celery-beat run as the '
+                               f'OWNER role {owner}, which can do anything on the database server.', fix.replace(', then run the update again.',
+                               ', then remove CVENGINE_DB_ALLOW_OWNER_FALLBACK from .env and run the update again.')]
+    why = _replace_fallback(path, None) if path else ''
+    lines = [f'db_app_role: ERROR: {problem}. The application is not started with the owner password instead.', f'{fix} {FALLBACK_HINT}']
+    if why:
+        lines.insert(1, f'db_app_role: warning: could not remove the owner fallback file {path}: {why}')
+    return False, None, lines
 
 
 def write_state(role, reason, path=None):

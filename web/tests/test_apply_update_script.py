@@ -23,6 +23,13 @@ case " $* " in
   *" migrate --check "*) if [ -f "$STUB_DIR/unmigrated_once" ]; then rm -f "$STUB_DIR/unmigrated_once"; exit 1; fi
     if [ -f "$STUB_DIR/unmigrated" ]; then exit 1; fi; exit 0;;
   *" info "*) echo "$STUB_DIR";;
+  *" db_app_role gate "*) if [ -f "$STUB_DIR/gate_fails" ]; then
+      echo "db_app_role: ERROR: the database role cvengine_app cannot log in (refused). The application is not started with the owner password instead." >&2
+      echo "Fix: make the database accept cvengine_app, then run the update again. To run on the owner role until then, set CVENGINE_DB_ALLOW_OWNER_FALLBACK=1 in .env and run it again." >&2
+      exit 1; fi
+    echo "db_app_role: web, celery and celery-beat run as the database role cvengine_app"; exit 0;;
+  *" config --format json "*) if [ -f "$STUB_DIR/overlay_leaks" ]; then
+      echo '{"services": {"db": {"environment": {"POSTGRES_PASSWORD": "canary"}}, "celery": {"environment": {"POSTGRES_PASSWORD": "canary"}}}}'; fi; exit 0;;
   *" ps -q web "*|*" ps -q celery "*|*" ps -q celery-beat "*) if [ -f "$STUB_DIR/old_containers" ]; then echo oldcontainer; fi; exit 0;;
   *" image inspect "*) if [ -f "$STUB_DIR/image_moved" ]; then echo sha256:new; else echo sha256:old; fi; exit 0;;
   *" inspect -f {{.Image}} oldcontainer"*) echo sha256:old; exit 0;;
@@ -44,6 +51,7 @@ case " $* " in
     esac; echo; exit 0;;
   *" ps --status running --services "*) if [ -f "$STUB_DIR/service_down" ]; then printf 'web\ncelery\ncelery-beat\ndb\nredis\n'; else printf 'web\ncelery\ncelery-beat\nproxy\ndb\nredis\n'; fi; exit 0;;
   *" config --services "*) printf 'web\\ncelery\\ncelery-beat\\ndb\\nredis\\n'
+    if [ -f "$STUB_DIR/has_migrate" ]; then echo migrate; fi
     if [ -f "$STUB_DIR/has_reviewer" ]; then echo reviewer; fi
     case " $* " in *" docker-compose.dev.yml "*) ;; *) echo proxy;; esac
     if [ -f "$STUB_DIR/has_scanner" ]; then echo scanner; fi; exit 0;;
@@ -1627,6 +1635,74 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         log = (self.work / 'web' / '.update-log').read_text()
         self.assertIn('is not restored', log)
         self.assertNotIn('returning to', log)
+
+    # The owner password stays out of the application: the one-off migrate service.
+
+    def publish_owner_service(self):
+        """A release with the migrate service (docker compose config --services lists it) and scripts/db-app-role.sh."""
+        (self.stub / 'has_migrate').touch()
+        other = self.tmp / 'other'
+        (other / 'scripts').mkdir(exist_ok=True)
+        for name in ('db-app-role.sh', 'redis-password.sh'):
+            shutil.copy(SCRIPTS / name, other / 'scripts' / name)
+        return self.publish_deploy_file()
+
+    def test_the_owner_commands_run_in_the_migrate_service_after_the_role_check_and_before_the_restart(self):
+        self.new = self.publish_owner_service()
+        self.approve()
+        result = self.run_script(CVENGINE_UPDATE_BACKUPS='3')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = self.calls()
+        index = lambda text: next(i for i, c in enumerate(calls) if text in c)
+        gate = 'run --rm --no-deps -T -e CVENGINE_DB_ALLOW_OWNER_FALLBACK=0 migrate python3 manage.py db_app_role gate'
+        migrate = 'docker compose -f docker-compose.yml run --rm --no-deps migrate python3 manage.py migrate --noinput'
+        self.assertIn(migrate, calls)
+        self.assertIn('docker compose -f docker-compose.yml run --rm --no-deps -T migrate python3 manage.py showmigrations --plan', calls)
+        order = [index(' up -d --no-recreate db redis'), index('pg_dump'), index('config --format json'), index(gate), index(migrate),
+                 index('up -d --no-deps --force-recreate web celery celery-beat proxy')]
+        self.assertEqual(order, sorted(order), calls)
+        # nothing runs an owner command in an application container any more
+        self.assertFalse([c for c in calls if 'CVENGINE_DB_ROLE=owner' in c])
+        self.assertFalse([c for c in calls if ' web ' in c and (' migrate --noinput' in c or 'showmigrations' in c)])
+        self.assertIn('run as the database role cvengine_app', (self.work / 'web' / '.update-log').read_text())
+
+    def test_an_app_role_that_cannot_log_in_stops_the_update_before_the_migration_with_the_fix(self):
+        (self.stub / 'gate_fails').touch()
+        self.new = self.publish_owner_service()
+        self.approve()
+        result = self.run_script(CVENGINE_UPDATE_BACKUPS='3')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        calls = self.calls()
+        gate = next(i for i, c in enumerate(calls) if 'db_app_role gate' in c)
+        # the new version never migrated or restarted anything; the one migrate call is the previous version being put back by its own deploy
+        self.assertEqual(len([c for c in calls if ' migrate --noinput' in c]), 1)
+        self.assertFalse([c for c in calls[:gate] if ' migrate --noinput' in c or '--force-recreate web' in c])
+        self.assertEqual(self.head(), self.prev)
+        log = (self.work / 'web' / '.update-log').read_text()
+        self.assertIn('cvengine_app cannot log in', log)
+        self.assertIn('Fix: make the database accept cvengine_app', log)
+        self.assertIn('CVENGINE_DB_ALLOW_OWNER_FALLBACK=1', log)
+
+    def test_the_fallback_switch_reaches_the_role_check(self):
+        (self.work / '.env').write_text('CVENGINE_DB_ALLOW_OWNER_FALLBACK=1\n')
+        self.new = self.publish_owner_service()
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue([c for c in self.calls() if '-e CVENGINE_DB_ALLOW_OWNER_FALLBACK=1 migrate python3 manage.py db_app_role gate' in c])
+
+    def test_an_overlay_that_still_hands_the_owner_password_to_a_service_stops_the_update(self):
+        (self.stub / 'overlay_leaks').touch()
+        self.new = self.publish_owner_service()
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        calls = self.calls()
+        self.assertFalse([c for c in calls if 'db_app_role gate' in c])
+        log = (self.work / 'web' / '.update-log').read_text()
+        self.assertIn('gives the database owner password to: celery.', log)
+        self.assertNotIn('canary', log)
+        self.assertEqual(self.head(), self.prev)
 
     # --- a dump before the migration, and what a failed migration does ---------------------------------------------------------------------
 

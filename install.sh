@@ -287,7 +287,7 @@ ok "the web service is answering"
 step "Preparing the database and your admin account"
 make migrate >/dev/null 2>&1 || make migrate || { show_logs; die "Database migrations failed."; }
 admin_output=$(make admin 2>&1) || { echo "$admin_output" >&2; show_logs; die "Could not create the admin account. Try 'make admin' once the services are up."; }
-# the make command echo ("docker compose ... exec") is noise: keep only the account banner
+# the make command echo ("docker compose ... run ... migrate", the one-off owner service) is noise: keep only the account banner
 admin_banner=$(printf '%s\n' "$admin_output" | sed -n '/^====/,$p')
 account='the account below'
 if [ -z "$admin_banner" ]; then

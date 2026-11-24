@@ -178,7 +178,7 @@ class StartupEnrollmentTests(TestCase):
         text = self.ENTRYPOINT.read_text()
         line = 'python3 manage.py ensure_builtin_scanner >/dev/null 2>&1 || true'
         self.assertEqual(text.count(line), 1)
-        self.assertGreater(text.index(line), text.index('until CVENGINE_DB_ROLE=owner python3 manage.py migrate --check'))
+        self.assertGreater(text.index(line), text.index('until python3 manage.py migrate --check'))
         self.assertLess(text.index(line), text.index('collectstatic'))
 
     def test_the_command_does_nothing_while_the_switch_is_off(self):
