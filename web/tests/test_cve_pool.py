@@ -96,7 +96,7 @@ class EquivalenceTests(PoolTestMixin, TestCase):
     """After any sequence of adds, updates, status flips, locality flips and deletions, the refreshed pool equals a full build."""
 
     def _op(self, rnd):
-        ids = list(CVEEntry.objects.values_list('pk', flat=True))
+        ids = list(CVEEntry.objects.order_by('pk').values_list('pk', flat=True))  # ordered: an unordered query made the pick depend on the heap order
         pick = CVEEntry.objects.filter(pk=rnd.choice(ids))
         op = rnd.choice(['add', 'affected', 'published', 'reject', 'unreject', 'local', 'unlocal', 'delete', 'kev', 'touch'])
         if op == 'add':
@@ -121,10 +121,17 @@ class EquivalenceTests(PoolTestMixin, TestCase):
             pick.update(synced_at=self.clock.tick())
         return op
 
-    def _check(self, cache, build, label):
+    def _check(self, cache, build, label, stamp_at):
+        before = (cache['key'] or (None,) * 4)[stamp_at]
         with mock.patch.object(correlation, '_full', wraps=correlation._full) as full:
             pool = build()
-        self.assertEqual(full.call_count, 0, f'{label}: a full build ran where a refresh should have')
+        after = cache['key'][stamp_at]
+        # the pool answers a newest stamp that moved backwards (the newest row left it) or that is missing (an empty pool, or rows never stamped)
+        # with a full build by design: that is the one case where a build is expected
+        if before is None or after is None or after < before:
+            self.assertLessEqual(full.call_count, 1, f'{label}: more than one full build')
+        else:
+            self.assertEqual(full.call_count, 0, f'{label}: a full build ran where a refresh should have')
         pool[1].candidate_tokens('nginx')  # the word map is built from the refreshed index's own tokens when it was not patched
         fresh = scratch(cache, build)
         fresh[1].candidate_tokens('nginx')
@@ -147,8 +154,8 @@ class EquivalenceTests(PoolTestMixin, TestCase):
                 if not CVEEntry.objects.exists():
                     break
                 label = f'seed {seed} step {step} {op}'
-                self._check(correlation._INDEX_CACHE, correlation.cve_pool, label)
-                self._check(correlation._LOCAL_CACHE, correlation.local_pool, label)
+                self._check(correlation._INDEX_CACHE, correlation.cve_pool, label, 2)  # the key is (limit, count, newest stamp, local count)
+                self._check(correlation._LOCAL_CACHE, correlation.local_pool, label, 1)  # the key is (count, newest stamp)
                 keys.add((correlation._INDEX_CACHE['key'], correlation._LOCAL_CACHE['key']))
             CVEEntry.objects.all().delete()
             for cache in (correlation._INDEX_CACHE, correlation._LOCAL_CACHE):
