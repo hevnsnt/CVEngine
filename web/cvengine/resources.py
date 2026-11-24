@@ -101,8 +101,8 @@ def request_abort(scan_id):
     try:  # a stage of it that waits on Sentinels without a worker (agentapi.stage_runs) hears of the stop now, not at its next budget
         from agentapi import stage_runs
         stage_runs.wake_scan(int(scan_id))
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception:  # noqa: BLE001 - the stage still hears of the stop at its next budget
+        logger.warning('could not wake the waiting stages of aborted scan %s', scan_id, exc_info=True)
 
 
 def abort_requested(scan_id):

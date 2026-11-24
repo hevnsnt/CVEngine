@@ -521,11 +521,17 @@ def _renew_claims(claims):
     if client is None:
         return
     from cvengine import resources
+    failed, lost = [], []
     for key, owner in claims:
         try:
-            resources.claim_refresh(client, key, owner, HOLD_SECONDS)
-        except Exception:  # noqa: BLE001
-            pass
+            if resources.claim_refresh(client, key, owner, HOLD_SECONDS) == 'lost':
+                lost.append(key)
+        except Exception:  # noqa: BLE001 - one claim failing must not stop the others; a claim not renewed expires and may be taken
+            failed.append(key)
+    if failed:
+        logger.warning('stage runs: %s held claim(s) could not be renewed, first %s', len(failed), failed[0])
+    if lost:
+        logger.warning('stage runs: %s held claim(s) were taken by another job while the run waited, first %s', len(lost), lost[0])
 
 
 # --- waking ------------------------------------------------------------------------------------------------------------------------------
