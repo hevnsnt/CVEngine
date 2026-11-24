@@ -41,6 +41,7 @@ HEAT_COLOURS = {'fire': '#b3261e', 'smoke': '#b9822a', 'ice': '#7a8594'}
 SOURCE_FIELD = {'cve': 'created_at', 'scanner': 'discovered_date', 'hygiene': 'first_seen'}  # when a finding of each kind first appeared
 EPOCH = datetime(1970, 1, 1, tzinfo=dt_timezone.utc)
 HASH_KIND = {'cve': 'match', 'scanner': 'vulnerability', 'hygiene': 'hygiene'}  # a finding's address on the Findings page
+HEAT_LINE_LABEL = 'CVE matches and scanner findings by heat'  # what the heat line counts (cveFeed.counts.HEAT_KINDS), printed beside it
 
 
 def _links(scope, base):
@@ -78,14 +79,12 @@ def _previous(scope, start):
 
 def _current(scope):
     from cveFeed import stats_history
-    total = {'open_findings': 0, 'exposed_hosts': 0, 'hosts': 0, 'heat': {'fire': 0, 'smoke': 0, 'ice': 0}}
+    total = {'open_findings': 0, 'exposed_hosts': 0, 'hosts': 0}
     for project in scope.projects:
         snap = stats_history.compute_snapshot(project, with_fixed=False)
         total['open_findings'] += sum(snap['open_findings'].get(b, 0) for b in ('critical', 'high', 'medium', 'low'))
         total['exposed_hosts'] += snap['exposed_hosts']
         total['hosts'] += snap['hosts']
-        for heat in total['heat']:
-            total['heat'][heat] += snap['cve_matches'].get(heat, 0)
     return total
 
 
@@ -231,13 +230,20 @@ def build(scope, start, end, cadence, now, tz='UTC'):
     if monthly:
         status = {**status, 'headline': status['headline'].replace(' this week', ' this month'), 'sub': status['sub'].replace(' this week', ' this month')}
     now_numbers = _current(scope)
+    # the heat line: open CVE matches and scanner findings by heat, the PDF report's own figure (report_data.open_counts) over the same sources
+    opened = report_data.open_counts(sources)
     before = _previous(scope, start)
     local_end = end.astimezone(report_schedule.zone(tz))
     label = report_schedule.period_label(start, end, tz, monthly=monthly)
     hygiene = _hygiene(scope, sources)
+    # the open findings above as distinct issues (cveFeed.counts.distinct_issues): the same actionable set compute_snapshot counted, the CVE matches grouped
+    # by product and version as the Findings list groups them
+    from cveFeed import counts
+    open_issues = counts.distinct_issues(now_numbers['open_findings'],
+                                         svc._finding_sources(scope.svc_scope(), {'status': 'actionable', 'type': 'cve'}, counting=True)['cve'])
     period_word = 'month' if monthly else 'week'
-    headline = {'open_findings': now_numbers['open_findings'], 'exposed_hosts': now_numbers['exposed_hosts'], 'hosts': now_numbers['hosts'],
-                'heat': now_numbers['heat'], 'new_findings': new_findings, 'new_worth_a_look': situations.new_worth_a_look(scope.ids, start, end), 'fixed': fixed,
+    headline = {'open_findings': now_numbers['open_findings'], 'open_issues': open_issues, 'exposed_hosts': now_numbers['exposed_hosts'], 'hosts': now_numbers['hosts'],
+                'heat': opened['heat'], 'heat_kinds': opened['by_kind'], 'new_findings': new_findings, 'new_worth_a_look': situations.new_worth_a_look(scope.ids, start, end), 'fixed': fixed,
                 'needs': host_groups['needs'], 'proven': host_groups['proven'], 'likely': host_groups['likely'], 'hygiene_high': host_groups['hygiene'],
                 'hygiene_open': hygiene['open'], 'compared': before is not None, 'compared_note': '' if before is not None else 'First report: no comparison yet',
                 'needs_prev': (before or {}).get('needs'), **{f'{k}_prev': (before or {}).get(k) for k in ('open_findings', 'exposed_hosts', 'hosts')}}
@@ -287,14 +293,16 @@ def _tiles(digest):
 
 
 def heat_line(digest):
-    """``[{'heat', 'text', 'gloss'}]``: Fire, Smoke and Ice in words: "No Fire", "14 Smoke (worth a look)", "643 Ice (low priority)"."""
+    """``[{'heat', 'text', 'gloss'}]``: Fire, Smoke and Ice in words: "No Fire", "14 Smoke (worth a look)", "643 Ice (low priority)". The counts are the
+    open CVE matches and scanner findings by heat (``HEAT_LINE_LABEL``), the PDF report's figure."""
     heat = digest['headline']['heat']
     spec = (('fire', 'Fire', 'needs action now'), ('smoke', 'Smoke', 'worth a look'), ('ice', 'Ice', 'low priority'))
     return [{'heat': key, 'text': f'{heat[key]:,} {name}' if heat[key] else f'No {name}', 'gloss': f'({gloss})' if heat[key] else ''} for key, name, gloss in spec]
 
 
 def totals_line(digest):
-    """The big totals as one quiet sentence, never a tile: "1,712 lower-priority items are tracked in cvENGINE (643 low-priority CVE matches, 673 hygiene notes)"."""
+    """The big totals as one quiet sentence, never a tile: "1,712 lower-priority items are tracked in cvENGINE (643 low-priority CVE matches and scanner
+    findings, 673 hygiene notes)"."""
     h = digest['headline']
     total = h['open_findings']
     if not total:
@@ -302,10 +310,20 @@ def totals_line(digest):
     quiet = not (h['needs'] or h['heat']['fire'] or h['heat']['smoke'])
     parts = []
     if h['heat']['ice']:
-        parts.append(f"{h['heat']['ice']:,} low-priority CVE match{'' if h['heat']['ice'] == 1 else 'es'}")
+        parts.append(f"{h['heat']['ice']:,} low-priority CVE matches and scanner findings")
     if h['hygiene_open']:
         parts.append(f"{h['hygiene_open']:,} hygiene note{'' if h['hygiene_open'] == 1 else 's'}")
     return f"{total:,} {'lower-priority ' if quiet else ''}item{'' if total == 1 else 's'} {'is' if total == 1 else 'are'} tracked in cvENGINE" + (f" ({', '.join(parts)})" if parts else '') + '.'
+
+
+def issues_line(digest):
+    """The open findings as distinct issues, beside the totals line: "1,712 findings in 310 distinct issues. Version-only matches on the same
+    product and version of one host are one fix, so they count as one issue." Empty when nothing is open (or the digest predates the figure)."""
+    from cveFeed import counts
+    h = digest['headline']
+    if not h.get('open_findings') or h.get('open_issues') is None:
+        return ''
+    return f"{counts.issues_text(h['open_findings'], h['open_issues'])}. {counts.ISSUES_NOTE}"
 
 
 def _preheader(digest):
@@ -342,7 +360,7 @@ def render(digest, sub=None, recipient='', unsubscribe_url='', attachment=None, 
     tiles = _tiles(digest)
     context = {'d': digest, 'tiles': tiles, 'tile_rows': [tiles[i:i + 2] for i in range(0, len(tiles), 2)], 'sub_name': clean(sub.name, 80) if sub is not None else digest['title'],
                'owner': clean(owner_name, 80), 'unsubscribe_url': unsubscribe_url, 'attachment': attachment, 'preheader': _preheader(digest),
-               'heat_line': heat_line(digest), 'totals_line': totals_line(digest), 'colours': HEAT_COLOURS,
+               'heat_line': heat_line(digest), 'heat_label': HEAT_LINE_LABEL, 'totals_line': totals_line(digest), 'issues_line': issues_line(digest), 'colours': HEAT_COLOURS,
                'tone_colour': {'fire': HEAT_COLOURS['fire'], 'smoke': HEAT_COLOURS['smoke'], 'ok': '#2f6048'}.get(digest['status']['tone'], HEAT_COLOURS['ice']),
                'period_word': 'month' if digest['cadence'] == 'monthly' else 'week', 'cadence_upper': digest['cadence'].upper()}
     return (subject(digest), render_to_string('cveFeed/email/report_digest.txt', context), render_to_string('cveFeed/email/report_digest.html', context))

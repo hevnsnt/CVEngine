@@ -18,6 +18,7 @@ from reNgine.utilities import *
 from scanEngine.models import (EngineType, Notification)
 from startScan.models import *
 from startScan.ip_rows import get_or_create_first, get_or_create_ip, org_id_of_project, org_id_of_subdomain
+from startScan.port_rows import create_ports
 from startScan.models import EndPoint, Subdomain, Vulnerability
 from targetApp.models import Domain
 from cvengine_scanner import versions
@@ -210,9 +211,8 @@ def _save_ports(ports, subdomains, ctx, own_project, own_name, now):
 			fields.append('source')
 		if port.pk:
 			dirty.setdefault(port.pk, (port, set()))[1].update(fields)
-	if new:
-		Port.objects.bulk_create([port for _, port in new], batch_size=500)
-		through.objects.bulk_create([through(ipaddress_id=ip_id, port_id=port.pk) for ip_id, port in new], ignore_conflicts=True, batch_size=1000)
+	# a port another writer stored meanwhile is used instead, and only the time it was seen is written onto it
+	create_ports(new, on_conflict=('last_seen',))
 	_write_changed(Port, dirty)
 
 
@@ -343,10 +343,7 @@ def _persist_bbot_http(result, ctx, subdomains):
 				if port.pk and port.http != summary:
 					port_dirty.setdefault(port.pk, (port, set()))[1].add('http')
 				port.http = summary
-	if new_ports:
-		Port.objects.bulk_create([port for _, port in new_ports], batch_size=500)
-		IpAddress.ports.through.objects.bulk_create([IpAddress.ports.through(ipaddress_id=ip_id, port_id=port.pk) for ip_id, port in new_ports],
-			ignore_conflicts=True, batch_size=1000)
+	create_ports(new_ports, on_conflict=('http',))  # a port another writer stored meanwhile is used instead, and gets the response summary
 	_write_changed(Port, port_dirty)
 	_write_changed(Subdomain, sub_dirty)
 

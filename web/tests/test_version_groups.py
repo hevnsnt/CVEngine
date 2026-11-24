@@ -106,11 +106,28 @@ class GroupingHelperTests(SimpleTestCase):
 		fix = vg.fix_summary(rows, affected)
 		self.assertEqual((fix['version'], fix['also'], fix['held_by']), ('1.31.9', ['1.30.7'], []))
 		self.assertEqual(vg.fix_text(fix), 'upgrade to 1.31.9 or 1.30.7')
-		# a member whose own data puts 1.30.7 inside a range (1.13.10 up to 1.31.2) takes the other line away
+		# a member whose own data puts 1.30.7 inside a range (1.13.10 up to 1.31.2) and states no 1.30 fix takes the other line away
 		rows.append(row(3, 'CVE-2026-3', 'a.example', fixed='1.31.2', introduced='1.13.10'))
-		affected[3] = [{'ranges': [{'fixed': '1.31.2', 'introduced': '1.13.10'}, {'fixed': '1.30.3', 'introduced': '1.30.2'}]}]
+		affected[3] = [{'ranges': [{'fixed': '1.31.2', 'introduced': '1.13.10'}]}]
 		fix = vg.fix_summary(rows, affected)
 		self.assertEqual((fix['version'], fix['also']), ('1.31.9', []))
+		# the same member as F5 writes it (CVE-2026-42055): the 1.30 line's own fix (1.30.2 up to 1.30.3) leaves 1.30.7 outside the wide range
+		affected[3] = [{'ranges': [{'fixed': '1.31.2', 'introduced': '1.13.10'}, {'fixed': '1.30.3', 'introduced': '1.30.2'}]}]
+		fix = vg.fix_summary(rows, affected)
+		self.assertEqual((fix['version'], fix['also'], fix['held_by']), ('1.31.9', ['1.30.7'], []))
+		self.assertEqual(vg.fix_text(fix), 'upgrade to 1.31.9 or 1.30.7')
+
+	def test_the_fix_is_raised_to_the_later_fix_of_its_line_another_member_states(self):
+		"""nginx 1.24.0 matched on 1.13.10 up to 1.31.2 (own fix 1.31.2) beside a CVE whose 1.31 line is fixed in 1.31.9: 1.31.2 is not the
+		release that settles the group, 1.31.9 is."""
+		rows = [row(1, 'CVE-2026-1', 'a.example', version='1.24.0', fixed='1.31.2', introduced='1.13.10'),
+				row(2, 'CVE-2026-2', 'a.example', version='1.24.0', fixed='1.30.7', introduced='1.25.5')]
+		affected = {1: [{'ranges': [{'fixed': '1.31.2', 'introduced': '1.13.10'}, {'fixed': '1.30.3', 'introduced': '1.30.2'}]}],
+					2: [{'ranges': [{'fixed': '1.31.9', 'introduced': '1.31.0'}, {'fixed': '1.30.7', 'introduced': '1.25.5'}]}]}
+		fix = vg.fix_summary(rows, affected)
+		self.assertEqual((fix['version'], fix['also'], fix['held_by']), ('1.31.9', ['1.30.7'], []))
+		# without the advisories' data the own fixes are all there is: the highest one, as before
+		self.assertEqual(vg.fix_summary(rows)['version'], '1.31.2')
 
 	def test_the_note_says_the_group_rests_on_the_version(self):
 		g = vg.summary(vg.build([row(1, 'CVE-2026-1', 'a.example'), row(2, 'CVE-2026-2', 'a.example')])[0])

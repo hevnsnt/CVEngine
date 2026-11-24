@@ -239,15 +239,24 @@ export function headerParts(r) {
     : r.group === BY_PRODUCT
       ? `${plural(r.grouped_findings || 0, "CVE match", "CVE matches")} shown as ${plural(r.groups, "row", "rows")}, one per product version on a host (they rest on the version read; each stays its own finding)`
       : `${plural(r.grouped_findings || 0, "CVE match", "CVE matches")} on sibling hosts shown as ${plural(r.groups, "row", "rows")} (the same library file on one site)`;
+  if (r.group === BY_PRODUCT) {
+    // grouped by product, a row is a distinct issue: the server counts the same figure for the Overview, the email and the PDF (cveFeed/counts.py match_issues)
+    return { lead: `${issuesText(findings, rows)}: `, counts, grouped, note: ISSUES_NOTE, truncated: r.group_scan_truncated ? TRUNCATED_NOTE : "" };
+  }
   return { lead: `${plural(findings, "finding", "findings")} in ${plural(rows, "row", "rows")}: `, counts, grouped, truncated: r.group_scan_truncated ? TRUNCATED_NOTE : "" };
 }
 
-// The dashboard's "in N" beside the per-host CVE match count: shown only when grouping makes it smaller and the count is exact (a
-// truncated grouping pass hides it rather than print a wrong number).
-export function dashboardNote(matches, groups, truncated) {
-  if (truncated || groups == null || matches == null || !(groups < matches)) return { text: "", title: "" };
+// The plain label of the distinct issues figure, and the sentence that explains it (cveFeed/counts.py issues_text and ISSUES_NOTE, word for word).
+export const ISSUES_NOTE = "Version-only matches on the same product and version of one host are one fix, so they count as one issue.";
+const counted = (n, one, many) => `${Number(n || 0).toLocaleString("en-US")} ${n === 1 ? one : many}`; // 2,140: as the email and the PDF print it
+export const issuesText = (findings, issues) => `${counted(findings, "finding", "findings")} in ${counted(issues, "distinct issue", "distinct issues")}`;
+
+// The Overview's CVE matches tile: beside the per-host count, how many distinct issues those matches are (the Findings list's default grouping by
+// product and version). Shown only when grouping makes the number smaller.
+export function issuesNote(matches, issues) {
+  if (issues == null || matches == null || !(issues < matches)) return { text: "", title: "" };
   return {
-    text: `in ${groups}`,
-    title: `${matches} matches, one per host, are ${groups} distinct findings: the same client-side library file on sibling hosts of one site counts once (the Findings list shows them grouped)`,
+    text: `in ${counted(issues, "distinct issue", "distinct issues")}`,
+    title: `${counted(matches, "CVE match", "CVE matches")}, one per host, in ${counted(issues, "distinct issue", "distinct issues")}. ${ISSUES_NOTE} The Findings list shows them grouped.`,
   };
 }

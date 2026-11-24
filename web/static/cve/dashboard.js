@@ -3,7 +3,7 @@
 import { detailDrawer, mountGraph } from "/staticfiles/cve/graph.js";
 import { cveHref, hostAnchor, ipAnchor, linkify } from "/staticfiles/cve/links.js";
 import { sinceLastVisit } from "/staticfiles/cve/seen.js";
-import { dashboardNote } from "/staticfiles/cve/finding-groups-logic.js";
+import { issuesNote } from "/staticfiles/cve/finding-groups-logic.js";
 import { fmtDateTime, fmtTime } from "/staticfiles/cve/prefs.js";
 import { activityMatrix, displayZone, sparkline } from "/staticfiles/cve/charts.js";
 import { reportButton } from "/staticfiles/cve/report-export.js";
@@ -241,9 +241,9 @@ async function pollStats() {
     paintMapCount();
     const groupNote = $("s-match_groups_note");
     if (groupNote) {
-      // one library file on several hosts of a site is one row of the Findings list: beside the per-host count, how many distinct findings
-      // that is (hidden when the grouping pass hit its cap: the number would not be exact)
-      const note = dashboardNote(s.matches, s.match_groups, s.match_groups_truncated);
+      // beside the per-host count, how many distinct issues those matches are, as the Findings list shows them grouped by product and version
+      // (s.match_issues, counted in the same snapshot as s.matches). s.match_groups, the older grouping of one file on sibling hosts, stays in the API
+      const note = issuesNote(s.matches, s.match_issues);
       groupNote.textContent = note.text;
       groupNote.title = note.title;
     }

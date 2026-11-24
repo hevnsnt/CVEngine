@@ -4423,10 +4423,11 @@ const pages = {
       const link = (key, n) => el("a", "", `${n} ${{ cve: n === 1 ? "CVE match" : "CVE matches", scanner: n === 1 ? "scanner finding" : "scanner findings", hygiene: n === 1 ? "hygiene finding" : "hygiene findings" }[key]}`,
         { href: `/cve/${encodeURIComponent(slug)}/${{ cve: "matches", scanner: "vulns", hygiene: "hygiene" }[key]}/${key === "scanner" ? "?type=scanner" : ""}` });
       // the per-type numbers stay per host finding in both modes; grouped, the lead also says how many rows that is
-      const { lead, counts, grouped, truncated: truncatedNote } = FG.headerParts(data);
+      const { lead, counts, grouped, note: issuesNote, truncated: truncatedNote } = FG.headerParts(data);
       header.append(lead);
       ["cve", "scanner", "hygiene"].forEach((key, i) => header.append(...(i ? [" · "] : []), link(key, counts[key] || 0)));
       if (grouped) header.append(`. ${grouped}`);
+      if (issuesNote) header.append(`. ${issuesNote}`);
       if (truncatedNote) header.append(" ", el("strong", "group-truncated", truncatedNote));
       if (truncated) header.append(` (the list shows the first ${count}; narrow the filters to see the rest)`);
     }

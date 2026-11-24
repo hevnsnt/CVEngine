@@ -414,6 +414,9 @@ def stats_payload():
     from django.db.models import Count
     host_counts = reps.aggregate(total=Count('pk', distinct=True), live=Count('pk', filter=counts.LIVE_HOST_Q, distinct=True))  # one pass over the hosts, not two
     oldest = counts.oldest_open()
+    # the exposed CVE matches and the distinct issues they are, from ONE grouped read (cveFeed.counts.match_issues): the count it replaces was a COUNT
+    # over the same rows, so the number beside it costs no extra statement unless two names of one project share a product version
+    matches, match_issues = counts.match_issues(counts.exposed_matches())
     return {
         'targets': Domain.objects.count(),
         'certs_expiring': counts.expiring_certificates(TlsCertificate.objects.all()).count(),
@@ -425,10 +428,13 @@ def stats_payload():
         **live_scan_counts(),
         'tiers': {FIRE: tiers[FIRE], SMOKE: tiers[SMOKE], ICE: tiers[ICE]},
         'cves': catalog['total'],
-        'matches': counts.exposed_matches().count(),
+        'matches': matches,
         # the same matches as the Findings list draws them grouped: one script on sibling hosts is one row (cveFeed.finding_groups).
         # 'matches' stays the per-host count it always was; this is the number beside it that says how many distinct findings that is
         **dict(zip(('match_groups', 'match_groups_truncated'), counts.match_group_count())),
+        # the same matches as distinct issues, as the Findings list's default view (group=product) shows them: the version-only matches of one
+        # product and version on one host are one fix (cveFeed.counts.match_issues). Part of this snapshot, so it is as fresh as 'matches' beside it
+        'match_issues': match_issues,
         'scanner_findings': counts.actionable_findings(Vulnerability.objects.all()).count(),
         'exposed_hosts': counts.exposed_host_count(reps),
         'oldest_open_days': oldest['days'],  # the longest a critical or high item has sat open, across CVE matches, scanner and hygiene findings

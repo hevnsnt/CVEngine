@@ -154,12 +154,15 @@ test('the header keeps findings per host and says what the rows are', () => {
   assert.equal(G.headerParts({total: 5, group_scan_truncated: true}).truncated, '');
 });
 
-test('the dashboard shows the grouped count only when it is smaller and exact', () => {
-  assert.equal(G.dashboardNote(14, 4, false).text, 'in 4');
-  assert.match(G.dashboardNote(14, 4, false).title, /^14 matches, one per host, are 4 distinct findings/);
-  assert.deepEqual(G.dashboardNote(14, 4, true), {text: '', title: ''});  // the pass hit its cap: no number rather than a wrong one
-  assert.deepEqual(G.dashboardNote(4, 4, false), {text: '', title: ''});
-  assert.deepEqual(G.dashboardNote(undefined, undefined, undefined), {text: '', title: ''});
+test('the dashboard shows the distinct issues beside the CVE matches only when grouping makes them fewer', () => {
+  assert.equal(G.issuesNote(95, 17).text, 'in 17 distinct issues');
+  assert.equal(G.issuesNote(2140, 310).text, 'in 310 distinct issues');
+  assert.match(G.issuesNote(2140, 310).title, /^2,140 CVE matches, one per host, in 310 distinct issues\. Version-only matches on the same product and version of one host are one fix/);
+  assert.equal(G.issuesNote(2, 1).text, 'in 1 distinct issue');
+  assert.deepEqual(G.issuesNote(4, 4), {text: '', title: ''});
+  assert.deepEqual(G.issuesNote(undefined, undefined), {text: '', title: ''});
+  assert.equal(G.issuesText(2140, 310), '2,140 findings in 310 distinct issues');
+  assert.equal(G.issuesText(1, 1), '1 finding in 1 distinct issue');
 });
 
 test('the Findings page wires the grouping in', () => {
@@ -173,5 +176,5 @@ test('the Findings page wires the grouping in', () => {
   const bulk = readFileSync(new URL('../static/cve/bulk.js', import.meta.url), 'utf8');
   assert.match(bulk, /result\.summary \?/);
   const dash = readFileSync(new URL('../static/cve/dashboard.js', import.meta.url), 'utf8');
-  assert.match(dash, /dashboardNote\(s\.matches, s\.match_groups, s\.match_groups_truncated\)/);
+  assert.match(dash, /issuesNote\(s\.matches, s\.match_issues\)/);
 });
