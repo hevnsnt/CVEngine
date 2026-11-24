@@ -244,7 +244,8 @@ class IpAllowlistEntry(models.Model):
 
 class AbuseStrike(models.Model):
 	"""One rejected request that carried an attack payload (command or SQL injection, path traversal, ...).
-	Strikes add up per user and per IP; enough of them inside the window trigger an automatic ban."""
+	Strikes add up per user and per IP; enough of them inside the window trigger an automatic action (reNgine.input_guard). A strike of weight 0
+	was a navigation a link can start (Sec-Fetch-Site none or same-origin on a GET): rejected and kept for the record, never counted."""
 	user = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
 	username = models.CharField(max_length=150, blank=True, default='')
 	ip = models.CharField(max_length=64, blank=True, default='')
@@ -260,8 +261,8 @@ class AbuseStrike(models.Model):
 
 
 class AbuseBan(models.Model):
-	"""An automatic (or manual) block of an IP address. An account ban is just ``User.is_active = False`` plus
-	revoked tokens, recorded here too so an admin can see why. Lift a ban by setting ``lifted`` (admin UI)."""
+	"""An automatic (or manual) block of an IP address. Lift a ban by setting ``lifted`` (admin UI). The input guard no longer disables
+	accounts (it ends the offending session and writes the audit log); rows with a user and no address are from older releases, when it did."""
 	ip = models.CharField(max_length=64, blank=True, default='', db_index=True)
 	user = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
 	username = models.CharField(max_length=150, blank=True, default='')

@@ -1,10 +1,11 @@
 """The real client IP of a request.
 
-``REMOTE_ADDR`` is the directly connected peer. Behind the shipped nginx that is the proxy, so when the
-operator lists the proxy's network in ``CVENGINE_TRUSTED_PROXIES`` (comma separated CIDRs) the address is
-taken from ``X-Forwarded-For`` instead: walking from the right, the first hop that is not itself a trusted
-proxy. Nothing a client puts at the left of that header can be picked, and with no trusted proxies the
-header is ignored entirely (it is attacker-settable).
+``REMOTE_ADDR`` is the directly connected peer. Behind the shipped nginx that is the proxy, and the proxy's
+fixed address is what docker-compose.yml puts in ``CVENGINE_TRUSTED_PROXIES`` (comma separated CIDRs) by
+default, so the address is taken from ``X-Forwarded-For`` instead: walking from the right, the first hop that
+is not itself a trusted proxy. Nothing a client puts at the left of that header can be picked, and with no
+trusted proxies the header is ignored entirely (it is attacker-settable). Any other peer (the built-in
+scanner, the AI reviewer, a process on the host) is taken as itself whatever it sends (review r3 S3).
 """
 import ipaddress
 import os

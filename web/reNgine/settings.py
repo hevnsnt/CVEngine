@@ -239,6 +239,7 @@ LOGIN_REQUIRED_IGNORE_VIEW_NAMES = [
     'admin_login_redirect',
     'invite',
     'report_unsubscribe',
+    'client_address_probe',  # answers 204 to anyone; records an address only for a token the server issued (reNgine/client_probe.py)
 ]
 
 # A Sentinel's very first call has no bearer token and no session yet: it authenticates with a one-time enrollment

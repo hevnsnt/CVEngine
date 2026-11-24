@@ -177,6 +177,15 @@ deploy_steps() {
   phase applying "$DEPLOY_STAGE"
   cv_status step build
   check_disk || return 1
+  # proxy_network's fixed subnet must be free before anything is stopped or migrated (scripts/client-address.sh); a clash would stop `up` half way
+  if [ -f scripts/client-address.sh ] && . scripts/client-address.sh; then
+    local clash
+    if ! clash=$(cvengine_proxy_network_check "${compose[@]}"); then
+      DEPLOY_WHY="The update stopped before changing anything: $clash"
+      log "$DEPLOY_WHY"
+      return 1
+    fi
+  fi
   # The proxy image is a moving tag and is meant to move with every update (nginx's security releases). It is fetched here, before anything is
   # stopped, and an unreachable registry only keeps the image already on the host: a pull that failed inside `up` after the migration (as
   # `pull_policy: always` did) failed an update that was otherwise done, and an offline host could never update at all.
@@ -235,6 +244,11 @@ deploy_steps() {
   if [ -f scripts/db-app-role.sh ] && . scripts/db-app-role.sh && cvengine_ensure_db_app_password "$(cvengine_compose_env_file "${compose[@]}")"; then
     log "the server had no database role of its own: generated its password (CVENGINE_DB_APP_PASSWORD in .env); the migration creates the role and the server runs as it from this update on"
   fi
+  # The upstream secret a host nginx sends so the proxy believes its X-Forwarded-For (scripts/client-address.sh): generated when there is none, in .env
+  # and the Compose env file; the proxy recreated below loads it. Until the host nginx sends it nothing changes (docs/DEPLOYMENT.md).
+  if [ -f scripts/client-address.sh ] && . scripts/client-address.sh && cvengine_ensure_upstream_secret "$(cvengine_compose_env_file "${compose[@]}")"; then
+    log "generated the upstream secret (CVENGINE_UPSTREAM_SECRET in .env); a host nginx in front of the proxy needs it to pass on the client address: scripts/client-address-check.sh --snippet"
+  fi
   # The database's own settings are in the compose file (max_connections). `up -d --no-deps db` recreates the db container only when its
   # definition changed since it was created (once, on the update that brings the change: a restart of a few seconds), and is a no-op otherwise.
   "${compose[@]}" up -d --no-deps db || return 1
@@ -281,6 +295,11 @@ deploy_steps() {
   # Which database role web, celery and celery-beat run as; a warning when any still uses the owner role (never fails the update).
   if declare -F cvengine_db_role_report >/dev/null; then
     while IFS= read -r line; do [ -z "$line" ] || log "$line"; done < <(cvengine_db_role_report "${compose[@]}")
+  fi
+  # Whether the real client address reaches the server (scripts/client-address.sh): one probe through the public name, compared with what
+  # Cloudflare saw. A report in the update log, never a failure; the probe route passes the maintenance page (config/nginx/rengine.conf).
+  if declare -F cvengine_client_address_report >/dev/null; then
+    while IFS= read -r line; do [ -z "$line" ] || log "$line"; done < <(cvengine_client_address_report "${compose[@]}" 2>/dev/null)
   fi
   # The built-in scanner, once the server answers: recreated on its own network (the Tailscale sidecar follows it), kept on the new image only once a
   # heartbeat of it reaches the server, else put back on the previous one. Never a failed update: until it runs, the scans that need it wait.
