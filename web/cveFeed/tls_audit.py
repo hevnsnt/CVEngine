@@ -496,7 +496,7 @@ def sweep(project_id, resolve=None):
     """Audit the due targets of one project on a Sentinel, one at a time. Returns ``{'tested', 'failed', 'issues', 'proven'}`` (and ``skipped``
     with the reason when nothing ran). Nothing runs on this server: with no scanner able to take a target it stays due."""
     from cveFeed import activity, exclusions, ledger
-    from reNgine import resources
+    from cvengine import resources
     summary = {'tested': 0, 'failed': 0, 'issues': 0, 'proven': 0}
     from agentapi import scanner_state
     waiting = scanner_state.skip_note('testssl')  # no scanner can run it and this server may not: no dispatch, no raise, no activity line

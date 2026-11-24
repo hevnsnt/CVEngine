@@ -10,7 +10,7 @@ measured around them.
 ```
 cd <worktree> && source ~/re-tools/test-env.sh && umask 022
 export CELERY_BROKER=redis://127.0.0.1:56379/11 CELERY_BACKEND=redis://127.0.0.1:56379/11 PYTHONPATH=$HOME/re-tools/scale-lib \
-       SCALE_DB=cv_scale RENGINE_HOME=$PWD/web DB_EXEC="docker exec -i cvt-pg psql -U cvengine_ci -d postgres"
+       SCALE_DB=cv_scale CVENGINE_HOME=$PWD/web DB_EXEC="docker exec -i cvt-pg psql -U cvengine_ci -d postgres"
 bash scripts/scale/run_matrix.sh <outdir> 500 1000 2000 3000        # seeds each size from a migrated template, runs scripts/scale/measure.py
 cd web && python ../scripts/scale/measure.py --label 3000 --out /tmp/x.json --only "q=nginx" --dups   # one entry, with the repeated statements (N+1)
 EXPLAIN=1 bash scripts/scale/run_matrix.sh <outdir> 500                                              # EXPLAIN (ANALYZE, BUFFERS) of the 3 slowest SELECTs per entry

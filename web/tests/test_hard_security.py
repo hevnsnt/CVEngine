@@ -12,9 +12,9 @@ from django.utils import timezone
 from cveFeed import autofire, hygiene, templategen
 from cveFeed.models import CVEEntry, CVEMatch, UpdateSettings
 from dashboard.models import AIProviderSettings, ApiCredential, ChaosAPIKey, Org, Project
-from reNgine import discovery_events as bbot_lib
-from reNgine import crypto_fields
-from reNgine.tasks import persist_bbot_result
+from cvengine import discovery_events as bbot_lib
+from cvengine import crypto_fields
+from cvengine.tasks import persist_bbot_result
 from scanEngine.models import Notification
 from startScan.models import IpAddress, Port, Subdomain
 from targetApp.models import Domain
@@ -28,7 +28,7 @@ def blocked_by_name(host):
 class DjangoSecretFileTests(unittest.TestCase):
 	def test_generated_and_existing_secret_files_are_private(self):
 		from pathlib import Path
-		from reNgine.init import first_run
+		from cvengine.init import first_run
 		with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {}, clear=True):
 			path = Path(directory) / 'secret'
 			key = first_run(str(path), directory)

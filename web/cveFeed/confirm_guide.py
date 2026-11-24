@@ -194,7 +194,7 @@ def _q(value):
 
 def _quote(text, limit=300):
     """Text from a scanned host or a feed, cleaned of control characters and capped: shown, never run."""
-    from reNgine.ai_providers import clean_text
+    from cvengine.ai_providers import clean_text
     return clean_text(str(text or ''), limit) or ''
 
 

@@ -1,7 +1,7 @@
 """Rating the discovery's baddns dangling-DNS findings by what an outsider can actually claim.
 
 baddns rates every dangling record medium, so cvENGINE showed them all as smoke: a claimable zone takeover and a stale CNAME no one else can
-use looked the same. Each finding is checked again (on a Sentinel) when it is stored (``reNgine.tasks._persist_bbot_findings``) and by the
+use looked the same. Each finding is checked again (on a Sentinel) when it is stored (``cvengine.tasks._persist_bbot_findings``) and by the
 ``rerate_dangling_dns`` command, and gets a severity (critical/high fire, medium smoke, low ice) and a note saying why:
 
 * **Dangling NS** ("Dangling NS Records (NS records without SOA)"): the delegation is evaluated at the client's own zone cut, found by walking
@@ -126,7 +126,7 @@ def assess_all(findings, project=None):
             plan.append((index, {'id': str(index), 'host': host[:260], 'kind': parsed.kind, 'triggers': [t[:260] for t in parsed.triggers[:10]]}))
     if project is not None and plan:
         from agentapi import probe_dispatch
-        from reNgine.resources import ScannerUnavailable
+        from cvengine.resources import ScannerUnavailable
         try:
             answered = probe_dispatch.try_dangling(project, [check for _i, check in plan], providers_doc())
         except ScannerUnavailable as exc:

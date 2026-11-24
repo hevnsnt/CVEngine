@@ -596,7 +596,7 @@ def sweep(project_id, fetch=None, dns=None, owner_check=None):
     they show another owner). ``fetch``, ``dns`` and ``owner_check`` replace the network in tests."""
     from cveFeed import activity, ledger
     from cveFeed.conductor import bounty_blocked_projects
-    from reNgine import resources
+    from cvengine import resources
     from targetApp.models import Domain
     summary = {'checked': 0, 'public': 0, 'takeover': 0, 'private': 0, 'missing': 0, 'unknown': 0, 'resolved': 0}
     if not enabled():
@@ -680,7 +680,7 @@ def _remote_verdicts(project_id, candidates):
     because no Sentinel can take the kind (it has no local path)."""
     from agentapi import probe_dispatch
     from dashboard.models import Project
-    from reNgine.resources import ScannerUnavailable
+    from cvengine.resources import ScannerUnavailable
     if not candidates:
         return {}, False
     try:

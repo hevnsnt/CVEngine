@@ -900,7 +900,7 @@ def apply_observations(sub):
     ``(findings, evidence, resolved)``."""
     from cveFeed import correlation
     from cveFeed.models import CVEEntry, CVEMatch, ProbeObservation
-    from reNgine.tasks import save_vulnerability
+    from cvengine.tasks import save_vulnerability
     domain = sub.target_domain
     cutoff = timezone.now() - timedelta(days=FRESH_DAYS)
     observations = list(ProbeObservation.objects.filter(project_id=domain.project_id, host=sub.name.lower(), probe=PROBE, kind=OBS_KIND))
@@ -1212,7 +1212,7 @@ def tick(resolve=None, blocked=None):
     one-at-a-time slot for ever."""
     from cveFeed.models import OpenvasRun, OpenvasSettings
     from cveFeed.scan_control import operator_pause_requested
-    from reNgine import resources
+    from cvengine import resources
     row = OpenvasSettings.current()
     if not row.enabled:
         return {'skipped': 'the OpenVAS add-on is switched off'}

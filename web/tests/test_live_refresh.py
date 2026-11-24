@@ -22,7 +22,7 @@ from django.test.utils import CaptureQueriesContext
 from agentapi import system_status
 from cveFeed import graph_live, live_refresh, snapshot_cache, views
 from dashboard.models import OrgMembership, ProjectMembership
-from reNgine import livecache_config
+from cvengine import livecache_config
 from startScan.models import Subdomain
 from tenancy import membership_cache, roles, scope
 from tests.test_live_cache import World, steady_caches
@@ -659,7 +659,7 @@ class ScheduleAndLaneTests(SimpleTestCase):
     def test_the_task_has_a_queue_that_no_scan_feed_or_validation_worker_consumes_and_runs_while_scanning_is_paused(self):
         from cveFeed import tasks
         from cveFeed.scan_control import PAUSE_EXEMPT_TASKS
-        from reNgine import time_limits
+        from cvengine import time_limits
         self.assertEqual(tasks.refresh_live_snapshots.queue, 'live_cache_queue')
         self.assertIn('refresh_live_snapshots', PAUSE_EXEMPT_TASKS)
         self.assertIn('live_cache_queue', system_status.QUEUES)
@@ -677,7 +677,7 @@ class BeatTableTests(Fresh):
         """What ``DatabaseScheduler.update_from_dict`` does with each ``CELERY_BEAT_SCHEDULE`` entry when beat starts."""
         from django_celery_beat.models import PeriodicTask
         from django_celery_beat.schedulers import ModelEntry
-        from reNgine.celery import app
+        from cvengine.celery import app
         for environ, enabled, seconds in (({}, True, 5), ({'CVENGINE_LIVE_REFRESH_SECONDS': '9', 'CVENGINE_LIVE_REFRESH': '0'}, False, 9)):
             ModelEntry.from_entry('cvengine-live-refresh', app=app, **livecache_config.beat_entry(environ))
             row = PeriodicTask.objects.get(name='cvengine-live-refresh')
@@ -788,10 +788,10 @@ class PoliteRefresherTests(Fresh):
 
             def __exit__(self, *a):
                 return False
-        with mock.patch('reNgine.celery.app.connection_for_read', return_value=Connection()):
+        with mock.patch('cvengine.celery.app.connection_for_read', return_value=Connection()):
             self.assertEqual(REAL_BACKLOG(), (2, 75))
         self.assertEqual(asked, ['live_cache_queue', *live_refresh.CLASSIC_QUEUES])  # a fixed list of lengths: no scan of the keyspace
-        with mock.patch('reNgine.celery.app.connection_for_read', side_effect=ConnectionError('down')):
+        with mock.patch('cvengine.celery.app.connection_for_read', side_effect=ConnectionError('down')):
             self.assertEqual(REAL_BACKLOG(), (0, 0), 'a broker that does not answer never holds a refresh back')
 
     def test_a_backlogged_worker_gets_no_refresh_and_the_skip_is_counted(self):

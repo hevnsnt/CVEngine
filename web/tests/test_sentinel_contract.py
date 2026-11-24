@@ -675,7 +675,7 @@ class RealTargetBuilderTests(SimpleTestCase):
         self.check(seen, ['nmap', 'naabu', 'nmap_udp', 'testssl'])
 
     def run_builders(self, scan):
-        from reNgine.resources import ScannerUnavailable
+        from cvengine.resources import ScannerUnavailable
 
         def waits(call):  # nmap, naabu and nmap_udp never run here: with no Sentinel answering, the builder's task is sent and the stage waits
             try:

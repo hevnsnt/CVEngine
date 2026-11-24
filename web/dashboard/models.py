@@ -1,7 +1,7 @@
-from reNgine.ai_profiles import PROFILES
-from reNgine.crypto_fields import ENCRYPTED_COLUMN_LENGTH, EncryptedCharField, EncryptedJSONField
+from cvengine.ai_profiles import PROFILES
+from cvengine.crypto_fields import ENCRYPTED_COLUMN_LENGTH, EncryptedCharField, EncryptedJSONField
 from django.db import models
-from reNgine.definitions import *
+from cvengine.definitions import *
 from django.contrib.auth.models import User
 
 
@@ -45,11 +45,11 @@ class Project(models.Model):
 
 
 class AIProviderSettings(models.Model):
-	"""Single-row config for the model-agnostic AI layer (see reNgine/ai_providers.py).
+	"""Single-row config for the model-agnostic AI layer (see cvengine/ai_providers.py).
 
 	The API key lives here (Postgres), set via the settings UI, never in git or .env.
 	"""
-	PROVIDER_CHOICES = [(profile.id, profile.label) for profile in PROFILES.values()]  # the provider table (reNgine/ai_profiles.py)
+	PROVIDER_CHOICES = [(profile.id, profile.label) for profile in PROFILES.values()]  # the provider table (cvengine/ai_profiles.py)
 	id = models.AutoField(primary_key=True)
 	provider = models.CharField(max_length=32, choices=PROVIDER_CHOICES, default='anthropic')
 	model = models.CharField(max_length=200, blank=True, default='')
@@ -66,7 +66,7 @@ class AIProviderSettings(models.Model):
 	# How many CVEs a day the model may write or revise guidance for (each is a paid request); the catalogue is covered in this many days.
 	cve_guidance_daily = models.PositiveIntegerField(default=25, db_default=25)
 	# How a request is made. Empty (NULL or '') means "not set here": the request then follows the environment variable of the same name
-	# (CVENGINE_AI_TIMEOUT and the others) and then the provider's own default (reNgine/ai_profiles.py), so an install that never touches
+	# (CVENGINE_AI_TIMEOUT and the others) and then the provider's own default (cvengine/ai_profiles.py), so an install that never touches
 	# these sends exactly what it did before. The ranges are in ai_profiles.NUMBER_SETTINGS and are enforced by the settings API.
 	request_timeout = models.PositiveIntegerField(null=True, blank=True)  # seconds to wait for an answer
 	connect_timeout = models.PositiveIntegerField(null=True, blank=True)  # seconds to reach the server
@@ -76,7 +76,7 @@ class AIProviderSettings(models.Model):
 	reasoning = models.CharField(max_length=8, blank=True, default='', db_default='')  # '', default, off, low, medium, high, max
 	keep_alive = models.CharField(max_length=8, blank=True, default='', db_default='')  # Ollama: 30m, 1h, 0, -1
 	# The model for the nuclei tag choice (stages nuclei_tag_selection and nuclei_targeting). '' = the default, resolved when it is read: the
-	# cheapest haiku the provider lists as available, else the model above (reNgine/ai_nuclei_model.py). Never written by a migration.
+	# cheapest haiku the provider lists as available, else the model above (cvengine/ai_nuclei_model.py). Never written by a migration.
 	nuclei_model = models.CharField(max_length=200, blank=True, default='', db_default='')
 	verified_at = models.DateTimeField(null=True, blank=True)
 	verified_provider = models.CharField(max_length=32, blank=True, default='')
@@ -244,7 +244,7 @@ class IpAllowlistEntry(models.Model):
 
 class AbuseStrike(models.Model):
 	"""One rejected request that carried an attack payload (command or SQL injection, path traversal, ...).
-	Strikes add up per user and per IP; enough of them inside the window trigger an automatic action (reNgine.input_guard). A strike of weight 0
+	Strikes add up per user and per IP; enough of them inside the window trigger an automatic action (cvengine.input_guard). A strike of weight 0
 	was a navigation a link can start (Sec-Fetch-Site none or same-origin on a GET): rejected and kept for the record, never counted."""
 	user = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
 	username = models.CharField(max_length=150, blank=True, default='')

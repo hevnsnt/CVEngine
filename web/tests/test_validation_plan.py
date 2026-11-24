@@ -33,7 +33,7 @@ class PlanParsingTests(TestCase):
     def test_provider_unavailable_only_allows_a_specific_vetted_template(self):
         row = mock.Mock(signature='sig')
         cve = mock.Mock()
-        with mock.patch('reNgine.ai_settings.get_configured_provider', return_value=None):
+        with mock.patch('cvengine.ai_settings.get_configured_provider', return_value=None):
             generic, _ = plan(1, row, cve, {}, [{'kind': 'nmap_sv'}, {'kind': 'http_head'}], ('', 'no template'))
             specific, _ = plan(1, row, cve, {}, [{'kind': 'nuclei_template'}, {'kind': 'http_head'}], ('/approved/cve.yaml', ''))
         self.assertEqual(generic['check_kinds'], [])
@@ -92,7 +92,7 @@ GOOD = '{"check_kinds":["nmap_sv"],"generate_template":false,"reason":"The servi
 
 
 def model(*replies, error=None):
-    from reNgine.ai_providers import AIProviderError
+    from cvengine.ai_providers import AIProviderError
     fake = mock.Mock(model='m')
     fake.name = 'anthropic'
     if error:

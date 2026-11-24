@@ -120,7 +120,7 @@ def _read_addresses(rows, errored):
     """``{(name, address)}`` of the names of ``rows``, read by a Sentinel (``identity_check``, one task per project). A name nobody answered (no
     Sentinel can take the kind and it never runs here, a timeout, a refusal) is put in ``errored`` and says nothing about the host."""
     from agentapi import probe_dispatch
-    from reNgine.resources import ScannerUnavailable
+    from cvengine.resources import ScannerUnavailable
     by_project = {}
     for row in rows:
         by_project.setdefault(row.project_id, (row.project, []))[1].append(row.host)

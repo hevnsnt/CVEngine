@@ -6,7 +6,7 @@
 #   docker compose run --rm migrate python3 manage.py COMMAND ...     any other command as the owner: createsuperuser, create_admin,
 #                                                                     showmigrations, db_app_role gate, test
 #
-# The check (manage.py db_app_role gate, reNgine/db_roles.py) exits 1 with the one-line fix when the app role cannot be used, so the application
+# The check (manage.py db_app_role gate, cvengine/db_roles.py) exits 1 with the one-line fix when the app role cannot be used, so the application
 # is never started with the owner password by accident; CVENGINE_DB_ALLOW_OWNER_FALLBACK=1 in .env is the explicit way to allow that.
 set -Eeuo pipefail
 export CVENGINE_DB_ROLE=owner

@@ -346,7 +346,7 @@ def run_for_scan(scan_id, force=False, dispatch=None):
     scanner can take the kind (the reads stay due; the passive readings are stored first)."""
     from agentapi import probe_dispatch, sentinel_dispatch
     from cveFeed import activity
-    from reNgine.resources import ScannerUnavailable
+    from cvengine.resources import ScannerUnavailable
     from startScan.models import ScanHistory, Subdomain
     scan = ScanHistory.objects.select_related('domain__project').get(pk=scan_id)
     project = scan.domain.project
@@ -391,7 +391,7 @@ def run_for_hosts(project, host_names, dispatch=None, priority=1):
     """The work planner's entry: the same plan, gates (unattended: a bug bounty engagement must have confirmed automated testing), ledger
     and storage as ``run_for_scan`` for the named hosts' current inventory rows, with no scan of its own."""
     from agentapi import probe_dispatch, sentinel_dispatch
-    from reNgine.resources import ScannerUnavailable
+    from cvengine.resources import ScannerUnavailable
     summary = {'hosts': 0, 'asked': 0, 'readings': 0, 'exposed': 0, 'waiting': 0}
     if not enabled():
         return {**summary, 'skipped': 'disabled'}
@@ -777,7 +777,7 @@ def _twin(sub, source):
 def file_exposure(scan, sub, source, url, readings=(), severity=None):
     """The finding of an exposure ``source`` answered in its shape: one row per host name, entry and URL (a rescan updates it). Returns 1
     when it is new."""
-    from reNgine.tasks import save_vulnerability
+    from cvengine.tasks import save_vulnerability
     if scan is None or _twin(sub, source):
         return 0
     exposure = source.exposure

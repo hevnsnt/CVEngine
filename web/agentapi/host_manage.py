@@ -391,7 +391,7 @@ def _purge(project, name, subtree=False, drained=None):
 
 
 def _remove_result_dirs(names):
-    from reNgine.common_func import SCAN_RESULTS_ROOT, safe_remove_path
+    from cvengine.common_func import SCAN_RESULTS_ROOT, safe_remove_path
     for name in names:  # exact directory names, never a prefix match
         try:
             safe_remove_path(os.path.join(SCAN_RESULTS_ROOT, name), SCAN_RESULTS_ROOT)

@@ -129,7 +129,7 @@ def _max_in_flight(source):
 
 
 def _redis():
-    from reNgine import resources
+    from cvengine import resources
     return getattr(resources.get_store(), 'r', None)
 
 

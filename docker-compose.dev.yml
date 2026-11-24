@@ -98,9 +98,9 @@ services:
     logging: *default-logging
 
   celery:
-    mem_limit: "${CELERY_MEM_LIMIT:-4g}"  # container ceiling; heavy scanner jobs queue inside it (reNgine/resources.py)
+    mem_limit: "${CELERY_MEM_LIMIT:-4g}"  # container ceiling; heavy scanner jobs queue inside it (cvengine/resources.py)
     extra_hosts:
-      - "host.docker.internal:host-gateway"  # lets "localhost" in Settings > AI model mean this server (see reNgine/ai_providers.py reachable_url)
+      - "host.docker.internal:host-gateway"  # lets "localhost" in Settings > AI model mean this server (see cvengine/ai_providers.py reachable_url)
     build:
       context: ./web
     restart: always
@@ -117,7 +117,7 @@ services:
       timeout: 40s
       retries: 3
       start_period: 10m
-    # command: watchmedo auto-restart --recursive --pattern="*.py" --directory="/usr/src/app/reNgine/" -- celery -A reNgine.tasks worker --autoscale=10,0 -l INFO
+    # command: watchmedo auto-restart --recursive --pattern="*.py" --directory="/usr/src/app/cvengine/" -- celery -A cvengine.tasks worker --autoscale=10,0 -l INFO
     volumes:
       - ./web:/usr/src/app
       - scan_results:/usr/src/scan_results
@@ -156,12 +156,12 @@ services:
       redis:
         condition: service_started
     networks:
-      - rengine_network
+      - cvengine_network
       - data_network
     logging: *default-logging
 
   celery-beat:
-    mem_limit: "${BEAT_MEM_LIMIT:-512m}"  # container ceiling; heavy scanner jobs queue inside it (reNgine/resources.py)
+    mem_limit: "${BEAT_MEM_LIMIT:-512m}"  # container ceiling; heavy scanner jobs queue inside it (cvengine/resources.py)
     restart: always
     build: ./web
     entrypoint: /usr/src/app/beat-entrypoint.sh
@@ -169,7 +169,7 @@ services:
     # image's (uid 10002), so these containers run as root here. Production (docker-compose.yml) runs the image's own source as uid 10002 with no
     # capabilities and mounts nothing of web/ over it (docs/DEPLOYMENT.md, "Who the containers run as").
     user: "0:0"
-    command: celery -A reNgine beat -l INFO --scheduler cveFeed.scan_control:PauseAwareScheduler
+    command: celery -A cvengine beat -l INFO --scheduler cveFeed.scan_control:PauseAwareScheduler
     depends_on:
       migrate:  # the one-off owner service: migrations, the app role and its check; nothing starts when it fails
         condition: service_completed_successfully
@@ -203,14 +203,14 @@ services:
       - tool_config:/home/cvengine/.config  # HOME of the image (web/Dockerfile)
       - db_owner_fallback:/var/lib/cvengine-db-owner:ro  # empty unless CVENGINE_DB_ALLOW_OWNER_FALLBACK=1 (the migrate service writes it)
     networks:
-      - rengine_network
+      - cvengine_network
       - data_network
     logging: *default-logging
 
   web:
-    mem_limit: "${WEB_MEM_LIMIT:-1g}"  # container ceiling; heavy scanner jobs queue inside it (reNgine/resources.py)
+    mem_limit: "${WEB_MEM_LIMIT:-1g}"  # container ceiling; heavy scanner jobs queue inside it (cvengine/resources.py)
     extra_hosts:
-      - "host.docker.internal:host-gateway"  # lets "localhost" in Settings > AI model mean this server (see reNgine/ai_providers.py reachable_url)
+      - "host.docker.internal:host-gateway"  # lets "localhost" in Settings > AI model mean this server (see cvengine/ai_providers.py reachable_url)
     build:
       context: ./web
     entrypoint: /usr/src/app/entrypoint.sh
@@ -260,12 +260,12 @@ services:
       celery-beat:
         condition: service_started
     networks:
-      - rengine_network
+      - cvengine_network
       - data_network
     logging: *default-logging
 
 networks:
-  rengine_network:
+  cvengine_network:
   data_network:  # the database and Redis, with web, celery and celery-beat only
 volumes:
   tool_config:

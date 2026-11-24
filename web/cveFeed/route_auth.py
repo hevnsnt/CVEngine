@@ -423,7 +423,7 @@ def _run_route_auth(scan_id, force=False):
     from django.utils import timezone
 
     from cveFeed import activity, ledger, scoring
-    from reNgine import resources
+    from cvengine import resources
     from startScan.models import ScanHistory
     scan = ScanHistory.objects.select_related('domain').get(pk=scan_id)
     domain, project = scan.domain, scan.domain.project_id

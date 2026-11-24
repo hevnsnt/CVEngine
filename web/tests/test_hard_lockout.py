@@ -73,7 +73,7 @@ class SharedCacheTests(TestCase):
 
 class CacheUrlTests(unittest.TestCase):
 	def url(self, **env):
-		from reNgine.settings import _cache_url
+		from cvengine.settings import _cache_url
 		with mock.patch.dict(os.environ, env, clear=False):
 			for key in ('CACHE_URL', 'CELERY_BROKER'):
 				if key not in env:

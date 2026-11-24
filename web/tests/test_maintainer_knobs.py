@@ -15,7 +15,7 @@ from agentapi import sentinel_policy
 from agentapi.models import Agent, SentinelTask
 from cveFeed import autotune, autotune_policy as policy, autotune_signals as signals, host_assessment, scan_concurrency as sc
 from cveFeed.models import AutoTuneSettings, HostAssessment, TuningDecision
-from reNgine import resources
+from cvengine import resources
 from tests.test_alerts_tell_the_truth import Base as SentinelBase, WAIT
 from tests.test_autotune import BASE, NOW, Isolated, change, decide, history, merge
 

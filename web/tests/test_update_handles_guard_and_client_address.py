@@ -25,7 +25,7 @@ from django.utils import timezone
 from cveFeed import client_address, guard_reenable, reviewer, upgrade_backfills
 from cveFeed.models import AdminAlert
 from dashboard.models import AbuseBan, ApiToken, AuditLog
-from reNgine import client_probe
+from cvengine import client_probe
 
 ROOT = Path(__file__).resolve().parents[2]
 PROXY = '172.16.238.10'  # the bundled proxy's fixed address, the default trusted proxy
@@ -33,7 +33,7 @@ SECRET = 'Zq8rT2vW9xY3bN5mK7pL4sD6fG1hJ0aEcUuu'
 
 
 def old_guard_disabled(user, tokens=2, when=None):
-    """What the input guard of releases before 1.5.0 did at its threshold (reNgine/input_guard.py before review r3 S1): disable the account,
+    """What the input guard of releases before 1.5.0 did at its threshold (cvengine/input_guard.py before review r3 S1): disable the account,
     revoke every token it held, store a user ban row and write ``abuse.account_disabled`` with the account as actor."""
     when = when or timezone.now() - timedelta(days=3)
     made = []
@@ -324,7 +324,7 @@ class NoticeTests(TestCase):
         self.assertEqual(ours, [line.replace('@CVENGINE_UPSTREAM_SECRET@', SECRET) for line in code])
 
     def test_the_proxy_labels_the_probe_route_only(self):
-        conf = (ROOT / 'config' / 'nginx' / 'rengine.conf').read_text()
+        conf = (ROOT / 'config' / 'nginx' / 'cvengine.conf').read_text()
         self.assertEqual(len(re.findall(r'proxy_set_header\s+X-CVEngine-Probe-Forwarded', conf)), 1)
         probe_block = conf[conf.index('location ^~ /client-address-probe/'):]
         probe_block = probe_block[:probe_block.index('\n    }')]

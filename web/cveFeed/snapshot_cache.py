@@ -33,7 +33,7 @@ import time
 
 from django.core.cache import cache
 
-from reNgine import livecache_config
+from cvengine import livecache_config
 
 logger = logging.getLogger(__name__)
 

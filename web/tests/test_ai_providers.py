@@ -2,7 +2,7 @@ import json
 import unittest
 from unittest import mock
 
-from reNgine import ai_providers as ai
+from cvengine import ai_providers as ai
 from tests import ai_queue
 
 
@@ -423,7 +423,7 @@ class LocalModelGapsTests(unittest.TestCase):
 	def test_ollamas_context_window_is_a_setting_and_a_full_one_is_reported(self):
 		with mock.patch.dict('os.environ', {'CVENGINE_OLLAMA_NUM_CTX': '8192'}), \
 				mock.patch('requests.post', return_value=FakeResp({'message': {'content': 'ok'}, 'prompt_eval_count': 8000})) as post, \
-				mock.patch.object(ai.logger, 'disabled', False), self.assertLogs('reNgine.ai_providers', level='WARNING') as logs:
+				mock.patch.object(ai.logger, 'disabled', False), self.assertLogs('cvengine.ai_providers', level='WARNING') as logs:
 			self.provider('ollama', 'http://h:11434').complete('s', 'u')
 		self.assertEqual(post.call_args[1]['json']['options'], {'num_predict': 2048, 'num_ctx': 8192})
 		self.assertIn('CVENGINE_OLLAMA_NUM_CTX', logs.output[0])

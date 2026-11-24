@@ -92,7 +92,7 @@ class WatchdogCase(TestCase):
     def setUp(self):
         self.home = Path(tempfile.mkdtemp())
         self.addCleanup(lambda: __import__('shutil').rmtree(self.home, ignore_errors=True))
-        p = override_settings(RENGINE_HOME=str(self.home), BASE_DIR=str(self.home))
+        p = override_settings(CVENGINE_HOME=str(self.home), BASE_DIR=str(self.home))
         p.enable()
         self.addCleanup(p.disable)
         env = mock.patch.dict(os.environ)
@@ -157,7 +157,7 @@ class SnapshotTests(WatchdogCase):
         self.assertFalse(snap_mod.lane_status(snap)['cve_feed_worker']['present'])
 
     def test_the_real_probes_report_unreachable_services_as_none(self):
-        with mock.patch.dict(os.environ, {'CELERY_BROKER': 'redis://127.0.0.1:1/0'}), mock.patch('reNgine.celery.app.control.inspect', side_effect=OSError('no broker')):
+        with mock.patch.dict(os.environ, {'CELERY_BROKER': 'redis://127.0.0.1:1/0'}), mock.patch('cvengine.celery.app.control.inspect', side_effect=OSError('no broker')):
             snap = snap_mod.collect(snap_mod.Probes())
         self.assertIsNone(snap['queues'])
         self.assertIsNone(snap['lanes'])
@@ -506,7 +506,7 @@ class StandDownTests(WatchdogCase):
         """11/9 11:00 pm: the CVE-feed lane missed pings while it completed a correlation every few seconds, and the watchdog restarted celery three times."""
         from unittest import mock
         self.break_lanes()
-        with mock.patch('reNgine.lane_memory.recent_progress', return_value={p: 20 for p in ('discovery', 'cve_feed', 'validation_priority', 'classic')}):
+        with mock.patch('cvengine.lane_memory.recent_progress', return_value={p: 20 for p in ('discovery', 'cve_feed', 'validation_priority', 'classic')}):
             self.tick()
             self.tick(400)
         self.assertIsNone(self.request())
@@ -517,7 +517,7 @@ class StandDownTests(WatchdogCase):
         self.break_lanes()
         quiet = {}  # no task finished in the last 90 seconds
         started_eight_minutes_ago = {p: 480 for p in ('discovery', 'cve_feed', 'validation_priority', 'classic')}
-        with mock.patch('reNgine.lane_memory.recent_progress', return_value=quiet), mock.patch('reNgine.lane_memory.in_flight', return_value=started_eight_minutes_ago):
+        with mock.patch('cvengine.lane_memory.recent_progress', return_value=quiet), mock.patch('cvengine.lane_memory.in_flight', return_value=started_eight_minutes_ago):
             self.tick()
             self.tick(400)
         self.assertIsNone(self.request())
@@ -526,7 +526,7 @@ class StandDownTests(WatchdogCase):
 
     def test_a_silent_lane_whose_task_started_over_thirty_minutes_ago_is_still_restarted(self):
         self.break_lanes()
-        with mock.patch('reNgine.lane_memory.recent_progress', return_value={}), mock.patch('reNgine.lane_memory.in_flight', return_value={}):
+        with mock.patch('cvengine.lane_memory.recent_progress', return_value={}), mock.patch('cvengine.lane_memory.in_flight', return_value={}):
             self.tick()
             self.tick(400)
         self.assertIsNotNone(self.request())
@@ -649,7 +649,7 @@ class R2HungTests(WatchdogCase):
     def test_one_long_task_with_free_slots_is_busy_not_hung(self):
         """One task running for twelve minutes, 1 of 8 slots taken, completions frozen, a queue that does not shrink: the lane is busy."""
         self.grow(10)
-        with mock.patch('reNgine.lane_memory.in_flight', return_value={'cve_feed': 720}):
+        with mock.patch('cvengine.lane_memory.in_flight', return_value={'cve_feed': 720}):
             self.tick()
             for step in range(1, 14):
                 self.grow(10 + step * 5)
@@ -660,7 +660,7 @@ class R2HungTests(WatchdogCase):
 
     def test_a_task_started_over_thirty_minutes_ago_does_not_make_a_lane_busy(self):
         self.grow(10)
-        with mock.patch('reNgine.lane_memory.in_flight', return_value={}):
+        with mock.patch('cvengine.lane_memory.in_flight', return_value={}):
             self.tick()
             for step in range(1, 12):
                 self.grow(10 + step * 5)
@@ -670,7 +670,7 @@ class R2HungTests(WatchdogCase):
     def _long_task_record(self, pid):
         """A real in-flight record of the CVE feed lane (written now, beating) by a worker with this pid."""
         from django.core.cache import cache
-        from reNgine import lane_memory
+        from cvengine import lane_memory
         now = time.time()
         cache.set(lane_memory.RUNNING_PREFIX + 'cve_feed', json.dumps({'pid': pid, 'beat': now, 'running': [{'name': 'cveFeed.tasks.port_load', 'since': now - 2700}]}), 600)
         self.addCleanup(cache.delete, lane_memory.RUNNING_PREFIX + 'cve_feed')
@@ -913,7 +913,7 @@ class R4R5R6Tests(WatchdogCase):
             getattr(fake, call).return_value = {w: [] for w in workers} or None
         app = mock.MagicMock()
         app.control.inspect.return_value = fake
-        return mock.patch('reNgine.celery.app', app)
+        return mock.patch('cvengine.celery.app', app)
 
     def test_no_worker_answering_never_returns_an_unacked_message(self):
         """A worker that does not answer may still hold the message: returning it would run the task twice."""
@@ -971,7 +971,7 @@ class R4R5R6Tests(WatchdogCase):
 
     def test_messages_stuck_behind_a_silent_lane_raise_a_notice_after_half_an_hour_that_says_what_happens_next(self):
         self._one_lane_silent_but_working()
-        with mock.patch('reNgine.lane_memory.in_flight', return_value={'cve_feed': 600}), mock.patch('cveFeed.broker_recovery.requeue_tags') as restored:
+        with mock.patch('cvengine.lane_memory.in_flight', return_value={'cve_feed': 600}), mock.patch('cveFeed.broker_recovery.requeue_tags') as restored:
             self.tick()
             self.tick(25 * 60)
             self.assertFalse(AdminAlert.objects.filter(code='watchdog_r5', resolved_at__isnull=True).exists())  # not yet: a quiet lane is often only busy
@@ -985,7 +985,7 @@ class R4R5R6Tests(WatchdogCase):
 
     def test_the_stuck_messages_notice_closes_when_every_lane_answers_again(self):
         self._one_lane_silent_but_working()
-        with mock.patch('reNgine.lane_memory.in_flight', return_value={'cve_feed': 600}):
+        with mock.patch('cvengine.lane_memory.in_flight', return_value={'cve_feed': 600}):
             self.tick()
             self.tick(31 * 60)
         self.assertTrue(AdminAlert.objects.filter(code='watchdog_r5', resolved_at__isnull=True).exists())
@@ -1008,7 +1008,7 @@ class R4R5R6Tests(WatchdogCase):
         }
         self.probes.data['lanes'] = {n: q for n, q in LANES.items() if not n.startswith('cve_feed')}
         self._restarted_at(0)
-        with mock.patch('reNgine.lane_memory.in_flight', return_value={'cve_feed': 60}), mock.patch('cveFeed.broker_recovery.requeue_tags', return_value=1) as restored:
+        with mock.patch('cvengine.lane_memory.in_flight', return_value={'cve_feed': 60}), mock.patch('cveFeed.broker_recovery.requeue_tags', return_value=1) as restored:
             self.tick(3000)  # the later message is now over 30 minutes old too
         restored.assert_called_once_with(['before'])
 
@@ -1251,7 +1251,7 @@ class TickSafetyTests(WatchdogCase):
     def test_the_commands_own_timer_ends_a_process_blocked_where_python_cannot_interrupt(self):
         code = ('import threading, sys\n'
                 'sys.path.insert(0, %r)\n'
-                'import os\nos.environ.setdefault("DJANGO_SETTINGS_MODULE", "reNgine.settings")\n'
+                'import os\nos.environ.setdefault("DJANGO_SETTINGS_MODULE", "cvengine.settings")\n'
                 'import django\ndjango.setup()\n'
                 'from cveFeed.management.commands.watchdog_tick import self_destruct\n'
                 'self_destruct(1)\nthreading.Event().wait()\n') % str(Path(__file__).resolve().parents[1])

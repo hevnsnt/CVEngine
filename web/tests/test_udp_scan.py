@@ -12,7 +12,7 @@ from agentapi.auth import create_token
 from cveFeed import hygiene, ledger, port_inventory, udp_scan
 from cveFeed.models import AgentActivity, HostExclusion, HygieneFinding, ScanControl, ServiceRun
 from dashboard.models import Org, Project, ProjectMembership
-from reNgine import resources
+from cvengine import resources
 from scanEngine.models import EngineType
 from startScan.models import OPEN_PORT_STATES, IpAddress, Port, ScanHistory, Subdomain, open_ports, open_services
 from targetApp.models import Domain
@@ -221,7 +221,7 @@ class PortKeyTests(UdpBase):
 		self.assertEqual(ip.ports.get(number=11211, protocol='udp').state, 'open')
 
 	def test_update_or_create_port_finds_the_tcp_row(self):
-		from reNgine.common_func import update_or_create_port
+		from cvengine.common_func import update_or_create_port
 		ip = self.ip('192.0.2.10')
 		udp_scan.record_run(ip, self.host_of(ANSWERED, '192.0.2.10'))
 		port, created = update_or_create_port(161, service_name='http', ip=ip)

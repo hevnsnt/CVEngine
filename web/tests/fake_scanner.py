@@ -182,7 +182,7 @@ class FakeScanner:
             assert self.agent.token.user_id == admin.pk
             self.clock = _Clock(self)
             stack.enter_context(mock.patch('agentapi.sentinel_dispatch.time', self.clock))
-            # The test suite runs stages blocking (reNgine.test_runner); ``async_stages=True`` runs them the way a server does, and the test
+            # The test suite runs stages blocking (cvengine.test_runner); ``async_stages=True`` runs them the way a server does, and the test
             # continues them with ``drain()``.
             stack.enter_context(mock.patch.dict(os.environ, {'CVENGINE_ASYNC_STAGES': '1' if self.async_stages else '0'}))
             _ACTIVE.append(self)

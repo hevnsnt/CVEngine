@@ -161,8 +161,8 @@ class SourceTests(Base):
         return SubdomainTechnology.objects.get(subdomain=sub or self.sub, technology__name=name)
 
     def test_discovery(self):
-        from reNgine import discovery_events as bbot_lib
-        from reNgine.tasks import persist_bbot_result
+        from cvengine import discovery_events as bbot_lib
+        from cvengine.tasks import persist_bbot_result
         ctx = {'scan_history_id': self.scan.id, 'domain_id': self.domain.id, 'subdomain_id': None, 'subscan_id': None}
         persist_bbot_result(bbot_lib.BbotResult(subdomains={HOST}, technologies={(HOST, 'Caddy'), (HOST, 'nginx/1.28.3')}), ctx=ctx)
         self.assertEqual({(n, s) for n, s, _c in self.links()}, {('Caddy', 'bbot'), ('nginx:1.28.3', 'bbot')})

@@ -147,7 +147,7 @@ def kind_pin(entry):
 
 
 def _killed():
-    from reNgine import resources
+    from cvengine import resources
     return resources.autotune_killed()
 
 

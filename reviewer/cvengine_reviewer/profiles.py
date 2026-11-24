@@ -1,4 +1,4 @@
-"""What each AI provider can do: a copy of the server's table (web/reNgine/ai_profiles.py, the part that shapes a request), so the requests the
+"""What each AI provider can do: a copy of the server's table (web/cvengine/ai_profiles.py, the part that shapes a request), so the requests the
 pipeline's AI jobs make from this container are the ones the server made itself before 1.4. Standard library only.
 
 The server's test ``tests/test_ai_jobs.py`` compares this table with the server's, field by field, so the two cannot drift apart.
@@ -41,7 +41,7 @@ def claude_version(model):
     return old_family, int(old_major), int(old_minor or 0)
 
 
-# The shortest prompt Anthropic will cache, by model: a COPY of ``web/reNgine/ai_profiles.cache_min_tokens`` (this image cannot import the
+# The shortest prompt Anthropic will cache, by model: a COPY of ``web/cvengine/ai_profiles.cache_min_tokens`` (this image cannot import the
 # server). ``web/tests/test_ai_prompt_cache.py`` fails when the two differ. A shorter prefix marked for the cache is processed normally.
 CACHE_MIN_DEFAULT = 4096
 

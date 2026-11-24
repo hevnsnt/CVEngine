@@ -42,7 +42,7 @@ CANDIDATE_TAGS = tuple(sorted({t for tags in STATIC_TAG_MAP.values() for t in ta
 GENERIC_TAGS = tuple(t for t in CANDIDATE_TAGS if t not in {x for tags in STATIC_TAG_MAP.values() for x in tags})  # not a product: exposure, rce, panel ...
 
 # The targeting job carries a TASK LINE ONLY (the tag selection job of the same measurement is retired: ``select_tags`` uses the static
-# table) and no shared preamble from reNgine/ai_prompts.py: the owner's sentence replaces the first sentence of
+# table) and no shared preamble from cvengine/ai_prompts.py: the owner's sentence replaces the first sentence of
 # the 1.4-develop text; the rules, output format and user labels are unchanged. Measured on the real provider (11/8, 5 repeats, Sonnet): this
 # wording (variant F of the probe) answered nuclei_targeting 5/5 (old text 3/5) and nuclei_tag_selection 5/5 (old 5/5); the shared preamble
 # raised refusals (0/5 answered on both), so it is not used here. Re-prove the shipped text with PROBE_VARIANTS=A,S (ai-prompts/probe.py).
@@ -498,7 +498,7 @@ def targeting_prompt(signatures, allowed, offered=None):
 
 
 def _host_names(signatures):
-	from reNgine.ai_providers import clean_text
+	from cvengine.ai_providers import clean_text
 	return {str(i): [clean_text(name, 60, strict=True) for name in sig][:40] for i, sig in enumerate(signatures)}
 
 
@@ -511,8 +511,8 @@ def targeting_parts(signatures):
 def nuclei_options():
 	"""The request options of the targeting job: the model of "Nuclei targeting and tag selection" (``AIProviderSettings.nuclei_model``)
 	when an owner chose one, and ``haiku``: the reviewer container uses the cheapest haiku its provider lists when none was chosen, and asks
-	it once more when another model refused the job or answered nothing (``reNgine.ai_nuclei_model``)."""
-	from reNgine import ai_nuclei_model
+	it once more when another model refused the job or answered nothing (``cvengine.ai_nuclei_model``)."""
+	from cvengine import ai_nuclei_model
 	chosen = ai_nuclei_model.configured()
 	return {'haiku': True, **({'model': chosen} if chosen else {})}
 
@@ -520,7 +520,7 @@ def nuclei_options():
 def parse_choice(reply, count, allowed):
 	"""``{index: (tags, severities)}`` of a targeting reply, or None when it is not one JSON object. Strictly a closed-set classifier: tags
 	are intersected with ``allowed`` (every installed tag) and severities with the five nuclei severities, whatever the model replies."""
-	from reNgine.ai_providers import extract_json
+	from cvengine.ai_providers import extract_json
 	data = extract_json(reply)
 	if not isinstance(data, dict):
 		return None
@@ -541,7 +541,7 @@ def ai_plan(signatures, allowed, offered=None, notes=None, project=None):
 	reached, or the same request failed a moment ago (it is not queued again inside its window). Never raises: a scan is not held up by this.
 	``offered`` is the subset of tags the prompt lists (``pertinent_tags``); left out, the whole of ``allowed`` is listed."""
 	from cveFeed import ai_jobs
-	from reNgine.ai_providers import plain_failure
+	from cvengine.ai_providers import plain_failure
 	notes = notes if notes is not None else []
 	if not signatures:
 		return None
@@ -610,7 +610,7 @@ def job_answer(job, text):
 	"""Keep the AI's choice for each host profile it was asked about (an empty choice too: that profile is not asked again within
 	``ANSWER_TTL``). A reply that is not one JSON object is sent back once with why; a second one is a failure of the request."""
 	from cveFeed import ai_jobs
-	from reNgine.ai_providers import repair_parts
+	from cvengine.ai_providers import repair_parts
 	signatures = [tuple(sig) for sig in (job.context or {}).get('signatures') or []]
 	choice = parse_choice(text, len(signatures), allowed_tags())
 	if choice is None:

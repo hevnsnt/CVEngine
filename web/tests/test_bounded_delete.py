@@ -193,7 +193,7 @@ class EquivalenceTests(Fixture):
 		dirs = sorted(list(Domain.objects.filter(pk__in=ids).values_list('name', flat=True))
 			+ [f'{n}_{sid}' for sid, n in ScanHistory.objects.filter(domain_id__in=ids).values_list('id', 'domain__name')])
 		rows, removed, _ = self.expected(lambda: Domain.objects.filter(pk__in=ids).delete())
-		with mock.patch('reNgine.common_func.safe_remove_path') as rm, mock.patch.object(bounded_delete, 'BATCH', 2):
+		with mock.patch('cvengine.common_func.safe_remove_path') as rm, mock.patch.object(bounded_delete, 'BATCH', 2):
 			out = svc.delete_targets(self.ctx(self.admin), 'a1', ids=ids)
 		self.assertEqual(out['deleted'], 3)  # one.test, two.test and the fixture's own target
 		self.assertSameDatabase(rows, removed)

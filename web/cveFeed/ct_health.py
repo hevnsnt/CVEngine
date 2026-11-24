@@ -148,7 +148,7 @@ def start_batching():
     if _state['flusher']:
         _state['batching'] = True
         return
-    from reNgine import gevent_db
+    from cvengine import gevent_db
     if gevent_db.gevent_patched():
         import gevent
         gevent.spawn(_loop, gevent.sleep)
@@ -164,7 +164,7 @@ def _stopping(**kwargs):
 
 def _in_worker():
     """True in a real worker process (started with ``-n``, as every lane is): a test that sends the worker signals starts no timer."""
-    from reNgine import lane_memory
+    from cvengine import lane_memory
     return bool(lane_memory.lane_name())
 
 
@@ -179,7 +179,7 @@ def _child_started(**kwargs):
 
 
 def install():
-    """Called once by the Celery app (reNgine/celery.py): batch the outcomes in a worker once it is ready, and write what is left when the
+    """Called once by the Celery app (cvengine/celery.py): batch the outcomes in a worker once it is ready, and write what is left when the
     worker or one of its processes stops, or the interpreter exits."""
     from celery.signals import worker_process_init, worker_process_shutdown, worker_ready, worker_shutdown
     worker_ready.connect(_worker_ready, weak=False, dispatch_uid='ct-health-batch')

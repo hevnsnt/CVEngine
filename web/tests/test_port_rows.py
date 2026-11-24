@@ -16,9 +16,9 @@ from django.db import IntegrityError, connection, transaction
 from django.test import TransactionTestCase
 
 from cveFeed import port_inventory
-from reNgine import discovery_events as bbot_lib
-from reNgine.common_func import update_or_create_port
-from reNgine.tasks import persist_bbot_result
+from cvengine import discovery_events as bbot_lib
+from cvengine.common_func import update_or_create_port
+from cvengine.tasks import persist_bbot_result
 from startScan.models import IpAddress, Port
 from tests.test_bbot_batch_equivalence import Fixture as EquivalenceFixture
 

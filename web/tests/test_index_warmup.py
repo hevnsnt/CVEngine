@@ -249,9 +249,9 @@ class WarmupConnectionTests(TransactionTestCase):
 
 class WhoStartsItTests(SimpleTestCase):
     def test_the_web_workers_and_the_celery_lanes_start_it(self):
-        wsgi = (WEB / 'reNgine' / 'wsgi.py').read_text()
+        wsgi = (WEB / 'cvengine' / 'wsgi.py').read_text()
         self.assertIn("warmup.start('web')", wsgi)
-        celery = (WEB / 'reNgine' / 'celery.py').read_text()
+        celery = (WEB / 'cvengine' / 'celery.py').read_text()
         block = celery.split('def start_warmup', 1)[1].split('\n\n\n', 1)[0]
         self.assertIn("warmup.start('celery')", block)
         self.assertIn('@worker_ready.connect()\ndef start_warmup', celery)
@@ -266,11 +266,11 @@ class WhoStartsItTests(SimpleTestCase):
                 continue
             if 'warmup.start(' in path.read_text(errors='ignore'):
                 callers.append(rel)
-        self.assertEqual(sorted(callers), ['reNgine/celery.py', 'reNgine/wsgi.py'])
+        self.assertEqual(sorted(callers), ['cvengine/celery.py', 'cvengine/wsgi.py'])
         for rel in ('cveFeed/management/commands/watchdog_tick.py', 'celery_healthcheck.py', 'cveFeed/apps.py', 'cveFeed/watchdog.py'):
             text = (WEB / rel).read_text()
             self.assertNotIn('warmup', text, rel)
-            self.assertNotIn('reNgine.wsgi', text, rel)
+            self.assertNotIn('cvengine.wsgi', text, rel)
         self.assertNotIn('import django', (WEB / 'celery_healthcheck.py').read_text())
 
     def test_the_switch_is_documented(self):

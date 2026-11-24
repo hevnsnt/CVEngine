@@ -162,7 +162,7 @@ def prune_abuse(now):
 
 def prune_sessions(now):
     """Expired login sessions (what ``manage.py clearsessions`` does, in bounded batches). The session store never reads a row past its
-    ``expire_date`` (``reNgine.hashed_sessions``), so it is dead weight."""
+    ``expire_date`` (``cvengine.hashed_sessions``), so it is dead weight."""
     from django.contrib.sessions.models import Session
     return keyset_delete(Session.objects.filter(expire_date__lt=now))
 

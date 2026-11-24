@@ -20,7 +20,7 @@ from agentapi.auth import create_token
 from agentapi.models import Agent, SentinelDefaults, SentinelTask
 from agentapi.services import ApiError, Ctx
 from dashboard.models import AuditLog, ProjectMembership
-from reNgine import resources
+from cvengine import resources
 from tests.fake_scanner import FakeScanner, LocalFallback
 from tests.test_agentapi import call, tool_call
 from tests.test_openvas import Fixture as OpenvasFixture

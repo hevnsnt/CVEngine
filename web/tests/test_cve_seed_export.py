@@ -334,7 +334,7 @@ class SeedFolderTests(TestCase):
         with mock.patch.dict(os.environ, {'CVENGINE_SEED_DIR': os.path.join(base, 'private')}):
             folder = seed_admin.seed_dir()
         self.assertEqual(oct(os.stat(folder).st_mode & 0o777), '0o700')
-        self.assertFalse(os.path.abspath(folder).startswith(os.path.abspath(settings.RENGINE_HOME) + os.sep))
+        self.assertFalse(os.path.abspath(folder).startswith(os.path.abspath(settings.CVENGINE_HOME) + os.sep))
         with mock.patch.dict(os.environ, {'CVENGINE_SEED_DIR': ''}), mock.patch('os.makedirs'), mock.patch('os.chmod'):
             self.assertTrue(seed_admin.seed_dir().endswith('/.config/cvengine/seed'))
 

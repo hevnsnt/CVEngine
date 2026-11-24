@@ -83,7 +83,7 @@ class NginxResultRouteTests(SimpleTestCase):
     def test_only_the_sentinel_result_route_may_carry_a_large_body(self):
         import os
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        conf = open(os.path.join(repo, 'config', 'nginx', 'rengine.conf'), encoding='utf-8').read()
+        conf = open(os.path.join(repo, 'config', 'nginx', 'cvengine.conf'), encoding='utf-8').read()
         sizes = re.findall(r'client_max_body_size\s+(\d+)M', conf)
         self.assertEqual(sizes, ['4', '24', '260'])  # the server default, the Sentinel result route, and the App Admin seed import (the one other upload)
         block = conf[conf.index('location ~ ^/api/v1/sentinel/tasks/'):]

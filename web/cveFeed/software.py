@@ -247,15 +247,15 @@ DATA_SOURCES = [
     source('WPScan vulnerability data', 'https://wpscan.com/', 'WordPress vulnerabilities for WPScan', 'your own wpscan.com token', used_by='the Sentinel\'s WPScan'),
     source('runZero Export API', 'https://www.runzero.com', 'Asset inventory (OS, hardware, tags, CVE reports); no runZero code is bundled', 'your own Export API token', used_by='cveFeed/runzero.py'),
     source('Tailscale API', 'https://tailscale.com/api', 'Read-only access to your own tailnet, and the fixed versions from Tailscale\'s security bulletins', 'the Tailscale add-on and your own credentials', used_by='cveFeed/tailscale_api.py'),
-    source('Slack, Discord, Telegram and Lark', 'https://slack.com', 'Notifications, to the webhook or bot you configure', 'a webhook you configure', used_by='reNgine/common_func.py'),
+    source('Slack, Discord, Telegram and Lark', 'https://slack.com', 'Notifications, to the webhook or bot you configure', 'a webhook you configure', used_by='cvengine/common_func.py'),
     source('Google Fonts', 'https://fonts.google.com', 'Inter, loaded by the HTML report only when you open one (the app itself serves its own fonts)', used_by='templates/report/'),
 ]
 
 AI_PROVIDERS = [
-    source('Anthropic', 'https://www.anthropic.com', 'AI triage, template drafting, validation and the reviewer, through its API', 'an API key you add', used_by='reNgine/ai_profiles.py'),
-    source('OpenAI', 'https://openai.com', 'The same, through its API', 'an API key you add', used_by='reNgine/ai_profiles.py'),
-    source('OpenRouter', 'https://openrouter.ai', 'The same, through its API', 'an API key you add', used_by='reNgine/ai_profiles.py'),
-    source('Ollama, vLLM and LM Studio', 'https://github.com/ollama/ollama', 'Self-hosted servers cvENGINE calls over HTTP (Ollama MIT, vLLM Apache-2.0; no code of any of them is included)', 'a server you run', used_by='reNgine/ai_providers.py'),
+    source('Anthropic', 'https://www.anthropic.com', 'AI triage, template drafting, validation and the reviewer, through its API', 'an API key you add', used_by='cvengine/ai_profiles.py'),
+    source('OpenAI', 'https://openai.com', 'The same, through its API', 'an API key you add', used_by='cvengine/ai_profiles.py'),
+    source('OpenRouter', 'https://openrouter.ai', 'The same, through its API', 'an API key you add', used_by='cvengine/ai_profiles.py'),
+    source('Ollama, vLLM and LM Studio', 'https://github.com/ollama/ollama', 'Self-hosted servers cvENGINE calls over HTTP (Ollama MIT, vLLM Apache-2.0; no code of any of them is included)', 'a server you run', used_by='cvengine/ai_providers.py'),
     source('Model Context Protocol', 'https://modelcontextprotocol.io', 'How agents connect to cvENGINE', used_by='agentapi/mcp.py'),
 ]
 

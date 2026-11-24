@@ -12,7 +12,7 @@ from django.utils import timezone
 from agentapi.auth import create_token
 from cveFeed.models import HostArchive, RouteAuth
 from dashboard.models import Org, Project
-from reNgine import input_guard, ip_allowlist
+from cvengine import input_guard, ip_allowlist
 from scanEngine.models import EngineType
 from startScan.models import IpAddress, ScanHistory, Subdomain
 from targetApp.models import Domain

@@ -420,7 +420,7 @@ class ScopeAndClaimTests(SentinelBase):
 
     def test_oversized_and_malicious_strings_are_clipped_never_stored_verbatim(self):
         # Unit-level, on the broker's own validation: a shell-injection-shaped, over-length string must never be
-        # trusted or stored as given, whatever an HTTP-layer defense (reNgine.input_guard) also does with it in transit.
+        # trusted or stored as given, whatever an HTTP-layer defense (cvengine.input_guard) also does with it in transit.
         evil = '; rm -rf / #' * 50
         clean = sentinels.clean_result('nmap', {'outcome': 'done', 'hosts': [{'ip': '192.0.2.50', 'os_guess': evil,
                  'ports': [{'number': 80, 'product': evil, 'version': evil, 'service_name': evil}]}]})

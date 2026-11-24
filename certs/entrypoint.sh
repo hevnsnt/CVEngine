@@ -113,11 +113,11 @@ cert() {
 cd "${CERT_DIR}" || exit 1
 
 # A certificate this authority did not issue is left to its owner when asked to renew only our own
-if [ "${CERT_ONLY_OURS:-}" = 1 ] && [ -s rengine.pem ]; then
-  if [ ! -f ca.crt ] || [ ! -f ca.key ] || [ "$(openssl x509 -in rengine.pem -noout -issuer_hash 2>/dev/null)" != "$(openssl x509 -in ca.crt -noout -subject_hash 2>/dev/null)" ]; then
+if [ "${CERT_ONLY_OURS:-}" = 1 ] && [ -s cvengine.pem ]; then
+  if [ ! -f ca.crt ] || [ ! -f ca.key ] || [ "$(openssl x509 -in cvengine.pem -noout -issuer_hash 2>/dev/null)" != "$(openssl x509 -in ca.crt -noout -subject_hash 2>/dev/null)" ]; then
     echo "The certificate in ${CERT_DIR} was not issued by this authority; it is left as it is."
     echo "cert-result: external"
-    echo "cert-not-after: $(openssl x509 -in rengine.pem -noout -enddate | cut -d= -f2)"
+    echo "cert-not-after: $(openssl x509 -in cvengine.pem -noout -enddate | cut -d= -f2)"
     exit 0
   fi
 fi
@@ -138,9 +138,9 @@ if [ ! -f ca.key ] || [ ! -f ca.crt ]; then
 fi
 
 # Create a new certificate for the DOMAIN_NAME when the one in place cannot stay
-problem=$(cert_problem "${DOMAIN_NAME}" rengine)
+problem=$(cert_problem "${DOMAIN_NAME}" cvengine)
 if [ -n "${problem}" ]; then
-  cert "${DOMAIN_NAME}" rengine "${problem}"
+  cert "${DOMAIN_NAME}" cvengine "${problem}"
   result=issued
 else
   echo "The certificate for ${DOMAIN_NAME} is still good; nothing to renew."
@@ -151,4 +151,4 @@ fi
 ls -l "${CERT_DIR}"
 
 echo "cert-result: ${result}"
-echo "cert-not-after: $(openssl x509 -in rengine.pem -noout -enddate | cut -d= -f2)"
+echo "cert-not-after: $(openssl x509 -in cvengine.pem -noout -enddate | cut -d= -f2)"

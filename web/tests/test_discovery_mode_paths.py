@@ -45,7 +45,7 @@ class ScanRowKeepsTheModeTests(DiscoveryModeBase):
 class LostScanIsRecoveredInItsModeTests(DiscoveryModeBase):
 	def setUp(self):
 		super().setUp()
-		from reNgine import resources
+		from cvengine import resources
 		client = resources.get_store().r
 		self.addCleanup(lambda: [client.delete(k) for k in client.scan_iter('cvengine:scan:redispatch:*')])
 		[client.delete(k) for k in client.scan_iter('cvengine:scan:redispatch:*')]
@@ -55,7 +55,7 @@ class LostScanIsRecoveredInItsModeTests(DiscoveryModeBase):
 										  results_dir='/tmp', discovery_mode=mode, tasks=tasks_)
 
 	def sent(self):
-		with mock.patch('reNgine.celery.app.send_task') as send:
+		with mock.patch('cvengine.celery.app.send_task') as send:
 			count = reaper.redispatch_queued_scans(now=NOW, live=set())
 		return count, {c.kwargs['args'][0]: c for c in send.call_args_list}
 

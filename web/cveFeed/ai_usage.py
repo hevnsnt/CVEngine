@@ -8,7 +8,7 @@ from django.utils import timezone
 
 
 def plain_failure(category, stop_reason=''):
-    from reNgine.ai_providers import plain_failure as say
+    from cvengine.ai_providers import plain_failure as say
     return say(category, stop_reason, fix=True)
 
 

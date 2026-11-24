@@ -200,7 +200,7 @@ class ContentTests(Base):
         text = zf.read('README.txt').decode('utf-8')
         for name in ('host.json', 'findings.csv', 'services.csv', 'history.csv', 'certificates.csv', 'inventory.csv', 'screenshots/'):
             self.assertIn(name, text)
-        self.assertIn(f'cvENGINE {settings.RENGINE_CURRENT_VERSION}', text)
+        self.assertIn(f'cvENGINE {settings.CVENGINE_CURRENT_VERSION}', text)
         self.assertIn('Exported at 2', text)
         self.assertIn('Every stored screenshot is included.', text)
         self.assertNotIn('\u2014', text)

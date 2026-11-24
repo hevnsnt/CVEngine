@@ -19,8 +19,8 @@ from django.utils import timezone
 
 from cveFeed import templategen
 from cveFeed.models import TriageCall
-from reNgine import ai_prompts
-from reNgine.ai_providers import clean_text
+from cvengine import ai_prompts
+from cvengine.ai_providers import clean_text
 
 PLAN_WAIT = timedelta(minutes=10)    # a request waits this long for its plan, then goes on with the deterministic one
 ANSWER_REUSE = timedelta(hours=24)  # a plan answered for the same evidence this recently is used again, not asked again
@@ -53,7 +53,7 @@ MAX_REASON = 700
 
 def parse_plan(reply, checks, can_generate):
     """Reject out-of-schema choices. A model cannot expand the deterministic check set."""
-    from reNgine.ai_providers import extract_json
+    from cvengine.ai_providers import extract_json
     obj = extract_json(reply, ('check_kinds', 'generate_template', 'reason'))
     if obj is None or set(obj) != {'check_kinds', 'generate_template', 'reason'}:
         return None
@@ -246,7 +246,7 @@ def _finish(job, status, **context):
 
 def job_answer(job, text):
     from cveFeed import ai_jobs
-    from reNgine.ai_providers import repair_parts
+    from cvengine.ai_providers import repair_parts
     ctx = job.context or {}
     checks = [{'kind': k} for k in ctx.get('checks') or []]
     decision = parse_plan(text, checks, bool(ctx.get('can_generate')))

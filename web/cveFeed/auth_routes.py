@@ -59,7 +59,7 @@ def run_signed_in(scan_id, force=False, ask=None):
     never raises, so the anonymous check's result stands. ``ask(project, scan, credential, {host: [urls]})`` replaces the scanner (tests)."""
     from cveFeed import activity, ledger, route_auth
     from cveFeed.models import RouteAuth
-    from reNgine import resources
+    from cvengine import resources
     from startScan.models import ScanHistory
     ask = ask or _ask
     scan = ScanHistory.objects.select_related('domain').get(pk=scan_id)

@@ -17,7 +17,7 @@ from agentapi import sentinel_dispatch as dispatch
 from agentapi.models import SentinelTask, StageRun
 from cveFeed import discovery, ledger, port_stage, reaper
 from cveFeed.models import AgentActivity, ServiceRun
-from reNgine import resources
+from cvengine import resources
 from startScan.models import IpAddress, ScanActivity, ScanHistory, Subdomain
 from tests.fake_scanner import FakeScanner, LocalFallback, assert_ran_nowhere_locally, fixture
 from tests.test_route_auth import RouteFixture
@@ -38,7 +38,7 @@ class AsyncBase(NoScannerBase):
         super().setUp()
         self.addCleanup(lambda: [stage_runs.ADAPTERS.pop(k, None) for k in [k for k in stage_runs.ADAPTERS if k.startswith('test.')]])
         self.addCleanup(mock.patch.stopall)
-        mock.patch('reNgine.resources.global_pause_requested', return_value=False).start()
+        mock.patch('cvengine.resources.global_pause_requested', return_value=False).start()
 
 
 class StageFreesItsWorkerTests(AsyncBase):
@@ -426,7 +426,7 @@ class SweepTests(RouteFixture, TestCase):
         super().setUp()
         self.scan(names=('a.rt.test', 'b.rt.test'), ports=((443, 'https'),))
         LocalFallback('none').apply(self)
-        for patcher in (mock.patch('reNgine.resources.global_pause_requested', return_value=False),
+        for patcher in (mock.patch('cvengine.resources.global_pause_requested', return_value=False),
                         mock.patch('cveFeed.tls_audit._address', return_value='203.0.113.5'),
                         mock.patch('cveFeed.ledger.sweep_claim', return_value=True)):
             patcher.start()

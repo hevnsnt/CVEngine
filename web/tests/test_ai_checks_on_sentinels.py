@@ -28,7 +28,7 @@ from agentapi import sentinel_dispatch as dispatch
 from agentapi.models import SentinelTask
 from agentapi.services import ApiError, Ctx
 from cveFeed import check_allowlist, os_detection, path_probe, templategen, validation
-from reNgine import resources
+from cvengine import resources
 from tests.fake_scanner import FakeScanner
 from tests import test_sentinel_v3_kinds as v3
 

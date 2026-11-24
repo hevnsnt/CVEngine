@@ -12,7 +12,7 @@ from django.utils import timezone
 
 from cveFeed import autotune, autotune_policy as policy, autotune_signals as signals
 from cveFeed.models import AutoTuneSettings, ScanControl, TuningDecision
-from reNgine import resources
+from cvengine import resources
 from tests.test_autotune import (BASE, BATCH, DEPTH, DISCOVERY32, NOW, REFRESH_GAP, SETTLED, SETTINGS, STAGE16, TWO_SENTINELS, WORK_GAP, Isolated,
                                  change, decide, history, merge)
 

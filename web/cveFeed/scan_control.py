@@ -78,7 +78,7 @@ def beat_heartbeat():
     """Epoch seconds of beat's last tick, or None when it never wrote one (cannot be told, or Redis is down). Lets a status page tell a
     beat that is not running from a schedule whose last_run_at is merely flushed to the database only every few minutes."""
     try:
-        from reNgine import resources
+        from cvengine import resources
         value = resources.get_store().r.get(BEAT_HEARTBEAT_KEY)
         return float(value) if value else None
     except Exception:  # noqa: BLE001
@@ -92,7 +92,7 @@ class PauseAwareScheduler(DatabaseScheduler):
         if now - _beat['at'] >= 15:  # a tick can come every few seconds; the heartbeat needs no more than this
             _beat['at'] = now
             try:
-                from reNgine import resources
+                from cvengine import resources
                 resources.get_store().r.set(BEAT_HEARTBEAT_KEY, f'{now:.0f}', ex=3600)
             except Exception:  # noqa: BLE001 - bookkeeping must never stop the scheduler
                 pass
@@ -107,7 +107,7 @@ class PauseAwareScheduler(DatabaseScheduler):
 @contextmanager
 def updater_idle():
     """Serialize a UI resume with both host updater scripts' shared lock."""
-    path = os.path.join(settings.RENGINE_HOME, '.update-lock')
+    path = os.path.join(settings.CVENGINE_HOME, '.update-lock')
     fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
     locked = False
     try:
@@ -308,7 +308,7 @@ def release_pressure_pause():
 def abort_running_scans(actor):
     """Stop running scan records cooperatively, without revoking a worker process."""
     from django.utils import timezone
-    from reNgine import resources
+    from cvengine import resources
     from startScan.models import ScanHistory, ScanActivity
 
     now = timezone.now()

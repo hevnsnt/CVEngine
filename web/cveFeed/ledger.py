@@ -180,7 +180,7 @@ def stale_first(service, domains):
 def sweep_claim(name, seconds):
     """Take the right to run the ``name`` sweep for the next ``seconds``. False when another sweep holds it. The key is
     left to expire, not released, so a sweep that is still working through what it queued is never doubled."""
-    from reNgine import resources
+    from cvengine import resources
     client = getattr(resources.get_store(), 'r', None)
     if client is None:
         return True
@@ -192,7 +192,7 @@ def sweep_claim(name, seconds):
 
 def sweep_claim_renew(name, seconds):
     """Take the ``name`` sweep's claim for the next ``seconds`` whoever held it (a run that must not wait for it). Never raises."""
-    from reNgine import resources
+    from cvengine import resources
     client = getattr(resources.get_store(), 'r', None)
     if client is None:
         return
@@ -214,7 +214,7 @@ def _owner():
 def claim(service, asset):
     """Hold the right to run ``service`` on ``asset``. Yields True when this caller won it (or Redis is unavailable), False
     when another pipeline is running it right now."""
-    from reNgine import resources
+    from cvengine import resources
     from agentapi import stage_runs
     run = stage_runs.current()  # inside a StageRun the claim belongs to the run: held while it waits, taken back by its next pass
     owner = run.claim_owner(service) if run is not None else _owner()
@@ -225,7 +225,7 @@ def claim(service, asset):
 @contextmanager
 def claim_many(service, assets):
     """Claim every asset it can. Yields the list this caller won, and releases them on exit. One thread keeps them all alive."""
-    from reNgine import resources
+    from cvengine import resources
     assets = sorted({_norm(a) for a in assets})
     client = getattr(resources.get_store(), 'r', None)
     if client is None:

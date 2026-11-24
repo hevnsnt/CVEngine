@@ -116,7 +116,7 @@ def slots_held():
 def deferral_count(task_id):
     """How many times this task has been put off by the share limit (a Redis counter that outlives the re-queued copies and expires after six hours). 0 when it cannot be read."""
     try:
-        from reNgine import resources
+        from cvengine import resources
         client = resources.redis_client()
         if client is None or not task_id:
             return 0

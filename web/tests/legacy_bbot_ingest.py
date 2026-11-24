@@ -1,5 +1,5 @@
 """The bbot ingest as it was before it was batched (develop before the batched rewrite), one row at a time: the reference
-``tests.test_bbot_batch_equivalence`` holds the batched ``reNgine.tasks.persist_bbot_result`` to. Only the names of the functions differ."""
+``tests.test_bbot_batch_equivalence`` holds the batched ``cvengine.tasks.persist_bbot_result`` to. Only the names of the functions differ."""
 import validators
 
 from urllib.parse import urlparse
@@ -8,8 +8,8 @@ from django.utils import timezone
 from cvengine_scanner import versions
 from cveFeed import js_libraries, source_versions
 from cveFeed.correlation import stored_technology_name
-from reNgine.common_func import get_port_service_description, update_or_create_port
-from reNgine.tasks import (MAX_BBOT_URLS_PER_SCAN, MAX_URL_LENGTH, _hosts_of_scan, logger, save_ip_address, save_subdomain,
+from cvengine.common_func import get_port_service_description, update_or_create_port
+from cvengine.tasks import (MAX_BBOT_URLS_PER_SCAN, MAX_URL_LENGTH, _hosts_of_scan, logger, save_ip_address, save_subdomain,
 						   save_vulnerability)
 from startScan.ip_rows import org_id_of_project
 from startScan.models import EndPoint, IpAddress, ScanHistory, Subdomain
@@ -212,7 +212,7 @@ def legacy_persist_bbot_findings(result, ctx, subdomains):
 	if not (scan and domain):
 		return
 	from cveFeed.labels import record_label
-	from reNgine.discovery_events import finding_key, label_for
+	from cvengine.discovery_events import finding_key, label_for
 	from cveFeed.exclusions import excluded_names, normalize
 	banned = ctx.get('_excluded_hosts')
 	if banned is None:
@@ -224,7 +224,7 @@ def legacy_persist_bbot_findings(result, ctx, subdomains):
 		if banned and normalize(f['host']) in banned:  # nothing is recorded for a host the organization excluded for good
 			continue
 		if f.get('informational'):
-			# a pure detection ("WAF Detection", "Nginx version detect") is a chip on the host, not a finding (see reNgine.discovery_events)
+			# a pure detection ("WAF Detection", "Nginx version detect") is a chip on the host, not a finding (see cvengine.discovery_events)
 			record_label(domain.project_id, domain.id, f['host'], label_for(f['name']), detail=f['description'])
 			continue
 		severity, description = f['severity'], f['description']

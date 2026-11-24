@@ -23,7 +23,7 @@ def _breathe(i):
     """Let a gevent worker's other greenlets run every ``YIELD_EVERY`` rows of a loop; a no-op outside gevent."""
     if i % YIELD_EVERY:
         return
-    from reNgine import gevent_db
+    from cvengine import gevent_db
     if gevent_db.gevent_patched():
         import gevent
         gevent.sleep(0)

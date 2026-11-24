@@ -20,8 +20,8 @@ table and shares it through the cache; a web worker (whose statements are cut at
 full build here: it waits, without a database connection, until a shared copy exists and takes that, or gives up at the deadline and leaves the
 work to the first request, as before.
 
-Who starts it: the web workers (``reNgine/wsgi.py``, imported by gunicorn in each worker and by ``runserver``) and the Celery lanes (the
-``worker_ready`` signal in ``reNgine/celery.py``). Management commands (``watchdog_tick`` every 30 s, ``migrate``, ``shell``), Celery beat and the
+Who starts it: the web workers (``cvengine/wsgi.py``, imported by gunicorn in each worker and by ``runserver``) and the Celery lanes (the
+``worker_ready`` signal in ``cvengine/celery.py``). Management commands (``watchdog_tick`` every 30 s, ``migrate``, ``shell``), Celery beat and the
 container health check (``celery_healthcheck.py``, a fresh process every minute that loads no Django) never import either hook, so they never
 run it. ``CVENGINE_WARMUP=0`` turns it off (default on). One log line per process gives each step's time.
 """
@@ -62,7 +62,7 @@ def warm_urls(role, deadline):
     """Import the URL configuration and every view module it names: the first request of a new web worker did it, about 2.7 s. No data."""
     from django.urls import get_resolver
     resolver = get_resolver()
-    resolver.url_patterns  # noqa: B018 - imports reNgine.urls and every included urls and views module
+    resolver.url_patterns  # noqa: B018 - imports cvengine.urls and every included urls and views module
     resolver.reverse_dict  # noqa: B018 - and builds the reverse lookup tables the pages use
     return 'ok'
 

@@ -11,7 +11,7 @@ from django.utils import timezone
 from cveFeed.ai_usage import snapshot
 from cveFeed.models import AIUsage
 from dashboard.models import AIProviderSettings, Project
-from reNgine import ai_providers as ai
+from cvengine import ai_providers as ai
 from tests.test_tenancy import client_for
 
 

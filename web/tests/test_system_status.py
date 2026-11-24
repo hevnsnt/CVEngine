@@ -54,13 +54,13 @@ HEALTH = {'workers_state': 'responding', 'worker_note': 'ok', 'scheduler_note': 
 		  'schedules': [{'name': 'cve-feed', 'next_due_state': 'estimated'}, {'name': 'late-task', 'next_due_state': 'past_due_unconfirmed'}],
 		  'jobs': {'scans': {'pending': 1, 'running': 1}}, 'last_activity': {'running': None, 'done': None, 'failed': None}}
 CLUSTER = {'store': 'redis', 'containers': [{'host': 'celery-1', 'memory': {'total_mb': 8000, 'limit_mb': 8000, 'used_mb': 3000, 'available_mb': 5000},
-	'age_seconds': 20}]}  # reNgine.resources.cluster_snapshot: memory only (no scanner runs on the server, so no budget, runs or kills)
+	'age_seconds': 20}]}  # cvengine.resources.cluster_snapshot: memory only (no scanner runs on the server, so no budget, runs or kills)
 
 
 def patched(broker=None, health=None, cluster=None):
 	return (mock.patch.object(system_status, '_broker_client', lambda: broker or FakeBroker({'discovery_queue': 3})),
 			mock.patch('cveFeed.admin_api.scheduler_health', lambda request, actor: health or HEALTH),
-			mock.patch('reNgine.resources.cluster_snapshot', lambda: cluster or CLUSTER))
+			mock.patch('cvengine.resources.cluster_snapshot', lambda: cluster or CLUSTER))
 
 
 class SystemStatusTests(TestCase):

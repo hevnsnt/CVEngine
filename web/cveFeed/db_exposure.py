@@ -45,11 +45,11 @@ def run_db_exposure_checks(scan_id, checks=None):
     ``checks`` replaces the {name-fragment: label} table (``{}`` checks nothing: the pipeline tests that do not exercise this stage)."""
     from cveFeed import activity
     from cveFeed.exclusions import normalize
-    from reNgine import resources
+    from cvengine import resources
     from startScan.models import open_ports
     from targetApp.target_types import is_scannable_ip
-    from reNgine.definitions import NUCLEI_SEVERITY_MAP
-    from reNgine.tasks import save_vulnerability
+    from cvengine.definitions import NUCLEI_SEVERITY_MAP
+    from cvengine.tasks import save_vulnerability
     from startScan.models import ScanHistory, Subdomain
 
     scan = ScanHistory.objects.select_related('domain').get(pk=scan_id)

@@ -16,7 +16,7 @@ from agentapi.models import Agent, SentinelEnrollment, SentinelTask
 from agentapi.services import ApiError
 from cveFeed import auth_checks, egress_proxy, scanner_wait
 from cveFeed.models import DeferredRetest
-from reNgine.resources import ScannerUnavailable
+from cvengine.resources import ScannerUnavailable
 from scanEngine.models import Proxy
 from tests.test_sentinel_secret_read import SECRETS, SecretBase
 

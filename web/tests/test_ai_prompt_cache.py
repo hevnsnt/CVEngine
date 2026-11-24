@@ -1,6 +1,6 @@
 """Anthropic prompt caching on both request paths, and the per-stage cost view.
 
-Path 1: the server's own requests (``reNgine.ai_providers.AnthropicProvider._body``: validation plans, Nuclei targeting, the connection test).
+Path 1: the server's own requests (``cvengine.ai_providers.AnthropicProvider._body``: validation plans, Nuclei targeting, the connection test).
 Path 2: AI jobs run by the reviewer container (``reviewer/cvengine_reviewer/llm.py``: triage, detection records, local checks, templates):
 the server puts the stage's cache lifetime in the job's options and the container marks the system prompt with it. The container's own
 two jobs (finding review, operations check) already marked their prompt; they now report what the cache did.
@@ -19,8 +19,8 @@ from django.utils import timezone
 
 from cveFeed import ai_jobs, ai_usage, detection_author as da, reviewer as server_reviewer, validation_plan
 from cveFeed.models import AIPriceRate, AIUsage
-from reNgine import ai_profiles, ai_providers as ai
-from reNgine.ai_profiles import STAGE_CACHE_TTL, cache_min_tokens, stage_cache_ttl
+from cvengine import ai_profiles, ai_providers as ai
+from cvengine.ai_profiles import STAGE_CACHE_TTL, cache_min_tokens, stage_cache_ttl
 
 REVIEWER = Path(__file__).resolve().parents[2] / 'reviewer'
 LONG = 'You are a careful analyst. ' * 200  # about 1,700 tokens, over every Claude minimum but 4096
@@ -115,7 +115,7 @@ class ServerRequestTests(TestCase):
         AIUsage.objects.all().delete()
         server = FakeAnthropic()
         p = provider()
-        with mock.patch('reNgine.ai_providers.guarded_request', side_effect=server.post), ai.usage_stage('validation_plan'):
+        with mock.patch('cvengine.ai_providers.guarded_request', side_effect=server.post), ai.usage_stage('validation_plan'):
             p.complete(LONG, 'u1')
             p.complete(LONG, 'u2')
         first, second = AIUsage.objects.order_by('id')

@@ -86,7 +86,7 @@ class QueuesTests(SimpleTestCase):
         self.assertEqual((out['waiting_total'], out['unacknowledged']), (len(system_status.QUEUES) * len(system_status.PRIORITY_SUFFIXES), 1))
 
     def test_the_depths_are_those_of_the_broker(self):
-        from reNgine import resources
+        from cvengine import resources
         client = resources.redis_client()
         names = ['bucketscan_queue', 'bucketscan_queue' + system_status.PRIORITY_SUFFIXES[2]]
         client.delete(*names)

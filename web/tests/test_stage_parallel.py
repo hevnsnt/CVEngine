@@ -18,7 +18,7 @@ from agentapi import sentinel_dispatch as dispatch
 from agentapi.auth import create_token
 from agentapi.models import Agent, SentinelTask
 from cveFeed import nuclei_scan
-from reNgine import resources
+from cvengine import resources
 from startScan.models import ScanHistory, Subdomain
 from tests.test_sentinel_dispatch import DispatchBase
 
@@ -344,7 +344,7 @@ class StopTests(StageBase):
         fake = FakeSentinels(self.two_agents(), chunks_of(8), duration=lambda i: 500)
         paused = {'on': False}
         fake.hooks.append((4, lambda: paused.update(on=True)))
-        with mock.patch('reNgine.resources.global_pause_requested', side_effect=lambda fail_closed=False: paused['on']), \
+        with mock.patch('cvengine.resources.global_pause_requested', side_effect=lambda fail_closed=False: paused['on']), \
                 self.assertRaises(resources.ScanAborted):
             self.fan_out(fake)
         self.assertEqual(self.active_tasks(), 0)
@@ -441,7 +441,7 @@ class CallerTests(StageBase):
         return targets, path
 
     def test_the_nuclei_stream_still_yields_every_line_of_every_chunk_and_waits_for_an_unserved_chunk(self):
-        from reNgine.resources import ScannerUnavailable
+        from cvengine.resources import ScannerUnavailable
         targets, path = self._targets(dispatch.MAX_ADDRESSES * 3 + 7)
         chunks = dispatch._chunks(targets)
         fake = FakeSentinels(self.two_agents(), chunks, outcome=lambda i: 'failed' if i == 1 else 'done')

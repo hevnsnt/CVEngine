@@ -1,4 +1,4 @@
-"""A real nginx (throwaway container) serving config/nginx/rengine.conf's /staticfiles/ rules: a hashed URL that exists is immutable for a year, a
+"""A real nginx (throwaway container) serving config/nginx/cvengine.conf's /staticfiles/ rules: a hashed URL that exists is immutable for a year, a
 hashed URL that does not exist (404) carries no Cache-Control at all, and nosniff stays on both. Opt in with CVENGINE_NGINX_DOCKER_TEST=1 (needs
 docker and the nginx:alpine image); it is skipped otherwise, so CI without docker is unaffected."""
 import os
@@ -25,7 +25,7 @@ class RealNginxStaticCacheTests(unittest.TestCase):
             return e.code, e.headers
 
     def test_200_is_immutable_and_404_is_not(self):
-        conf = open(os.path.join(REPO, 'config', 'nginx', 'rengine.conf'), encoding='utf-8').read()
+        conf = open(os.path.join(REPO, 'config', 'nginx', 'cvengine.conf'), encoding='utf-8').read()
         head = conf[:conf.index('server {')]
         loc = conf[conf.index('    location /staticfiles/'):]
         loc = loc[:loc.index('\n    }') + 6].replace('/usr/src/app/staticfiles/', '/srv/static/')

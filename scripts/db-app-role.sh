@@ -1,4 +1,4 @@
-# Sourced by the update scripts and `make up`: the least privilege database role the server runs as (web/reNgine/db_roles.py,
+# Sourced by the update scripts and `make up`: the least privilege database role the server runs as (web/cvengine/db_roles.py,
 # docs/CONFIGURATION.md "Database roles").
 #
 #   . scripts/db-app-role.sh && cvengine_ensure_db_app_password [ENV_FILE]

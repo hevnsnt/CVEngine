@@ -12,7 +12,7 @@ import hashlib
 import json
 import re
 
-from reNgine.ai_providers import clean_text
+from cvengine.ai_providers import clean_text
 
 MAX_TECHS, MAX_PORTS, MAX_PROBES, MAX_MATCHES, MAX_STEPS, MAX_CERTS = 40, 25, 30, 10, 8, 6
 EDGE_NOTE = ('This host is fronted by a CDN, WAF or hosting edge. The Server header, X-Powered-By, error pages and TLS answers describe '

@@ -18,11 +18,11 @@ later, marks it a success. Making a machine explicit fixes that class of bug for
 
 ## How it works
 
-`web/reNgine/lifecycle.py` holds the `Machine` class; `web/reNgine/state_machines.py` holds every table. A table names each state (stored
+`web/cvengine/lifecycle.py` holds the `Machine` class; `web/cvengine/state_machines.py` holds every table. A table names each state (stored
 value, stable key, label, one-sentence meaning), the states a row may be created in, and the allowed moves. A state with no moves is final.
 
 ```python
-from reNgine.state_machines import SCAN, SUCCESS
+from cvengine.state_machines import SCAN, SUCCESS
 
 # Moves the row only if it is in a state allowed to become SUCCESS; returns 0 if it had moved on (a person stopped it).
 if not SCAN.move(ScanHistory.objects.filter(pk=scan_id), SUCCESS, stop_scan_date=now):

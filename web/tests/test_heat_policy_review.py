@@ -220,7 +220,7 @@ class RescanPagingTests(Base):
 		migration.baseline(apps, None)
 		self.assertIsNotNone(CVEMatch.objects.get(pk=m.pk).fire_notified_at)
 		from cveFeed import tasks
-		from reNgine import celery
+		from cvengine import celery
 		with mock.patch('cveFeed.notify.baseline_heat_policy') as baseline:
 			celery.baseline_heat_pages()
 			tasks.report_resources()

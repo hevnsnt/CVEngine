@@ -19,7 +19,7 @@ from agentapi import sentinel_dispatch
 from agentapi import sentinel_stream as stream
 from agentapi.models import Agent, SentinelPartial, SentinelTask
 from agentapi.services import ApiError
-from reNgine.resources import ScannerUnavailable
+from cvengine.resources import ScannerUnavailable
 from tests.test_agentapi import call
 from tests.test_sentinel_secret_read import SecretBase
 from tests.test_sentinels import build_world, register_sentinel, reset_rates

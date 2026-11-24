@@ -5,7 +5,7 @@ Runs right after the web route check, so it reads the routes just probed. Per ho
 at most ``MAX_URLS``) and the front page's own scripts (``RouteAuth.evidence['script_urls']``, at most ``MAX_SCRIPT_URLS``), in tasks of at most
 ``MAX_HOSTS`` hosts. The scanner fetches them with the route check's bounded, anonymous GET (same origin only, source maps of those scripts,
 the caps of ``LIMITS``) and runs Kingfisher with ``--no-validate``. There is no local path: with no scanner that takes the kind, the stage waits
-and the hosts stay due (``reNgine.resources.ScannerUnavailable``). A host is read again after ``ledger.ttl('secrets-scan')`` (7 days).
+and the hosts stay due (``cvengine.resources.ScannerUnavailable``). A host is read again after ``ledger.ttl('secrets-scan')`` (7 days).
 
 What comes back (``agentapi.sentinel_broker`` cleaned and bound it to the task first) is filed by ``persist``:
 

@@ -13,7 +13,7 @@ from agentapi.auth import create_token
 from cveFeed import closure, finding_lifecycle, hygiene, wpscan_scan
 from cveFeed.models import CVEEntry, CVEMatch, FindingAuditEvent, FindingComment, HygieneFinding, ProbeObservation, RouteAuth
 from dashboard.models import Org, Project, ProjectMembership
-from reNgine.tasks import save_vulnerability
+from cvengine.tasks import save_vulnerability
 from scanEngine.models import EngineType
 from startScan.models import ScanHistory, Subdomain, Vulnerability
 from targetApp.models import Domain

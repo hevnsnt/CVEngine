@@ -11,7 +11,7 @@ from django.test import TestCase
 from cveFeed import nuclei_templates as nt
 from cveFeed.models import AIUsage
 from cveFeed.ai_usage import snapshot
-from reNgine import ai_providers as ai
+from cvengine import ai_providers as ai
 from tests import ai_queue
 from tests.anthropic_fake import SHAPES, FakeAnthropic
 

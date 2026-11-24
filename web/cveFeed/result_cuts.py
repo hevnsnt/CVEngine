@@ -36,7 +36,7 @@ def clean(value):
                 row[key] = number
         target = item.get('target')
         if isinstance(target, str) and target.strip():
-            from reNgine.ai_providers import clean_text
+            from cvengine.ai_providers import clean_text
             row['target'] = clean_text(target, 260)
         out.append(row)
     return out

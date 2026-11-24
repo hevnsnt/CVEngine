@@ -16,7 +16,7 @@ from django.core.cache import cache
 from django.test import Client, TestCase
 from django.utils import timezone
 
-from reNgine.hashed_sessions import db_key
+from cvengine.hashed_sessions import db_key
 
 RAN = []
 
@@ -80,7 +80,7 @@ class SignedCacheTests(TestCase):
 
 	def test_the_cache_is_configured_with_the_signed_serializer(self):
 		conf = settings.CACHES['default']
-		self.assertEqual(conf['OPTIONS']['serializer'], 'reNgine.cache_serializer.SignedRedisSerializer')
+		self.assertEqual(conf['OPTIONS']['serializer'], 'cvengine.cache_serializer.SignedRedisSerializer')
 		self.assertEqual(conf['VERSION'], 2)  # apart from the unsigned values of earlier releases
 
 
@@ -107,7 +107,7 @@ class ScriptPolicyReportOnlyTests(TestCase):
 		self.assertEqual(response['Content-Security-Policy'], "base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'")
 
 	def test_a_response_with_its_own_policy_gets_no_report_only_header(self):
-		from reNgine.middleware import ContentSecurityPolicyMiddleware
+		from cvengine.middleware import ContentSecurityPolicyMiddleware
 		from django.http import HttpRequest, HttpResponse
 
 		def own(request):

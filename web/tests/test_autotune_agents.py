@@ -20,7 +20,7 @@ from cveFeed import autotune, scan_concurrency as sc, tunables
 from cveFeed import autotune_signals as signals
 from cveFeed.models import AutoTuneSettings, ScanConcurrency, SetupAnswer, TunableSettings, TuningDecision
 from dashboard.models import AuditLog
-from reNgine import resources
+from cvengine import resources
 from tests.test_agentapi import call, tool_call
 from tests.test_autotune import BASE, Isolated, merge
 from tests.test_settings import send

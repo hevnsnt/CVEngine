@@ -17,7 +17,7 @@ from cvengine_scanner import flags as scan_flags
 from agentapi import agent_broker as broker
 from agentapi import sentinel_broker as sb
 from agentapi import sentinel_dispatch as dispatch
-from reNgine.resources import ScannerUnavailable
+from cvengine.resources import ScannerUnavailable
 from agentapi.auth import create_token
 from agentapi.models import Agent, SentinelEnrollment, SentinelTask
 from cveFeed import nuclei_scan
@@ -472,7 +472,7 @@ class OfflineProbeTests(TestCase):
 
 class DiscoveryQueueTests(SimpleTestCase):
     def test_the_range_sweep_runs_on_the_discovery_queue_not_the_four_slot_feed_queue(self):
-        from reNgine.celery import app
+        from cvengine.celery import app
         self.assertEqual(app.tasks['run_internal_discovery'].queue, 'discovery_queue')
 
 

@@ -26,7 +26,7 @@ import threading
 import time
 from collections import namedtuple
 
-from reNgine import resources
+from cvengine import resources
 
 logger = logging.getLogger(__name__)
 

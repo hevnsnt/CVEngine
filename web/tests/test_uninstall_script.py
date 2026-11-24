@@ -62,7 +62,7 @@ class UninstallScriptTests(unittest.TestCase):
         self.assertIn('docker network rm net1', calls)
         joined = '\n'.join(calls)
         self.assertNotIn('name=', joined)  # nothing is selected by a name that merely contains a word
-        self.assertNotIn('rengine', joined)
+        self.assertNotIn('cvengine', joined)
         self.assertNotIn('prune', joined)
         for call in calls:
             if call.startswith(('docker ps', 'docker volume ls', 'docker network ls')):

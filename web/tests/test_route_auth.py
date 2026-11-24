@@ -15,7 +15,7 @@ from agentapi.auth import create_token
 from cveFeed import discovery, route_auth as ra
 from cveFeed.models import AgentActivity, AssetChange, RouteAuth, ServiceRun
 from dashboard.models import Org, Project, ProjectMembership
-from reNgine import resources
+from cvengine import resources
 from scanEngine.models import EngineType
 from startScan.models import IpAddress, Port, ScanActivity, ScanHistory, Subdomain
 from targetApp.models import Domain

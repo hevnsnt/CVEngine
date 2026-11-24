@@ -50,7 +50,7 @@ class Fixture(TestCase):
 		self.counter = 0
 		self.sent = []
 		for name in SENDERS:
-			patcher = mock.patch(f'reNgine.common_func.{name}', side_effect=lambda text, n=name: self.sent.append((n, text)))
+			patcher = mock.patch(f'cvengine.common_func.{name}', side_effect=lambda text, n=name: self.sent.append((n, text)))
 			patcher.start()
 			self.addCleanup(patcher.stop)
 

@@ -179,7 +179,7 @@ class ValidationAnswerTests(TriageDbBase):
 
 class TruncationNoteTests(TestCase):
     def test_the_model_is_told_when_the_finding_was_shortened_and_not_otherwise(self):
-        from reNgine.ai_providers import triage_parts
+        from cvengine.ai_providers import triage_parts
         short = triage_parts('cve_match', {'product': 'nginx', 'affected': [{'product': 'nginx'}]})
         self.assertFalse(any('shortened' in p.get('text', '') for p in short))
         long = triage_parts('cve_match', {'product': 'nginx', 'affected': [{'product': f'p{i}'} for i in range(30)], 'description': 'x ' * 2000})

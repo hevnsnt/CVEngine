@@ -53,7 +53,7 @@ class LedgerTests(TestCase):
 
 class ClaimTests(TestCase):
 	def setUp(self):
-		from reNgine import resources
+		from cvengine import resources
 		if getattr(resources.get_store(), 'r', None) is None:
 			self.skipTest('no Redis to hold claims in this environment')
 		self.asset = f'claim-{os.getpid()}-{timezone.now().timestamp()}.test'
@@ -77,7 +77,7 @@ class ClaimTests(TestCase):
 
 class NoRedisTests(TestCase):
 	def test_claims_succeed_without_redis(self):
-		from reNgine import resources
+		from cvengine import resources
 		with mock.patch.object(resources, 'get_store', return_value=object()):
 			with ledger.claim('nmap-fast', 'a.test') as ok:
 				self.assertTrue(ok)
@@ -87,7 +87,7 @@ class NoRedisTests(TestCase):
 
 class AtomicClaimTests(TestCase):
 	def setUp(self):
-		from reNgine import resources
+		from cvengine import resources
 		client = getattr(resources.get_store(), 'r', None)
 		if client is None:
 			self.skipTest('no Redis to hold claims in this environment')

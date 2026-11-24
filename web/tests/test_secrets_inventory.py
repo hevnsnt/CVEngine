@@ -9,7 +9,7 @@ from django.utils import timezone
 from cveFeed import scoring, secrets_inventory as inv
 from cveFeed.models import SecretFinding, SecretFingerprintKey, SecretOccurrence
 from dashboard.models import Org, Project
-from reNgine.tasks import save_vulnerability
+from cvengine.tasks import save_vulnerability
 from startScan.models import ScanHistory, Subdomain, Vulnerability
 from scanEngine.models import EngineType
 from targetApp.models import Domain
@@ -156,7 +156,7 @@ class FeederTests(Base):
                                   response='HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<script>key="%s"</script>' % extracted[0])
 
     def test_a_token_template_finding_keeps_only_the_mask_and_feeds_the_inventory(self):
-        with mock.patch('reNgine.tasks.VulnerabilityTags.objects.get_or_create', return_value=(None, False)):
+        with mock.patch('cvengine.tasks.VulnerabilityTags.objects.get_or_create', return_value=(None, False)):
             vuln, created = self.nuclei([GOOGLE])
         vuln.refresh_from_db()
         self.assertTrue(created)
@@ -167,7 +167,7 @@ class FeederTests(Base):
         self.assertEqual(row.rule_ids, ['nuclei:google-api-key'])
         self.assertEqual(row.occurrences.get().vulnerability_id, vuln.pk)
         self.assertEqual([s.pk for s in inv.tracked(vuln.pk)], [row.pk])
-        with mock.patch('reNgine.tasks.VulnerabilityTags.objects.get_or_create', return_value=(None, False)):
+        with mock.patch('cvengine.tasks.VulnerabilityTags.objects.get_or_create', return_value=(None, False)):
             again, created = self.nuclei([GOOGLE])  # seen again: same row, nothing changes, nothing filed twice
         self.assertFalse(created)
         self.assertEqual((again.pk, SecretFinding.objects.count(), SecretOccurrence.objects.count()), (vuln.pk, 1, 1))

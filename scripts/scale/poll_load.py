@@ -21,7 +21,7 @@ import threading
 import time
 
 sys.path.insert(0, os.getcwd())
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'reNgine.settings')
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'cvengine.settings')
 import django  # noqa: E402
 
 django.setup()

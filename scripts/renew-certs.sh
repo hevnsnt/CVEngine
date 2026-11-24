@@ -13,7 +13,7 @@
 # scripts/auto-deploy.sh, and before the services are recreated by an update. --if-due: do nothing unless the next check is due. --no-reload:
 # do not touch the running proxy (the caller recreates it). CVENGINE_CERT_CHECK_SECONDS (default 43200) is the time between checks and
 # CVENGINE_CERT_RETRY_SECONDS (default 3600) the wait after a failure. Nothing happens on an install that does not use the bundled
-# authority (no secrets/certs/rengine.pem: a host proxy owns the certificate).
+# authority (no secrets/certs/cvengine.pem: a host proxy owns the certificate).
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 # root (cron, systemd) in a checkout owned by whoever cloned it: git refuses it ("dubious ownership") unless this one is named
@@ -32,7 +32,7 @@ done
 log() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*"; }
 number() { [[ ${!1:-} =~ ^[0-9]+$ ]] && printf '%s' "${!1}" || printf '%s' "$2"; }
 
-[ -s secrets/certs/rengine.pem ] || exit 0
+[ -s secrets/certs/cvengine.pem ] || exit 0
 interval=$(number CVENGINE_CERT_CHECK_SECONDS 43200)
 retry=$(number CVENGINE_CERT_RETRY_SECONDS 3600)
 STATE=$(python3 scripts/update-state.py directory) || exit 1
@@ -52,7 +52,7 @@ publish() {  # result, the certificate's notAfter date, an error line
 fail() {
   local error=${1:0:200}
   log "certificate renewal failed: $error"
-  publish failed "$(openssl x509 -in secrets/certs/rengine.pem -noout -enddate 2>/dev/null | cut -d= -f2)" "$error"
+  publish failed "$(openssl x509 -in secrets/certs/cvengine.pem -noout -enddate 2>/dev/null | cut -d= -f2)" "$error"
   schedule "$retry"
   exit 1
 }

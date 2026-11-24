@@ -11,7 +11,7 @@ from agentapi import sentinel_dispatch as dispatch
 from agentapi.models import Agent, SentinelTask
 from cveFeed import activity, reviewer
 from cveFeed.models import AgentActivity
-from reNgine import resources
+from cvengine import resources
 from tests.test_reviewer import Fixture
 from tests.test_sentinel_capability_policy import PolicyBase
 

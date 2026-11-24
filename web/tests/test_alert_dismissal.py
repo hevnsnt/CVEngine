@@ -225,7 +225,7 @@ class HeartbeatResolvesTests(Base):
         self.assertFalse(AdminAlert.objects.filter(code__in=('sentinels_offline', 'generated_templates'), resolved_at__isnull=True).exists())
 
     def test_a_templates_alert_stays_while_no_live_sentinel_runs_template_checks(self):
-        from reNgine.resources import ScannerUnavailable
+        from cvengine.resources import ScannerUnavailable
         self.raised()
         with mock.patch('agentapi.sentinel_dispatch.nuclei_validate_ready', side_effect=ScannerUnavailable('none')):
             self.fakes[0].heartbeat()

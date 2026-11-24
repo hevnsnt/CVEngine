@@ -210,11 +210,11 @@ web_python() {
 }
 
 # Celery's command line, run in a throwaway container of the image built for this update. The checkout is fast-forwarded before the build and ./web is
-# bind-mounted, so the running (old) containers already read the NEW code on their old image; the CLI imports the whole application (reNgine.tasks
+# bind-mounted, so the running (old) containers already read the NEW code on their old image; the CLI imports the whole application (cvengine.tasks
 # loads every installed app), so inside a running old container it dies on whatever the new code needs and the old image lacks (1.3.x to 1.4:
 # ModuleNotFoundError cvengine_scanner) and every inspection reads as "worker state unknown". The one-off container has an image and code that agree,
 # and asks the same broker, so it sees the same workers. A worker that cannot be inspected still fails the command: nothing here hides an error.
-celery_cli() { "${compose[@]}" run --rm --no-deps -T --entrypoint celery celery -A reNgine.tasks "$@"; }
+celery_cli() { "${compose[@]}" run --rm --no-deps -T --entrypoint celery celery -A cvengine.tasks "$@"; }
 
 # consumer_control add_consumer|cancel_consumer WORKER QUEUE. A worker busy with CPU work (the correlation and template passes right
 # after it starts) can miss a short reply window, so it is asked up to three times with a longer wait each time. Both commands are safe
@@ -241,7 +241,7 @@ scan_stop_code=$(cat <<'PY'
 import base64, json
 from django.contrib.auth import get_user_model
 from agentapi.services import _abort_scan
-from reNgine.celery import app
+from cvengine.celery import app
 from startScan.models import ScanActivity, ScanHistory
 modes = {}
 def note(args):
@@ -481,6 +481,11 @@ fi
 # workers and Beat never run new code on the old schema (Beat's "migrate --check" would then fail forever).
 trap 'code=$?; trap - EXIT; (( code == 0 )) || revert_unmigrated; exit "$code"' EXIT
 python3 scripts/update-state.py migrate-requeue "$requeue_file"
+# An install made before 1.5.0 has the old names in its own files (.env, an overlay, its certificates): the new ones are added beside them before
+# Compose reads anything, and the old ones go once the update is verified (scripts/legacy_names.py)
+if [[ -f scripts/legacy_names.py ]]; then
+    python3 scripts/legacy_names.py migrate -- "${compose[@]}" || die 'Could not move this install to the 1.5.0 names (see the line above).'
+fi
 "${compose[@]}" config --quiet
 diagnostic_log=$(mktemp /tmp/cvengine-update.XXXXXX)
 chmod 600 "$diagnostic_log"
@@ -528,6 +533,9 @@ if grep -qx reviewer < <("${compose[@]}" config --services 2>/dev/null); then
     "${compose[@]}" build reviewer || echo 'Could not build the AI reviewer image; scanning is not affected (the next update tries again).' >&2
 fi
 images_built=1
+# an install made before 1.5.0: its database and Redis are still on the old network until they are recreated below; the one-off containers of the
+# new images (celery_cli, web_python) join only the new one (scripts/legacy_names.py bridge)
+if [[ -f scripts/legacy_names.py ]]; then python3 scripts/legacy_names.py bridge -- "${compose[@]}" || true; fi
 # The application runs as its own account (uid 10002): the paths it writes are handed to it before anything of the new image runs, and again
 # right before the application is recreated (scripts/app-ownership.sh; idempotent, one line each time).
 if [[ -f scripts/app-ownership.sh ]]; then
@@ -940,7 +948,7 @@ fi
 
 worker_queues_ready() {
     local queues
-    queues=$("${compose[@]}" exec -T celery celery -A reNgine.tasks inspect active_queues -j -t 5 2>/dev/null) || return 1
+    queues=$("${compose[@]}" exec -T celery celery -A cvengine.tasks inspect active_queues -j -t 5 2>/dev/null) || return 1
     printf '%s' "$queues" | python3 -c '
 import json, sys
 try:
@@ -1000,6 +1008,7 @@ while (( SECONDS < deadline )); do
         if declare -F cvengine_client_address_report >/dev/null; then cvengine_client_address_report "${compose[@]}" || true; fi
         # accounts the abuse guard of releases before 1.5.0 disabled, enabled again (web/cveFeed/guard_reenable.py: only those; tokens stay revoked)
         "${compose[@]}" exec -T web python3 manage.py reenable_guard_disabled_users --apply 2>/dev/null | tail -n 50 | sed 's/^/guard accounts: /' || true
+        if [[ -f scripts/legacy_names.py ]]; then python3 scripts/legacy_names.py cleanup -- "${compose[@]}" || true; fi
         "${compose[@]}" ps
         rm -f "$diagnostic_log"
         # An install that never had the update watcher cannot act on Approve in Settings > Updates. This is the one manual update such an

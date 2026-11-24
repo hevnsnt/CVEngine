@@ -74,14 +74,14 @@ class YieldTests(TestCase):
     def test_the_python_pass_yields_to_a_gevent_workers_other_greenlets(self):
         from unittest import mock
         rows = [(i, f'h{i}.d.t', None, None, 'd.t') for i in range(5 * inventory_counts.YIELD_EVERY + 1)]
-        with mock.patch('reNgine.gevent_db.gevent_patched', return_value=True), mock.patch('gevent.sleep') as sleeping:
+        with mock.patch('cvengine.gevent_db.gevent_patched', return_value=True), mock.patch('gevent.sleep') as sleeping:
             inventory_counts._collapse(rows)
         self.assertGreaterEqual(sleeping.call_count, 5)
 
     def test_it_does_not_touch_gevent_outside_a_gevent_worker(self):
         from unittest import mock
         rows = [(i, f'h{i}.d.t', None, None, 'd.t') for i in range(3 * inventory_counts.YIELD_EVERY)]
-        with mock.patch('reNgine.gevent_db.gevent_patched', return_value=False), mock.patch('gevent.sleep') as sleeping:
+        with mock.patch('cvengine.gevent_db.gevent_patched', return_value=False), mock.patch('gevent.sleep') as sleeping:
             inventory_counts._collapse(rows)
         self.assertEqual(sleeping.call_count, 0)
 

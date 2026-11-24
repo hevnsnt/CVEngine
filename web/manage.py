@@ -5,7 +5,7 @@ import sys
 
 
 def main():
-    os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'reNgine.settings')
+    os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'cvengine.settings')
     # show the CVEngine banner (never fatal: a missing file must not stop a management command)
     try:
         with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'art', 'CVEngine.txt')) as f:

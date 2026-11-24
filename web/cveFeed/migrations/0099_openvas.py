@@ -2,7 +2,7 @@
 
 import django.db.models.deletion
 import django.utils.timezone
-import reNgine.crypto_fields
+import cvengine.crypto_fields
 from django.conf import settings
 from django.db import migrations, models
 
@@ -72,7 +72,7 @@ class Migration(migrations.Migration):
                 ),
                 (
                     "gmp_password",
-                    reNgine.crypto_fields.EncryptedCharField(
+                    cvengine.crypto_fields.EncryptedCharField(
                         blank=True, default="", max_length=1200
                     ),
                 ),

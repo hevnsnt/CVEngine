@@ -706,7 +706,7 @@ def record_info(agent, raw, now=None):
         # A new version, a tool change or an update request answered keeps a normal commit.
         from contextlib import nullcontext
 
-        from reNgine import usage_stamps
+        from cvengine import usage_stamps
         with usage_stamps.relaxed_commit() if telemetry_only else nullcontext():
             Agent.objects.filter(pk=agent.pk).update(**fields)
     _note_tools_behind(agent, before, merged.get('tool_versions'))

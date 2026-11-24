@@ -1019,7 +1019,7 @@ pre.mono{margin:0 0 var(--s-2);padding:var(--s-2) var(--s-3);background:var(--in
 .mcp-ok{color:var(--ok-ink)}.mcp-fail{color:var(--fire-ink);font-weight:var(--fw-semi)}
 .mcp-pages{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
 @media (max-width:720px){.mcp-table thead{display:none}.mcp-table,.mcp-table tbody,.mcp-table tr,.mcp-table td{display:block;width:100%}.mcp-table colgroup{display:none}.mcp-table tr{border-top:1px solid var(--line);padding:8px 0}.mcp-table td{border-top:0;padding:2px 0}.mcp-table td::before{content:attr(data-label);display:block;font-size:var(--fs-1);color:var(--muted)}}
-.about-rengine{padding-top:24px;border-top:1px solid var(--line)}
+.about-upstream{padding-top:24px;border-top:1px solid var(--line)}
 .two-step h3,.recovery h3,.card>h3{margin-bottom:var(--s-1)}
 .two-step .note{margin-bottom:var(--s-3)}
 .two-step-form{display:grid;gap:var(--s-3);margin-top:var(--s-1)}

@@ -1,5 +1,5 @@
 """``system_status`` is also called inside a Celery lane (``reviewer.ops_checks``, half-hourly), which is a gevent worker: its probe "threads" are greenlets.
-A deadline still holds there because a probe waits through gevent (Event waits, sockets, the database wait callback of ``reNgine.gevent_db``), and a thread
+A deadline still holds there because a probe waits through gevent (Event waits, sockets, the database wait callback of ``cvengine.gevent_db``), and a thread
 is not named there: Python 3.14 gives a thread's name to the operating system, and a greenlet runs on the main thread, so naming one renamed the whole
 process in ``ps`` (``status-warm-row``, ``redis-claim``)."""
 import os
@@ -13,7 +13,7 @@ SCRIPT = textwrap.dedent('''
     from gevent import monkey
     monkey.patch_all()
     import django, os, threading
-    os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'reNgine.settings')
+    os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'cvengine.settings')
     django.setup()
     import gevent
     from agentapi import status_probes
@@ -43,7 +43,7 @@ class GeventDeadlineTests(SimpleTestCase):
             from gevent import monkey
             monkey.patch_all()
             import threading, gevent
-            from reNgine import gevent_db
+            from cvengine import gevent_db
             comm = lambda: open('/proc/self/comm').read().strip()
             start = comm()
             gevent_db.keep_process_name()

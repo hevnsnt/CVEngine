@@ -140,7 +140,7 @@ def run_page(run_id=None, *, resolver=None, tcp_probe=None):
                 .select_related('domain', 'project').order_by('pk')[:PAGE])
     if (resolver is None or tcp_probe is None) and rows:
         from cveFeed.archive_rediscovery import Reads
-        from reNgine.resources import ScannerUnavailable
+        from cvengine.resources import ScannerUnavailable
         try:
             reads = Reads(rows, dns=resolver is None, tcp=tcp_probe is None)
         except ScannerUnavailable as exc:  # no Sentinel can take the reads and they never run here: nothing was asked, nothing is archived or reactivated

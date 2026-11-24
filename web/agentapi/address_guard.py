@@ -342,7 +342,7 @@ def resolve_before_discovery(scan, domain):
     and raise ``AddressExcluded`` when it points into the list. A target that is a whole domain is discovered as before (the run carries the list as ranges it
     never touches, and what it finds is judged per host). An unreadable list refuses the run."""
     from cveFeed import exclusions
-    from reNgine.resources import AddressExcluded
+    from cvengine.resources import AddressExcluded
     project_id = _project_id(domain.project_id)
     if not project_id:
         return

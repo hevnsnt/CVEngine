@@ -16,6 +16,8 @@ NUMBER_WORDS = {10: 'ten', 11: 'eleven', 12: 'twelve', 15: 'fifteen', 29: 'twent
 HISTORICAL = {'SECRETS-PLAN.md', 'SENTINEL-CLIENT-HANDOFF.md', 'SCANNER-ARCHITECTURE.md'}
 NOT_SETTINGS = {
     'CVENGINE_AWK_VALUE',  # an awk variable inside scripts/
+    'CVENGINE_CURRENT_VERSION',  # a Django setting read from web/.version, not from the environment
+    'CVENGINE_EDITION',  # a Django setting read from web/.edition, not from the environment
     'CVENGINE_ROOT',  # a test hook of the host inventory script
     'CVENGINE_SCALE_FIXTURE',  # the scale-test fixture
     'CVENGINE_TEST_BLOCK_NETWORK',  # the test runner

@@ -5,7 +5,7 @@ it saw again, and the earlier scans' rows stayed open beside it (the same adviso
 filed under a target, so a host covered by two targets of one project had each finding twice. Four rules keep that from happening:
 
 * **Upsert.** A scanner finding seen again is the same row, moved onto the scan that saw it (``earlier_copy``, called by
-  ``reNgine.tasks.save_vulnerability``): the same project, host name, source, template, name, URL and matcher. Its first-seen date, status,
+  ``cvengine.tasks.save_vulnerability``): the same project, host name, source, template, name, URL and matcher. Its first-seen date, status,
   note, assignee, comments, audit trail and AI triage stay with it. A hygiene finding a second target finds on the same host updates the row the
   first target filed (cveFeed.hygiene.store_findings).
 * **Duplicates.** Rows filed before this existed are merged by ``manage.py dedupe_findings`` (dry run by default): the row that stays
@@ -41,7 +41,7 @@ FIXED_VERSION = AUTOMATIC + ' fixed version read.'
 FOLDED = (DUPLICATE, ALIAS)  # a copy the engine folded into another row: it stays closed when a scan sees it again
 REOPENED_NOTE = 'Reopened automatically: a later scan reports this again.'
 
-# what makes two scanner rows the same finding, besides the project and the host name (reNgine.tasks.VULNERABILITY_KEY without the scan's
+# what makes two scanner rows the same finding, besides the project and the host name (cvengine.tasks.VULNERABILITY_KEY without the scan's
 # own rows: target, scan, host row and endpoint)
 IDENTITY = ('source', 'template_id', 'name', 'http_url', 'matcher_name')
 LOCATION = ('target_domain', 'scan_history', 'subdomain', 'endpoint')
@@ -228,7 +228,7 @@ def close_fixed_for_host(domain, host, report, seen=None, read_in='', apply=True
         note = _note(f'{FIXED_VERSION} {why}: read by the WordPress scan on {host}' + (f' {read_in}' if read_in else '') + '.')
         close.setdefault(note, []).append(row.pk)
     if apply:
-        from reNgine.state_machines import REMEDIATION
+        from cvengine.state_machines import REMEDIATION
         for note, ids in close.items():
             # only from open with nobody on it, as read above: a person who took the finding up since then keeps it
             REMEDIATION.move(Vulnerability._base_manager.filter(pk__in=ids, remediation_by__isnull=True), 'fixed', only_from=('open',),

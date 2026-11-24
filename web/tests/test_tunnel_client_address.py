@@ -1,10 +1,10 @@
 """Behind a Cloudflare Tunnel (docs/HOSTING-ONLINE.md, "Through a Cloudflare Tunnel") the application must see each visitor's own address, from the
 bundled proxy's X-Forwarded-For, and must not be talkable into a wrong one. Three layers are checked here:
 
-* the bundled proxy (config/nginx/rengine.conf, run by a real nginx: the proxy's own nginx:alpine image, and in CI a missing image is a failure, not a
+* the bundled proxy (config/nginx/cvengine.conf, run by a real nginx: the proxy's own nginx:alpine image, and in CI a missing image is a failure, not a
   skip): a forged X-Forwarded-For is replaced, except that its chain is kept (and the peer appended) when BOTH the request came in on the tunnel
   listener and the peer is listed in trusted-upstreams.conf; a listed peer on the ordinary port, or an unlisted peer on the tunnel port, is overwritten;
-* reNgine.client_ip on the chain the proxy then sends (what Cloudflare sends: the visitor's address appended to whatever the visitor wrote);
+* cvengine.client_ip on the chain the proxy then sends (what Cloudflare sends: the visitor's address appended to whatever the visitor wrote);
 * the IP allowlist middleware, the abuse ban and the sign-in throttle: one visitor's ban does not touch another behind the same tunnel."""
 import os
 import re
@@ -22,10 +22,10 @@ from django.core.cache import cache
 from django.http import HttpResponse
 from django.test import RequestFactory, SimpleTestCase, TestCase
 
-from reNgine.client_ip import client_ip
+from cvengine.client_ip import client_ip
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-CONF = open(os.path.join(REPO, 'config', 'nginx', 'rengine.conf'), encoding='utf-8').read()
+CONF = open(os.path.join(REPO, 'config', 'nginx', 'cvengine.conf'), encoding='utf-8').read()
 CONNECTOR = '172.18.0.7'   # cloudflared as the web container's proxy sees it (a Docker address)
 ALICE, BOB = '198.51.100.20', '203.0.113.30'
 FORGED = '10.0.0.99'
@@ -35,7 +35,7 @@ SECRET = 'Zq8rT2vW9xY3bN5mK7pL4sD6fG1hJ0aEcUr7Xk2Ma9QdVb4Ns6Pw1Tj8'  # 56 charac
 
 
 class ClientAddressTests(SimpleTestCase):
-    """reNgine.client_ip on the chains the tunnel produces. Cloudflare appends the address that connected to it to any X-Forwarded-For the visitor
+    """cvengine.client_ip on the chains the tunnel produces. Cloudflare appends the address that connected to it to any X-Forwarded-For the visitor
     sent (https://developers.cloudflare.com/fundamentals/reference/http-headers/), so the visitor's real address is the right-most one."""
 
     def ip(self, xff, remote='172.18.0.5', trusted=TRUSTED):
@@ -113,7 +113,7 @@ def free_port():
 
 
 class BundledProxyTests(SimpleTestCase):
-    """config/nginx/rengine.conf under a real nginx with a fake application behind it. The test client connects from 127.0.0.1, which stands for
+    """config/nginx/cvengine.conf under a real nginx with a fake application behind it. The test client connects from 127.0.0.1, which stands for
     cloudflared (or for anything else that connects). The proxy has two listeners here, as it does in the container: one stands for 443 and one for
     the tunnel port 8443 (given a free number, which the conf's one literal 8443 is rewritten to)."""
 
@@ -157,7 +157,7 @@ class BundledProxyTests(SimpleTestCase):
         self.assertIn('"~^443:[01]:1:.+"', head)
         head = head.replace('"~^8443:1:[01]:.+"', f'"~^{tunnel}:1:[01]:.+"').replace('"~^443:[01]:1:.+"', f'"~^{plain}:[01]:1:.+"')
         server = CONF[CONF.index('    location / {'):]
-        server = server[:server.index('\n    }') + 6].replace('http://rengine:8000', f'http://127.0.0.1:{upstream.server_port}')  # the address is set in a variable in the location (follows the web container)
+        server = server[:server.index('\n    }') + 6].replace('http://cvengine:8000', f'http://127.0.0.1:{upstream.server_port}')  # the address is set in a variable in the location (follows the web container)
         server = server.replace('/etc/nginx/state/', f'{etc}/state/')
         scratch = f'{tmp}/scratch' if self.runner == 'local' else '/tmp'
         os.makedirs(scratch, exist_ok=True)
@@ -287,7 +287,7 @@ class OneVisitorsBanIsNotEveryonesTests(TestCase):
 
     def setUp(self):
         cache.clear()
-        from reNgine import input_guard, ip_allowlist
+        from cvengine import input_guard, ip_allowlist
         input_guard.invalidate_cache()
         ip_allowlist.invalidate_cache()
         patch = mock.patch.dict(os.environ, {'CVENGINE_TRUSTED_PROXIES': TRUSTED})
@@ -295,13 +295,13 @@ class OneVisitorsBanIsNotEveryonesTests(TestCase):
         self.addCleanup(patch.stop)
 
     def through_the_tunnel(self, visitor, forged=''):
-        from reNgine.ip_allowlist import IpAllowlistMiddleware
+        from cvengine.ip_allowlist import IpAllowlistMiddleware
         request = RequestFactory().get('/', REMOTE_ADDR='172.18.0.2', HTTP_X_FORWARDED_FOR=f'{forged}{visitor}, {CONNECTOR}')
         return IpAllowlistMiddleware(ok_view)(request).status_code
 
     def test_a_ban_hits_only_that_visitor(self):
         from dashboard.models import AbuseBan
-        from reNgine import input_guard
+        from cvengine import input_guard
         AbuseBan.objects.create(ip=ALICE, reason='test')
         input_guard.invalidate_cache()
         self.assertEqual(self.through_the_tunnel(ALICE), 403)
@@ -309,21 +309,21 @@ class OneVisitorsBanIsNotEveryonesTests(TestCase):
 
     def test_a_banned_visitor_cannot_hide_behind_a_forged_left_hand_address(self):
         from dashboard.models import AbuseBan
-        from reNgine import input_guard
+        from cvengine import input_guard
         AbuseBan.objects.create(ip=ALICE, reason='test')
         input_guard.invalidate_cache()
         self.assertEqual(self.through_the_tunnel(ALICE, forged=f'{BOB}, '), 403)
 
     def test_a_visitor_cannot_borrow_another_visitors_clean_record_by_forging_it(self):
         from dashboard.models import AbuseBan
-        from reNgine import input_guard
+        from cvengine import input_guard
         AbuseBan.objects.create(ip=ALICE, reason='test')
         input_guard.invalidate_cache()
         self.assertEqual(self.through_the_tunnel(BOB, forged=f'{ALICE}, '), 200)  # Bob is not punished for what Alice's name was written next to
 
     def test_the_allowlist_sees_the_visitor_not_the_connector(self):
         from dashboard.models import IpAccessControl, IpAllowlistEntry
-        from reNgine import ip_allowlist
+        from cvengine import ip_allowlist
         control = IpAccessControl.current()
         control.enabled = True
         control.save()
@@ -334,7 +334,7 @@ class OneVisitorsBanIsNotEveryonesTests(TestCase):
         self.assertEqual(self.through_the_tunnel(BOB, forged=f'{ALICE}, '), 403)
 
     def test_the_connectors_own_address_is_never_banned_by_the_guard(self):
-        from reNgine.input_guard import _ip_is_banable
+        from cvengine.input_guard import _ip_is_banable
         self.assertFalse(_ip_is_banable(CONNECTOR))
 
     def test_sign_in_failures_are_counted_per_visitor(self):
@@ -350,9 +350,9 @@ class MapBucketTests(TestCase):
     """The proxy crashed on start on a real install: a 48 character secret overflows nginx's default 64 byte map bucket."""
 
     def test_the_config_raises_the_map_bucket_above_the_longest_secret(self):
-        conf = open(os.path.join(REPO, 'config', 'nginx', 'rengine.conf'), encoding='utf-8').read()
+        conf = open(os.path.join(REPO, 'config', 'nginx', 'cvengine.conf'), encoding='utf-8').read()
         found = re.search(r'^map_hash_bucket_size\s+(\d+);', conf, re.M)
-        self.assertIsNotNone(found, 'rengine.conf must set map_hash_bucket_size')
+        self.assertIsNotNone(found, 'cvengine.conf must set map_hash_bucket_size')
         self.assertEqual(len(re.findall(r'^map_hash_bucket_size\b', conf, re.M)), 1, 'nginx refuses the directive twice')
         self.assertLess(found.start(), conf.index('\nmap '), 'it must come before the first map block: after one, nginx refuses it as a duplicate')
         self.assertGreaterEqual(int(found.group(1)), 512)  # the shape check accepts a secret of up to 256 characters, plus the key's prefix and the entry overhead

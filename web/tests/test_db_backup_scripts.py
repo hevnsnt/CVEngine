@@ -42,7 +42,7 @@ if argv[:1] == ['exec']:
     if 'pg_restore' in line:
         sys.exit(1 if (STATE / 'restore_fail').exists() else 0)
     if 'printf %%s "$POSTGRES_DB"' in line:
-        sys.stdout.write('rengine')
+        sys.stdout.write('cvengine')
         sys.exit(0)
     if 'SELECT count(*)' in line:
         table = argv[-1].split('"')[1]
@@ -80,7 +80,7 @@ class BackupScriptTests(unittest.TestCase):
         for name in ('db-backup-daily.sh', 'install-db-backup.sh', 'restore-check.sh', 'compose-layout.sh'):
             shutil.copy(SCRIPTS / name, self.repo / 'scripts' / name)
         (self.repo / 'docker-compose.yml').write_text('services: {}\n')
-        (self.repo / '.env').write_text('POSTGRES_USER=rengine\nPOSTGRES_DB=rengine\nCVENGINE_COMPOSE_FILES=docker-compose.yml\n')
+        (self.repo / '.env').write_text('POSTGRES_USER=cvengine\nPOSTGRES_DB=cvengine\nCVENGINE_COMPOSE_FILES=docker-compose.yml\n')
         self.env = {k: v for k, v in os.environ.items() if not k.startswith(('CVENGINE_', 'COMPOSE_'))}
         self.env['PATH'] = f'{stub}:{os.environ["PATH"]}'
 

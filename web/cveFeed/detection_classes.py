@@ -284,7 +284,7 @@ def exploit_precondition(description):
     """The sentence of an advisory's description that says what must hold for the flaw to be used (untrusted input reaching a function, a
     feature turned on), trimmed to 300 characters; '' when no sentence says so. Plain text from a third-party feed: shown quoted, as the
     advisory's words, never run and never turned into a test."""
-    from reNgine.ai_providers import clean_text
+    from cvengine.ai_providers import clean_text
     text = clean_text(str(description or ''), 2500) or ''
     sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+(?=[A-Z])', text) if 20 <= len(s.strip())]
     for pattern in (_STRONG, _WEAK):
@@ -502,7 +502,7 @@ def feature_preconditions(title='', description=''):
     characters), whether a reading may rule a match out (False when the advisory also names a way to the feature no reading covers, such as
     h2c), the reading values that expose the host and those that clear it (None: every value that does not expose it). Empty when none is
     stated, or when the advisory says the flaw does not need it. Plain text from a third-party feed: quoted, never run."""
-    from reNgine.ai_providers import clean_text
+    from cvengine.ai_providers import clean_text
     title = clean_text(str(title or ''), 400) or ''
     text = clean_text(str(description or ''), 4000) or ''
     whole = f'{title}\n{text}'

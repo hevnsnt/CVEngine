@@ -1321,7 +1321,7 @@ def close_shodan_matches(matches):
     from django.db import transaction
     from cveFeed import activity, match_policy, scoring
     from cveFeed.models import CVEMatch, FindingAuditEvent, Triage, ProbeObservation
-    from reNgine.state_machines import REMEDIATION
+    from cvengine.state_machines import REMEDIATION
     matches = [m for m in matches if m.remediation_status == 'open' and getattr(m, 'remediation_by_id', None) is None]
     if not matches:
         return []

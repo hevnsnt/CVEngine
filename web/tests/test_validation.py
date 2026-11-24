@@ -14,7 +14,7 @@ from cvengine_scanner import flags as scan_flags
 from cveFeed import nuclei_scan, templategen, triage, validation
 from cveFeed.models import CVEEntry, CVEMatch, GeneratedTemplate, ServiceRun, Triage
 from dashboard.models import Org, Project
-from reNgine import resources
+from cvengine import resources
 from startScan.models import Subdomain, Vulnerability
 from targetApp.models import Domain
 from tests import ai_queue

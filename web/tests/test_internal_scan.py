@@ -151,7 +151,7 @@ class RunTests(Base):
             scan = self.queued_scan()
             ScanHistory.objects.filter(pk=scan.pk).update(scan_status=status, celery_ids=['the-task-that-ran-it'], error_message='kept')
             seen = []
-            with mock.patch('cveFeed.tasks.correlate_cves') as correlate, mock.patch('reNgine.tasks.persist_bbot_result') as persist:
+            with mock.patch('cveFeed.tasks.correlate_cves') as correlate, mock.patch('cvengine.tasks.persist_bbot_result') as persist:
                 out = internal_scan.run(scan.id, dispatch=lambda *a, seen=seen, **k: seen.append(a) or NMAP_RESULT,
                                         nuclei_stream=lambda kind: iter_none, provider=None)
                 self.assertEqual(run_internal_scan.apply(args=(scan.id,), task_id='a-redelivery').get()['status'], 'finished')
@@ -342,7 +342,7 @@ class HandStartedTests(Base):
 
 class StorageTests(Base):
     def test_an_internal_address_is_stored_only_for_the_host_that_is_that_address(self):
-        from reNgine.tasks import save_ip_address
+        from cvengine.tasks import save_ip_address
         self.assertIsNotNone(save_ip_address('10.20.0.7', subdomain=None, project_id=self.pa.id)[0])
         self.assertIsNone(save_ip_address('10.20.0.8', subdomain=None, project_id=self.pb.id)[0])  # another project did not declare it
         self.assertIsNone(save_ip_address('10.20.0.9', subdomain=None)[0])  # no project: a name that resolved there

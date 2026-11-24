@@ -10,7 +10,7 @@ from agentapi.auth import create_token
 from cveFeed import discovery
 from cveFeed.models import AgentActivity
 from dashboard.models import Org, Project, ProjectMembership
-from reNgine import resources
+from cvengine import resources
 from scanEngine.models import EngineType
 from startScan.models import ScanActivity, ScanHistory, Subdomain, Vulnerability
 from targetApp.models import Domain
@@ -81,7 +81,7 @@ class ScansListAndStopTests(TestCase):
     # -- stop ---------------------------------------------------------------------------------------------------------
     def test_stopping_a_queued_scan_aborts_it_and_the_pipeline_skips_it(self):
         ids = self.bulk(2)
-        with mock.patch('reNgine.celery.app.control.revoke') as revoke:
+        with mock.patch('cvengine.celery.app.control.revoke') as revoke:
             status, data = call(self.tok, 'POST', f'/api/v1/projects/acme/scans/{ids[0]}/stop')
         self.assertEqual((status, data), (200, {'stopped': 1, 'scan_ids': [ids[0]]}))
         scan = ScanHistory.objects.get(pk=ids[0])
@@ -101,7 +101,7 @@ class ScansListAndStopTests(TestCase):
         ids = self.bulk(1)
         ScanHistory.objects.filter(pk=ids[0]).update(scan_status=1, celery_ids=['task-1'])
         ScanActivity.objects.filter(scan_of_id=ids[0]).update(status=1)
-        with mock.patch('reNgine.celery.app.control.revoke') as revoke:
+        with mock.patch('cvengine.celery.app.control.revoke') as revoke:
             self.assertEqual(call(self.tok, 'POST', f'/api/v1/projects/acme/scans/{ids[0]}/stop')[0], 200)
         revoke.assert_called_once_with('task-1', terminate=True, signal='SIGTERM')
         self.assertTrue(resources.abort_requested(ids[0]))
@@ -117,7 +117,7 @@ class ScansListAndStopTests(TestCase):
         domain = Domain.objects.create(name='else.example', project=self.other, insert_date=timezone.now())
         with mock.patch('cveFeed.tasks.run_bbot_discovery.delay'):
             theirs = discovery.start_discovery(domain)
-        with mock.patch('reNgine.celery.app.control.revoke'):
+        with mock.patch('cvengine.celery.app.control.revoke'):
             status, data = call(self.tok, 'POST', '/api/v1/projects/acme/scans/stop')
         self.assertEqual((status, data['stopped'], sorted(data['scan_ids'])), (200, 3, sorted(ids[:3])))
         self.assertEqual(ScanHistory.objects.get(pk=ids[3]).scan_status, 2)  # finished stays finished
@@ -136,7 +136,7 @@ class ScansListAndStopTests(TestCase):
 
     def test_the_stop_tools_exist_in_mcp(self):
         ids = self.bulk(2)
-        with mock.patch('reNgine.celery.app.control.revoke'):
+        with mock.patch('cvengine.celery.app.control.revoke'):
             status, data = rpc(self.tok, 'tools/call', {'name': 'stop_scan', 'arguments': {'project': 'acme', 'scan_id': ids[0]}})
             self.assertEqual(status, 200)
             status, data = rpc(self.tok, 'tools/call', {'name': 'stop_all_scans', 'arguments': {'project': 'acme'}})
@@ -160,7 +160,7 @@ class ScansListAndStopTests(TestCase):
         def nmap_runner(*a, **k):
             services._abort_scan(scan)  # a person presses Stop while nmap runs
             return ''
-        with mock.patch('reNgine.celery.app.control.revoke'), \
+        with mock.patch('cvengine.celery.app.control.revoke'), \
                 mock.patch('cveFeed.tasks.run_hygiene_task.delay') as hygiene, sentinel_discovery(events):
             out = discovery.run_pipeline(scan.id, port_stage_run=port_double(nmap_runner),
                 light_stream=lambda path, **k: later.append('light') or iter([]), targeted_stream=lambda path, **k: later.append('t') or iter([]),

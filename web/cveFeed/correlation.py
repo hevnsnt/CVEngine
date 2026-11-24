@@ -1,7 +1,7 @@
 """Correlate stored cve.now entries against the discovered asset inventory.
 
 Deterministic candidate generation first: match each discovered Technology (and
-its version, when reNgine captured one) against the product/package names and
+its version, when the scan captured one) against the product/package names and
 version ranges in `CVEEntry.affected`. Candidates become `CVEMatch` rows with a
 heuristic confidence; the AI triage (cveFeed.triage) then judges each one,
 which is what makes exposure precise rather than noisy.
@@ -57,7 +57,7 @@ _BANNER_TECH_RE = re.compile(r"^([A-Za-z][\w.+-]*?)_(\d[\w.+~-]*)(?:\s|$)")
 
 
 def split_name_version(tech_name):
-    """reNgine stores tech as 'Name' or 'Name:version' (httpx tech-detect); a scanner may also store a CPE or a 'Name_version' banner."""
+    """Technology rows store tech as 'Name' or 'Name:version' (httpx tech-detect); a scanner may also store a CPE or a 'Name_version' banner."""
     if not tech_name:
         return "", ""
     name = tech_name.strip()
@@ -2201,7 +2201,7 @@ def collect_subdomain_matches(subdomain, product_index, cve_by_id, min_confidenc
     """The CVEMatch rows for one subdomain, appended to ``rows`` (a new list when omitted). Returns the rows.
 
     Two deterministic sources are correlated against the CVE product index:
-    - "tech": reNgine's httpx technology fingerprints (stored as name[:version]).
+    - "tech": the httpx technology fingerprints (stored as name[:version]).
     - "port": the Shodan-style nmap -sV service data on the host's open ports
       (Port.product / Port.version), reached via the subdomain's IP addresses.
     """

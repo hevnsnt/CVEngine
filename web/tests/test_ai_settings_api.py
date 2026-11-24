@@ -9,8 +9,8 @@ from django.contrib.auth.models import User
 from django.test import TestCase
 
 from dashboard.models import AIProviderSettings, AuditLog, Org, OrgMembership
-from reNgine import ai_providers as ai
-from reNgine.ai_profiles import AIRuntime
+from cvengine import ai_providers as ai
+from cvengine.ai_profiles import AIRuntime
 from tests.test_settings import send
 from tests.test_tenancy import client_for
 
@@ -204,7 +204,7 @@ class AiRequestSettingsApiTests(TestCase):
 	# --- they reach the request ---
 
 	def test_the_configured_provider_carries_the_settings(self):
-		from reNgine.ai_settings import get_configured_provider
+		from cvengine.ai_settings import get_configured_provider
 		self.put(provider='ollama', base_url='http://h:11434', model='qwen3:8b', enabled=True, request_timeout=600, max_tokens=3000,
 			context_tokens=8192, keep_alive='20m', reasoning='off', structured_mode='off', connect_timeout=25)
 		provider = get_configured_provider()
@@ -218,12 +218,12 @@ class AiRequestSettingsApiTests(TestCase):
 		self.assertEqual((kwargs['json']['keep_alive'], kwargs['json']['think']), ('20m', False))
 
 	def test_an_install_that_sets_nothing_builds_the_provider_it_always_did(self):
-		from reNgine.ai_settings import get_configured_provider
+		from cvengine.ai_settings import get_configured_provider
 		AIProviderSettings.objects.create(provider='anthropic', api_key='k', enabled=True)
 		self.assertEqual(get_configured_provider().runtime, AIRuntime())
 
 	def test_a_row_edited_by_hand_with_a_bad_value_still_sends_a_valid_request(self):
-		from reNgine.ai_settings import get_configured_provider
+		from cvengine.ai_settings import get_configured_provider
 		AIProviderSettings.objects.create(provider='anthropic', api_key='k', enabled=True, request_timeout=1, max_tokens=5, structured_mode='x', reasoning='y', keep_alive='z')
 		self.assertEqual(get_configured_provider().runtime, AIRuntime())
 

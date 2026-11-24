@@ -113,7 +113,7 @@ def _product_key(match):
 
 def _plain(text, limit=80):
     """A product name from a scanner or a feed, reduced to the characters a product name uses (shown as text, never run)."""
-    from reNgine.ai_providers import clean_text
+    from cvengine.ai_providers import clean_text
     return clean_text(str(text or ''), limit, strict=True)
 
 
@@ -946,7 +946,7 @@ def precondition_words(match):
         seen = stored.get(key) if isinstance(stored.get(key), dict) else {}
         state = seen.get('state') if seen.get('state') in service_features.STATES else 'unknown'
         reading = _plain(seen.get('detail'), 120)
-        from reNgine.ai_providers import clean_text
+        from cvengine.ai_providers import clean_text
         said = clean_text(str(need.get('quote') or ''), 300) or ''  # the advisory's sentence: feed prose, shown as text
         if closed_reason and service_features._words(key, 'ruled_out') in closed_reason:
             state, closed = 'ruled_out', True

@@ -8,7 +8,7 @@ from unittest import mock
 from django.test import SimpleTestCase
 
 from cveFeed import ledger, udp_scan
-from reNgine.resources import ScannerReportedNothing, ScannerUnavailable
+from cvengine.resources import ScannerReportedNothing, ScannerUnavailable
 from tests.test_udp_scan import UdpBase, run_udp
 
 FINISHED = '<runstats><finished time="1" exit="success"/><hosts up="{up}" down="{down}" total="{total}"/></runstats>'

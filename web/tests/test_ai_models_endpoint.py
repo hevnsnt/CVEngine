@@ -79,7 +79,7 @@ class ModelsEndpointTests(TestCase):
 
     def test_the_saved_key_goes_only_to_the_provider_and_address_it_was_saved_for(self):
         self.save_connection(provider='openai', base_url='https://gw.example.com/v1')
-        with mock.patch('reNgine.ai_providers.get_provider') as get_provider:
+        with mock.patch('cvengine.ai_providers.get_provider') as get_provider:
             get_provider.return_value.list_models.return_value = []
             self.models(provider='anthropic')
             self.assertIsNone(get_provider.call_args.kwargs['api_key'])

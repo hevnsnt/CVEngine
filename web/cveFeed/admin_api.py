@@ -767,7 +767,7 @@ def scheduler_health(request, actor):
     from django_celery_beat.models import PeriodicTask
     from cveFeed.models import (AutomaticValidation, DeferredRetest, OnDemandValidation, AgentActivity,
                                 ArchiveRediscovery, InactiveArchiveReview, HostAssessment, HostState)
-    from reNgine.celery import app
+    from cvengine.celery import app
     from startScan.models import ScanHistory
 
     now = timezone.now()
@@ -887,7 +887,7 @@ def scan_control_get(request, actor):
         raise AdminError(403, 'App Admin only')
     from cveFeed.models import ScanControl
     from startScan.models import ScanHistory
-    from reNgine.celery import app
+    from cvengine.celery import app
 
     row = ScanControl.current()
     active = None

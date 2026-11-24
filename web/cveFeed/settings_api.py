@@ -12,8 +12,8 @@ from django.http import FileResponse, Http404, JsonResponse
 from django.http.response import HttpResponseBase
 
 from cveFeed import egress_proxy, mailer, openvas_admin, seed_admin, tailscale_admin
-from reNgine import ai_prompts
-from reNgine.ai_profiles import (KEEP_ALIVE_PATTERN, NUMBER_SETTINGS, REASONING_CHOICES, SETTING_APPLIES, SETTING_ENV, STRUCTURED_MODES, AIRuntime, same_service)
+from cvengine import ai_prompts
+from cvengine.ai_profiles import (KEEP_ALIVE_PATTERN, NUMBER_SETTINGS, REASONING_CHOICES, SETTING_APPLIES, SETTING_ENV, STRUCTURED_MODES, AIRuntime, same_service)
 from dashboard.models import AIProviderSettings, ChaosAPIKey
 from scanEngine.models import Notification, Proxy, VulnerabilityReportSetting
 
@@ -146,8 +146,8 @@ def _nuclei_in_force(cfg):
     chosen model, else the cheapest haiku of a list read in the last ten minutes, else '' (the page says the default is found when it loads)."""
     if (cfg.nuclei_model or '').strip():
         return cfg.nuclei_model.strip()
-    from reNgine import ai_nuclei_model
-    from reNgine.ai_providers import get_provider
+    from cvengine import ai_nuclei_model
+    from cvengine.ai_providers import get_provider
     try:
         return ai_nuclei_model.haiku_default(get_provider(cfg.provider, api_key=cfg.api_key or 'x', base_url=cfg.base_url or None), fetch=False) or ''
     except Exception:  # noqa: BLE001 - a stored provider this version does not know
@@ -156,7 +156,7 @@ def _nuclei_in_force(cfg):
 
 def ai_get(request):
     cfg = AIProviderSettings.objects.first() or AIProviderSettings()
-    from reNgine.ai_providers import DEFAULT_MODELS, KEYLESS, SELECTABLE, SERVER_URL_PROVIDERS, effective_settings, provider_defaults
+    from cvengine.ai_providers import DEFAULT_MODELS, KEYLESS, SELECTABLE, SERVER_URL_PROVIDERS, effective_settings, provider_defaults
     out = {'provider': cfg.provider, 'model': cfg.model, 'base_url': cfg.base_url, 'enabled': cfg.enabled,
            'verified_at': cfg.verified_at.isoformat() if cfg.verified_at else None,
            'selectable': list(SELECTABLE), 'keyless': list(KEYLESS), 'needs_url': list(SERVER_URL_PROVIDERS),
@@ -233,7 +233,7 @@ def _nuclei_model_value(raw, cfg, old_connection, old_value):
 
 
 def ai_put(request):
-    from reNgine.ai_providers import DEFAULT_MODELS, LOCAL_PORT, SERVER_URL_PROVIDERS
+    from cvengine.ai_providers import DEFAULT_MODELS, LOCAL_PORT, SERVER_URL_PROVIDERS
     data = _body(request)
     cfg = AIProviderSettings.objects.first() or AIProviderSettings()
     old_connection = (cfg.provider, cfg.model, cfg.base_url, cfg.api_key)
@@ -480,7 +480,7 @@ def _models_hit(provider, base_url, key, refresh=False):
     """The provider's model list as ``ai_models`` answers it (cached per provider, address and key hash): ``{models, recommended,
     nuclei_default}``. Raises SettingsError(400) with the plain reason when the list cannot be read."""
     from django.core.cache import cache
-    from reNgine.ai_providers import SELECTABLE, AIProviderError, get_provider, pick_cheapest_newest
+    from cvengine.ai_providers import SELECTABLE, AIProviderError, get_provider, pick_cheapest_newest
     cache_key = _models_cache_key(provider, base_url, key)
     hit = None
     if not refresh:
@@ -493,7 +493,7 @@ def _models_hit(provider, base_url, key, refresh=False):
             raw = get_provider(provider, api_key=key or None, base_url=base_url or None).list_models()
             listed = _clean_models(raw)
             recommended = '' if provider in SELECTABLE else (pick_cheapest_newest(raw) or '')
-            from reNgine import ai_nuclei_model
+            from cvengine import ai_nuclei_model
             haiku = ai_nuclei_model.remember(provider, base_url, raw)
             hit = {'models': listed, 'recommended': recommended if any(m['id'] == recommended for m in listed) else '',
                    'nuclei_default': haiku if any(m['id'] == haiku for m in listed) else ''}
@@ -521,7 +521,7 @@ def ai_models(request):
     provider and address are the one it was saved for, so a stored key is never sent to a different service); the page never receives a
     key. The answer is cached for a few minutes per provider, address and key hash (``refresh`` skips the cache), a failure for a few
     seconds. Nothing in the answer, the cache or the log holds a key or the provider's own words."""
-    from reNgine.ai_providers import DEFAULT_MODELS, SERVER_URL_PROVIDERS
+    from cvengine.ai_providers import DEFAULT_MODELS, SERVER_URL_PROVIDERS
     data = _body(request)
     cfg = AIProviderSettings.objects.first() or AIProviderSettings()
     provider = data.get('provider') or cfg.provider
@@ -569,7 +569,7 @@ def ai_error_hint(exc, timeout, connect=10, capped=False):
 
 def ai_test(request):
     import dataclasses
-    from reNgine.ai_providers import PROVIDERS, AIProviderError, connect_timeout, request_timeout
+    from cvengine.ai_providers import PROVIDERS, AIProviderError, connect_timeout, request_timeout
     cfg = AIProviderSettings.objects.first()
     if not cfg:
         raise SettingsError(400, 'save the AI settings first')
@@ -582,10 +582,10 @@ def ai_test(request):
         runtime = dataclasses.replace(runtime, request_timeout=TEST_TIMEOUT_CAP)
         waits = TEST_TIMEOUT_CAP
     try:
-        from reNgine.ai_providers import get_provider
+        from cvengine.ai_providers import get_provider
         provider = get_provider(cfg.provider, model=cfg.model or None, api_key=cfg.api_key or None,
                                 base_url=cfg.base_url or None, runtime=runtime)
-        from reNgine.ai_providers import usage_stage
+        from cvengine.ai_providers import usage_stage
         with usage_stage('connection_test'):
             reply = provider.complete(ai_prompts.CONNECTION_TEST_SYSTEM, ai_prompts.CONNECTION_TEST_USER)
     except AIProviderError as exc:
@@ -799,7 +799,7 @@ def proxy_put(request):
 
 REPORT_TEXT = {'company_name': 100, 'company_address': 200, 'company_email': 100, 'company_website': 100,
                'footer_text': 200, 'executive_summary_description': 5000}
-REPORT_FLAGS = {'show_executive_summary': 'show_executive_summary', 'show_footer': 'show_footer', 'show_banner': 'show_rengine_banner'}
+REPORT_FLAGS = {'show_executive_summary': 'show_executive_summary', 'show_footer': 'show_footer', 'show_banner': 'show_cvengine_banner'}
 
 
 def report_get(request):
@@ -835,7 +835,7 @@ def report_put(request):
 # --- ip allowlist ---------------------------------------------------------------
 
 def _client_ip(request):
-    from reNgine.client_ip import client_ip
+    from cvengine.client_ip import client_ip
     return client_ip(request)
 
 
@@ -872,7 +872,7 @@ def ip_allowlist_get(request):
 
 def ip_allowlist_put(request):
     from dashboard.models import IpAccessControl, IpAllowlistEntry
-    from reNgine import ip_allowlist as ipa
+    from cvengine import ip_allowlist as ipa
     data = _body(request)
     cfg = IpAccessControl.current()
     if 'enabled' in data:
@@ -891,7 +891,7 @@ def ip_allowlist_put(request):
 
 def ip_allowlist_entry_create(request):
     from dashboard.models import IpAllowlistEntry
-    from reNgine import ip_allowlist as ipa
+    from cvengine import ip_allowlist as ipa
     data = _body(request)
     cidr = _valid_cidr(_text(data, 'cidr', max_len=64))
     label = _text(data, 'label', max_len=200)
@@ -903,7 +903,7 @@ def ip_allowlist_entry_create(request):
 
 def ip_allowlist_entry_delete(request, entry_id):
     from dashboard.models import IpAccessControl, IpAllowlistEntry
-    from reNgine import ip_allowlist as ipa
+    from cvengine import ip_allowlist as ipa
     entry = IpAllowlistEntry.objects.filter(id=entry_id).first()
     if not entry:
         raise SettingsError(404, 'entry not found')
@@ -920,7 +920,7 @@ def ip_allowlist_entry_delete(request, entry_id):
 # --- resources -----------------------------------------------------------------------
 
 def resources_get(request):
-    from reNgine import resources
+    from cvengine import resources
     return resources.cluster_snapshot()
 
 

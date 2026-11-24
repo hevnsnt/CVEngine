@@ -378,7 +378,7 @@ def is_java_host(sub, runtimes=None):
 
 def file_jdwp_exposure(scan, sub, address, port, evidence=''):
     """The critical finding of an open JDWP port: one row per host name and endpoint (a rescan updates it). Returns 1 when it is new."""
-    from reNgine.tasks import save_vulnerability
+    from cvengine.tasks import save_vulnerability
     if scan is None:
         return 0
     evidence = java.clip(evidence, 300)
@@ -525,7 +525,7 @@ def run_for_scan(scan_id, force=False, dispatch=None):
     kind (the active reads stay due; the passive readings are stored first)."""
     from agentapi import probe_dispatch, sentinel_dispatch
     from cveFeed import activity
-    from reNgine.resources import ScannerUnavailable
+    from cvengine.resources import ScannerUnavailable
     from startScan.models import ScanHistory, Subdomain
     scan = ScanHistory.objects.select_related('domain__project').get(pk=scan_id)
     project = scan.domain.project
@@ -564,7 +564,7 @@ def run_for_hosts(project, host_names, dispatch=None, priority=1):
     """The work planner's entry: the same plan, gates (unattended: the bug bounty engagement must have confirmed automated testing), ledger and
     storage as ``run_for_scan`` for the named hosts' current inventory rows, with no scan of its own."""
     from agentapi import probe_dispatch, sentinel_dispatch
-    from reNgine.resources import ScannerUnavailable
+    from cvengine.resources import ScannerUnavailable
     summary = {'hosts': 0, 'asked': 0, 'readings': 0, 'exposed': 0, 'waiting': 0}
     if not enabled():
         return {**summary, 'skipped': 'disabled'}

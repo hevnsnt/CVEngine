@@ -12,7 +12,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 out=${1:-/tmp/scale-results}; shift || true
 sizes=${*:-500 1000 2000 3000}
 mkdir -p "$out"
-export RENGINE_HOME=${RENGINE_HOME:-$here/../../web}
+export CVENGINE_HOME=${CVENGINE_HOME:-$here/../../web}
 DB_EXEC=${DB_EXEC:-psql -h ${POSTGRES_HOST:-127.0.0.1} -p ${POSTGRES_PORT:-5432} -U ${POSTGRES_USER} -d postgres}
 tpl=${SCALE_TPL:-cv_scale_tpl}; db=${SCALE_DB:-cv_scale}
 cd "$here/../../web"
@@ -26,5 +26,5 @@ for n in $sizes; do
   export POSTGRES_DB=$db
   python manage.py seed_scale_fixture --hosts "$n" > "$out/seed-$n.full" 2>&1 || { tail -30 "$out/seed-$n.full"; exit 1; }
   tail -1 "$out/seed-$n.full" | tee "$out/seed-$n.txt"
-  python ../scripts/scale/measure.py --label "$n" --out "$out/scale-$n.json" ${EXPLAIN:+--explain} 2>&1 | grep -v '^weasyprint\|^reNgine\.' | tee "$out/scale-$n.log"
+  python ../scripts/scale/measure.py --label "$n" --out "$out/scale-$n.json" ${EXPLAIN:+--explain} 2>&1 | grep -v '^weasyprint\|^cvengine\.' | tee "$out/scale-$n.log"
 done

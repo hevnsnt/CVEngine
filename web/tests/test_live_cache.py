@@ -31,7 +31,7 @@ def steady_caches():
     tests.test_check_coverage: the IP allowlist and ban caches expire after 10 s, the internal network table after 5 minutes, and a request
     landing after the expiry costs two or three queries more)."""
     from cveFeed import internal_view
-    from reNgine import input_guard, ip_allowlist
+    from cvengine import input_guard, ip_allowlist
     internal_view.invalidate()
     with mock.patch.object(internal_view, 'CACHE_SECONDS', float('inf')), \
             mock.patch.object(ip_allowlist, '_load', return_value=(False, [])), \

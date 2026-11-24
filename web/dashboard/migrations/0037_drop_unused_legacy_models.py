@@ -2,7 +2,7 @@ from django.db import migrations
 
 
 class Migration(migrations.Migration):
-    """Drop seven reNgine-era tables that nothing reads or writes any more (docs/UPGRADE.md, "Dropped legacy tables and columns"): the OpenAI,
+    """Drop seven legacy tables that nothing reads or writes any more (docs/UPGRADE.md, "Dropped legacy tables and columns"): the OpenAI,
     Netlas and HackerOne entries of the old key vault (the AI model's key is in AIProviderSettings, discovery keys in ApiCredential, a HackerOne
     submission uses the person's own credentials), the Ollama settings the AI layer never read, the search history, the per-user preferences row
     and the in-app notifications of the deleted classic screens. Schema only: the rows go with the tables."""

@@ -7,8 +7,8 @@ from django.utils import timezone
 
 from agentapi.auth import create_token
 from dashboard.models import AbuseBan, AbuseStrike, ApiToken, AuditLog, Org, OrgMembership, Project
-from reNgine import input_guard as guard
-from reNgine.client_ip import client_ip
+from cvengine import input_guard as guard
+from cvengine.client_ip import client_ip
 from targetApp import target_types as tt
 
 

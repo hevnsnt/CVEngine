@@ -196,7 +196,7 @@ class ComposeProjectTests(SimpleTestCase):
     def init_env(self, docker_prints='', env=None, keep_env=None):
         import os
         import subprocess
-        (self.tmp / 'bin' / 'docker').write_text(f'#!/bin/sh\ncase "$*" in *project=rengine*) printf %s "{docker_prints}";; esac\nexit 0\n')
+        (self.tmp / 'bin' / 'docker').write_text(f'#!/bin/sh\ncase "$*" in *project=cvengine*) printf %s "{docker_prints}";; esac\nexit 0\n')
         (self.tmp / 'bin' / 'docker').chmod(0o755)
         if keep_env is not None:
             (self.tmp / '.env').write_text(keep_env)
@@ -207,18 +207,18 @@ class ComposeProjectTests(SimpleTestCase):
         return [line.split('=', 1)[1] for line in (self.tmp / '.env').read_text().splitlines() if line.startswith('COMPOSE_PROJECT_NAME=')][-1]
 
     def test_a_host_with_no_other_stack_keeps_the_default_name(self):
-        self.assertEqual(self.init_env(), 'rengine')
+        self.assertEqual(self.init_env(), 'cvengine')
 
-    def test_a_host_that_already_runs_rengine_elsewhere_gives_the_new_checkout_a_name_of_its_own(self):
-        self.assertEqual(self.init_env(docker_prints='/opt/cvengine\\n'), 'rengine-my-second_stack'.replace('_', '-'))
+    def test_a_host_that_already_runs_cvengine_elsewhere_gives_the_new_checkout_a_name_of_its_own(self):
+        self.assertEqual(self.init_env(docker_prints='/opt/cvengine\\n'), 'cvengine-my-second_stack'.replace('_', '-'))
 
     def test_a_name_given_for_the_run_is_used(self):
         self.assertEqual(self.init_env(env={'COMPOSE_PROJECT_NAME': 'staging'}), 'staging')
         self.tmp.joinpath('.env').unlink()
-        self.assertEqual(self.init_env(env={'COMPOSE_PROJECT_NAME': 'Not Valid!'}), 'rengine')
+        self.assertEqual(self.init_env(env={'COMPOSE_PROJECT_NAME': 'Not Valid!'}), 'cvengine')
 
     def test_an_existing_env_keeps_its_name_whatever_runs_on_the_host(self):
-        self.assertEqual(self.init_env(docker_prints='/opt/cvengine\\n', keep_env='COMPOSE_PROJECT_NAME=rengine\nDOMAIN_NAME=x.test\n'), 'rengine')
+        self.assertEqual(self.init_env(docker_prints='/opt/cvengine\\n', keep_env='COMPOSE_PROJECT_NAME=cvengine\nDOMAIN_NAME=x.test\n'), 'cvengine')
 
     def test_the_scanner_has_no_fixed_container_name_and_nothing_reaches_it_by_one(self):
         import re

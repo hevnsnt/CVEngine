@@ -375,7 +375,7 @@ def _requires_features(value, problems):
 
 
 def _text(value, limit):
-    from reNgine.ai_providers import clean_text
+    from cvengine.ai_providers import clean_text
     return clean_text(value, limit) if isinstance(value, str) else None
 
 

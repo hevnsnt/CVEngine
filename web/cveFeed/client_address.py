@@ -1,6 +1,6 @@
 """The client address check's verdict, and the notice it raises (review r3 S2; docs/DEPLOYMENT.md, "Client addresses behind a host proxy").
 
-Every update runs scripts/client-address-check.sh: one probe through the public name (reNgine.client_probe), the address the server took for
+Every update runs scripts/client-address-check.sh: one probe through the public name (cvengine.client_probe), the address the server took for
 it, the address Cloudflare saw when there is one, the label the bundled proxy put on the probe (what it did with the forwarding headers) and
 where the proxy's port 443 is published on the host. ``classify`` turns that into one verdict (``KINDS``) and one line for the update log;
 ``apply`` opens, refreshes or resolves the App Admin notice of it (an ``AdminAlert`` with code ``client_address``: the status strip, Settings,
@@ -103,7 +103,7 @@ def published_direct(published):
 
 def classify(recorded, forwarded, seen='', published=''):
     """``(kind, line)``: the verdict (a key of KINDS) and its line for the update log. ``recorded`` is the address the server took for the probe,
-    ``forwarded`` the proxy's label (reNgine.client_probe.FORWARDED_LABELS, '' when none came), ``seen`` the address Cloudflare saw (''
+    ``forwarded`` the proxy's label (cvengine.client_probe.FORWARDED_LABELS, '' when none came), ``seen`` the address Cloudflare saw (''
     when there is no Cloudflare), ``published`` where the proxy's 443 is published ('' when unknown)."""
     if not recorded or recorded == 'unknown':
         return 'unknown', 'verdict: none, the probe did not arrive.'
@@ -209,7 +209,7 @@ def _get(url, timeout=10):
 def recheck(get=None):
     """The check from the server itself: one probe through the public name. Resolves the notice when it passes; never opens one (where the
     proxy's port is published cannot be seen from here). Returns ``{kind, result}``."""
-    from reNgine import client_probe
+    from cvengine import client_probe
     get = get or _get
     url = public_url()
     if not url:

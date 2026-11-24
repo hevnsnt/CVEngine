@@ -1,4 +1,4 @@
-"""The provider capability profile (reNgine/ai_profiles.py): the request each provider sends is byte for byte what it was before the table
+"""The provider capability profile (cvengine/ai_profiles.py): the request each provider sends is byte for byte what it was before the table
 existed, the opt-in reasoning controls send exactly their own fields and only when asked, and a key is never guessed onto a vendor."""
 import json
 import unittest
@@ -8,8 +8,8 @@ import requests
 from django.contrib.auth.models import User
 from django.test import SimpleTestCase, TestCase
 
-from reNgine import ai_profiles as profiles
-from reNgine import ai_providers as ai
+from cvengine import ai_profiles as profiles
+from cvengine import ai_providers as ai
 
 OPENAI_OK = {'choices': [{'message': {'content': 'ok'}, 'finish_reason': 'stop'}]}
 ANTHROPIC_OK = {'content': [{'type': 'text', 'text': 'ok'}], 'stop_reason': 'end_turn'}
@@ -314,7 +314,7 @@ class ReasoningRequestTests(unittest.TestCase):
 
 	def test_an_ignored_setting_is_logged_once_per_provider_and_model(self):
 		with mock.patch.dict('os.environ', {'CVENGINE_AI_REASONING': 'high'}):
-			with self.assertLogs('reNgine.ai_providers', level='WARNING') as logs:
+			with self.assertLogs('cvengine.ai_providers', level='WARNING') as logs:
 				for _ in range(3):
 					sent('openai', model='gpt-4o', env={'CVENGINE_AI_REASONING': 'high'})
 				sent('openai', model='gpt-4.1', env={'CVENGINE_AI_REASONING': 'high'})

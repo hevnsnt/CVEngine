@@ -14,7 +14,7 @@ from django.test import SimpleTestCase, TestCase
 from cveFeed import config_maxxing, tunables
 from cveFeed.models import TunableSettings
 from dashboard.models import AuditLog, Org, OrgMembership
-from reNgine import resources
+from cvengine import resources
 from tests.test_settings import send
 from tests.test_tenancy import client_for
 from tests.steady import expiring_caches
@@ -431,7 +431,7 @@ class PublishTests(Isolated, TestCase):
         self.assertTrue(tunables.reconcile())
         self.assertEqual(json.loads(resources.redis_client().get(tunables.VALUES_KEY))['values'], {'stage_parallel': 2})
         from cveFeed import tasks
-        with mock.patch('reNgine.resources.report_state'), mock.patch('cveFeed.scan_concurrency.reconcile'), mock.patch.object(tunables, 'reconcile') as tick:
+        with mock.patch('cvengine.resources.report_state'), mock.patch('cveFeed.scan_concurrency.reconcile'), mock.patch.object(tunables, 'reconcile') as tick:
             tasks.report_resources()
         tick.assert_called_once_with()
 
