@@ -31,7 +31,7 @@ ALICE, BOB = '198.51.100.20', '203.0.113.30'
 FORGED = '10.0.0.99'
 TRUSTED = '172.16.0.0/12'  # the range installs had before review r3 S3; the shipped default is now the proxy's one address (PROXY)
 PROXY = '172.16.238.10'
-SECRET = 'Zq8rT2vW9xY3bN5mK7pL4sD6fG1hJ0aEcU'
+SECRET = 'Zq8rT2vW9xY3bN5mK7pL4sD6fG1hJ0aEcUr7Xk2Ma9QdVb4Ns6Pw1Tj8'  # 56 characters: a generated secret is 48, and nginx's default map bucket (64) cannot hold one
 
 
 class ClientAddressTests(SimpleTestCase):
@@ -344,3 +344,13 @@ class OneVisitorsBanIsNotEveryonesTests(TestCase):
         self.assertNotEqual(a['ip'], b['ip'])
         self.assertNotEqual(a['pair'], b['pair'])
         self.assertIn(ALICE, a['ip'])
+
+
+class MapBucketTests(TestCase):
+    """The proxy crashed on start on a real install: a 48 character secret overflows nginx's default 64 byte map bucket."""
+
+    def test_the_config_raises_the_map_bucket_above_the_longest_secret(self):
+        conf = open(os.path.join(REPO, 'config', 'nginx', 'rengine.conf'), encoding='utf-8').read()
+        found = re.search(r'^map_hash_bucket_size\s+(\d+);', conf, re.M)
+        self.assertIsNotNone(found, 'rengine.conf must set map_hash_bucket_size')
+        self.assertGreaterEqual(int(found.group(1)), 512)  # the shape check accepts a secret of up to 256 characters, plus the key's prefix and the entry overhead
