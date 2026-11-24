@@ -1,10 +1,10 @@
 name: 🔒 Security checks and pull request image build
 
 on:
+  # develop is not listed: a pull request is tested merged with develop before it lands, and the push run after the merge repeated all of it
   push:
     branches:
       - master
-      - develop
       - 1.4-develop
   pull_request:
     branches:
@@ -24,14 +24,46 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  security-tests:
-    name: 🔒 Django security and tenancy tests (${{ matrix.shard }} of 3)
+  changes:
+    # What the pull request touches decides which of the heavy jobs run (a documentation or test only change builds no image and opens no browser).
+    # The Django tests always run: they also check the documentation and the changelog.
+    name: What changed
     runs-on: ubuntu-latest
-    # the suite is split in three jobs of about the same size (scripts/ci_shard.py): each has its own Postgres and Redis, so they never share state
+    timeout-minutes: 5
+    outputs:
+      runtime: ${{ steps.diff.outputs.runtime }}
+      image_inputs: ${{ steps.diff.outputs.image_inputs }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Which kinds of file changed
+        id: diff
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "$EVENT" != "pull_request" ]; then
+            echo "runtime=true" >> "$GITHUB_OUTPUT"; echo "image_inputs=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          files=$(git diff --name-only "$BASE_SHA"...HEAD)
+          echo "$files"
+          # runtime: anything that is not documentation, the changelog or a test (the application, the images, the scripts, the workflows)
+          if echo "$files" | grep -qvE '^(docs/|web/tests/|CHANGELOG\.md$)|\.md$'; then runtime=true; else runtime=false; fi
+          # image_inputs: what decides whether the arm64 image still builds (the Dockerfiles, the pinned requirements, the compose files, the workflows)
+          if echo "$files" | grep -qE '^(web/Dockerfile|web/requirements|reviewer/|config/|docker-compose|\.github/)'; then inputs=true; else inputs=false; fi
+          echo "runtime=$runtime" >> "$GITHUB_OUTPUT"; echo "image_inputs=$inputs" >> "$GITHUB_OUTPUT"
+
+  security-tests:
+    name: 🔒 Django security and tenancy tests (${{ matrix.shard }} of 4)
+    runs-on: ubuntu-latest
+    # the suite is split in four jobs that take about the same time (scripts/ci_shard.py, weighed by scripts/ci_shard_weights.json): each has its own Postgres
+    # and Redis, so they never share state
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
+        shard: [1, 2, 3, 4]
     services:
       postgres:
         image: postgres:18-alpine
@@ -137,7 +169,7 @@ jobs:
           DEBUG: '0'
           CVENGINE_TEST_BLOCK_NETWORK: '1'  # a test that resolves a name or connects outside loopback, Postgres and Redis fails (reNgine/test_runner.py)
         # one worker per core (at most 7: reNgine/test_runner.py gives each worker its own Redis databases)
-        run: python manage.py test --noinput --parallel auto $(python ../scripts/ci_shard.py ${{ matrix.shard }} 3) --durations 15
+        run: python manage.py test --noinput --parallel auto $(python ../scripts/ci_shard.py ${{ matrix.shard }} 4) --durations 15 --module-times
       - name: Front-end node tests (every file in web/tests)
         # was a hand-kept list of 29 files that left 19 of the 50 out (retest, Situations, list failure states, nav fold, ...): a new test file now runs without anyone adding it here
         if: matrix.shard == 1
@@ -145,6 +177,8 @@ jobs:
 
 
   ui-gates:
+    needs: changes
+    if: needs.changes.outputs.runtime == 'true'
     name: 🖥️ UI gates (headless Chromium on the seeded demo)
     runs-on: ubuntu-latest
     timeout-minutes: 40
@@ -215,18 +249,15 @@ jobs:
           if-no-files-found: ignore
 
   build:
+    needs: changes
+    if: needs.changes.outputs.runtime == 'true'
     name: 🐳 Build Docker image (${{ matrix.platform }})
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
-        include:
-          # each platform builds on a native runner; arm64 under QEMU took over 1.5 hours
-          - platform: linux/amd64
-            arch: amd64
-            runner: ubuntu-latest
-          - platform: linux/arm64
-            arch: arm64
-            runner: ubuntu-24.04-arm
+        # each platform builds on a native runner; arm64 under QEMU took over 1.5 hours. A pull request builds arm64 only when something that decides it
+        # changed (the Dockerfiles, the pinned requirements, the compose files, the workflows); pushes to master and the weekly run always build both.
+        include: ${{ fromJSON(needs.changes.outputs.image_inputs == 'true' && '[{"platform":"linux/amd64","arch":"amd64","runner":"ubuntu-latest"},{"platform":"linux/arm64","arch":"arm64","runner":"ubuntu-24.04-arm"}]' || '[{"platform":"linux/amd64","arch":"amd64","runner":"ubuntu-latest"}]') }}
     steps:
       - name: 📥 Checkout the git repo
         uses: actions/checkout@v4
@@ -275,6 +306,8 @@ jobs:
           cache-to: ${{ github.event_name != 'pull_request' && format('type=gha,mode=max,scope=image-{0}', matrix.arch) || '' }}
 
   reviewer-image:
+    needs: changes
+    if: needs.changes.outputs.runtime == 'true'
     # The AI reviewer's own image (docs/AI-REVIEWER.md): it must build, run as its unprivileged user on a read-only filesystem with no
     # capabilities, import every module (the Anthropic SDK included) with the network off, and pass its unit tests there.
     name: 🤖 Build the AI reviewer image

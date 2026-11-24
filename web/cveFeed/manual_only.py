@@ -55,3 +55,31 @@ def other_holder(project_id, host):
     row = (Subdomain._base_manager.filter(target_domain__project_id=project_id).exclude(target_domain__discovery_mode=Domain.DISCOVERY_MANUAL)
            .annotate(lowered=Lower('name')).filter(lowered=name).select_related('target_domain').order_by('-id').first())
     return row.target_domain if row is not None else None
+
+
+HOLDERS_CHUNK = 1000  # names per statement, so one IN list stays a modest size
+
+
+def holders(project_id, hosts):
+    """``{name: Domain or None}``, ``other_holder`` for many hosts at once: two statements per chunk of names instead of two per name. Keys are the
+    names as ``other_holder`` normalises them (stripped, lower case, no trailing dot). Each answer is the one ``other_holder`` gives: the oldest
+    target that is not manual only whose own name it is, else the target of the newest host row a target that is not manual only holds."""
+    from startScan.models import Subdomain
+    from targetApp.models import Domain
+    wanted = list(dict.fromkeys(str(h).strip().lower().rstrip('.') for h in hosts))
+    found = dict.fromkeys(wanted)
+    for start in range(0, len(wanted), HOLDERS_CHUNK):
+        chunk = wanted[start:start + HOLDERS_CHUNK]
+        own = (Domain._base_manager.filter(project_id=project_id).exclude(discovery_mode=Domain.DISCOVERY_MANUAL).annotate(lowered=Lower('name'))
+               .filter(lowered__in=chunk).order_by('-id'))
+        for domain in own:  # newest first, so the oldest of a name is the one kept, as ``.first()`` keeps it
+            found[domain.lowered] = domain
+        rest = [n for n in chunk if found[n] is None]
+        if not rest:
+            continue
+        rows = (Subdomain._base_manager.filter(target_domain__project_id=project_id).exclude(target_domain__discovery_mode=Domain.DISCOVERY_MANUAL)
+                .annotate(lowered=Lower('name')).filter(lowered__in=rest).select_related('target_domain').only('id', 'name', 'target_domain')
+                .order_by('lowered', '-id').distinct('lowered'))
+        for row in rows:
+            found[row.lowered] = row.target_domain
+    return found

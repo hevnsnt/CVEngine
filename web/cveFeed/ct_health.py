@@ -2,14 +2,24 @@
 
 Every real lookup of the standalone watch (cveFeed.ctmonitor) records its outcome for its source here: ``ok`` with the names the source
 gave and the hosts that were new, ``failed`` with why, or ``busy`` (the source's shared pacing held it back for later). The record is a
-daily rollup, one ``CtLookupDay`` row per source and UTC day, so the table stays small whatever the number of lookups: one
-``UPDATE`` per lookup, which runs at most every couple of seconds on the watch's own queue. Rows older than ``KEEP_DAYS`` are deleted
-when a day's first row is written. Every function here is non-fatal: a monitoring write never fails a lookup.
+daily rollup, one ``CtLookupDay`` row per source and UTC day, so the table stays small whatever the number of lookups. Rows older than
+``KEEP_DAYS`` are deleted when a day's first row is written. Every function here is non-fatal: a monitoring write never fails a lookup.
+
+In a Celery worker (``install``) the outcomes are added up in memory and written by a timer every ``FLUSH_SECONDS``: one additive
+``UPDATE`` per source and day (``ok = ok + n``, the newest time of each kind kept with ``GREATEST``), so any number of processes can
+write the same row without losing a count, and a lookup never waits for this row. Every crt.sh lookup held back by pacing used to write
+the row itself, and those writes queued on its row lock behind each other's commits: a third of all database statement time. The
+worker writes what is left when it stops (``worker_shutdown``, ``worker_process_shutdown``, ``atexit``), and a write that fails is kept
+for the next one. Elsewhere (the web, a management command, tests) each outcome is written at once, as before.
 """
+import atexit
 import logging
+import threading
+import time
 from datetime import timedelta
 
-from django.db.models import F, Max
+from django.db.models import Case, F, Max, Q, Value, When
+from django.db.models.functions import Greatest
 from django.utils import timezone
 
 logger = logging.getLogger(__name__)
@@ -19,26 +29,164 @@ STALL_HOURS = 3  # no source answered for this long while lookups were attempted
 OUTCOMES = ('ok', 'failed', 'busy')
 
 
+FLUSH_SECONDS = 60  # how long a worker keeps outcomes in memory before it writes them: the status line lags by at most this much
+_COUNTS = ('ok', 'failed', 'busy', 'names', 'new_hosts')
+_STAMPS = ('last_ok_at', 'last_attempt_at', 'last_failed_at')
+_lock = threading.Lock()
+_pending = {}  # (day, source): {the counts to add, the newest time of each kind, the error of the newest failure}
+_state = {'batching': False, 'flusher': False}
+
+
 def record(source, outcome, names=0, new=0, error='', now=None):
-    """Count one lookup of ``source`` with ``outcome`` (``ok``, ``failed`` or ``busy``) in today's row."""
+    """Count one lookup of ``source`` with ``outcome`` (``ok``, ``failed`` or ``busy``) in today's row: at once, or with the next flush
+    in a worker (``install``)."""
     if outcome not in OUTCOMES:
         return
     try:
-        from cveFeed.models import CtLookupDay
         now = now or timezone.now()
-        day = now.date()
-        fields = {outcome: F(outcome) + 1, 'last_attempt_at': now}
-        if outcome == 'ok':
-            fields.update(names=F('names') + max(0, int(names)), new_hosts=F('new_hosts') + max(0, int(new)), last_ok_at=now)
-        elif outcome == 'failed':
-            fields.update(last_failed_at=now, last_error=(str(error) or 'failed')[:300])
-        if not CtLookupDay.objects.filter(day=day, source=source).update(**fields):
-            _, created = CtLookupDay.objects.get_or_create(day=day, source=source)
-            CtLookupDay.objects.filter(day=day, source=source).update(**fields)
-            if created:
-                CtLookupDay.objects.filter(day__lt=day - timedelta(days=KEEP_DAYS)).delete()
+        names, new = max(0, int(names)), max(0, int(new))
+        with _lock:  # no I/O while held: a greenlet never yields here
+            entry = _pending.setdefault((now.date(), source), dict.fromkeys(_COUNTS, 0))
+            entry[outcome] += 1
+            _later(entry, 'last_attempt_at', now)
+            if outcome == 'ok':
+                entry['names'] += names
+                entry['new_hosts'] += new
+                _later(entry, 'last_ok_at', now)
+            elif outcome == 'failed' and _later(entry, 'last_failed_at', now):
+                entry['last_error'] = (str(error) or 'failed')[:300]
+        if not _state['batching']:
+            flush()
     except Exception:  # noqa: BLE001
         logger.exception('could not record a certificate transparency lookup of %s', source)
+
+
+def _later(entry, field, at):
+    """Keep ``at`` as ``entry[field]`` when it is the newest so far; True when it was kept."""
+    if entry.get(field) is None or at >= entry[field]:
+        entry[field] = at
+        return True
+    return False
+
+
+def _merge(key, entry):
+    """Put a batch whose write failed back with what was counted meanwhile, so the next flush writes both."""
+    with _lock:
+        into = _pending.setdefault(key, dict.fromkeys(_COUNTS, 0))
+        for name in _COUNTS:
+            into[name] += entry[name]
+        for name in ('last_ok_at', 'last_attempt_at'):
+            if entry.get(name):
+                _later(into, name, entry[name])
+        if entry.get('last_failed_at') and _later(into, 'last_failed_at', entry['last_failed_at']):
+            into['last_error'] = entry.get('last_error', '')
+
+
+def flush():
+    """Write every outcome counted in this process and not written yet: one ``UPDATE`` per source and day. Returns the rows written.
+    A batch whose write fails stays for the next flush. Never raises."""
+    with _lock:
+        if not _pending:
+            return 0
+        batch = dict(_pending)
+        _pending.clear()
+    written = 0
+    for key, entry in sorted(batch.items(), key=lambda item: (item[0][0], item[0][1])):
+        try:
+            _write(key, entry)
+            written += 1
+        except Exception:  # noqa: BLE001
+            _merge(key, entry)
+            logger.exception('could not write the certificate transparency lookups of %s on %s; kept for the next write', key[1], key[0])
+    return written
+
+
+def _write(key, entry):
+    from cveFeed.models import CtLookupDay
+    day, source = key
+    fields = {name: F(name) + entry[name] for name in _COUNTS if entry[name]}
+    for name in _STAMPS:
+        if entry.get(name):
+            fields[name] = Greatest(F(name), Value(entry[name]))  # GREATEST skips NULL: a first time is taken as it is
+    if entry.get('last_failed_at'):
+        fields['last_error'] = Case(When(Q(last_failed_at__isnull=True) | Q(last_failed_at__lte=entry['last_failed_at']),
+                                         then=Value(entry['last_error'])), default=F('last_error'))
+    if not CtLookupDay.objects.filter(day=day, source=source).update(**fields):
+        _, created = CtLookupDay.objects.get_or_create(day=day, source=source)
+        CtLookupDay.objects.filter(day=day, source=source).update(**fields)
+        if created:
+            CtLookupDay.objects.filter(day__lt=day - timedelta(days=KEEP_DAYS)).delete()
+
+
+def _flush_and_release():
+    """One timer tick: write, then give back the database connection this greenlet or thread opened, so it holds none between ticks."""
+    try:
+        flush()
+    finally:
+        try:
+            from django.db import connection
+            connection.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _loop(sleep=time.sleep, ticks=None):
+    while ticks is None or ticks > 0:
+        sleep(FLUSH_SECONDS)
+        try:
+            if _pending:
+                _flush_and_release()
+        except Exception:  # noqa: BLE001 - housekeeping must never end the timer
+            logger.exception('ct_health: the timed write failed')
+        if ticks is not None:
+            ticks -= 1
+
+
+def start_batching():
+    """From now on this process adds the outcomes up and a timer writes them every ``FLUSH_SECONDS`` (a greenlet in a gevent worker, a
+    daemon thread otherwise). What is left is written when the process stops."""
+    if _state['flusher']:
+        _state['batching'] = True
+        return
+    from reNgine import gevent_db
+    if gevent_db.gevent_patched():
+        import gevent
+        gevent.spawn(_loop, gevent.sleep)
+    else:
+        threading.Thread(target=_loop, name='ct-health-flush', daemon=True).start()
+    _state['flusher'] = True
+    _state['batching'] = True
+
+
+def _stopping(**kwargs):
+    flush()
+
+
+def _in_worker():
+    """True in a real worker process (started with ``-n``, as every lane is): a test that sends the worker signals starts no timer."""
+    from reNgine import lane_memory
+    return bool(lane_memory.lane_name())
+
+
+def _worker_ready(**kwargs):
+    if _in_worker():
+        start_batching()
+
+
+def _child_started(**kwargs):
+    _state['flusher'] = False  # a forked pool process has no copy of its parent's timer thread
+    _worker_ready()
+
+
+def install():
+    """Called once by the Celery app (reNgine/celery.py): batch the outcomes in a worker once it is ready, and write what is left when the
+    worker or one of its processes stops, or the interpreter exits."""
+    from celery.signals import worker_process_init, worker_process_shutdown, worker_ready, worker_shutdown
+    worker_ready.connect(_worker_ready, weak=False, dispatch_uid='ct-health-batch')
+    worker_process_init.connect(_child_started, weak=False, dispatch_uid='ct-health-batch-child')
+    worker_shutdown.connect(_stopping, weak=False, dispatch_uid='ct-health-flush-worker')
+    worker_process_shutdown.connect(_stopping, weak=False, dispatch_uid='ct-health-flush-child')
+    atexit.register(flush)
 
 
 def _ago(seconds):
