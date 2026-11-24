@@ -205,7 +205,12 @@ class ReportContentTests(ReportBase):
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
+        before = timezone.now()
         cls.project_job = queued(cls.worker, 'acme')
+        after = timezone.now()
+        # the cover's date is the day the report was rendered, read from the clock then: a run that passes midnight between importing this
+        # module (NOW) and rendering would otherwise look for yesterday's date
+        cls.rendered_on = {f'{d:%B} {d.day}, {d:%Y}'.lower() for d in (before, after)}
         cls.closed_job = queued(cls.worker, 'acme', include_closed=True)
         cls.host_job = queued(cls.worker, 'acme', host='www.acme.test')
         cls.text = pdf_text(os.path.join(cls.reports_dir, cls.project_job.filename))
@@ -224,7 +229,8 @@ class ReportContentTests(ReportBase):
 
     def test_cover_names_the_client_the_window_the_date_and_who_prepared_it(self):
         scanned = NOW - timedelta(days=2)
-        for text in ('External Attack Surface Assessment', 'Acme Exposure', 'Acme Org', f'{NOW:%B} {NOW.day}, {NOW:%Y}', 'blue ridge security',
+        self.assertTrue(any(day in self.text.lower() for day in self.rendered_on), self.rendered_on)
+        for text in ('External Attack Surface Assessment', 'Acme Exposure', 'Acme Org', 'blue ridge security',
                      '1 target, 2 hosts in the current inventory', 'Open findings only', f'Assessment window {scanned:%B} {scanned.day}, {scanned:%Y}',
                      'Prepared by Blue Ridge Security, with cvENGINE', 'Confidential'):
             self.assertIn(text.lower(), self.text.lower())  # the cover sets some of it in capitals
