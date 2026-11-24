@@ -353,5 +353,6 @@ class MapBucketTests(TestCase):
         conf = open(os.path.join(REPO, 'config', 'nginx', 'rengine.conf'), encoding='utf-8').read()
         found = re.search(r'^map_hash_bucket_size\s+(\d+);', conf, re.M)
         self.assertIsNotNone(found, 'rengine.conf must set map_hash_bucket_size')
+        self.assertEqual(len(re.findall(r'^map_hash_bucket_size\b', conf, re.M)), 1, 'nginx refuses the directive twice')
         self.assertLess(found.start(), conf.index('\nmap '), 'it must come before the first map block: after one, nginx refuses it as a duplicate')
         self.assertGreaterEqual(int(found.group(1)), 512)  # the shape check accepts a secret of up to 256 characters, plus the key's prefix and the entry overhead
