@@ -2,9 +2,14 @@ name: "Code Quality"
 
 on:
   push:
-    branches: [ master, develop, 1.4-develop ]
+    branches: [ master, 1.4-develop ]
   pull_request:
     branches: [ master, develop, 1.4-develop ]
+    # documentation and tests hold no code to analyse
+    paths-ignore:
+      - 'docs/**'
+      - 'web/tests/**'
+      - '**.md'
   schedule:
     - cron: '0 18 * * 5'
 
