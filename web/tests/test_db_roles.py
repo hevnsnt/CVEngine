@@ -533,6 +533,10 @@ class ComposeTests(SimpleTestCase):
                 self.assertIn('db_owner_fallback:/var/lib/cvengine-db-owner:ro', spec['volumes'], f'{name} {service}')
                 self.assertEqual(self.env_of(spec)['CVENGINE_DB_OWNER_FALLBACK_FILE'], '/var/lib/cvengine-db-owner/password', f'{name} {service}')
             for service, spec in services.items():
+                if service == 'ownership':  # the one-off ownership service hands the volume to uid 10002 (web/ownership.sh): no network, no .env, no password
+                    self.assertEqual((spec.get('network_mode'), spec.get('env_file')), ('none', None), name)
+                    self.assertNotIn('POSTGRES_PASSWORD', str(spec.get('environment')), name)
+                    continue
                 if service not in (*APP_SERVICES, 'migrate'):
                     self.assertFalse([v for v in spec.get('volumes') or [] if 'db_owner_fallback' in str(v)], f'{name} {service}')
             self.assertIn('db_owner_fallback', self.load(name)['volumes'], name)

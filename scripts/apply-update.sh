@@ -326,9 +326,14 @@ deploy_builtin() {
   fi
   DEPLOY_STAGE=build
   phase applying "$DEPLOY_STAGE"
-  SENTINEL_SHA=$(scripts/sentinel-ref.sh 2>/dev/null) || SENTINEL_SHA=''  # the newest Sentinel library, resolved now (docs/UPDATES.md)
-  export SENTINEL_SHA
   "${compose[@]}" build web celery celery-beat || return 1
+  # a checkout whose image runs as its own account hands it its files first (scripts/app-ownership.sh); older checkouts have no such service
+  if grep -qx ownership <<<"$listed" && [ -f scripts/app-ownership.sh ]; then
+    . scripts/app-ownership.sh
+    local owned
+    owned=$(cvengine_app_ownership "${compose[@]}") || { log "$owned"; return 1; }
+    log "$owned"
+  fi
   DEPLOY_STAGE=datastores
   phase applying "$DEPLOY_STAGE"
   if [ -f scripts/redis-password.sh ] && . scripts/redis-password.sh && cvengine_ensure_redis_password "$(cvengine_compose_env_file "${compose[@]}")"; then
@@ -354,7 +359,8 @@ deploy_builtin() {
   fi
   DEPLOY_STAGE=migrated
   phase applying "$DEPLOY_STAGE"
-  "${compose[@]}" run --rm --no-deps --entrypoint python3 web manage.py collectstatic --noinput || return 1
+  # in celery: it writes the static volume in every layout (web mounts it read-only where the image runs as its own account)
+  "${compose[@]}" run --rm --no-deps --entrypoint python3 celery manage.py collectstatic --noinput || return 1
   "${compose[@]}" up -d --no-deps --force-recreate "${services[@]}" || return 1
   verify_running "${services[@]}" || return 1
   # The built-in scanner (scripts/scanner.sh) where the checkout has it: its pinned image, recreated on its own network with the Tailscale sidecar

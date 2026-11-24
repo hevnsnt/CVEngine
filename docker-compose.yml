@@ -7,10 +7,23 @@ x-logging: &default-logging
     max-size: "${CVENGINE_LOG_MAX_SIZE:-50m}"
     max-file: "${CVENGINE_LOG_MAX_FILE:-5}"
 
+# web, celery, celery-beat and the one-off migrate service run as the image's unprivileged account (uid 10002, web/Dockerfile), with every Linux
+# capability dropped (none is needed: the server listens on 8000 and runs no scan tool, so not even NET_BIND_SERVICE or NET_RAW) and no way to
+# gain privileges (no-new-privileges: a setuid binary does not raise them). They run the image's own copy of the source: ./web is NOT mounted over
+# it, so nothing they could write is ever imported. The host's web/ folder is mounted at /var/lib/cvengine/web for what the host and the
+# application exchange (the Django secret, the update channel: docs/UPDATES.md); its folder has the sticky bit and the application owns only its
+# own requests in it (web/ownership.sh). docs/DEPLOYMENT.md, "Who the containers run as".
+x-app-hardening: &app-hardening
+  user: "10002:10002"
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+
 services:
   db:
     restart: always
-    image: "postgres:18-alpine"
+    image: "postgres:18-alpine@sha256:0115267ab5a509022df9319c77be365cef335adb71556c75f60f5360ee247e71"
     # Every worker task holds a database connection while it runs (gevent greenlets, no pooling), and the discovery worker alone may run up to 32
     # at once: PostgreSQL's default of 100 connections is too few. An update recreates this container once when this line changes (scripts/update.sh).
     # The memory settings default to what this file always used (work_mem 4MB and no preloaded library are PostgreSQL's own defaults); a bigger host
@@ -45,7 +58,7 @@ services:
 
   redis:
     restart: always
-    image: "redis:alpine"
+    image: "redis:alpine@sha256:5af80107c1eeecb484a2269b80a26d12bfa6521787da4663bd9f19f60a163483"
     hostname: redis
     environment:
       - REDIS_PASSWORD=${REDIS_PASSWORD:-}
@@ -54,6 +67,39 @@ services:
     command: ["sh", "-c", "if [ -n \"$$REDIS_PASSWORD\" ]; then exec redis-server --requirepass \"$$REDIS_PASSWORD\"; else exec redis-server; fi"]
     networks:
       - data_network  # as the database: only web, celery and celery-beat reach it
+    logging: *default-logging
+
+  # The one-off ownership service (web/ownership.sh): hands the paths the application writes (its volumes, the Django secret and its own update
+  # requests in the host's web/ folder) to the application's account, uid 10002, once and idempotently: an install from before this release
+  # has them as root's. It runs and exits, as root with only the three capabilities chown needs, no network and no environment file. The update
+  # scripts and `make up` run it after the build and before the migrate service; `docker compose up` runs it through depends_on.
+  ownership:
+    build:  # the same image as web (cvengine/web:latest), built with it
+      context: ./web
+    image: cvengine/web:latest
+    entrypoint: /usr/src/app/ownership.sh
+    user: "0:0"
+    restart: "no"
+    network_mode: none
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - FOWNER
+      - DAC_OVERRIDE
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      - CVENGINE_HOST_DIR=/var/lib/cvengine/web
+    volumes:
+      - ./web:/var/lib/cvengine/web
+      - scan_results:/usr/src/scan_results
+      - generated_templates:/root/cvengine-generated-templates
+      - tool_config:/home/cvengine/.config
+      - db_owner_fallback:/var/lib/cvengine-db-owner
+      - static_volume:/usr/src/app/staticfiles
+      - scanner_bootstrap:/var/lib/cvengine-scanner
+      - reviewer_bootstrap:/var/lib/cvengine-reviewer
     logging: *default-logging
 
   # The one-off database owner service. It is the ONLY container that gets the owner role's password (POSTGRES_PASSWORD: the role the
@@ -68,12 +114,10 @@ services:
   migrate:
     build:  # the same image as web (cvengine/web:latest), built with it
       context: ./web
-      args:
-        SENTINEL_REF: "${SENTINEL_REF:-main}"
-        SENTINEL_SHA: "${SENTINEL_SHA:-}"
     image: cvengine/web:latest
     entrypoint: /usr/src/app/migrate-entrypoint.sh
     restart: "no"
+    <<: *app-hardening
     env_file:
       - path: .env
         required: false
@@ -91,12 +135,18 @@ services:
       - CVENGINE_DB_APP_USER=${CVENGINE_DB_APP_USER-cvengine_app}
       - CVENGINE_DB_APP_PASSWORD=${CVENGINE_DB_APP_PASSWORD:-}
       - CVENGINE_DB_OWNER_FALLBACK_FILE=/var/lib/cvengine-db-owner/password
+      - RENGINE_HOME=/var/lib/cvengine/web  # the Django secret (web/secret) is read from the host's web/ folder
+      - CVENGINE_HOST_DIR=/var/lib/cvengine/web
     volumes:
-      - ./web:/usr/src/app
+      - ./web:/var/lib/cvengine/web:ro  # the Django secret only; the ownership service creates it on a first start
       - db_owner_fallback:/var/lib/cvengine-db-owner
     depends_on:
-      - db
-      - redis
+      ownership:
+        condition: service_completed_successfully
+      db:
+        condition: service_started
+      redis:
+        condition: service_started
     networks:
       - data_network  # the database (and Redis, which Django's settings name), nothing else
     logging: *default-logging
@@ -106,11 +156,9 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"  # lets "localhost" in Settings > AI model mean this server (see reNgine/ai_providers.py reachable_url)
     build:
-      context: ./web
-      args:  # the Sentinel library the image installs (web/Dockerfile): the newest build of SENTINEL_REF (default main), resolved to SENTINEL_SHA by scripts/sentinel-ref.sh at build time
-        SENTINEL_REF: "${SENTINEL_REF:-main}"
-        SENTINEL_SHA: "${SENTINEL_SHA:-}"
+      context: ./web  # the Sentinel library is the commit web/requirements.txt pins (web/Dockerfile)
     restart: always
+    <<: *app-hardening
     # An init process (tini) as PID 1 reaps the scanners' children and passes SIGTERM on to the entrypoint, which turns it into a warm shutdown of
     # the workers and exits when any one of them dies, so `restart: always` brings back all four. 60 s matches the update scripts' stop timeout.
     init: true
@@ -126,12 +174,12 @@ services:
       retries: 3
       start_period: 10m
     volumes:
-      - ./web:/usr/src/app
+      - ./web:/var/lib/cvengine/web  # the host's web/ folder: the Django secret and the update channel (the watchdog's and the scanner's requests), NOT the source
       - scan_results:/usr/src/scan_results
       - generated_templates:/root/cvengine-generated-templates  # validated AI-written templates survive an update
-      - tool_config:/root/.config
+      - tool_config:/home/cvengine/.config  # HOME's .config: the CVE seed folder (cveFeed/seed_admin.py)
       - db_owner_fallback:/var/lib/cvengine-db-owner:ro  # empty unless CVENGINE_DB_ALLOW_OWNER_FALLBACK=1 (the migrate service writes it)
-      - static_volume:/usr/src/app/staticfiles/
+      - static_volume:/usr/src/app/staticfiles/  # the ONLY service that writes it (collectstatic at start and in the update); the proxy serves it, web reads it
       - tailscale_status:/var/run/tailscale-status:ro  # the optional tailscale profile's published node status, read-only (docs/TAILSCALE.md); empty without it
       - scanner_bootstrap:/var/lib/cvengine-scanner  # where the server leaves the built-in scanner's one-time enrollment (agentapi/builtin_scanner.py); empty unless CVENGINE_BUILTIN_SCANNER=1
       - reviewer_bootstrap:/var/lib/cvengine-reviewer  # where the server leaves the AI reviewer container's token (agentapi/builtin_reviewer.py)
@@ -157,6 +205,8 @@ services:
       - CVENGINE_DB_APP_PASSWORD=${CVENGINE_DB_APP_PASSWORD:-}  # generated by the update and make up (scripts/db-app-role.sh)
       - DJANGO_SUPERUSER_PASSWORD=  # empty: only make admin needs it, and that runs in the migrate service
       - CVENGINE_DB_OWNER_FALLBACK_FILE=/var/lib/cvengine-db-owner/password  # absent unless CVENGINE_DB_ALLOW_OWNER_FALLBACK=1 (docs/CONFIGURATION.md)
+      - RENGINE_HOME=/var/lib/cvengine/web  # the Django secret and the update lock, in the host's web/ folder
+      - CVENGINE_HOST_DIR=/var/lib/cvengine/web  # the update channel's files (cveFeed/updater.py host_dir)
     depends_on:
       migrate:  # the one-off owner service: migrations, the app role and its check; nothing starts when it fails
         condition: service_completed_successfully
@@ -173,6 +223,7 @@ services:
     mem_limit: "${BEAT_MEM_LIMIT:-512m}"  # container ceiling; heavy scanner jobs queue inside it (reNgine/resources.py)
     restart: always
     build: ./web
+    <<: *app-hardening
     entrypoint: /usr/src/app/beat-entrypoint.sh
     command: celery -A reNgine beat -l INFO --scheduler cveFeed.scan_control:PauseAwareScheduler
     # every variable in .env reaches the container (the explicit entries below win, so the internal
@@ -194,6 +245,8 @@ services:
       - CVENGINE_DB_APP_PASSWORD=${CVENGINE_DB_APP_PASSWORD:-}  # generated by the update and make up (scripts/db-app-role.sh)
       - DJANGO_SUPERUSER_PASSWORD=  # empty: only make admin needs it, and that runs in the migrate service
       - CVENGINE_DB_OWNER_FALLBACK_FILE=/var/lib/cvengine-db-owner/password  # absent unless CVENGINE_DB_ALLOW_OWNER_FALLBACK=1 (docs/CONFIGURATION.md)
+      - RENGINE_HOME=/var/lib/cvengine/web  # the Django secret and the update lock, in the host's web/ folder
+      - CVENGINE_HOST_DIR=/var/lib/cvengine/web  # the update channel's files (cveFeed/updater.py host_dir)
     depends_on:
       migrate:  # the one-off owner service: migrations, the app role and its check; nothing starts when it fails
         condition: service_completed_successfully
@@ -202,10 +255,10 @@ services:
       db:
         condition: service_started
     volumes:
-      - ./web:/usr/src/app
-      - scan_results:/usr/src/scan_results
-      - generated_templates:/root/cvengine-generated-templates  # validated AI-written templates survive an update
-      - tool_config:/root/.config
+      - ./web:/var/lib/cvengine/web:ro  # the Django secret; Beat only schedules (its schedule is in the database) and writes none of these
+      - scan_results:/usr/src/scan_results:ro
+      - generated_templates:/root/cvengine-generated-templates:ro
+      - tool_config:/home/cvengine/.config:ro
       - db_owner_fallback:/var/lib/cvengine-db-owner:ro  # empty unless CVENGINE_DB_ALLOW_OWNER_FALLBACK=1 (the migrate service writes it)
     networks:
       - rengine_network
@@ -217,10 +270,8 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"  # lets "localhost" in Settings > AI model mean this server (see reNgine/ai_providers.py reachable_url)
     build:
-      context: ./web
-      args:  # the Sentinel library the image installs (web/Dockerfile): the newest build of SENTINEL_REF (default main), resolved to SENTINEL_SHA by scripts/sentinel-ref.sh at build time
-        SENTINEL_REF: "${SENTINEL_REF:-main}"
-        SENTINEL_SHA: "${SENTINEL_SHA:-}"
+      context: ./web  # the Sentinel library is the commit web/requirements.txt pins (web/Dockerfile)
+    <<: *app-hardening
     entrypoint: /usr/src/app/entrypoint.sh
     # GUNICORN_WORKERS is pinned below (not read from .env): the lockout counters are in the shared Redis cache, so two workers is safe,
     # and a stray value in .env cannot change it
@@ -250,13 +301,15 @@ services:
       - CVENGINE_DB_APP_PASSWORD=${CVENGINE_DB_APP_PASSWORD:-}  # generated by the update and make up (scripts/db-app-role.sh)
       - DJANGO_SUPERUSER_PASSWORD=  # empty: only make admin needs it, and that runs in the migrate service
       - CVENGINE_DB_OWNER_FALLBACK_FILE=/var/lib/cvengine-db-owner/password  # absent unless CVENGINE_DB_ALLOW_OWNER_FALLBACK=1 (docs/CONFIGURATION.md)
+      - RENGINE_HOME=/var/lib/cvengine/web  # the Django secret and the update lock, in the host's web/ folder
+      - CVENGINE_HOST_DIR=/var/lib/cvengine/web  # the update channel's files (cveFeed/updater.py host_dir)
     volumes:
-      - ./web:/usr/src/app
+      - ./web:/var/lib/cvengine/web  # the host's web/ folder: the Django secret and the update channel (Settings > Updates writes its requests here), NOT the source
       - scan_results:/usr/src/scan_results
       - generated_templates:/root/cvengine-generated-templates  # validated AI-written templates survive an update
-      - tool_config:/root/.config
+      - tool_config:/home/cvengine/.config
       - db_owner_fallback:/var/lib/cvengine-db-owner:ro  # empty unless CVENGINE_DB_ALLOW_OWNER_FALLBACK=1 (the migrate service writes it)
-      - static_volume:/usr/src/app/staticfiles/
+      - static_volume:/usr/src/app/staticfiles/:ro  # read only: only celery writes the static files the proxy serves
     # No published port: the bundled proxy is the way in, and the built-in scanner and the AI reviewer reach http://web:8000 on their own networks. A
     # port on 127.0.0.1 let any local process reach the server from the Docker gateway, past the proxy. Opt in with docker-compose.webport.yml (your
     # own reverse proxy on this host, docs/DEPLOYMENT.md); docker-compose.hostnet.yml publishes it for the scanner it moves to the host network.
@@ -280,7 +333,7 @@ services:
 
   proxy:
     restart: always
-    image: nginx:alpine
+    image: nginx:alpine@sha256:b50897d5c7b1aa08067c3d90c5e8b3e47ec4e3c91c91446f67820228f7b41e34
     # A stock image is only as new as the day it was first pulled. The update scripts pull it before they build, while nothing is stopped, and
     # keep the image on the host when the registry cannot be reached: `pull_policy: always` made the pull part of `up`, which runs after the
     # database migration, so a registry outage failed an update that was otherwise done and an offline host could never update.
@@ -305,7 +358,7 @@ services:
       - ./config/nginx/trusted-upstreams.conf:/etc/nginx/trusted-upstreams.conf:ro  # empty: no peer is believed to have set X-Forwarded-For (HOSTING-ONLINE.md, Cloudflare Tunnel)
       # rendered at start into conf.d/cvengine-upstream-secret.inc: the secret a host nginx sends to have its X-Forwarded-For believed on 443
       - ./config/nginx/templates:/etc/nginx/templates:ro
-      - static_volume:/usr/src/app/staticfiles/
+      - static_volume:/usr/src/app/staticfiles/:ro
       - scan_results:/usr/src/scan_results:ro
     environment:
       # Empty (the default until an update or make up generates it): no X-Forwarded-For is believed on 443 (config/nginx/rengine.conf, "Client addresses")
@@ -398,7 +451,7 @@ services:
   # else of the stack (not PostgreSQL, not Redis). The Tailscale sidecar joins this container's namespace, and the host network and macvlan overlays
   # (docker-compose.hostnet.yml, docker-compose.macvlan.yml) move this container, not celery. Nothing connects to it.
   scanner:
-    image: "${CVENGINE_SCANNER_IMAGE:-${CVENGINE_SCANNER_ROLLBACK_IMAGE:-ghcr.io/hevnsnt/cvengine-sentinel:main}}"
+    image: "${CVENGINE_SCANNER_IMAGE:-${CVENGINE_SCANNER_ROLLBACK_IMAGE:-ghcr.io/hevnsnt/cvengine-sentinel@sha256:60954c7bd1b840cd5ed84dc505dac34349d80aac17c250f8824aa330457a84ce}}"
     pull_policy: "${CVENGINE_SCANNER_PULL_POLICY:-missing}"
     restart: unless-stopped
     init: true

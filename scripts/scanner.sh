@@ -4,7 +4,7 @@
 # at the next update, and until it is back the work that needs it waits (nothing is marked failed).
 #
 #   . scripts/scanner.sh
-#   cvengine_scanner_fetch docker compose [ARGS...]   before anything is stopped: pull the newest published scanner image (the moving tag, `main`)
+#   cvengine_scanner_fetch docker compose [ARGS...]   before anything is stopped: pull the scanner image this release pins (image@sha256, scanner.lock.json)
 #   cvengine_scanner_start [--no-wait] docker compose [ARGS...]
 #                                                     once the server answers: recreate the scanner, wait until it is healthy AND has checked in with a
 #                                                     contract version this server accepts, and put the previous image back when it does not (`make up`
@@ -12,14 +12,15 @@
 #   cvengine_scanner_sidecar docker compose [ARGS...] the Tailscale sidecar (profile tailscale) back in the scanner's network namespace after the scanner was
 #                                                     recreated; the functions above call it themselves
 #   cvengine_scanner_update docker compose [ARGS...]  the "Scanner update" routine for a running install (scripts/scanner-update.sh runs it): fetch,
-#                                                     then, only when the newest image is not the one running, let the scanner finish its work and start
-#                                                     the new one as above. Safe to run from cron or a timer.
+#                                                     then, only when the pinned image is not the one running, let the scanner finish its work and start
+#                                                     the new one as above. Safe to run from cron or a timer: between updates it finds nothing to do.
 #
-# The scanner FOLLOWS the newest published Sentinel: scanner.lock.json names the moving tag (scripts/scanner_lock.py ref), which docker-compose.yml runs by
-# default, and its known-good floor (the commit and contract version the release was tested with, which `make scanner-build` builds from source offline).
+# The scanner runs EXACTLY the image this release pins: scanner.lock.json names it by digest (scripts/scanner_lock.py ref), which docker-compose.yml runs by
+# default, with the Sentinel commit it was published from and the contract version that commit speaks (`make scanner-build` builds it from source offline).
+# No moving tag is pulled: a newer Sentinel reaches a host only with an update whose commit moved the pin (scripts/scanner_lock.py bump, by pull request).
 # CVENGINE_SCANNER_IMAGE in the env file is an administrator's own image or digest, the way to HOLD a version: it is used as it is and never pulled over, updated
 # or rolled back. A rollback tags the image that was running as cvengine-sentinel-rollback:previous (a moving tag cannot name it any more) and writes it as
-# CVENGINE_SCANNER_ROLLBACK_IMAGE into the env file Compose reads (and .env); the next update removes it before it pulls the newest image again.
+# CVENGINE_SCANNER_ROLLBACK_IMAGE into the env file Compose reads (and .env); the next update removes it before it pulls the pinned image again.
 # CVENGINE_BUILTIN_SCANNER=0 turns the scanner off: it is stopped and removed, and nothing is pulled.
 # CVENGINE_SCANNER_READY_SECONDS (default 300) is how long the start waits for the first heartbeat; CVENGINE_SCANNER_DRAIN_SECONDS (default 900) how long
 # a scheduled update lets the running scanner finish its tasks before it gives up for this time.
@@ -29,7 +30,7 @@
 
 _cv_scanner_rollback_tag=cvengine-sentinel-rollback:previous
 _cv_scanner_why=''          # why the last new image was refused (set by _cvengine_scanner_ready)
-_cv_scanner_result=''       # cvengine_scanner_update: `done` (on the newest image, or held, or off: nothing more to do), `busy` or `no-pull` (try again at the next run)
+_cv_scanner_result=''       # cvengine_scanner_update: `done` (on the pinned image, or held, or off: nothing more to do), `busy` or `no-pull` (try again at the next run)
 _cv_scanner_pulled=''       # fetch: `ok`, `failed`, `own` (an administrator's image: nothing pulled), or empty (nothing tried)
 
 _cvengine_scanner_log() { if declare -F log >/dev/null 2>&1; then log "$*"; else echo "$*" >&2; fi; }
@@ -119,7 +120,7 @@ cvengine_scanner_fetch() {
   fi
   file=$(_cvengine_scanner_env_file "$@")
   own=$(_cvengine_scanner_value CVENGINE_SCANNER_IMAGE "$file")
-  _cvengine_scanner_rollback "$file" ''  # the newest image is tried again
+  _cvengine_scanner_rollback "$file" ''  # the pinned image is tried again
   wanted=$(cvengine_scanner_wanted_image "$@") || { _cvengine_scanner_log "could not read scanner.lock.json; the built-in scanner keeps the image it has"; return 0; }
   if [ -n "$own" ]; then
     _cv_scanner_pulled=own
@@ -127,13 +128,14 @@ cvengine_scanner_fetch() {
       _cvengine_scanner_log "CVENGINE_SCANNER_IMAGE=$wanted is not on this host and could not be pulled; the built-in scanner keeps the image it has"
     return 0
   fi
-  # the moving tag: pulled every time (that is the update). A failure never stops the update; the image on this host is kept.
+  # the pinned digest: a no-op when it is on this host already, the new image after an update moved the pin. A failure never stops the update; the image
+  # on this host is kept.
   if docker pull -q "$wanted" >/dev/null 2>&1; then
     _cv_scanner_pulled=ok
-    _cvengine_scanner_log "the newest published built-in scanner image ($wanted) is on this host"
+    _cvengine_scanner_log "the pinned built-in scanner image ($wanted) is on this host"
   else
     _cv_scanner_pulled=failed
-    _cvengine_scanner_log "could not pull the built-in scanner image $wanted (offline, or the registry refused); the scanner keeps the image it has. Build the tested floor from source with: make scanner-build"
+    _cvengine_scanner_log "could not pull the built-in scanner image $wanted (offline, or the registry refused); the scanner keeps the image it has. Build the pinned commit from source with: make scanner-build"
   fi
   return 0
 }
@@ -344,7 +346,7 @@ cvengine_scanner_update() {  # docker compose [ARGS...]
   file=$(_cvengine_scanner_env_file "$@")
   own=$(_cvengine_scanner_value CVENGINE_SCANNER_IMAGE "$file")
   if [ -n "$own" ]; then
-    _cvengine_scanner_log "the built-in scanner is held at CVENGINE_SCANNER_IMAGE=$own; the scanner update leaves it alone (remove the line to follow the newest published image)"
+    _cvengine_scanner_log "the built-in scanner is held at CVENGINE_SCANNER_IMAGE=$own; the scanner update leaves it alone (remove the line to run the image this release pins)"
     return 0
   fi
   running_id=$(_cvengine_scanner_running_id "$@")
@@ -353,7 +355,7 @@ cvengine_scanner_update() {  # docker compose [ARGS...]
   wanted=$(cvengine_scanner_wanted_image "$@") || return 0
   wanted_id=$(_cvengine_scanner_image_id "$wanted")
   if [ -n "$running_id" ] && [ "$running_id" = "$wanted_id" ]; then
-    _cvengine_scanner_log "the built-in scanner already runs the newest published image"
+    _cvengine_scanner_log "the built-in scanner already runs the pinned image"
     cvengine_scanner_sidecar "$@"
     return 0
   fi

@@ -33,12 +33,7 @@ python3 manage.py collectstatic --no-input
 # is never overwritten (this used to be `loaddata`, which rewrote every field).
 python3 manage.py load_default_fixtures fixtures/default_scan_engines.yaml
 
-# Temporary fix for whatportis bug - See https://github.com/yogeshojha/rengine/issues/984
-# (path looked up, not hard-coded: it depends on the Python version and the virtual environment)
-WHATPORTIS_CLI=$(python3 -c "import os, whatportis; print(os.path.join(os.path.dirname(whatportis.__file__), 'cli.py'))")
-sed -i 's/purge()/truncate()/g' "$WHATPORTIS_CLI"
-
-# update whatportis
+# update whatportis (its table is in HOME; the fix for https://github.com/yogeshojha/rengine/issues/984 is applied when the image is built, web/Dockerfile)
 yes | whatportis --update
 
 # store scan_results
@@ -46,9 +41,10 @@ if [ ! -d "/usr/src/scan_results" ]
 then
   mkdir /usr/src/scan_results
 fi
-# Only root and the bundled nginx (gid 101 in nginx:alpine; the proxy serves /protected_media/ from this volume, read-only) may enter it: no other
-# account in this container has any business with scan output, PDF reports or log archives. Applied at every start.
-chgrp 101 /usr/src/scan_results && chmod 0750 /usr/src/scan_results || echo "Could not restrict /usr/src/scan_results to root and the proxy"
+# Only this container's account (uid 10002, which owns it: web/ownership.sh) and the bundled nginx (gid 101 in nginx:alpine; the proxy serves
+# /protected_media/ from this volume, read-only) may enter it: no other account has any business with scan output, PDF reports or log archives.
+# Applied at every start (the account is a member of group 101, so it may set that group on a folder it owns).
+chgrp 101 /usr/src/scan_results && chmod 0750 /usr/src/scan_results || echo "Could not restrict /usr/src/scan_results to the application and the proxy"
 
 # the server runs no scan tool and keeps no template set: every scan, template run and template check runs on a Sentinel
 

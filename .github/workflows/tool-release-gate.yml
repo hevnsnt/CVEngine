@@ -1,7 +1,8 @@
 name: 🔭 Tools up to date for release
 
 # Preparing a release (any level) means looking at every scanner tool: a pull request into master fails while a pinned tool is behind its
-# newest release. Bump the pin in web/Dockerfile (or web/requirements.txt, docker-compose.yml, build-pr.yml) and rebuild, or, when a newer
+# newest release, or a base image pinned by digest is behind its tag. Bump the pin in web/Dockerfile (or web/requirements.txt, docker-compose.yml,
+# build-pr.yml; a digest with scripts/image_pins.py bump) and rebuild, or, when a newer
 # version was looked at and deliberately not taken, add the `tools-reviewed` label to the pull request and say why in its description.
 on:
   pull_request:
@@ -21,7 +22,8 @@ jobs:
           REVIEWED: ${{ contains(github.event.pull_request.labels.*.name, 'tools-reviewed') }}
           GITHUB_TOKEN: ${{ github.token }}  # for api.github.com lookups: unauthenticated they are rate limited on shared runners
         run: |
-          if python3 scripts/check_tool_versions.py --fail-if-behind; then
+          # the base images pinned by digest count too: a pin whose tag names a newer image is behind (python3 scripts/image_pins.py bump IMAGE)
+          if python3 scripts/check_tool_versions.py --fail-if-behind && python3 scripts/image_pins.py check --remote --fail-if-behind; then
             exit 0
           fi
           if [ "$REVIEWED" = "true" ]; then

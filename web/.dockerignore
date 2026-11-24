@@ -1,5 +1,35 @@
-secret
-__pycache__/
-*.pyc
-.update-*
-.commit
+# What the image is built from: an ALLOW list of the tracked top-level entries of web/, nothing else. The web and celery containers can create new
+# files in the host's web/ folder (the update channel: .update-approved and the other request files, docs/UPDATES.md), but never change or rename one
+# that is not theirs (the folder has the sticky bit, see web/ownership.sh). A name that is not on this list, such as a module planted there, is
+# therefore never copied into the next image, and neither are the secret, .commit or the .update-* files. A new top-level file or folder in web/
+# needs its line here (tests/test_image_user.py checks the list against git).
+*
+!.version
+!.edition
+!Dockerfile
+!agentapi
+!art
+!beat-entrypoint.sh
+!celery-entrypoint.sh
+!celery_healthcheck.py
+!cveFeed
+!dashboard
+!db-role.sh
+!entrypoint.sh
+!fixtures
+!manage.py
+!migrate-entrypoint.sh
+!ownership.sh
+!reNgine
+!recon_note
+!requirements.txt
+!scanEngine
+!startScan
+!static
+!targetApp
+!templates
+!tenancy
+!tests
+# never, even below an allowed folder
+**/__pycache__
+**/*.pyc

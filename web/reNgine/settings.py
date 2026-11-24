@@ -24,6 +24,9 @@ environ.Env.read_env(os.path.join(BASE_DIR, os.pardir, '.env'))
 # Root env vars
 RENGINE_HOME = env('RENGINE_HOME', default='/usr/src/app')
 RENGINE_RESULTS = env('RENGINE_RESULTS', default=f'{RENGINE_HOME}/scan_results')
+# The host's web/ folder where it is not the source folder: production runs the image's own copy of the source and mounts web/ at this path for the
+# update channel's files and the Django secret (docker-compose.yml sets it and RENGINE_HOME to /var/lib/cvengine/web). Empty: the source folder.
+CVENGINE_HOST_DIR = env('CVENGINE_HOST_DIR', default='')
 
 # Common env vars
 DEBUG = env.bool('DEBUG', default=False)
@@ -291,6 +294,9 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 '''
 LOGGING settings
 '''
+# Where errors.log, db.log and celery.log are written (every line also goes to the container log). Empty: the working directory, as always (the
+# tests, a checkout). The image sets /home/cvengine/logs: the application source is read only to the account the containers run as (web/Dockerfile).
+CVENGINE_LOG_DIR = env('CVENGINE_LOG_DIR', default='')
 LOGGING = {
     'version': 1,
     # False: this configuration is applied more than once in a process (django.setup() runs again when reNgine.celery is imported and when a
@@ -302,7 +308,7 @@ LOGGING = {
         'file': {
             'level': 'ERROR',
             'class': 'logging.FileHandler',
-            'filename': 'errors.log',
+            'filename': os.path.join(CVENGINE_LOG_DIR, 'errors.log'),
         },
         'null': {
             'class': 'logging.NullHandler'
@@ -326,14 +332,14 @@ LOGGING = {
         'db': {
             'class': 'logging.handlers.RotatingFileHandler',
             'formatter': 'brief',
-            'filename': 'db.log',
+            'filename': os.path.join(CVENGINE_LOG_DIR, 'db.log'),
             'maxBytes': 1024,
             'backupCount': 3
         },
         'celery': {
             'class': 'logging.handlers.RotatingFileHandler',
             'formatter': 'simple',
-            'filename': 'celery.log',
+            'filename': os.path.join(CVENGINE_LOG_DIR, 'celery.log'),
             'maxBytes': 1024 * 1024 * 100,  # 100 mb
             'backupCount': 3,
         },
