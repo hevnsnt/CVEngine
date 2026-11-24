@@ -235,6 +235,14 @@ def build(samples):
     }
 
 
+def dumps(data):
+    """The weights file text: one module a line, so a refresh reads as a short diff."""
+    head = {key: value for key, value in sorted(data.items()) if key != 'modules'}
+    lines = [f' {json.dumps(key)}: {json.dumps(value)},' for key, value in head.items()]
+    rows = [f'  {json.dumps(name)}: {json.dumps(row)}' for name, row in sorted(data['modules'].items())]
+    return '{\n' + '\n'.join(lines) + '\n "modules": {\n' + ',\n'.join(rows) + '\n }\n}\n'
+
+
 def refresh(argv):
     runs, repo, workflow, run_ids, files = 5, REPO, WORKFLOW, [], []
     args = iter(argv)
@@ -263,8 +271,7 @@ def refresh(argv):
         old = load_weights()
         data.update({key: old[key] for key in ('workers', 'fixed_seconds', 'shard_one_seconds')})
     with open(WEIGHTS, 'w', encoding='utf-8') as handle:
-        json.dump(data, handle, indent=1, sort_keys=True)
-        handle.write('\n')
+        handle.write(dumps(data))
     print(f'{len(data["modules"])} modules from {data["runs"]} runs ({data["samples"]} samples a module) written to {WEIGHTS}')
 
 

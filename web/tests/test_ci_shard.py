@@ -1,6 +1,7 @@
 """The CI split of the Django suite puts every test module in exactly one shard (scripts/ci_shard.py), balanced by the module times the CI logs print
 (scripts/ci_shard_weights.json, ``ci_shard.py --refresh``, the runner's ``--module-times``)."""
 import importlib.util
+import json
 import os
 import re
 import shutil
@@ -81,6 +82,14 @@ class ShardTests(SimpleTestCase):
         present = self.shard.modules()
         self.assertTrue(all(re.fullmatch(r'test_\w+', name) for name in data['modules']))
         self.assertGreater(len(set(data['modules']) & set(present)), 0.8 * len(present), 'most modules have a measured time: run --refresh')
+
+    def test_the_weights_file_is_written_one_module_a_line(self):
+        data = self.shard.load_weights()
+        with open(self.shard.WEIGHTS, encoding='utf-8') as handle:
+            text = handle.read()
+        self.assertEqual(json.loads(self.shard.dumps(json.loads(text))), json.loads(text))
+        self.assertEqual(text, self.shard.dumps(json.loads(text)), 'write the file with ci_shard.py --refresh')
+        self.assertLess(len(text.splitlines()), len(data['modules']) + 20)
 
     def test_the_split_is_the_same_on_every_call(self):
         self.assertEqual(self.shard.shards(3), self.shard.shards(3))
