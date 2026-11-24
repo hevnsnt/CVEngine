@@ -17,9 +17,20 @@ a shell, a query or a template (see API_FREE_TEXT_FIELDS).
 
 Every hit is rejected with 400 and stored as an AbuseStrike. Strikes from one user or one IP inside the window
 add up; at the threshold (``CVENGINE_GUARD_STRIKES``, default 3, so one command-injection attempt is enough) the
-account is disabled, its API tokens are revoked, and a public IP is blocked for 24 hours (``AbuseBan``). Private
-and proxy addresses are never IP-banned (that would block a whole site), and superusers are only logged. An admin
-lifts a ban in Django admin (AbuseBan.lifted) and re-enables the user.
+signed-in session that sent the request is ended (the person signs in again) and a public IP is blocked for 24 hours
+(``AbuseBan``). The guard never disables an account and never revokes an API token: a request can be forced on a
+signed-in person by a link they click, so the most a payload may cost an account is one sign-in, and every action is
+written to the audit log (``abuse.session_ended``, ``abuse.user_flagged``, ``abuse.ip_banned``) for an App Admin to judge.
+Private and proxy addresses are never IP-banned (that would block a whole site), and superusers are only logged
+(``abuse.superuser_flagged``). An admin lifts an address ban in Django admin (AbuseBan.lifted).
+
+Which hits count (review r3 S1). A browser labels every request with ``Sec-Fetch-Site``. ``cross-site`` and ``same-site``
+come from another site's page; ``none`` is a navigation the person started outside any page (a link in a mail or chat
+app, a bookmark, a typed address) and ``same-origin`` a link inside this site. A GET or HEAD with any of those labels is
+a navigation a link can start, so it is rejected and stored (weight 0, for the record) but never counted. Counted are the
+requests a link cannot force: a non-safe method (POST, PUT, PATCH, DELETE) that is not cross-site or same-site, and any
+request without the header (scripts, scanners, API clients). A client can still send a header of its choice to stay
+uncounted; its payload is refused all the same.
 """
 import json
 import logging
@@ -259,48 +270,73 @@ def _audit(user, action, target, **detail):
                             target=_stored(target, 300), detail={k: _stored(v, 600) if isinstance(v, str) else v for k, v in detail.items()})
 
 
-def record_and_maybe_ban(request, hits, ip, user):
-    """Store the strikes; ban if the user's or the IP's recent total reaches the threshold. Returns True if banned."""
+# Safe methods a link or a navigation can produce. Stored as weight 0 when the browser says it was such a navigation (see _counted).
+NAVIGATION_METHODS = frozenset({'GET', 'HEAD'})
+NAVIGATION_SITES = frozenset({'none', 'same-origin'})
+FOREIGN_SITES = frozenset({'cross-site', 'same-site'})
+
+
+def _counted(request):
+    """True when the hits of this request may add up to a ban: a request a link or another site cannot make for the person (module docstring)."""
+    site = request.META.get('HTTP_SEC_FETCH_SITE', '').strip().lower()
+    if site in FOREIGN_SITES:
+        return False
+    return not (request.method in NAVIGATION_METHODS and site in NAVIGATION_SITES)
+
+
+def _end_session(request, user):
+    """Ends the signed-in browser session that sent the request; True if there was one. A bearer token is never touched."""
+    if getattr(request, 'api_token', None) is not None or not hasattr(request, 'session'):
+        return False
+    if getattr(request, 'user', None) is None or getattr(request.user, 'pk', None) != user.pk:
+        return False
+    from django.contrib.auth import logout
+    logout(request)
+    return True
+
+
+def record_and_maybe_ban(request, hits, ip, user, counted=True):
+    """Store the strikes; act if the user's or the IP's recent total reaches the threshold. Returns True if it acted (a session ended
+    or an address banned). ``counted=False`` stores them with weight 0: kept for the record, never part of a total.
+
+    The account is never disabled and no token is revoked (review r3 S1): a user at the threshold loses the browser session that sent the
+    request and is written to the audit log, and a public address at the threshold is banned for IP_BAN."""
     from django.db.models import Sum
 
     from dashboard.models import AbuseBan, AbuseStrike
     for category, weight, field, sample in hits[:5]:
-        AbuseStrike.objects.create(user=user, username=getattr(user, 'username', '') if user else '', ip=ip, weight=weight,
+        AbuseStrike.objects.create(user=user, username=getattr(user, 'username', '') if user else '', ip=ip, weight=weight if counted else 0,
                                    category=category, field=_stored(field, 80), sample=_stored(sample, 200), path=_stored(request.path, 200))
+    if not counted:
+        return False
     since = timezone.now() - WINDOW
     # Two separate tallies: a person's account answers for that person's strikes only, and an address for what came from it.
-    # Summing both let one user's strikes (or a neighbour behind the same NAT) disable an account that had one point.
+    # Summing both let one user's strikes (or a neighbour behind the same NAT) act on an account that had one point.
     recent = AbuseStrike.objects.filter(created_at__gte=since)
     user_total = (recent.filter(user=user).aggregate(t=Sum('weight'))['t'] or 0) if user else 0
     ip_total = (recent.filter(ip=ip).aggregate(t=Sum('weight'))['t'] or 0) if ip else 0
-    disable_user = bool(user) and user_total >= _threshold()
+    user_over = bool(user) and user_total >= _threshold()
     ban_ip = bool(ip) and ip_total >= _threshold()
-    if not (disable_user or ban_ip):
+    if not (user_over or ban_ip):
         return False
-    total = user_total if disable_user else ip_total
+    total = user_total if user_over else ip_total
     reason = _stored(f'{hits[0][0]} in "{hits[0][2]}" ({total} strike points in {int(WINDOW.total_seconds() // 60)} min)', 300)
     if user and user.is_superuser:
-        if disable_user:
+        if user_over:
             _audit(user, 'abuse.superuser_flagged', user.username, reason=reason, ip=ip)
         return False
-    acted = False
-    if disable_user:
-        acted = True
-        from dashboard.models import ApiToken
-        user.is_active = False
-        user.save(update_fields=['is_active'])
-        ApiToken.objects.filter(user=user, revoked=False).update(revoked=True)
-        AbuseBan.objects.create(user=user, username=user.username, ip='', reason=reason)
-        _audit(user, 'abuse.account_disabled', user.username, reason=reason, ip=ip)
+    ended = banned = False
+    if user_over:
+        ended = _end_session(request, user)
+        _audit(user, 'abuse.session_ended' if ended else 'abuse.user_flagged', user.username, reason=reason, ip=ip)
     if ban_ip and _ip_is_banable(ip) and not AbuseBan.objects.filter(ip=ip, lifted=False, expires_at__gt=timezone.now()).exists():
         AbuseBan.objects.create(ip=ip, username=getattr(user, 'username', '') if user else '', reason=reason,
                                 expires_at=timezone.now() + IP_BAN)
         _audit(user, 'abuse.ip_banned', ip, reason=reason)
         invalidate_cache()
-        acted = True
-    if acted:
-        logger.warning('input guard banned user=%s ip=%s: %s', getattr(user, 'username', None), ip, reason)
-    return acted
+        banned = True
+    logger.warning('input guard: user=%s ip=%s session ended=%s address banned=%s: %s', getattr(user, 'username', None), ip, ended, banned, reason)
+    return ended or banned
 
 
 def _oversize_api_json(request):
@@ -335,17 +371,17 @@ class InputGuardMiddleware:
         if not hits:
             return self.get_response(request)
         # A page on another site can make a victim's browser send these requests (an image tag, an auto-submitted
-        # form). Browsers label those cross-site/same-site; reject them but never count them against the victim.
-        if request.META.get('HTTP_SEC_FETCH_SITE', '').lower() in ('cross-site', 'same-site'):
+        # form). Browsers label those cross-site/same-site; reject them but never record them against the victim.
+        if request.META.get('HTTP_SEC_FETCH_SITE', '').strip().lower() in FOREIGN_SITES:
             return JsonResponse({'error': 'Request rejected.'}, status=400)
         from reNgine.client_ip import client_ip
         user = getattr(request, 'user', None)
         user = user if user is not None and user.is_authenticated else None
         banned = False
         try:
-            banned = record_and_maybe_ban(request, hits, client_ip(request), user)
+            banned = record_and_maybe_ban(request, hits, client_ip(request), user, counted=_counted(request))
         except Exception:  # noqa: BLE001
             logger.exception('input guard could not record a strike')
         if banned:
-            return JsonResponse({'error': 'This account or address has been blocked for sending malicious input.'}, status=403)
+            return JsonResponse({'error': 'This session or address has been blocked for sending malicious input.'}, status=403)
         return JsonResponse({'error': 'Request rejected: it contains characters or patterns that are not valid input.'}, status=400)

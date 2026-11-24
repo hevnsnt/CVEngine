@@ -40,6 +40,8 @@ up: check-env		## Build and start all services.
 	@bash -c '. scripts/redis-password.sh && cvengine_ensure_redis_password "$(CVENGINE_COMPOSE_ENV_FILE)" && echo "The Redis broker had no password: generated one (REDIS_PASSWORD in .env)." || true'
 	@# the least privilege database role the server runs as gets its password; the migrate service below creates the role (docs/CONFIGURATION.md)
 	@bash -c '. scripts/db-app-role.sh && cvengine_ensure_db_app_password "$(CVENGINE_COMPOSE_ENV_FILE)" && echo "Generated the password of the database role the server runs as (CVENGINE_DB_APP_PASSWORD in .env)." || true'
+	@# the secret a host nginx sends so the proxy believes its X-Forwarded-For (docs/DEPLOYMENT.md, Client addresses behind a host proxy)
+	@bash -c '. scripts/client-address.sh && cvengine_ensure_upstream_secret "$(CVENGINE_COMPOSE_ENV_FILE)" && echo "Generated the upstream secret (CVENGINE_UPSTREAM_SECRET in .env); a host nginx in front of the proxy needs it: scripts/client-address-check.sh --snippet" || true'
 	@# Only the one-off migrate service gets the database owner's password. It runs here, before the application starts, in the foreground so its
 	@# output shows: the migrations, then the app role's grants and login check, which stops make up with the one-line fix when the role cannot be
 	@# used (CVENGINE_DB_ALLOW_OWNER_FALLBACK=1 in .env is the explicit way to run on the owner role instead).

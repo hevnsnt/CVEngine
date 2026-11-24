@@ -82,7 +82,7 @@ To turn them off, remove the lines from `.env` (or set `off` and `-1`) and run `
 | --- | --- | --- |
 | 443 | all interfaces | `proxy`, the HTTPS front door |
 | 8082 | all interfaces | `proxy`, redirects to HTTPS |
-| 8000 | `127.0.0.1` | `web`, for your own reverse proxy |
+| 8000 | not published | `web`. Opt in on `127.0.0.1` with `docker-compose.webport.yml` (your own reverse proxy) or `docker-compose.hostnet.yml` (which publishes it for the scanner) |
 | 5432 | `127.0.0.1` | `db` |
 
 Firewall 443 and 8082 to the people who need them. The development stack has no proxy and publishes 8000 and 5432 on `127.0.0.1` only. The optional `tailscale` and `openvas` profiles publish no ports at all.
@@ -186,9 +186,35 @@ An install made before this release holds a 10-year server certificate: it is re
 
 For a public site with a browser-trusted certificate (Let's Encrypt, Cloudflare), follow [HOSTING-ONLINE.md](HOSTING-ONLINE.md). For a server with no inbound port, published through a Cloudflare Tunnel, see [Through a Cloudflare Tunnel](HOSTING-ONLINE.md#c-through-a-cloudflare-tunnel-no-inbound-port): the tunnel needs the bundled proxy told to believe it (`config/nginx/trusted-upstreams.conf`), which is the one thing that differs from the proxy of your own below.
 
-To use your own proxy or CDN, point it at the web service (`127.0.0.1:8000` on the host) and have it set `X-Forwarded-Proto` and `X-Forwarded-For`, replacing any values from the client. Then add `CVENGINE_CSRF_TRUSTED_ORIGINS` (your https address) to `.env` and run `make up`.
+**Client addresses.** The IP allowlist, the abuse guard, the sign-in lockout and the audit log need the real client address. The web service reads it from `X-Forwarded-For`, but only when the peer connecting to it is listed in `CVENGINE_TRUSTED_PROXIES`, and by default that is the bundled proxy alone: the proxy has a fixed address (`172.16.238.10`, `CVENGINE_PROXY_ADDRESS`) on `proxy_network`, a network only it and `web` are on, and it reaches `web` there and nowhere else. The built-in scanner, the AI reviewer and anything on the host reach `web` from other addresses, so the header they send is ignored and they cannot choose the address the server records or bans. The bundled proxy in turn replaces any `X-Forwarded-For` it receives with the address that connected to it, except in two cases, where it passes the chain on unchanged (the application takes its right-most address):
 
-**Client addresses.** The IP allowlist and the abuse guard need the real client address. CVEngine reads it from `X-Forwarded-For`, but only when the peer connecting to the web container is listed in `CVENGINE_TRUSTED_PROXIES`. That setting names the addresses the web container sees *connecting to it*, not your proxy's public or LAN address. A proxy on the Docker host reaches the container through the Docker bridge gateway, which the default `172.16.0.0/12` already covers, so for a proxy on the same host you set nothing. Do not replace the default with your proxy's own network: the gateway is then untrusted, `X-Forwarded-For` is ignored, and every request appears to come from the gateway. If you need to trust more, add to the default (`172.16.0.0/12,203.0.113.0/24`): the address the container sees if your proxy does not arrive through the bridge, and the networks of any further hops (a CDN edge) that append to `X-Forwarded-For` instead of replacing it. Your outermost proxy must overwrite any `X-Forwarded-For` the client sent. The bundled proxy does the same to what it receives, unless the request arrived on the tunnel listener (container port 8443, not published by default) from a peer listed in the file mounted at `/etc/nginx/trusted-upstreams.conf` (empty by default): then it keeps the chain and appends the peer. Port 443 never does.
+- the request came in on the tunnel listener (container port 8443, not published by default) from a peer listed in the file mounted at `/etc/nginx/trusted-upstreams.conf` (empty by default; [Through a Cloudflare Tunnel](HOSTING-ONLINE.md#c-through-a-cloudflare-tunnel-no-inbound-port));
+- the request came in on port 443 with this install's upstream secret in `X-CVEngine-Upstream` ([Client addresses behind a host proxy](#client-addresses-behind-a-host-proxy)). The proxy removes that header before the request reaches the application.
+
+Port 443 never believes the peer alone: Docker's port publishing shows an outside client (every IPv6 client, for one) to the proxy as the same gateway address a host nginx has. Run `scripts/client-address-check.sh` to see which address the server takes for a request through your public name; every update runs it and writes the answer to its log.
+
+### Client addresses behind a host proxy
+
+When a web server on the host terminates TLS and forwards to the bundled proxy (for example Cloudflare, then the host's nginx, then `127.0.0.1:18443`, which a Compose overlay publishes for the proxy's port 443), the proxy sees the Docker gateway connect, so without this step every visitor is one address: five wrong passwords from anyone lock the account out for everyone, and a ban or the IP allowlist acts on everybody at once.
+
+1. The install has a secret: `CVENGINE_UPSTREAM_SECRET` in `.env` (and in the Compose env file, such as `.env.vps`). `make up`, the installer and every update generate it when it is missing, and recreate the proxy, which loads it.
+2. Print the lines for the host nginx with the secret filled in, into a file only root can read:
+
+   ```bash
+   (umask 077; scripts/client-address-check.sh --snippet | sudo tee /etc/nginx/snippets/cvengine-client-address.conf >/dev/null)
+   ```
+
+   The shipped file is `config/nginx/host-proxy-client-address.conf`. It holds exactly two lines, `proxy_set_header X-Forwarded-For $remote_addr;` (the address this nginx saw, replacing anything the client sent) and `proxy_set_header X-CVEngine-Upstream "<secret>";`.
+3. Include it in the `location` that holds the `proxy_pass` to the bundled proxy (`include snippets/cvengine-client-address.conf;`), next to the other `proxy_set_header` lines, and remove any other `X-Forwarded-For` line there. Behind Cloudflare, `$remote_addr` must already be the visitor: `real_ip_header CF-Connecting-IP;` and one `set_real_ip_from` line per Cloudflare range (https://www.cloudflare.com/ips/).
+4. `sudo nginx -t && sudo systemctl reload nginx`, then `scripts/client-address-check.sh`. `ok: a request through https://... arrived as <address>, the address Cloudflare saw` means it works; `PROBLEM` names what is still missing.
+
+Without the snippet, or with an empty secret, the proxy behaves as before (it believes no header on 443): nothing breaks, the addresses are just all the gateway. A new secret (remove the line from `.env` and update) must be put into the host snippet again. Anyone who holds the secret and can reach the proxy's port 443 directly can choose the address the server records, so keep the snippet root-only and the proxy's port on loopback where a host proxy fronts it.
+
+A Compose overlay for such a host (for example `docker-compose.vps.yml`) may move the proxy's published ports, but it must not: set `CVENGINE_TRUSTED_PROXIES` to a range, publish `web`'s port 8000 again (use `docker-compose.webport.yml` only for your own reverse proxy), replace the proxy's `networks` (its fixed address on `proxy_network`), its `environment` (`CVENGINE_UPSTREAM_SECRET`) or the `./config/nginx/templates` mount, or move `web`'s `rengine` alias off `proxy_network`. Each of these either lets other containers choose the client address again or stops the secret from loading (the check script reports the second).
+
+### Your own reverse proxy
+
+To use your own proxy in place of the bundled one, publish the web service with `docker-compose.webport.yml` (`127.0.0.1:8000`, `CVENGINE_WEB_HOST_PORT` moves it; add it to `CVENGINE_COMPOSE_FILES`), point the proxy at it, and have it set `X-Forwarded-Proto` and `X-Forwarded-For`, replacing any values from the client. The web container sees your proxy connect from a Docker gateway address (`docker compose exec web python3 manage.py client_address_probe trusted` prints what it trusts; your proxy's address is in the web container's logs, or `docker network inspect`), so add that one address to `CVENGINE_TRUSTED_PROXIES` beside the default (`CVENGINE_TRUSTED_PROXIES=172.16.238.10,<gateway>`). Anything else on the host that can reach `127.0.0.1:8000` can then choose its client address too. Then add `CVENGINE_CSRF_TRUSTED_ORIGINS` (your https address) to `.env` and run `make up`.
 
 Django sends an HSTS header with a one-hour lifetime by default and does not include subdomains or ask for preloading. Raise `CVENGINE_HSTS_SECONDS` only once your public TLS path is reliable.
 

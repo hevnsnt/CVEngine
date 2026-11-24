@@ -1,0 +1,12 @@
+# Opt in: publish the web service on this host's loopback, for your own reverse proxy (Caddy, nginx, Traefik) in place of the bundled one.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.webport.yml up -d     (or CVENGINE_COMPOSE_FILES=docker-compose.yml,docker-compose.webport.yml in .env)
+#
+# The base file publishes no port for web: the bundled proxy is the way in, and the built-in scanner and the AI reviewer reach http://web:8000 on their
+# own networks. With this file anything on this host can reach the server directly. A proxy that connects here is seen by the web container as the
+# a Docker gateway (such as 172.16.238.1); its X-Forwarded-For is believed only when you add that address to
+# CVENGINE_TRUSTED_PROXIES (docs/DEPLOYMENT.md, "Your own reverse proxy"), and then every local process can choose its client address too.
+services:
+  web:
+    ports:
+      - "127.0.0.1:${CVENGINE_WEB_HOST_PORT:-8000}:8000"

