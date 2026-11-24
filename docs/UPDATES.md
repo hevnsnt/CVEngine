@@ -26,6 +26,8 @@ The two scripts differ in how carefully they restart:
 | Removes the replaced image afterward | no | yes, once the update is verified |
 | Stops scans | only with `--stop-scans` or `--force`; automatic deployment always does | only work on this server that is still running after the 60 second cap, or (with the opt-in) scans still running after the drain limit: the update then goes ahead and interrupts them. A scan on a Sentinel is never stopped by an update |
 
+The dumps an update takes are restore points for that update only. A daily dump, kept a number of days, is separate: `make db-backup-schedule` sets it up and `make restore-check` proves the newest one restores ([DEPLOYMENT.md](DEPLOYMENT.md#nightly-dump)). An update neither takes nor removes those.
+
 ## Automatic deployment
 
 Needs a Linux host with systemd. Install the timer once, as root, in the checkout:

@@ -618,7 +618,7 @@ class UpdatePathTests(unittest.TestCase):
 
     def test_each_update_path_fetches_before_and_starts_after(self):
         for name, after in (('scripts/update.sh', 'worker_queues_ready && beat_ready'), ('scripts/update-deploy.sh', 'verify_serving || return 1'),
-                            ('scripts/apply-update.sh', 'verify_running "${services[@]}" || return 1'), ('Makefile', 'up -d --build ${SERVICES}')):
+                            ('scripts/apply-update.sh', 'verify_running "${services[@]}" || return 1'), ('Makefile', 'up -d --build --no-deps ${SERVICES}')):
             with self.subTest(name=name):
                 text = self.text(name)
                 self.assertIn('cvengine_scanner_fetch', text)

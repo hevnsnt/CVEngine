@@ -48,7 +48,8 @@ case " $* " in
   *" config --services "*) if [[ "$*" == *"docker-compose.dev.yml"* ]]; then
       printf 'db\\nredis\\nweb\\ncelery\\ncelery-beat\\n';
     else printf 'db\\nredis\\nweb\\ncelery\\ncelery-beat\\nproxy\\n'; fi
-    if [ -e "$STUB_DIR/tailscale_profile" ]; then printf 'tailscale\\n'; fi; exit 0;;
+    if [ -e "$STUB_DIR/tailscale_profile" ]; then printf 'tailscale\\n'; fi
+    if [ -e "$STUB_DIR/has_migrate" ]; then printf 'migrate\\n'; fi; exit 0;;
   *" pull "*) test ! -e "$STUB_DIR/pull_fails"; exit $?;;
   *" cancel_consumer "*) if [ -e "$STUB_DIR/cancel_never_answers" ]; then exit 69; fi
     if [ -e "$STUB_DIR/cancel_slow_once" ]; then rm "$STUB_DIR/cancel_slow_once"; exit 69; fi
@@ -77,6 +78,7 @@ case " $* " in
   *" exec dbid "*) case "$*" in *pg_dump*) if [ -e "$STUB_DIR/dump_fails" ]; then exit 1; fi
       echo "-- a dump of the database, long enough to pass the size check of scripts/db-backup.sh";;
     esac; exit 0;;
+  *" db_app_role gate "*) if [ -e "$STUB_DIR/gate_fails" ]; then echo "Fix: make the database accept cvengine_app" >&2; exit 1; fi; exit 0;;
   *" showmigrations "*) if [ -f "$STUB_DIR/migrations_state" ]; then cat "$STUB_DIR/migrations_state"; else echo "[X]  app.0001_initial"; fi; exit 0;;
   *" migrate --noinput "*) if [ -e "$STUB_DIR/migrate_partial" ]; then
       printf '[X]  app.0001_initial\\n[X]  app.0002_first_of_the_batch\\n' > "$STUB_DIR/migrations_state"; exit 1; fi
@@ -303,6 +305,34 @@ class ManualUpdateTests(UpdateScriptCase):
             if process.poll() is None:
                 process.kill()
                 process.communicate()
+
+    def with_owner_service(self):
+        (self.stub / 'has_migrate').touch()
+        for name in ('db-app-role.sh', 'redis-password.sh'):
+            shutil.copy(SCRIPT.with_name(name), self.work / 'scripts' / name)
+
+    def test_the_role_check_and_the_migration_run_in_the_migrate_service_before_the_apps_restart(self):
+        self.with_owner_service()
+        result = self.run_update(CVENGINE_UPDATE_BACKUPS='3')
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        calls = self.calls()
+        index = lambda text, start=0: next(i for i, c in enumerate(calls) if i >= start and text in c)
+        # (update.sh reads config --format json earlier too, for the PostgreSQL volume: the owner password check is the read after the dump)
+        order = [index('pg_dump'), index('config --format json', index('pg_dump')),
+                 index('run --rm --no-deps -T -e CVENGINE_DB_ALLOW_OWNER_FALLBACK=0 migrate python3 manage.py db_app_role gate'),
+                 index('run --rm --no-deps migrate python3 manage.py migrate --noinput'), index('--force-recreate web')]
+        self.assertEqual(order, sorted(order), calls)
+        self.assertFalse([c for c in calls if 'CVENGINE_DB_ROLE=owner' in c])
+
+    def test_a_failed_role_check_stops_before_the_migration_and_keeps_the_old_apps(self):
+        self.with_owner_service()
+        (self.stub / 'gate_fails').touch()
+        result = self.run_update()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Fix: make the database accept cvengine_app', result.stderr + result.stdout)
+        self.assertIn('database role the server runs as cannot be used', result.stderr + result.stdout)
+        self.assertFalse(any(' migrate --noinput' in c or '--force-recreate web' in c for c in self.calls()))
+        self.assertTrue(any(' add_consumer ' in c for c in self.calls()))  # the old workers are resumed
 
     def test_migration_failure_does_not_restart_apps(self):
         (self.stub / 'migrate_fail').touch()

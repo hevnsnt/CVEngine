@@ -62,6 +62,7 @@ BACKFILLS = (
     'backfill_php_link_tells',            # PHP read only from a link to a .php URL: route fingerprints and probe rows become leads, the PHP links go (re-correlated)
     'rewrite_tls_findings',               # open TLS audit findings (testssl.sh) reworded from their stored evidence: plain text, confidence in the title, unproven capped at Medium
     'close_archived_findings',            # the open findings of hosts archived before archiving closed them: closed as fixed, the note says the host was archived
+    'recheck_branch_fixes',               # matches past a fix the advisory states for their own release line (F5's nginx records), re-correlated
     'audit_finding_hosts',                # the open findings of hosts gone from the current inventory (or archived): closed as fixed, reopened when the host is back
     'rerate_findings',                    # 1.3.5: rescore hosts for the new heat rules, clear stale fire marks (last: counts everything above)
 )

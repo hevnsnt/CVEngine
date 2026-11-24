@@ -117,8 +117,12 @@ def _shared_inputs(project_ids):
     try:
         ids = list(project_ids)
         current = inventory_counts.current_rows()  # the current inventory, worked out once and used by the host counts and the CVE match counts
-        shared = {**stats_history.shared_host_counts(current), 'web_hosts': web_shot.web_hosts_by_project(),
+        names = {}  # (project id, name) -> the host key of the Hosts page's fold, from the host counts' own collapse
+        shared = {**stats_history.shared_host_counts(current, names_out=names), 'web_hosts': web_shot.web_hosts_by_project(),
                   'findings': stats_history.shared_finding_counts(ids, [row[0] for row in current])}
+        # the distinct issues of the open findings: the CVE matches grouped as the Findings list groups them, the hosts read from the same collapse
+        shared['issues'] = stats_history.match_issue_counts(ids, [row[0] for row in current],
+                                                            site_of=lambda project_id, name: names.get((project_id, name)))
         shared['targets'] = {row['project_id']: row['n'] for row in Domain.objects.filter(project_id__in=ids).values('project_id').annotate(n=Count('id')).order_by()}
         window = counts.running_window()
         for name, scans in (('running', counts.running_scans(window=window)), ('queued', counts.queued_scans()), ('stalled', counts.stalled_scans())):
@@ -171,6 +175,13 @@ def _project_row(project, shared=None):
     from startScan.models import ScanHistory
     from targetApp.models import Domain
     snap = compute_snapshot(project, with_fixed=False, shared=shared)  # the live counts only; never stored
+    open_total = sum(snap['open_findings'].values())
+    if shared is not None and 'issues' in shared:
+        matched, issues = shared['issues'].get(project.id, (0, 0))
+        open_issues = open_total - matched + issues  # counts.distinct_issues, from the shared grouped read
+    else:
+        from cveFeed.stats_history import open_issues as issues_of
+        open_issues = issues_of(project, open_total)
     if shared is not None and 'scans_running' in shared:
         pid = project.id
         targets = shared['targets'].get(pid, 0)
@@ -186,7 +197,9 @@ def _project_row(project, shared=None):
         'targets': targets,
         'hosts': snap['hosts'], 'exposed_hosts': snap['exposed_hosts'],
         'scans': scans,
-        'open_findings': snap['open_findings'], 'open_findings_total': sum(snap['open_findings'].values()),
+        'open_findings': snap['open_findings'], 'open_findings_total': open_total,
+        # the same open findings as distinct issues: version-only CVE matches on one product and version of a host are one fix (cveFeed.counts.match_issues)
+        'open_issues': open_issues,
         'cve_matches': snap['cve_matches'],
         # WordPress hosts: how many, how many the WordPress scan has covered, and why the rest were not (blocked by an edge, failed, waiting)
         'wordpress': wordpress,
@@ -468,9 +481,11 @@ def _inventory(ctx, problems):
 
 
 def _totals(rows):
-    total = {'projects': len(rows), 'targets': 0, 'hosts': 0, 'exposed_hosts': 0, 'open_findings': 0,
+    total = {'projects': len(rows), 'targets': 0, 'hosts': 0, 'exposed_hosts': 0, 'open_findings': 0, 'open_issues': 0,
              'scans_running': 0, 'scans_queued': 0, 'scans_stalled': 0}
     for row in rows:
+        if total['open_issues'] is not None:  # a row counted before the figure existed has none: the total then says nothing rather than a wrong sum
+            total['open_issues'] = None if row.get('open_issues') is None else total['open_issues'] + row['open_issues']
         total['targets'] += row['targets']
         total['hosts'] += row['hosts']
         total['exposed_hosts'] += row['exposed_hosts']
