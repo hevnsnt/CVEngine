@@ -8,7 +8,7 @@
 # are root's. This changes only what is not already right, says how many paths it changed in one line, and changes nothing on a second run:
 #   scan results          every entry to uid 10002 (groups kept); the folder itself 10002:101 (the proxy's nginx group), mode 0750
 #   static files, generated templates, ~/.config (the CVE seed folder), the owner fallback, the AI reviewer's token folder: every entry to 10002:10002
-#   the built-in scanner's enrollment folder: the folder only, 10002:10002 mode 2750 (setgid: the blob the server writes there is 0640, group 10002,
+#   the built-in scanner's enrollment folder: the folder only, 10002:10002 mode 2751 (setgid: the blob the server writes there is 0640, group 10002,
 #   which the scanner service is given with group_add); a blob left readable by others is made group 10002 and 0640
 #   the host's web/ folder (mounted at /var/lib/cvengine/web): group 10002 and mode 1775, so the application can create its update requests there
 #   but cannot change, rename or remove any file it does not own (the sticky bit); the Django secret (web/secret, mode 0600) and the request
@@ -63,9 +63,11 @@ done
 # The setgid bit is set while the folder's group is still root's: this root has no FSETID capability and is not in group 10002, and the kernel
 # drops the bit from a chmod by such a process; a later change of a folder's group keeps it.
 scanner_dir="$R/var/lib/cvengine-scanner"
-if [ -d "$scanner_dir" ] && [ "$(stat -c '%u:%g %a' "$scanner_dir")" != "$APP_UID:$APP_GID 2750" ]; then
+# Others may pass through the folder (the 1 of 2751) but not list it: the previous release's scanner, which has no group 10002, still reaches the
+# 0600 blob of its own that the previous release writes there, so an update that is put back does not leave its scanner unable to enroll.
+if [ -d "$scanner_dir" ] && [ "$(stat -c '%u:%g %a' "$scanner_dir")" != "$APP_UID:$APP_GID 2751" ]; then
     chown "$APP_UID:$(id -g)" "$scanner_dir"
-    chmod 2750 "$scanner_dir"
+    chmod 2751 "$scanner_dir"
     chgrp "$APP_GID" "$scanner_dir"
     changed=$((changed + 1))
     report="$report cvengine-scanner/"

@@ -334,7 +334,7 @@ class OwnershipScriptTests(unittest.TestCase):
         self.assertEqual(self.mode(secret), 0o600)
         self.assertEqual(self.mode(self.web), 0o1775, 'the sticky bit: the application cannot replace a file it does not own')
         self.assertEqual(self.mode(self.root / 'usr/src/scan_results'), 0o750)
-        self.assertEqual(self.mode(self.root / 'var/lib/cvengine-scanner'), 0o2750, 'setgid: the blob takes group 10002, which the scanner is given')
+        self.assertEqual(self.mode(self.root / 'var/lib/cvengine-scanner'), 0o2751, 'setgid: the blob takes group 10002, which the scanner is given')
         self.assertTrue((self.web / '.update-approved').is_symlink())
         self.assertEqual(self.run_it().strip(), f'ownership: every application path already belongs to uid {self.uid}; nothing changed')
 
