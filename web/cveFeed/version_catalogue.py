@@ -63,12 +63,6 @@ def version_of(text, keep_suffix=True):
     return found.group(1) + (f'-{found.group(2)}' if keep_suffix and found.group(2) else '')
 
 
-def base_version(text):
-    """Only the dotted numbers of a version (``1.27.3-eks-a5565ad`` -> ``1.27.3``)."""
-    found = _VERSION.match(clip(text, 80))
-    return found.group(1) if found else ''
-
-
 @dataclass(frozen=True)
 class Request:
     path: str

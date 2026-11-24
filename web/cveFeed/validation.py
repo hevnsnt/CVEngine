@@ -1770,15 +1770,6 @@ def put_library_step(row, step):
     return True
 
 
-def record_library_read(row, match, save=True):
-    """Record (or drop) the body-read step of ``match`` on its Triage ``row`` (``library_step``, ``put_library_step``). Returns whether it
-    changed (and was saved, with ``save``)."""
-    changed = put_library_step(row, library_step(match, library_reading(match)))
-    if changed and save:
-        row.save(update_fields=['validation_steps', 'updated_at'])
-    return changed
-
-
 def _blocked_step(row, check, why, now):
     return {'kind': check['kind'], 'label': check['label'], 'display': check['display'], 'target': check['target'],
             'ran_at': now.isoformat(), 'result': 'blocked', 'summary': why, 'output_excerpt': '', 'error': ''}

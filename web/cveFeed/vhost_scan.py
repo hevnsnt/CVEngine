@@ -529,11 +529,3 @@ def sweep_all(**kwargs):
 
 # ----------------------------------------------------------------------------- reading it back
 
-def also_served(project_id, addresses):
-    """``[{'name', 'address', 'port', 'classification', 'status', 'title', 'observed_at'}]``: the distinct applications recorded on any of
-    ``addresses`` for the project, for the host page."""
-    from cveFeed.models import ProbeObservation
-    rows = ProbeObservation.objects.filter(project_id=project_id, probe=PROBE, kind=KIND, outcome='found', product__in=list(addresses)).order_by('host')
-    return [{'name': r.host, 'address': r.product, 'port': r.port, 'classification': r.variant,
-             'status': (r.evidence or {}).get('answer', {}).get('status'), 'title': (r.evidence or {}).get('answer', {}).get('title', ''),
-             'observed_at': r.observed_at.isoformat()} for r in rows]

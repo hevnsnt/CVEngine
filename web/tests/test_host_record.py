@@ -63,9 +63,7 @@ class Fixture(TestCase):
 		self.domain = Domain.objects.create(name='acme.test', project=self.project, insert_date=now)
 		engine = EngineType.objects.create(engine_name='e', yaml_configuration='x', default_engine=True)
 		self.scan = ScanHistory.objects.create(domain=self.domain, scan_type=engine, start_scan_date=now, scan_status=2, results_dir='/tmp')
-		patch = mock.patch('cveFeed.hosting.canonical_name', return_value='')
-		patch.start()
-		self.addCleanup(mock.patch.stopall)
+		self.addCleanup(mock.patch.stopall)  # subclasses start patches without stopping them
 
 	def host(self, name, address, **kw):
 		sub = Subdomain.objects.create(scan_history=self.scan, target_domain=self.domain, name=name, **kw)

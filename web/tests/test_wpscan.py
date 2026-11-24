@@ -132,7 +132,8 @@ class StageTests(RouteFixture, TestCase):
         plain = Subdomain.objects.get(scan_history=self.scan_obj, name='plain.rt.test')
         RouteAuth.objects.create(project=self.project, domain=self.domain, host=plain.name, url='https://plain.rt.test/', path='/',
                                  auth_state='open', evidence={'fingerprint_names': ['WordPress:6.4']})
-        self.assertEqual([s.name for s, _ in wpscan_scan.wordpress_sites(self.scan_obj)], ['plain.rt.test', 'www.rt.test'])
+        subs = list(Subdomain.objects.filter(scan_history=self.scan_obj))
+        self.assertEqual(sorted(wpscan_scan.candidate_signals(self.scan_obj, subs)), ['plain.rt.test', 'www.rt.test'])
 
     def test_each_site_is_scanned_once_a_week(self):
         self.go(runner=self.runner)

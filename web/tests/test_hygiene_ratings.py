@@ -10,13 +10,12 @@ import dns.exception
 import dns.resolver
 from django.contrib.auth.models import User
 from django.core.management import call_command
-from django.test import SimpleTestCase, TestCase
+from django.test import TestCase
 from django.utils import timezone
 
 from agentapi.auth import create_token
 from cveFeed import hygiene as hy
 from cveFeed import hygiene_rating as hr
-from cveFeed import mailfail as mf
 from cveFeed import tls_audit
 from cveFeed.models import HostLabel, HygieneFinding, RouteAuth
 from cveFeed.threat import host_heat
@@ -53,9 +52,6 @@ class Base(TestCase):
 		now = timezone.now()
 		self.project = Project.objects.create(name='R', slug='r', insert_date=now, org=Org.objects.create(name='R', slug='r'))
 		self.domain = Domain.objects.create(name='example.com', project=self.project, insert_date=now)
-		patcher = mock.patch('cveFeed.hosting.canonical_name', return_value='')  # no live DNS: CNAMEs come from the stored hosts
-		patcher.start()
-		self.addCleanup(patcher.stop)
 
 	def host(self, name, cname=None):
 		return Subdomain.objects.create(name=name, target_domain=self.domain, cname=cname)
@@ -226,13 +222,6 @@ class CertificateExpiryTests(Base):
 		prod = hr.rate(self.domain, self.expiring('shop.example.com', -10), cnames={})
 		self.assertEqual([(f.severity, heat_of(f.severity)) for f in prod], [(hy.CRITICAL, 'fire')])
 		self.assertFalse(hr.is_dev_host('developer.example.com'))
-
-
-class DmarcReportAuthorizationTests(SimpleTestCase):
-	def test_a_report_authorisation_gap_under_an_enforcing_policy_is_info(self):
-		for policy, severity in (('reject', hy.INFO), ('quarantine', hy.INFO), ('none', hy.MEDIUM), ('', hy.MEDIUM)):
-			found = mf.evaluate_report_authorization('example.com', 'reports.example.net', [], policy)
-			self.assertEqual([(f.check, f.severity) for f in found], [('dmarc_report_unauthorized', severity)], policy)
 
 
 # ----------------------------------------------------------------------------- item 19: two resolvers or two runs

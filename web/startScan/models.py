@@ -1,5 +1,4 @@
 from urllib.parse import urlparse
-from django.apps import apps
 from django.contrib.auth.models import User
 from django.contrib.postgres.fields import ArrayField
 from django.db import models
@@ -72,28 +71,6 @@ class ScanHistory(models.Model):
 	def get_subdomain_count(self):
 		return Subdomain.objects.filter(scan_history__id=self.id).count()
 
-	def get_subdomain_change_count(self):
-		last_scan = (
-			ScanHistory.objects
-			.filter(id=self.id)
-			.filter(tasks__overlap=['subdomain_discovery'])
-			.order_by('-start_scan_date')
-		)
-		scanned_host_q1 = (
-			Subdomain.objects
-			.filter(target_domain__id=self.domain.id)
-			.exclude(scan_history__id=last_scan[0].id)
-			.values('name')
-		)
-		scanned_host_q2 = (
-			Subdomain.objects
-			.filter(scan_history__id=last_scan[0].id)
-			.values('name')
-		)
-		new_subdomains = scanned_host_q2.difference(scanned_host_q1).count()
-		removed_subdomains = scanned_host_q1.difference(scanned_host_q2).count()
-		return [new_subdomains, removed_subdomains]
-
 
 	def get_endpoint_count(self):
 		return (
@@ -156,10 +133,6 @@ class ScanHistory(models.Model):
 			.filter(severity=4)
 			.count()
 		)
-
-	def get_completed_ago(self):
-		if self.stop_scan_date:
-			return self.get_time_ago(self.stop_scan_date)
 
 	def get_total_scan_time_in_sec(self):
 		if self.stop_scan_date:
@@ -241,88 +214,11 @@ class Subdomain(models.Model):
 		return endpoints.count()
 
 	@property
-	def get_info_count(self):
-		return (
-			self.get_vulnerabilities
-			.filter(severity=0)
-			.count()
-		)
-
-	@property
-	def get_low_count(self):
-		return (
-			self.get_vulnerabilities
-			.filter(severity=1)
-			.count()
-		)
-
-	@property
-	def get_medium_count(self):
-		return (
-			self.get_vulnerabilities
-			.filter(severity=2)
-			.count()
-		)
-
-	@property
-	def get_high_count(self):
-		return (
-			self.get_vulnerabilities
-			.filter(severity=3)
-			.count()
-		)
-
-	@property
-	def get_critical_count(self):
-		return (
-			self.get_vulnerabilities
-			.filter(severity=4)
-			.count()
-		)
-
-	@property
-	def get_total_vulnerability_count(self):
-		return self.get_vulnerabilities.count()
-
-	@property
 	def get_vulnerabilities(self):
 		vulns = Vulnerability.objects.filter(subdomain__name=self.name, subdomain__target_domain_id=self.target_domain_id)
 		if self.scan_history:
 			vulns = vulns.filter(scan_history=self.scan_history)
 		return vulns
-
-	@property
-	def get_vulnerabilities_without_info(self):
-		vulns = Vulnerability.objects.filter(subdomain__name=self.name, subdomain__target_domain_id=self.target_domain_id).exclude(severity=0)
-		if self.scan_history:
-			vulns = vulns.filter(scan_history=self.scan_history)
-		return vulns
-
-	@property
-	def get_directories_count(self):
-		subdomains = (
-			Subdomain.objects
-			.filter(id=self.id)
-		)
-		dirscan = (
-			DirectoryScan.objects
-			.filter(directories__in=subdomains)
-		)
-		return (
-			DirectoryFile.objects
-			.filter(directory_files__in=dirscan)
-			.distinct()
-			.count()
-		)
-
-	@property
-	def get_subscan_count(self):
-		return (
-			SubScan.objects
-			.filter(subdomain__id=self.id)
-			.distinct()
-			.count()
-		)
 
 
 class SubScan(models.Model):
@@ -338,29 +234,8 @@ class SubScan(models.Model):
 	engine = models.ForeignKey(EngineType, on_delete=models.CASCADE, blank=True, null=True)
 	subdomain_subscan_ids = models.ManyToManyField('Subdomain', related_name='subdomain_subscan_ids', blank=True)
 
-	def get_completed_ago(self):
-		if self.stop_scan_date:
-			return get_time_taken(timezone.now(), self.stop_scan_date)
-
-	def get_total_time_taken(self):
-		if self.stop_scan_date:
-			return get_time_taken(self.stop_scan_date, self.start_scan_date)
-
 	def get_elapsed_time(self):
 		return get_time_taken(timezone.now(), self.start_scan_date)
-
-	def get_task_name_str(self):
-		taskmap = {
-			'subdomain_discovery': 'Subdomain discovery',
-			'dir_file_fuzz': 'Directory and File fuzzing',
-			'port_scan': 'Port Scan',
-			'fetch_url': 'Fetch URLs',
-			'vulnerability_scan': 'Vulnerability Scan',
-			'screenshot': 'Screenshot',
-			'waf_detection': 'Waf Detection',
-			'osint': 'Open-Source Intelligence'
-		}
-		return taskmap.get(self.type, 'Unknown')
 
 class EndPoint(models.Model):
 	id = models.AutoField(primary_key=True)
@@ -519,21 +394,6 @@ class Vulnerability(models.Model):
 		cve_str = ', '.join(f'`{cve.name}`' for cve in self.cve_ids.all())
 		severity = NUCLEI_REVERSE_SEVERITY_MAP[self.severity]
 		return f'{self.http_url} | `{severity.upper()}` | `{self.name}` | `{cve_str}`'
-
-	def get_severity(self):
-		return self.severity
-
-	def get_cve_str(self):
-		return ', '.join(f'`{cve.name}`' for cve in self.cve_ids.all())
-
-	def get_cwe_str(self):
-		return ', '.join(f'`{cwe.name}`' for cwe in self.cwe_ids.all())
-
-	def get_tags_str(self):
-		return ', '.join(f'`{tag.name}`' for tag in self.tags.all())
-
-	def get_refs_str(self):
-		return '•' + '\n• '.join(f'`{ref.url}`' for ref in self.references.all())
 
 	def get_path(self):
 		return urlparse(self.http_url).path

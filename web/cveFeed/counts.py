@@ -191,18 +191,15 @@ def with_host_key(qs):
 
 
 class Machines:
-    """The machines of some projects' current inventory exactly as the Hosts page folds them (``machines``). ``of_row(id)`` and ``of_name(project id,
-    name)`` give the machine key (the ``with_host_key`` form: ``<project>:i:<address ids>`` or ``<project>:n:<name>``) of a current row or name,
-    ``name(key)`` the name the Hosts page shows for that machine. A row or name outside the inventory read has no machine (None)."""
+    """The machines of some projects' current inventory exactly as the Hosts page folds them (``machines``). ``of_row(id)`` gives the machine key (the
+    ``with_host_key`` form: ``<project>:i:<address ids>`` or ``<project>:n:<name>``) of a current row, ``name(key)`` the name the Hosts page shows for that
+    machine. A row outside the inventory read has no machine (None)."""
 
     def __init__(self, by_row, by_name, names):
         self._by_row, self._by_name, self._names = by_row, by_name, names
 
     def of_row(self, sub_id):
         return self._by_row.get(sub_id)
-
-    def of_name(self, project_id, name):
-        return self._by_name.get((project_id, name))
 
     def name(self, key):
         return self._names.get(key)

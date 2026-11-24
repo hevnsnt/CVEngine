@@ -56,8 +56,6 @@ NOISE = frozenset({
     'contact', 'products', 'product', 'services', 'service', 'support', 'help', 'faq', 'cart', 'checkout', 'account', 'profile', 'sitemap', 'feed', 'rss',
 })
 _SEGMENT = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]{1,39}$')
-_ROBOTS_LINE = re.compile(r'(?im)^\s*(?:dis)?allow:\s*(/\S*)')
-_SITEMAP_LOC = re.compile(r'(?is)<loc>\s*([^<\s]{1,500})\s*</loc>')
 
 
 def enabled():
@@ -196,29 +194,6 @@ def lead_counts(urls_by_source, known):
                 counts[mount] += 1
                 source_of.setdefault(mount, source)
     return counts, source_of
-
-
-def lead_paths(urls_by_source, known):
-    """``{path: source}`` for at most ``MAX_LEADS`` mount directories the host's own data shows (``urls_by_source``: ``{source: [url or path]}``),
-    most often seen first, excluding the curated paths and ``known``."""
-    counts, source_of = lead_counts(urls_by_source, known)
-    return {path: source_of[path] for path, _n in counts.most_common(MAX_LEADS)}
-
-
-def robots_paths(body):
-    return [m.group(1) for m in _ROBOTS_LINE.finditer(body or '')][:200]
-
-
-def sitemap_paths(body, host):
-    out = []
-    for m in _SITEMAP_LOC.finditer((body or '')[:BODY_SCAN]):
-        try:
-            parts = urlsplit(m.group(1))
-        except ValueError:
-            continue
-        if (parts.hostname or '').lower() == host.lower():
-            out.append(parts.path or '/')
-    return out[:500]
 
 
 # ----------------------------------------------------------------------------- what is known about a host
