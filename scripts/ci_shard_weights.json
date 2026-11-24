@@ -1,617 +1,3041 @@
 {
- "about": "Seconds of one test process per test module, the median of the CI runs counted in runs. Written by scripts/ci_shard.py --refresh.",
- "fixed_seconds": 97.3,
+ "about": "Per test module: [seconds of one test process, its longest class, the group Django runs it in (0 TestCase, 1 other SimpleTestCase, 2 plain unittest)], the median of the CI jobs that ran it, each job scaled by its machine speed. Written by scripts/ci_shard.py --refresh.",
+ "fixed_seconds": 98.7,
  "modules": {
-  "test_about_page": 3.7,
-  "test_activity_days": 7.2,
-  "test_activity_diagnostic_redaction": 0.0,
-  "test_activity_log": 0.9,
-  "test_address_guard": 45.7,
-  "test_admin": 11.9,
-  "test_admin_login_mfa": 0.8,
-  "test_admin_secrets_sessions": 1.8,
-  "test_agent_broker": 101.3,
-  "test_agent_hold_migration": 11.1,
-  "test_agent_rules_b": 12.2,
-  "test_agentapi": 46.5,
-  "test_agentapi_review": 13.4,
-  "test_ai_checks_on_sentinels": 26.1,
-  "test_ai_disclosure": 2.2,
-  "test_ai_empty_response": 12.3,
-  "test_ai_jobs": 7.3,
-  "test_ai_models_endpoint": 2.4,
-  "test_ai_nuclei_model": 6.7,
-  "test_ai_profiles": 1.7,
-  "test_ai_prompt_cache": 0.4,
-  "test_ai_prompts": 3.4,
-  "test_ai_providers": 0.4,
-  "test_ai_redirects": 5.0,
-  "test_ai_runtime": 0.3,
-  "test_ai_servers": 3.7,
-  "test_ai_settings_api": 1.5,
-  "test_ai_truncation": 18.5,
-  "test_ai_usage": 0.7,
-  "test_ai_usage_bounded": 0.5,
-  "test_alert_dismissal": 56.8,
-  "test_alerts_tell_the_truth": 421.1,
-  "test_alias_note": 11.2,
-  "test_all_projects": 25.1,
-  "test_api_credentials": 7.3,
-  "test_api_keys_list": 3.2,
-  "test_api_keys_nav": 2.3,
-  "test_api_text_and_size": 0.0,
-  "test_apply_update_script": 318.8,
-  "test_archive_closure": 31.6,
-  "test_archive_rediscovery": 5.8,
-  "test_archive_urls": 1.3,
-  "test_assess_batch": 10.4,
-  "test_async_stages": 10.7,
-  "test_authcheck": 27.8,
-  "test_auto_deploy_script": 5.7,
-  "test_autofire": 0.8,
-  "test_autotune": 9.7,
-  "test_autotune_agents": 6.8,
-  "test_autotune_sentinels": 7.5,
-  "test_autotune_verify": 5.6,
-  "test_autovacuum_options": 0.1,
-  "test_bbot_batch_equivalence": 1.3,
-  "test_bbot_findings": 0.1,
-  "test_bbot_ingest_saves": 1.1,
-  "test_bbot_key_levels": 8.2,
-  "test_bbot_keys_to_sentinels": 16.1,
-  "test_bootstrap": 0.1,
-  "test_bounded_delete": 21.0,
-  "test_bounty_api": 25.1,
-  "test_bounty_data": 0.2,
-  "test_bounty_gate": 7.7,
-  "test_bounty_report": 0.2,
-  "test_bounty_scope": 0.0,
-  "test_bounty_workbench": 7.6,
-  "test_branch_fixes": 0.1,
-  "test_broker_acks": 0.0,
-  "test_broker_recovery": 0.1,
-  "test_bucket_scan": 5.3,
-  "test_builtin_default": 10.4,
-  "test_builtin_scanner": 4.9,
-  "test_builtin_visible": 13.6,
-  "test_bulk_fairness": 0.1,
-  "test_bulk_heat_batched": 2.4,
-  "test_bulk_status_queries": 3.4,
-  "test_catalog_reads": 0.2,
-  "test_celery_lanes": 18.6,
-  "test_census_paging": 15.5,
-  "test_certificates": 9.5,
-  "test_changes": 6.1,
-  "test_check_coverage": 29.4,
-  "test_check_migrations": 0.4,
-  "test_ci_shard": 0.8,
-  "test_client_library_detection": 0.4,
-  "test_client_library_script_read_review": 10.3,
-  "test_client_library_validation": 7.9,
-  "test_cms": 0.0,
-  "test_cms_products": 0.0,
-  "test_cms_resolver": 1.8,
-  "test_collapse_once": 2.1,
-  "test_compose": 1.1,
-  "test_compose_layout": 2.4,
-  "test_compose_proxy": 0.1,
-  "test_conductor": 0.7,
-  "test_confirm_guide": 11.7,
-  "test_correlation": 0.1,
-  "test_count_rules": 6.3,
-  "test_counts": 15.8,
-  "test_coverage_gate": 3.1,
-  "test_coverage_idle_memo": 0.6,
-  "test_coverage_topup": 1.0,
-  "test_coyote_version": 0.3,
-  "test_create_admin": 6.3,
-  "test_ct_fallback": 1.0,
-  "test_ct_health": 11.7,
-  "test_ct_queue": 1.7,
-  "test_ctmonitor": 2.1,
-  "test_ctmonitor_queue": 0.0,
-  "test_current_inventory_ids": 1.4,
-  "test_current_scans": 2.7,
-  "test_cve_backfill": 3.5,
-  "test_cve_checks_contract": 7.2,
-  "test_cve_detection": 1.1,
-  "test_cve_explorer": 4.5,
-  "test_cve_feed": 1.0,
-  "test_cve_guidance": 23.5,
-  "test_cve_seed": 0.6,
-  "test_cve_seed_export": 6.8,
-  "test_dangling_dns": 2.3,
-  "test_dashboard_default": 3.7,
-  "test_dashboard_scrollback": 0.3,
-  "test_db_app_role_grants": 15.7,
-  "test_db_backup_scripts": 4.6,
-  "test_db_connection_settings": 0.0,
-  "test_db_exposure": 0.4,
-  "test_db_intel": 0.2,
-  "test_db_jit": 0.0,
-  "test_db_roles": 1.9,
-  "test_db_stats": 0.6,
-  "test_dedupe_constraints": 11.0,
-  "test_default_fixtures": 0.2,
-  "test_default_status": 0.0,
-  "test_detection_author_failures": 0.3,
-  "test_discovery": 13.8,
-  "test_discovery_counts_query": 0.2,
-  "test_discovery_events": 0.0,
-  "test_discovery_mode": 14.6,
-  "test_discovery_mode_paths": 7.0,
-  "test_discovery_reason_busy": 18.7,
-  "test_distinct_issues": 6.0,
-  "test_distro_banners": 6.8,
-  "test_distro_rhel": 1.4,
-  "test_dns_crosscheck": 24.4,
-  "test_docs_accuracy": 1.8,
-  "test_drop_legacy_models": 128.0,
-  "test_drop_unused_legacy_models": 38.6,
-  "test_edge_builds": 3.6,
-  "test_egress_proxy": 6.5,
-  "test_entrypoint": 55.4,
-  "test_exclude_domain": 31.1,
-  "test_exclusion_cache": 0.8,
-  "test_factory_reset": 6.9,
-  "test_fake_scanner": 18.9,
-  "test_false_positive_status": 12.3,
-  "test_feed_coverage_gaps": 146.1,
-  "test_feed_health": 1.0,
-  "test_field_key": 0.1,
-  "test_finding_confirm": 5.2,
-  "test_finding_counts_cache": 1.7,
-  "test_finding_glance": 0.0,
-  "test_finding_groups": 4.7,
-  "test_finding_hosts": 2.8,
-  "test_finding_lifecycle": 9.1,
-  "test_findings_unified": 6.2,
-  "test_first_run_waits": 0.0,
-  "test_fix_retest": 13.0,
-  "test_frontend_pages": 0.4,
-  "test_fullscan": 2.9,
-  "test_fullscan_revocation": 1.1,
-  "test_generated_template_restore": 0.1,
-  "test_generated_template_review": 28.8,
-  "test_gevent_autoscale": 0.7,
-  "test_gevent_cache": 0.0,
-  "test_gevent_db": 6.0,
-  "test_gevent_gc": 2.3,
-  "test_gevent_worker_e2e": 102.7,
-  "test_glance_layout": 0.0,
-  "test_graph_live": 0.7,
-  "test_graph_overview": 0.4,
-  "test_graph_payload_queries": 11.1,
-  "test_graph_payload_size": 1.4,
-  "test_graph_single_flight": 4.6,
-  "test_hard_batch": 1.4,
-  "test_hard_changes": 0.3,
-  "test_hard_distro": 2.0,
-  "test_hard_evidence": 2.3,
-  "test_hard_findings": 0.4,
-  "test_hard_lockout": 1.6,
-  "test_hard_naabu": 0.6,
-  "test_hard_notify": 2.7,
-  "test_hard_perf": 0.2,
-  "test_hard_ports": 0.4,
-  "test_hard_retest": 2.4,
-  "test_hard_samples": 0.0,
-  "test_hard_scope": 2.8,
-  "test_hard_scoring": 1.0,
-  "test_hard_security": 0.6,
-  "test_hard_shots": 0.1,
-  "test_hard_stale": 2.1,
-  "test_hard_webhooks": 0.2,
-  "test_hard_zombie": 0.6,
-  "test_heat_135": 2.1,
-  "test_heat_override": 19.5,
-  "test_heat_policy": 1.6,
-  "test_heat_policy_review": 8.3,
-  "test_heat_policy_review2": 4.6,
-  "test_hermetic_runner": 0.3,
-  "test_host_actions": 7.4,
-  "test_host_ai_review": 12.2,
-  "test_host_aliases": 3.3,
-  "test_host_assessment": 8.7,
-  "test_host_bulk_batch": 0.7,
-  "test_host_count_cache": 1.2,
-  "test_host_export": 12.9,
-  "test_host_filter_current_ids": 58.8,
-  "test_host_fit_script": 89.1,
-  "test_host_groups": 2.0,
-  "test_host_headers": 3.0,
-  "test_host_inventory": 9.0,
-  "test_host_labels": 1.3,
-  "test_host_loop_batching": 1.9,
-  "test_host_manage": 97.1,
-  "test_host_names_batch": 0.5,
-  "test_host_page_batching": 0.9,
-  "test_host_record": 1.4,
-  "test_host_review": 0.2,
-  "test_host_review_api": 50.1,
-  "test_host_review_default_off": 9.7,
-  "test_host_review_hardening": 36.6,
-  "test_host_review_job": 15.4,
-  "test_host_review_postgres": 1.0,
-  "test_host_review_steps": 31.4,
-  "test_host_screenshot": 1.4,
-  "test_host_scripts": 1.0,
-  "test_host_siblings_keys": 3.5,
-  "test_hot_indexes": 0.2,
-  "test_hot_validation": 19.8,
-  "test_hot_validation_signature": 0.4,
-  "test_how_it_works": 0.3,
-  "test_hygiene": 11.6,
-  "test_hygiene_cleartext": 39.3,
-  "test_hygiene_mail": 1.0,
-  "test_hygiene_ratings": 6.6,
-  "test_hygiene_unknown_mail": 0.1,
-  "test_image_python": 0.0,
-  "test_inactive_archive": 0.5,
-  "test_index_warmup": 2.7,
-  "test_infra_hardening": 0.2,
-  "test_ingest_batch": 1.3,
-  "test_input_guard": 3.4,
-  "test_input_limits": 0.8,
-  "test_installer": 3.6,
-  "test_intel": 0.5,
-  "test_internal_coverage": 1.8,
-  "test_internal_discovery": 5.9,
-  "test_internal_last_resort": 22.6,
-  "test_internal_ranges": 8.9,
-  "test_internal_scan": 20.2,
-  "test_internal_view": 8.4,
-  "test_inventory_counts": 13.1,
-  "test_inventory_current": 1.1,
-  "test_inventory_hardening": 17.1,
-  "test_inventory_match": 7.8,
-  "test_inventory_scripts": 23.2,
-  "test_investigation": 6.8,
-  "test_investigation_review": 3.4,
-  "test_ip_allowlist": 0.7,
-  "test_java_runtime": 6.9,
-  "test_js_libraries": 0.7,
-  "test_js_libraries_provenance": 81.7,
-  "test_js_library_versions": 6.1,
-  "test_js_provenance_strict": 16.4,
-  "test_js_provenance_unread": 13.0,
-  "test_kev_revalidation": 13.3,
-  "test_lane_memory": 0.2,
-  "test_lane_resize_e2e": 33.6,
-  "test_lane_stacks": 2.8,
-  "test_ledger": 0.1,
-  "test_library_body_proven": 8.6,
-  "test_library_closure_review": 40.6,
-  "test_library_detection_135": 6.5,
-  "test_list_hosts_paging": 4.6,
-  "test_list_viewport": 0.0,
-  "test_live_cache": 18.2,
-  "test_live_refresh": 42.9,
-  "test_live_validation_fixes": 1.6,
-  "test_llamacpp_builds": 0.1,
-  "test_load_fixes": 8.8,
-  "test_locality": 0.3,
-  "test_logging_config": 0.0,
-  "test_login_throttle": 17.6,
-  "test_maintainer_ai": 15.5,
-  "test_maintainer_ai_caps": 11.2,
-  "test_maintainer_checks": 96.2,
-  "test_maintainer_knobs": 23.6,
-  "test_maintainer_record": 10.7,
-  "test_maintainer_signals": 6.3,
-  "test_maintenance": 0.5,
-  "test_maintenance_page": 0.4,
-  "test_manual_only_sweeps": 7.0,
-  "test_match_explain": 1.2,
-  "test_match_policy": 8.4,
-  "test_match_policy_review": 4.3,
-  "test_mcp_arguments": 0.5,
-  "test_mcp_limits": 0.2,
-  "test_mcp_page": 2.6,
-  "test_mfa_security": 9.1,
-  "test_migration_frozen": 0.0,
-  "test_name_versions": 0.2,
-  "test_nav_current": 2.5,
-  "test_nav_reachability": 0.5,
-  "test_network_detection": 5.2,
-  "test_nginx_static_cache_real": 0.0,
-  "test_no_local_tools": 4.2,
-  "test_no_unstyled_flash": 0.2,
-  "test_node2shell": 2.0,
-  "test_notify": 1.4,
-  "test_nuclei_all_templates_migration": 0.0,
-  "test_nuclei_port_protocol": 1.1,
-  "test_nuclei_templates": 1.0,
-  "test_oldest_open": 1.4,
-  "test_onboarding_email": 8.2,
-  "test_openvas": 34.7,
-  "test_openvas_fixes": 1.9,
-  "test_openvas_generic": 3.1,
-  "test_openvas_gvmd227": 3.8,
-  "test_openvas_identity": 0.7,
-  "test_openvas_queue_summary": 0.5,
-  "test_org_uniqueness": 97.2,
-  "test_os_detection": 0.4,
-  "test_overview": 5.0,
-  "test_overview_fast": 10.5,
-  "test_page_polls": 6.6,
-  "test_page_read": 6.2,
-  "test_panel_versions": 4.0,
-  "test_path_probe": 0.1,
-  "test_perf_autofire": 1.6,
-  "test_perf_batching": 0.7,
-  "test_perf_correlation": 11.8,
-  "test_perf_dashboard": 2.9,
-  "test_perf_deepsweep": 0.6,
-  "test_perf_hostpipeline": 5.5,
-  "test_perf_indexes": 0.1,
-  "test_perf_sweeps": 0.7,
-  "test_perf_templates": 0.1,
-  "test_perf_versionless": 0.4,
-  "test_php_link_tells": 1.7,
-  "test_pipeline_limits": 0.0,
-  "test_plain_language_pages": 0.5,
-  "test_port_flood": 1.8,
-  "test_port_inventory": 0.8,
-  "test_port_rows": 19.9,
-  "test_port_trim": 3.2,
-  "test_probe_kinds": 50.4,
-  "test_probes": 7.8,
-  "test_project_settings": 0.6,
-  "test_protected_media": 0.8,
-  "test_proxy_follows_web": 43.5,
-  "test_range_consumers": 0.1,
-  "test_range_ingest": 1.1,
-  "test_rdp_shot": 7.8,
-  "test_read_paths_batch": 6.7,
-  "test_reaper": 92.8,
-  "test_recog": 1.8,
-  "test_refresh_unchanged": 1.5,
-  "test_remediation_carry": 0.2,
-  "test_report_email_digest": 11.3,
-  "test_report_issues": 4.0,
-  "test_report_memory": 169.2,
-  "test_report_niced": 0.0,
-  "test_report_pdf": 86.3,
-  "test_report_queries": 1.3,
-  "test_report_resources": 0.2,
-  "test_report_subscriptions": 28.9,
-  "test_report_threats": 19.8,
-  "test_reporting": 14.7,
-  "test_request_overhead": 0.2,
-  "test_resolve_errors": 2.9,
-  "test_resources": 0.2,
-  "test_retest": 7.5,
-  "test_review_efficiency": 1.2,
-  "test_reviewer": 23.8,
-  "test_reviewer_caps": 1.9,
-  "test_reviewer_consistency": 5.0,
-  "test_reviewer_keyset": 18.9,
-  "test_rotate_secrets_script": 14.5,
-  "test_route_auth": 8.8,
-  "test_runtime_files_untracked": 0.1,
-  "test_runzero": 19.0,
-  "test_safeyaml": 0.0,
-  "test_saved_searches": 6.9,
-  "test_sbom": 0.0,
-  "test_scale_batch_tasks": 1.5,
-  "test_scale_contract_cache": 0.0,
-  "test_scale_discovery_counts": 0.2,
-  "test_scale_heat_sql": 0.8,
-  "test_scale_hosts": 2.4,
-  "test_scale_probes": 0.2,
-  "test_scale_report_render": 14.6,
-  "test_scale_search_branches": 1.1,
-  "test_scale_search_facets": 2.8,
-  "test_scale_search_matched": 2.5,
-  "test_scale_sentinel_page": 3.2,
-  "test_scale_stats_cache": 20.2,
-  "test_scan_concurrency": 17.0,
-  "test_scan_control": 11.6,
-  "test_scan_retention": 2.1,
-  "test_scan_vulns_page": 0.5,
-  "test_scanner_env_optin": 8.6,
-  "test_scanner_fallback_policy": 5.0,
-  "test_scanner_fallback_telemetry": 6.2,
-  "test_scanner_follows_latest": 4.5,
-  "test_scanner_fp_135": 1.0,
-  "test_scanner_overlays": 0.0,
-  "test_scanner_plan": 9.1,
-  "test_scanner_result_fields": 0.0,
-  "test_scanner_script": 49.0,
-  "test_scanner_unavailable_stages": 4.0,
-  "test_scanner_vantage": 3.0,
-  "test_scanner_waiting_state": 13.9,
-  "test_scans_stop": 1.5,
-  "test_schema_guard": 1.3,
-  "test_scope": 0.5,
-  "test_scope_add_time": 5.9,
-  "test_scope_api": 0.3,
-  "test_score_explained": 0.8,
-  "test_scoring": 5.2,
-  "test_screenshot_image_scrub": 0.1,
-  "test_screenshot_xss": 3.2,
-  "test_scrub_nse_scripts_migration": 0.1,
-  "test_search_evidence": 6.1,
-  "test_search_hostile_input": 0.1,
-  "test_search_negation_cost": 0.0,
-  "test_search_version": 1.8,
-  "test_secret_context": 9.4,
-  "test_secret_context_compat": 1.3,
-  "test_secret_detail": 13.7,
-  "test_secret_redaction": 3.8,
-  "test_secret_value_scrub": 0.1,
-  "test_secrets_api": 7.5,
-  "test_secrets_catalog": 0.1,
-  "test_secrets_inventory": 1.7,
-  "test_secrets_scan": 4.2,
-  "test_secrets_validation": 0.2,
-  "test_security_settings": 0.0,
-  "test_sensitive": 4.0,
-  "test_sentinel_autoupdate": 13.9,
-  "test_sentinel_balance": 42.4,
-  "test_sentinel_breaker": 3.7,
-  "test_sentinel_capability_policy": 53.1,
-  "test_sentinel_capacity": 5.3,
-  "test_sentinel_checkout_checkin": 12.2,
-  "test_sentinel_client_limits": 1.2,
-  "test_sentinel_contract": 5.4,
-  "test_sentinel_contract_version": 1.4,
-  "test_sentinel_dispatch": 16.3,
-  "test_sentinel_feed": 6.3,
-  "test_sentinel_hardening": 15.8,
-  "test_sentinel_lab_results": 1.0,
-  "test_sentinel_nmap_detail": 1.3,
-  "test_sentinel_policy": 14.0,
-  "test_sentinel_poll_cost": 7.1,
-  "test_sentinel_query_counts": 2.9,
-  "test_sentinel_reaper_batch": 3.5,
-  "test_sentinel_result_cuts": 0.8,
-  "test_sentinel_secret_read": 13.8,
-  "test_sentinel_settings": 13.4,
-  "test_sentinel_source": 0.3,
-  "test_sentinel_stream": 9.3,
-  "test_sentinel_task_retention": 0.1,
-  "test_sentinel_template_index": 7.4,
-  "test_sentinel_time_limits": 0.0,
-  "test_sentinel_tools_behind": 0.4,
-  "test_sentinel_v3_kinds": 9.1,
-  "test_sentinel_version": 5.3,
-  "test_sentinel_waiters": 4.7,
-  "test_sentinel_waiting_not_failing": 44.3,
-  "test_sentinels": 22.8,
-  "test_service_features": 4.4,
-  "test_service_features_net": 2.4,
-  "test_service_features_web": 4.0,
-  "test_service_intel": 0.6,
-  "test_settings": 1.6,
-  "test_settings_bridge": 16.1,
-  "test_setup_questions": 22.4,
-  "test_setup_wizard": 27.8,
-  "test_shodan_leads": 1.6,
-  "test_shots": 1.1,
-  "test_signed_routes": 5.5,
-  "test_situations": 15.7,
-  "test_situations_fast": 4.2,
-  "test_snmp_bundled": 2.0,
-  "test_source_versions": 4.6,
-  "test_ssh_scan": 11.3,
-  "test_stage_parallel": 257.5,
-  "test_stage_run_drive_once": 0.0,
-  "test_stale_page": 1.0,
-  "test_state_machines": 1.6,
-  "test_state_machines_findings": 6.7,
-  "test_state_machines_ops": 9.1,
-  "test_state_machines_sentinels": 8.5,
-  "test_stats_fresh_after_write": 9.4,
-  "test_stats_history": 1.6,
-  "test_status_budget": 18.1,
-  "test_status_efficiency": 2.0,
-  "test_status_gevent": 3.9,
-  "test_status_probe_speed": 2.5,
-  "test_status_row_renewal": 3.4,
-  "test_status_shared_counts": 3.1,
-  "test_status_strip": 0.0,
-  "test_status_warm": 4.5,
-  "test_steady_default": 0.1,
-  "test_storage_safe": 0.0,
-  "test_store_unchanged": 0.3,
-  "test_stuck_queued_scans": 0.4,
-  "test_subdir_apps": 27.5,
-  "test_suppliers": 71.6,
-  "test_system_checks": 0.0,
-  "test_system_status": 31.3,
-  "test_tailscale": 8.6,
-  "test_target_types": 0.0,
-  "test_tarpit_and_filler": 13.1,
-  "test_tech_depth": 0.6,
-  "test_tech_identity": 0.4,
-  "test_tech_links": 0.6,
-  "test_tech_names": 0.0,
-  "test_tech_normalisation": 2.0,
-  "test_tech_search": 54.7,
-  "test_technology_columns": 0.0,
-  "test_template_fixture_regex_limit": 0.6,
-  "test_template_hit_evidence": 2.3,
-  "test_template_identity": 7.0,
-  "test_template_security": 0.2,
-  "test_template_validation": 1.6,
-  "test_template_validation_gate": 10.7,
-  "test_templategen": 0.9,
-  "test_templategen_evidence": 3.0,
-  "test_templategen_evidence_strict": 3.5,
-  "test_templategen_revalidate": 0.2,
-  "test_tenancy": 6.4,
-  "test_tenancy_snapshot": 15.2,
-  "test_tenant_visible_text": 0.5,
-  "test_threat_machines": 4.8,
-  "test_time_limits": 0.1,
-  "test_tls_audit": 15.3,
-  "test_tls_findings": 0.6,
-  "test_tool_versions": 0.0,
-  "test_triage": 28.3,
-  "test_triage_retriage": 2.3,
-  "test_trusted_proxies_guidance": 0.0,
-  "test_tunables": 20.5,
-  "test_tunnel_client_address": 5.2,
-  "test_udp_empty_report": 0.6,
-  "test_udp_ipv6_per_sentinel": 3.2,
-  "test_udp_ipv6_unreachable": 1.0,
-  "test_udp_scan": 10.3,
-  "test_ui_a11y": 0.0,
-  "test_ui_names_purpose": 3.2,
-  "test_ui_nav": 3.7,
-  "test_ui_tokens": 0.1,
-  "test_ui_touch": 0.0,
-  "test_uninstall_script": 0.4,
-  "test_unique_ip": 7.4,
-  "test_unresolved_archive": 0.4,
-  "test_update_disk_state": 2.9,
-  "test_update_no_wait": 12.6,
-  "test_update_script": 71.5,
-  "test_update_small_host_script": 2.0,
-  "test_update_status": 1.2,
-  "test_updater": 8.6,
-  "test_upgrade_backfills": 3.1,
-  "test_validate_findings_slices": 0.0,
-  "test_validation": 8.8,
-  "test_validation_cost": 1.9,
-  "test_validation_plan": 1.9,
-  "test_verdict_tenancy": 15.8,
-  "test_version_groups": 1.7,
-  "test_version_only_heat": 10.7,
-  "test_version_sources": 8.8,
-  "test_version_unknown": 2.3,
-  "test_vhost_scan": 24.2,
-  "test_waf_fingerprint": 3.2,
-  "test_watchdog": 32.4,
-  "test_watchdog_lane_naming": 2.0,
-  "test_watchdog_page": 0.0,
-  "test_watchdog_script": 21.2,
-  "test_watchdog_state_writes": 0.1,
-  "test_watchdog_tick_budget": 2.1,
-  "test_web_shot": 63.6,
-  "test_web_statement_timeout": 0.0,
-  "test_web_version_tells": 4.8,
-  "test_weekly_nuclei": 0.7,
-  "test_welcome": 1.5,
-  "test_windows_builds": 1.5,
-  "test_wordpress": 24.3,
-  "test_work_items_light": 1.5,
-  "test_work_items_tier": 2.2,
-  "test_work_planner": 26.2,
-  "test_work_planner_load": 84.3,
-  "test_worker_probe": 0.1,
-  "test_wp_core": 3.8,
-  "test_wpscan": 22.8,
-  "test_wpscan_outcomes": 6.9,
-  "test_wpscan_quick": 6.9,
-  "test_wpscan_token_redaction": 3.0,
-  "test_zombie": 5.3
+  "test_about_page": [
+   3.1,
+   1.5,
+   0
+  ],
+  "test_activity_days": [
+   4.6,
+   4.4,
+   0
+  ],
+  "test_activity_diagnostic_redaction": [
+   0.0,
+   0.0,
+   1
+  ],
+  "test_activity_log": [
+   0.6,
+   0.6,
+   0
+  ],
+  "test_address_guard": [
+   44.3,
+   10.9,
+   0
+  ],
+  "test_admin": [
+   15.2,
+   9.7,
+   0
+  ],
+  "test_admin_login_mfa": [
+   0.9,
+   0.9,
+   0
+  ],
+  "test_admin_secrets_sessions": [
+   1.7,
+   1.0,
+   0
+  ],
+  "test_agent_broker": [
+   62.3,
+   9.2,
+   0
+  ],
+  "test_agent_hold_migration": [
+   12.8,
+   12.8,
+   1
+  ],
+  "test_agent_rules_b": [
+   10.8,
+   2.5,
+   0
+  ],
+  "test_agentapi": [
+   56.4,
+   13.7,
+   0
+  ],
+  "test_agentapi_review": [
+   7.8,
+   1.8,
+   0
+  ],
+  "test_ai_checks_on_sentinels": [
+   36.0,
+   6.4,
+   0
+  ],
+  "test_ai_disclosure": [
+   2.2,
+   0.8,
+   0
+  ],
+  "test_ai_empty_response": [
+   12.3,
+   6.1,
+   0
+  ],
+  "test_ai_jobs": [
+   8.3,
+   2.7,
+   0
+  ],
+  "test_ai_models_endpoint": [
+   1.9,
+   1.5,
+   0
+  ],
+  "test_ai_nuclei_model": [
+   7.9,
+   4.3,
+   0
+  ],
+  "test_ai_profiles": [
+   1.1,
+   0.5,
+   2
+  ],
+  "test_ai_prompt_cache": [
+   0.2,
+   0.1,
+   0
+  ],
+  "test_ai_prompts": [
+   2.4,
+   1.1,
+   0
+  ],
+  "test_ai_providers": [
+   0.3,
+   0.1,
+   2
+  ],
+  "test_ai_redirects": [
+   5.0,
+   5.0,
+   1
+  ],
+  "test_ai_runtime": [
+   0.4,
+   0.1,
+   2
+  ],
+  "test_ai_servers": [
+   5.1,
+   2.2,
+   0
+  ],
+  "test_ai_settings_api": [
+   2.1,
+   2.1,
+   0
+  ],
+  "test_ai_truncation": [
+   17.1,
+   10.7,
+   0
+  ],
+  "test_ai_usage": [
+   1.0,
+   1.0,
+   0
+  ],
+  "test_ai_usage_bounded": [
+   0.6,
+   0.6,
+   0
+  ],
+  "test_alert_dismissal": [
+   55.8,
+   32.7,
+   0
+  ],
+  "test_alerts_tell_the_truth": [
+   425.5,
+   78.8,
+   0
+  ],
+  "test_alias_note": [
+   14.1,
+   6.1,
+   0
+  ],
+  "test_all_projects": [
+   36.3,
+   6.1,
+   0
+  ],
+  "test_api_credentials": [
+   9.2,
+   7.3,
+   0
+  ],
+  "test_api_keys_list": [
+   4.7,
+   4.7,
+   0
+  ],
+  "test_api_keys_nav": [
+   2.8,
+   1.0,
+   0
+  ],
+  "test_api_text_and_size": [
+   0.0,
+   0.0,
+   1
+  ],
+  "test_apply_update_script": [
+   364.6,
+   354.0,
+   2
+  ],
+  "test_archive_closure": [
+   45.6,
+   14.2,
+   0
+  ],
+  "test_archive_rediscovery": [
+   8.8,
+   8.8,
+   0
+  ],
+  "test_archive_urls": [
+   1.3,
+   1.3,
+   0
+  ],
+  "test_assess_batch": [
+   7.6,
+   3.1,
+   0
+  ],
+  "test_async_stages": [
+   14.5,
+   2.4,
+   0
+  ],
+  "test_authcheck": [
+   29.3,
+   8.9,
+   0
+  ],
+  "test_auto_deploy_script": [
+   7.0,
+   7.0,
+   2
+  ],
+  "test_autofire": [
+   1.4,
+   0.8,
+   0
+  ],
+  "test_autotune": [
+   12.4,
+   4.6,
+   0
+  ],
+  "test_autotune_agents": [
+   9.3,
+   1.9,
+   0
+  ],
+  "test_autotune_sentinels": [
+   5.6,
+   2.6,
+   0
+  ],
+  "test_autotune_verify": [
+   6.3,
+   6.3,
+   0
+  ],
+  "test_autovacuum_options": [
+   0.0,
+   0.0,
+   0
+  ],
+  "test_bbot_batch_equivalence": [
+   1.8,
+   1.4,
+   0
+  ],
+  "test_bbot_findings": [
+   0.1,
+   0.0,
+   0
+  ],
+  "test_bbot_ingest_saves": [
+   0.7,
+   0.5,
+   0
+  ],
+  "test_bbot_key_levels": [
+   4.9,
+   3.5,
+   0
+  ],
+  "test_bbot_keys_to_sentinels": [
+   17.6,
+   4.7,
+   0
+  ],
+  "test_bootstrap": [
+   0.1,
+   0.1,
+   0
+  ],
+  "test_bounded_delete": [
+   21.4,
+   13.4,
+   0
+  ],
+  "test_bounty_api": [
+   24.2,
+   3.9,
+   0
+  ],
+  "test_bounty_data": [
+   0.3,
+   0.3,
+   0
+  ],
+  "test_bounty_gate": [
+   9.1,
+   5.1,
+   0
+  ],
+  "test_bounty_report": [
+   0.1,
+   0.0,
+   1
+  ],
+  "test_bounty_scope": [
+   0.0,
+   0.0,
+   1
+  ],
+  "test_bounty_workbench": [
+   9.0,
+   2.4,
+   0
+  ],
+  "test_branch_fixes": [
+   0.1,
+   0.1,
+   0
+  ],
+  "test_broker_acks": [
+   0.0,
+   0.0,
+   2
+  ],
+  "test_broker_recovery": [
+   0.1,
+   0.1,
+   0
+  ],
+  "test_bucket_scan": [
+   6.1,
+   3.0,
+   0
+  ],
+  "test_builtin_default": [
+   9.8,
+   2.9,
+   0
+  ],
+  "test_builtin_scanner": [
+   5.7,
+   1.9,
+   0
+  ],
+  "test_builtin_visible": [
+   11.1,
+   5.9,
+   0
+  ],
+  "test_bulk_fairness": [
+   0.1,
+   0.1,
+   1
+  ],
+  "test_bulk_heat_batched": [
+   3.1,
+   3.1,
+   0
+  ],
+  "test_bulk_status_queries": [
+   3.8,
+   3.8,
+   0
+  ],
+  "test_catalog_reads": [
+   0.2,
+   0.1,
+   0
+  ],
+  "test_celery_lanes": [
+   19.2,
+   17.6,
+   1
+  ],
+  "test_census_paging": [
+   14.7,
+   14.6,
+   0
+  ],
+  "test_certificates": [
+   10.3,
+   7.5,
+   2
+  ],
+  "test_changes": [
+   6.1,
+   1.9,
+   0
+  ],
+  "test_check_coverage": [
+   34.7,
+   27.5,
+   1
+  ],
+  "test_check_migrations": [
+   0.3,
+   0.3,
+   1
+  ],
+  "test_ci_shard": [
+   5.8,
+   5.5,
+   1
+  ],
+  "test_client_library_detection": [
+   0.3,
+   0.2,
+   0
+  ],
+  "test_client_library_script_read_review": [
+   15.3,
+   5.9,
+   0
+  ],
+  "test_client_library_validation": [
+   4.4,
+   3.1,
+   0
+  ],
+  "test_cms": [
+   0.0,
+   0.0,
+   1
+  ],
+  "test_cms_products": [
+   0.0,
+   0.0,
+   1
+  ],
+  "test_cms_resolver": [
+   2.0,
+   2.0,
+   0
+  ],
+  "test_collapse_once": [
+   2.2,
+   1.0,
+   0
+  ],
+  "test_compose": [
+   0.7,
+   0.6,
+   2
+  ],
+  "test_compose_layout": [
+   2.6,
+   1.4,
+   2
+  ],
+  "test_compose_proxy": [
+   0.1,
+   0.1,
+   2
+  ],
+  "test_conductor": [
+   0.5,
+   0.5,
+   0
+  ],
+  "test_confirm_guide": [
+   7.6,
+   4.5,
+   0
+  ],
+  "test_correlation": [
+   0.1,
+   0.0,
+   2
+  ],
+  "test_count_rules": [
+   6.2,
+   6.2,
+   0
+  ],
+  "test_counts": [
+   14.7,
+   6.0,
+   0
+  ],
+  "test_coverage_gate": [
+   2.2,
+   1.6,
+   0
+  ],
+  "test_coverage_idle_memo": [
+   0.6,
+   0.6,
+   0
+  ],
+  "test_coverage_topup": [
+   0.8,
+   0.8,
+   0
+  ],
+  "test_coyote_version": [
+   0.4,
+   0.4,
+   0
+  ],
+  "test_create_admin": [
+   7.6,
+   4.9,
+   0
+  ],
+  "test_ct_fallback": [
+   1.0,
+   0.4,
+   0
+  ],
+  "test_ct_health": [
+   11.3,
+   10.9,
+   0
+  ],
+  "test_ct_queue": [
+   1.9,
+   0.9,
+   0
+  ],
+  "test_ctmonitor": [
+   2.3,
+   1.5,
+   0
+  ],
+  "test_ctmonitor_queue": [
+   0.0,
+   0.0,
+   1
+  ],
+  "test_current_inventory_ids": [
+   1.4,
+   1.0,
+   0
+  ],
+  "test_current_scans": [
+   2.0,
+   1.9,
+   0
+  ],
+  "test_cve_backfill": [
+   3.2,
+   2.9,
+   0
+  ],
+  "test_cve_checks_contract": [
+   4.0,
+   3.1,
+   1
+  ],
+  "test_cve_detection": [
+   1.0,
+   0.4,
+   0
+  ],
+  "test_cve_explorer": [
+   5.0,
+   1.2,
+   0
+  ],
+  "test_cve_feed": [
+   1.2,
+   0.4,
+   0
+  ],
+  "test_cve_guidance": [
+   24.2,
+   21.2,
+   0
+  ],
+  "test_cve_seed": [
+   0.5,
+   0.2,
+   0
+  ],
+  "test_cve_seed_export": [
+   7.5,
+   3.8,
+   0
+  ],
+  "test_dangling_dns": [
+   2.5,
+   1.4,
+   0
+  ],
+  "test_dashboard_default": [
+   4.0,
+   2.3,
+   0
+  ],
+  "test_dashboard_scrollback": [
+   0.3,
+   0.3,
+   0
+  ],
+  "test_db_app_role_grants": [
+   9.9,
+   9.9,
+   1
+  ],
+  "test_db_backup_scripts": [
+   3.3,
+   3.3,
+   2
+  ],
+  "test_db_connection_settings": [
+   0.0,
+   0.0,
+   1
+  ],
+  "test_db_exposure": [
+   0.5,
+   0.5,
+   0
+  ],
+  "test_db_intel": [
+   0.2,
+   0.1,
+   0
+  ],
+  "test_db_jit": [
+   0.0,
+   0.0,
+   0
+  ],
+  "test_db_roles": [
+   1.9,
+   0.7,
+   1
+  ],
+  "test_db_stats": [
+   0.5,
+   0.5,
+   0
+  ],
+  "test_dedupe_constraints": [
+   10.8,
+   3.5,
+   1
+  ],
+  "test_default_fixtures": [
+   0.2,
+   0.2,
+   0
+  ],
+  "test_default_status": [
+   0.0,
+   0.0,
+   1
+  ],
+  "test_detection_author_failures": [
+   0.3,
+   0.2,
+   0
+  ],
+  "test_discovery": [
+   17.2,
+   7.9,
+   0
+  ],
+  "test_discovery_counts_query": [
+   0.2,
+   0.2,
+   0
+  ],
+  "test_discovery_events": [
+   0.0,
+   0.0,
+   1
+  ],
+  "test_discovery_mode": [
+   19.1,
+   12.2,
+   0
+  ],
+  "test_discovery_mode_paths": [
+   5.7,
+   1.5,
+   0
+  ],
+  "test_discovery_reason_busy": [
+   22.8,
+   11.6,
+   0
+  ],
+  "test_distinct_issues": [
+   4.8,
+   1.6,
+   0
+  ],
+  "test_distro_banners": [
+   5.2,
+   4.5,
+   0
+  ],
+  "test_distro_rhel": [
+   1.9,
+   0.4,
+   0
+  ],
+  "test_dns_crosscheck": [
+   21.1,
+   9.6,
+   0
+  ],
+  "test_docs_accuracy": [
+   0.9,
+   0.6,
+   1
+  ],
+  "test_drop_legacy_models": [
+   154.5,
+   154.5,
+   1
+  ],
+  "test_drop_unused_legacy_models": [
+   44.5,
+   44.5,
+   1
+  ],
+  "test_edge_builds": [
+   3.2,
+   2.8,
+   0
+  ],
+  "test_egress_proxy": [
+   6.3,
+   5.6,
+   0
+  ],
+  "test_entrypoint": [
+   54.2,
+   50.1,
+   1
+  ],
+  "test_exclude_domain": [
+   32.1,
+   13.8,
+   0
+  ],
+  "test_exclusion_cache": [
+   0.8,
+   0.6,
+   0
+  ],
+  "test_factory_reset": [
+   8.0,
+   8.0,
+   0
+  ],
+  "test_fake_scanner": [
+   16.6,
+   3.5,
+   0
+  ],
+  "test_false_positive_status": [
+   7.4,
+   3.0,
+   0
+  ],
+  "test_feed_coverage_gaps": [
+   79.5,
+   29.8,
+   0
+  ],
+  "test_feed_health": [
+   1.3,
+   0.4,
+   0
+  ],
+  "test_field_key": [
+   0.2,
+   0.1,
+   0
+  ],
+  "test_finding_confirm": [
+   5.7,
+   1.7,
+   0
+  ],
+  "test_finding_counts_cache": [
+   2.1,
+   2.1,
+   0
+  ],
+  "test_finding_glance": [
+   0.0,
+   0.0,
+   1
+  ],
+  "test_finding_groups": [
+   5.2,
+   4.9,
+   0
+  ],
+  "test_finding_hosts": [
+   3.3,
+   1.1,
+   0
+  ],
+  "test_finding_lifecycle": [
+   4.8,
+   1.4,
+   0
+  ],
+  "test_findings_unified": [
+   3.9,
+   3.9,
+   0
+  ],
+  "test_first_run_waits": [
+   0.0,
+   0.0,
+   1
+  ],
+  "test_fix_retest": [
+   21.1,
+   4.3,
+   0
+  ],
+  "test_frontend_pages": [
+   0.3,
+   0.3,
+   0
+  ],
+  "test_fullscan": [
+   3.0,
+   1.3,
+   0
+  ],
+  "test_fullscan_revocation": [
+   0.8,
+   0.8,
+   0
+  ],
+  "test_generated_template_restore": [
+   0.1,
+   0.1,
+   0
+  ],
+  "test_generated_template_review": [
+   26.9,
+   8.7,
+   0
+  ],
+  "test_gevent_autoscale": [
+   0.7,
+   0.7,
+   2
+  ],
+  "test_gevent_cache": [
+   0.0,
+   0.0,
+   1
+  ],
+  "test_gevent_db": [
+   5.5,
+   5.5,
+   1
+  ],
+  "test_gevent_gc": [
+   2.1,
+   1.5,
+   1
+  ],
+  "test_gevent_worker_e2e": [
+   105.3,
+   105.3,
+   2
+  ],
+  "test_glance_layout": [
+   0.0,
+   0.0,
+   1
+  ],
+  "test_graph_live": [
+   0.8,
+   0.8,
+   0
+  ],
+  "test_graph_overview": [
+   0.5,
+   0.5,
+   0
+  ],
+  "test_graph_payload_queries": [
+   12.4,
+   7.3,
+   0
+  ],
+  "test_graph_payload_size": [
+   1.6,
+   1.6,
+   0
+  ],
+  "test_graph_single_flight": [
+   4.6,
+   2.3,
+   1
+  ],
+  "test_hard_batch": [
+   1.6,
+   1.6,
+   0
+  ],
+  "test_hard_changes": [
+   0.2,
+   0.2,
+   0
+  ],
+  "test_hard_distro": [
+   2.2,
+   0.9,
+   0
+  ],
+  "test_hard_evidence": [
+   1.6,
+   1.4,
+   0
+  ],
+  "test_hard_findings": [
+   0.3,
+   0.3,
+   0
+  ],
+  "test_hard_lockout": [
+   1.9,
+   1.9,
+   0
+  ],
+  "test_hard_naabu": [
+   0.6,
+   0.6,
+   0
+  ],
+  "test_hard_notify": [
+   3.2,
+   1.6,
+   0
+  ],
+  "test_hard_perf": [
+   0.1,
+   0.1,
+   0
+  ],
+  "test_hard_ports": [
+   0.3,
+   0.1,
+   0
+  ],
+  "test_hard_retest": [
+   2.0,
+   1.1,
+   0
+  ],
+  "test_hard_samples": [
+   0.0,
+   0.0,
+   1
+  ],
+  "test_hard_scope": [
+   3.2,
+   3.2,
+   0
+  ],
+  "test_hard_scoring": [
+   1.3,
+   0.8,
+   0
+  ],
+  "test_hard_security": [
+   0.7,
+   0.4,
+   0
+  ],
+  "test_hard_shots": [
+   0.0,
+   0.0,
+   1
+  ],
+  "test_hard_stale": [
+   1.6,
+   1.6,
+   0
+  ],
+  "test_hard_webhooks": [
+   0.1,
+   0.1,
+   0
+  ],
+  "test_hard_zombie": [
+   0.6,
+   0.6,
+   0
+  ],
+  "test_heat_135": [
+   2.5,
+   0.7,
+   0
+  ],
+  "test_heat_override": [
+   14.8,
+   4.6,
+   0
+  ],
+  "test_heat_policy": [
+   1.6,
+   1.6,
+   0
+  ],
+  "test_heat_policy_review": [
+   8.7,
+   5.4,
+   0
+  ],
+  "test_heat_policy_review2": [
+   5.6,
+   1.4,
+   0
+  ],
+  "test_hermetic_runner": [
+   0.3,
+   0.2,
+   1
+  ],
+  "test_host_actions": [
+   8.0,
+   3.0,
+   0
+  ],
+  "test_host_ai_review": [
+   9.6,
+   8.5,
+   0
+  ],
+  "test_host_aliases": [
+   4.1,
+   2.2,
+   0
+  ],
+  "test_host_assessment": [
+   10.0,
+   10.0,
+   0
+  ],
+  "test_host_bulk_batch": [
+   0.8,
+   0.8,
+   0
+  ],
+  "test_host_count_cache": [
+   1.5,
+   1.5,
+   0
+  ],
+  "test_host_export": [
+   17.7,
+   2.5,
+   0
+  ],
+  "test_host_filter_current_ids": [
+   79.5,
+   79.5,
+   0
+  ],
+  "test_host_fit_script": [
+   59.3,
+   29.3,
+   2
+  ],
+  "test_host_groups": [
+   1.4,
+   1.4,
+   0
+  ],
+  "test_host_headers": [
+   4.6,
+   4.6,
+   0
+  ],
+  "test_host_inventory": [
+   11.0,
+   3.7,
+   0
+  ],
+  "test_host_labels": [
+   0.9,
+   0.8,
+   0
+  ],
+  "test_host_loop_batching": [
+   1.7,
+   0.6,
+   0
+  ],
+  "test_host_manage": [
+   64.0,
+   20.7,
+   0
+  ],
+  "test_host_names_batch": [
+   0.6,
+   0.6,
+   0
+  ],
+  "test_host_page_batching": [
+   0.9,
+   0.9,
+   0
+  ],
+  "test_host_record": [
+   1.7,
+   0.6,
+   0
+  ],
+  "test_host_review": [
+   0.2,
+   0.2,
+   2
+  ],
+  "test_host_review_api": [
+   38.8,
+   8.6,
+   0
+  ],
+  "test_host_review_default_off": [
+   8.1,
+   3.3,
+   0
+  ],
+  "test_host_review_hardening": [
+   55.0,
+   7.2,
+   0
+  ],
+  "test_host_review_job": [
+   17.9,
+   9.7,
+   0
+  ],
+  "test_host_review_postgres": [
+   0.7,
+   0.2,
+   2
+  ],
+  "test_host_review_steps": [
+   28.1,
+   15.1,
+   0
+  ],
+  "test_host_screenshot": [
+   1.7,
+   0.8,
+   0
+  ],
+  "test_host_scripts": [
+   1.3,
+   0.6,
+   2
+  ],
+  "test_host_siblings_keys": [
+   2.5,
+   2.5,
+   0
+  ],
+  "test_hot_indexes": [
+   0.1,
+   0.1,
+   0
+  ],
+  "test_hot_validation": [
+   13.1,
+   7.9,
+   0
+  ],
+  "test_hot_validation_signature": [
+   0.3,
+   0.3,
+   0
+  ],
+  "test_how_it_works": [
+   0.3,
+   0.3,
+   0
+  ],
+  "test_hygiene": [
+   8.6,
+   5.7,
+   0
+  ],
+  "test_hygiene_cleartext": [
+   35.7,
+   9.6,
+   0
+  ],
+  "test_hygiene_mail": [
+   0.8,
+   0.7,
+   0
+  ],
+  "test_hygiene_ratings": [
+   6.8,
+   4.6,
+   0
+  ],
+  "test_hygiene_unknown_mail": [
+   0.1,
+   0.1,
+   0
+  ],
+  "test_image_python": [
+   0.0,
+   0.0,
+   1
+  ],
+  "test_inactive_archive": [
+   0.7,
+   0.7,
+   0
+  ],
+  "test_index_warmup": [
+   1.8,
+   0.8,
+   1
+  ],
+  "test_infra_hardening": [
+   0.2,
+   0.1,
+   1
+  ],
+  "test_ingest_batch": [
+   1.4,
+   0.8,
+   0
+  ],
+  "test_input_guard": [
+   2.7,
+   1.3,
+   0
+  ],
+  "test_input_limits": [
+   0.4,
+   0.2,
+   1
+  ],
+  "test_installer": [
+   4.4,
+   4.3,
+   2
+  ],
+  "test_intel": [
+   0.6,
+   0.5,
+   0
+  ],
+  "test_internal_coverage": [
+   2.0,
+   2.0,
+   0
+  ],
+  "test_internal_discovery": [
+   6.8,
+   1.6,
+   0
+  ],
+  "test_internal_last_resort": [
+   22.6,
+   9.7,
+   0
+  ],
+  "test_internal_ranges": [
+   7.4,
+   2.0,
+   0
+  ],
+  "test_internal_scan": [
+   19.6,
+   3.4,
+   0
+  ],
+  "test_internal_view": [
+   10.5,
+   3.2,
+   0
+  ],
+  "test_inventory_counts": [
+   13.7,
+   13.4,
+   0
+  ],
+  "test_inventory_current": [
+   1.4,
+   1.4,
+   0
+  ],
+  "test_inventory_hardening": [
+   13.6,
+   2.8,
+   0
+  ],
+  "test_inventory_match": [
+   8.8,
+   2.9,
+   0
+  ],
+  "test_inventory_scripts": [
+   28.6,
+   19.9,
+   1
+  ],
+  "test_investigation": [
+   4.5,
+   2.0,
+   0
+  ],
+  "test_investigation_review": [
+   4.1,
+   1.5,
+   0
+  ],
+  "test_ip_allowlist": [
+   0.8,
+   0.8,
+   0
+  ],
+  "test_java_runtime": [
+   6.0,
+   5.0,
+   0
+  ],
+  "test_js_libraries": [
+   0.7,
+   0.7,
+   0
+  ],
+  "test_js_libraries_provenance": [
+   80.0,
+   31.2,
+   0
+  ],
+  "test_js_library_versions": [
+   7.0,
+   1.9,
+   0
+  ],
+  "test_js_provenance_strict": [
+   16.6,
+   8.5,
+   0
+  ],
+  "test_js_provenance_unread": [
+   13.4,
+   5.1,
+   0
+  ],
+  "test_kev_revalidation": [
+   18.5,
+   5.6,
+   0
+  ],
+  "test_lane_memory": [
+   0.2,
+   0.1,
+   1
+  ],
+  "test_lane_resize_e2e": [
+   38.9,
+   38.9,
+   2
+  ],
+  "test_lane_stacks": [
+   2.9,
+   2.9,
+   2
+  ],
+  "test_ledger": [
+   0.2,
+   0.1,
+   0
+  ],
+  "test_library_body_proven": [
+   10.0,
+   5.0,
+   0
+  ],
+  "test_library_closure_review": [
+   39.3,
+   7.6,
+   0
+  ],
+  "test_library_detection_135": [
+   6.2,
+   5.0,
+   1
+  ],
+  "test_list_hosts_paging": [
+   4.2,
+   3.5,
+   0
+  ],
+  "test_list_viewport": [
+   0.0,
+   0.0,
+   1
+  ],
+  "test_live_cache": [
+   14.7,
+   4.1,
+   0
+  ],
+  "test_live_refresh": [
+   54.8,
+   8.8,
+   0
+  ],
+  "test_live_validation_fixes": [
+   1.9,
+   0.8,
+   0
+  ],
+  "test_llamacpp_builds": [
+   0.1,
+   0.1,
+   0
+  ],
+  "test_load_fixes": [
+   11.0,
+   8.0,
+   0
+  ],
+  "test_locality": [
+   0.3,
+   0.3,
+   0
+  ],
+  "test_logging_config": [
+   0.0,
+   0.0,
+   1
+  ],
+  "test_login_throttle": [
+   23.7,
+   21.6,
+   0
+  ],
+  "test_maintainer_ai": [
+   18.6,
+   5.0,
+   0
+  ],
+  "test_maintainer_ai_caps": [
+   11.3,
+   11.0,
+   0
+  ],
+  "test_maintainer_checks": [
+   97.5,
+   95.6,
+   0
+  ],
+  "test_maintainer_knobs": [
+   34.5,
+   29.1,
+   0
+  ],
+  "test_maintainer_record": [
+   6.2,
+   3.1,
+   0
+  ],
+  "test_maintainer_signals": [
+   4.5,
+   2.5,
+   0
+  ],
+  "test_maintenance": [
+   0.5,
+   0.3,
+   0
+  ],
+  "test_maintenance_page": [
+   0.5,
+   0.5,
+   0
+  ],
+  "test_manual_only_sweeps": [
+   7.9,
+   1.8,
+   0
+  ],
+  "test_match_explain": [
+   2.1,
+   1.3,
+   0
+  ],
+  "test_match_policy": [
+   5.6,
+   2.9,
+   2
+  ],
+  "test_match_policy_review": [
+   3.1,
+   1.0,
+   0
+  ],
+  "test_mcp_arguments": [
+   0.4,
+   0.4,
+   0
+  ],
+  "test_mcp_limits": [
+   0.2,
+   0.2,
+   1
+  ],
+  "test_mcp_page": [
+   1.9,
+   1.0,
+   0
+  ],
+  "test_mfa_security": [
+   5.0,
+   3.5,
+   0
+  ],
+  "test_migration_frozen": [
+   0.0,
+   0.0,
+   0
+  ],
+  "test_name_versions": [
+   0.4,
+   0.4,
+   0
+  ],
+  "test_nav_current": [
+   1.9,
+   1.9,
+   0
+  ],
+  "test_nav_reachability": [
+   0.4,
+   0.4,
+   0
+  ],
+  "test_network_detection": [
+   4.0,
+   2.3,
+   0
+  ],
+  "test_nginx_static_cache_real": [
+   0.0,
+   0.0,
+   2
+  ],
+  "test_no_local_tools": [
+   2.6,
+   2.2,
+   1
+  ],
+  "test_no_unstyled_flash": [
+   0.1,
+   0.1,
+   1
+  ],
+  "test_node2shell": [
+   2.3,
+   1.3,
+   0
+  ],
+  "test_notify": [
+   1.5,
+   1.5,
+   0
+  ],
+  "test_nuclei_all_templates_migration": [
+   0.0,
+   0.0,
+   0
+  ],
+  "test_nuclei_port_protocol": [
+   1.9,
+   0.6,
+   0
+  ],
+  "test_nuclei_templates": [
+   0.8,
+   0.3,
+   0
+  ],
+  "test_oldest_open": [
+   1.1,
+   1.1,
+   0
+  ],
+  "test_onboarding_email": [
+   8.6,
+   5.3,
+   0
+  ],
+  "test_openvas": [
+   61.4,
+   14.7,
+   0
+  ],
+  "test_openvas_fixes": [
+   2.2,
+   2.2,
+   0
+  ],
+  "test_openvas_generic": [
+   3.6,
+   1.7,
+   0
+  ],
+  "test_openvas_gvmd227": [
+   2.8,
+   2.8,
+   0
+  ],
+  "test_openvas_identity": [
+   0.8,
+   0.3,
+   0
+  ],
+  "test_openvas_queue_summary": [
+   0.7,
+   0.4,
+   0
+  ],
+  "test_org_uniqueness": [
+   118.1,
+   111.4,
+   1
+  ],
+  "test_os_detection": [
+   0.6,
+   0.2,
+   0
+  ],
+  "test_overview": [
+   5.9,
+   3.4,
+   0
+  ],
+  "test_overview_fast": [
+   8.7,
+   2.1,
+   0
+  ],
+  "test_page_polls": [
+   7.8,
+   6.2,
+   0
+  ],
+  "test_page_read": [
+   6.6,
+   4.1,
+   0
+  ],
+  "test_panel_versions": [
+   2.7,
+   1.1,
+   0
+  ],
+  "test_path_probe": [
+   0.2,
+   0.1,
+   0
+  ],
+  "test_perf_autofire": [
+   1.9,
+   1.5,
+   0
+  ],
+  "test_perf_batching": [
+   0.7,
+   0.5,
+   0
+  ],
+  "test_perf_correlation": [
+   6.9,
+   1.1,
+   0
+  ],
+  "test_perf_dashboard": [
+   2.1,
+   1.9,
+   0
+  ],
+  "test_perf_deepsweep": [
+   0.8,
+   0.6,
+   0
+  ],
+  "test_perf_hostpipeline": [
+   3.8,
+   2.0,
+   0
+  ],
+  "test_perf_indexes": [
+   0.2,
+   0.2,
+   0
+  ],
+  "test_perf_sweeps": [
+   0.8,
+   0.8,
+   0
+  ],
+  "test_perf_templates": [
+   0.1,
+   0.1,
+   2
+  ],
+  "test_perf_versionless": [
+   0.4,
+   0.4,
+   0
+  ],
+  "test_php_link_tells": [
+   1.3,
+   0.7,
+   0
+  ],
+  "test_pipeline_limits": [
+   0.0,
+   0.0,
+   1
+  ],
+  "test_plain_language_pages": [
+   0.6,
+   0.6,
+   0
+  ],
+  "test_port_flood": [
+   1.0,
+   1.0,
+   0
+  ],
+  "test_port_inventory": [
+   0.9,
+   0.4,
+   0
+  ],
+  "test_port_rows": [
+   12.4,
+   5.5,
+   1
+  ],
+  "test_port_trim": [
+   3.2,
+   3.2,
+   0
+  ],
+  "test_probe_kinds": [
+   68.1,
+   20.9,
+   0
+  ],
+  "test_probes": [
+   9.9,
+   4.8,
+   0
+  ],
+  "test_project_settings": [
+   0.9,
+   0.9,
+   0
+  ],
+  "test_protected_media": [
+   1.0,
+   0.7,
+   0
+  ],
+  "test_proxy_follows_web": [
+   45.7,
+   39.9,
+   1
+  ],
+  "test_range_consumers": [
+   0.1,
+   0.0,
+   1
+  ],
+  "test_range_ingest": [
+   1.6,
+   0.3,
+   0
+  ],
+  "test_rdp_shot": [
+   10.1,
+   6.8,
+   0
+  ],
+  "test_read_paths_batch": [
+   2.9,
+   1.5,
+   0
+  ],
+  "test_reaper": [
+   93.5,
+   27.9,
+   0
+  ],
+  "test_recog": [
+   1.6,
+   0.8,
+   0
+  ],
+  "test_refresh_unchanged": [
+   1.1,
+   0.6,
+   0
+  ],
+  "test_remediation_carry": [
+   0.3,
+   0.3,
+   0
+  ],
+  "test_report_email_digest": [
+   17.6,
+   7.2,
+   0
+  ],
+  "test_report_issues": [
+   5.5,
+   2.1,
+   0
+  ],
+  "test_report_memory": [
+   102.7,
+   102.4,
+   1
+  ],
+  "test_report_niced": [
+   0.0,
+   0.0,
+   1
+  ],
+  "test_report_pdf": [
+   115.5,
+   25.4,
+   0
+  ],
+  "test_report_queries": [
+   1.6,
+   1.6,
+   0
+  ],
+  "test_report_resources": [
+   0.2,
+   0.2,
+   2
+  ],
+  "test_report_subscriptions": [
+   43.4,
+   8.5,
+   0
+  ],
+  "test_report_threats": [
+   19.3,
+   5.2,
+   0
+  ],
+  "test_reporting": [
+   17.9,
+   5.6,
+   0
+  ],
+  "test_request_overhead": [
+   0.3,
+   0.3,
+   0
+  ],
+  "test_resolve_errors": [
+   3.3,
+   1.8,
+   0
+  ],
+  "test_resources": [
+   0.3,
+   0.3,
+   2
+  ],
+  "test_retest": [
+   5.3,
+   2.6,
+   0
+  ],
+  "test_review_efficiency": [
+   1.5,
+   0.8,
+   0
+  ],
+  "test_reviewer": [
+   32.6,
+   12.0,
+   0
+  ],
+  "test_reviewer_caps": [
+   2.5,
+   1.0,
+   0
+  ],
+  "test_reviewer_consistency": [
+   6.0,
+   6.0,
+   0
+  ],
+  "test_reviewer_keyset": [
+   24.0,
+   19.6,
+   0
+  ],
+  "test_rotate_secrets_script": [
+   10.1,
+   10.1,
+   2
+  ],
+  "test_route_auth": [
+   11.5,
+   5.8,
+   0
+  ],
+  "test_runtime_files_untracked": [
+   0.1,
+   0.1,
+   2
+  ],
+  "test_runzero": [
+   14.0,
+   11.1,
+   0
+  ],
+  "test_safeyaml": [
+   0.0,
+   0.0,
+   1
+  ],
+  "test_saved_searches": [
+   9.2,
+   2.6,
+   0
+  ],
+  "test_sbom": [
+   0.0,
+   0.0,
+   1
+  ],
+  "test_scale_batch_tasks": [
+   2.2,
+   1.9,
+   0
+  ],
+  "test_scale_contract_cache": [
+   0.0,
+   0.0,
+   1
+  ],
+  "test_scale_discovery_counts": [
+   0.3,
+   0.3,
+   0
+  ],
+  "test_scale_heat_sql": [
+   1.0,
+   1.0,
+   0
+  ],
+  "test_scale_hosts": [
+   3.6,
+   2.6,
+   0
+  ],
+  "test_scale_probes": [
+   0.2,
+   0.1,
+   0
+  ],
+  "test_scale_report_render": [
+   26.9,
+   14.3,
+   0
+  ],
+  "test_scale_search_branches": [
+   1.0,
+   1.0,
+   0
+  ],
+  "test_scale_search_facets": [
+   3.3,
+   2.7,
+   0
+  ],
+  "test_scale_search_matched": [
+   2.2,
+   2.2,
+   0
+  ],
+  "test_scale_sentinel_page": [
+   3.6,
+   2.1,
+   0
+  ],
+  "test_scale_stats_cache": [
+   17.4,
+   17.4,
+   0
+  ],
+  "test_scan_concurrency": [
+   24.0,
+   12.9,
+   0
+  ],
+  "test_scan_control": [
+   11.6,
+   8.6,
+   0
+  ],
+  "test_scan_retention": [
+   3.0,
+   3.0,
+   0
+  ],
+  "test_scan_vulns_page": [
+   0.7,
+   0.7,
+   0
+  ],
+  "test_scanner_env_optin": [
+   12.0,
+   9.1,
+   2
+  ],
+  "test_scanner_fallback_policy": [
+   5.3,
+   2.2,
+   0
+  ],
+  "test_scanner_fallback_telemetry": [
+   7.3,
+   4.3,
+   0
+  ],
+  "test_scanner_follows_latest": [
+   5.9,
+   3.4,
+   0
+  ],
+  "test_scanner_fp_135": [
+   1.3,
+   0.4,
+   0
+  ],
+  "test_scanner_overlays": [
+   0.0,
+   0.0,
+   2
+  ],
+  "test_scanner_plan": [
+   9.7,
+   3.2,
+   0
+  ],
+  "test_scanner_result_fields": [
+   0.0,
+   0.0,
+   1
+  ],
+  "test_scanner_script": [
+   29.4,
+   13.9,
+   2
+  ],
+  "test_scanner_unavailable_stages": [
+   4.9,
+   1.5,
+   0
+  ],
+  "test_scanner_vantage": [
+   4.1,
+   2.5,
+   0
+  ],
+  "test_scanner_waiting_state": [
+   24.6,
+   9.5,
+   0
+  ],
+  "test_scans_stop": [
+   1.9,
+   1.9,
+   0
+  ],
+  "test_schema_guard": [
+   1.2,
+   0.5,
+   0
+  ],
+  "test_scope": [
+   0.7,
+   0.3,
+   0
+  ],
+  "test_scope_add_time": [
+   5.3,
+   1.5,
+   0
+  ],
+  "test_scope_api": [
+   0.4,
+   0.4,
+   0
+  ],
+  "test_score_explained": [
+   0.7,
+   0.7,
+   0
+  ],
+  "test_scoring": [
+   3.5,
+   2.1,
+   0
+  ],
+  "test_screenshot_image_scrub": [
+   0.1,
+   0.1,
+   0
+  ],
+  "test_screenshot_xss": [
+   3.8,
+   1.6,
+   0
+  ],
+  "test_scrub_nse_scripts_migration": [
+   0.1,
+   0.1,
+   0
+  ],
+  "test_search_evidence": [
+   4.1,
+   4.1,
+   0
+  ],
+  "test_search_hostile_input": [
+   0.1,
+   0.1,
+   0
+  ],
+  "test_search_negation_cost": [
+   0.0,
+   0.0,
+   1
+  ],
+  "test_search_version": [
+   2.4,
+   2.4,
+   0
+  ],
+  "test_secret_context": [
+   9.0,
+   3.6,
+   0
+  ],
+  "test_secret_context_compat": [
+   1.8,
+   1.8,
+   0
+  ],
+  "test_secret_detail": [
+   13.0,
+   5.4,
+   0
+  ],
+  "test_secret_redaction": [
+   7.0,
+   7.0,
+   2
+  ],
+  "test_secret_value_scrub": [
+   0.1,
+   0.1,
+   0
+  ],
+  "test_secrets_api": [
+   5.4,
+   4.6,
+   0
+  ],
+  "test_secrets_catalog": [
+   0.0,
+   0.0,
+   1
+  ],
+  "test_secrets_inventory": [
+   1.5,
+   0.5,
+   0
+  ],
+  "test_secrets_scan": [
+   5.2,
+   3.1,
+   0
+  ],
+  "test_secrets_validation": [
+   0.5,
+   0.5,
+   1
+  ],
+  "test_security_settings": [
+   0.1,
+   0.1,
+   0
+  ],
+  "test_sensitive": [
+   5.2,
+   5.0,
+   0
+  ],
+  "test_sentinel_autoupdate": [
+   9.2,
+   3.8,
+   0
+  ],
+  "test_sentinel_balance": [
+   34.5,
+   11.7,
+   0
+  ],
+  "test_sentinel_breaker": [
+   2.9,
+   2.9,
+   0
+  ],
+  "test_sentinel_capability_policy": [
+   50.8,
+   14.0,
+   0
+  ],
+  "test_sentinel_capacity": [
+   5.9,
+   3.4,
+   0
+  ],
+  "test_sentinel_checkout_checkin": [
+   11.2,
+   11.2,
+   0
+  ],
+  "test_sentinel_client_limits": [
+   1.5,
+   1.5,
+   0
+  ],
+  "test_sentinel_contract": [
+   4.2,
+   2.0,
+   1
+  ],
+  "test_sentinel_contract_version": [
+   2.2,
+   2.2,
+   0
+  ],
+  "test_sentinel_dispatch": [
+   15.3,
+   3.9,
+   0
+  ],
+  "test_sentinel_feed": [
+   8.2,
+   3.8,
+   0
+  ],
+  "test_sentinel_hardening": [
+   26.1,
+   4.7,
+   0
+  ],
+  "test_sentinel_lab_results": [
+   1.2,
+   1.2,
+   0
+  ],
+  "test_sentinel_nmap_detail": [
+   1.1,
+   1.1,
+   0
+  ],
+  "test_sentinel_policy": [
+   16.3,
+   4.2,
+   0
+  ],
+  "test_sentinel_poll_cost": [
+   8.8,
+   2.3,
+   0
+  ],
+  "test_sentinel_query_counts": [
+   3.9,
+   2.9,
+   0
+  ],
+  "test_sentinel_reaper_batch": [
+   4.6,
+   1.8,
+   0
+  ],
+  "test_sentinel_result_cuts": [
+   0.9,
+   0.9,
+   0
+  ],
+  "test_sentinel_secret_read": [
+   15.7,
+   4.4,
+   0
+  ],
+  "test_sentinel_settings": [
+   18.6,
+   3.1,
+   0
+  ],
+  "test_sentinel_source": [
+   0.4,
+   0.3,
+   0
+  ],
+  "test_sentinel_stream": [
+   5.7,
+   1.6,
+   0
+  ],
+  "test_sentinel_task_retention": [
+   0.1,
+   0.1,
+   0
+  ],
+  "test_sentinel_template_index": [
+   6.5,
+   4.2,
+   0
+  ],
+  "test_sentinel_time_limits": [
+   0.0,
+   0.0,
+   1
+  ],
+  "test_sentinel_tools_behind": [
+   0.4,
+   0.4,
+   0
+  ],
+  "test_sentinel_v3_kinds": [
+   9.1,
+   1.4,
+   0
+  ],
+  "test_sentinel_version": [
+   5.9,
+   3.0,
+   0
+  ],
+  "test_sentinel_waiters": [
+   5.6,
+   5.6,
+   0
+  ],
+  "test_sentinel_waiting_not_failing": [
+   44.0,
+   44.0,
+   0
+  ],
+  "test_sentinels": [
+   30.5,
+   5.3,
+   0
+  ],
+  "test_service_features": [
+   5.1,
+   2.4,
+   0
+  ],
+  "test_service_features_net": [
+   3.2,
+   1.2,
+   0
+  ],
+  "test_service_features_web": [
+   3.3,
+   1.8,
+   0
+  ],
+  "test_service_intel": [
+   0.8,
+   0.5,
+   0
+  ],
+  "test_settings": [
+   2.0,
+   2.0,
+   0
+  ],
+  "test_settings_bridge": [
+   17.3,
+   14.1,
+   0
+  ],
+  "test_setup_questions": [
+   32.5,
+   12.3,
+   0
+  ],
+  "test_setup_wizard": [
+   45.5,
+   13.1,
+   0
+  ],
+  "test_shodan_leads": [
+   2.1,
+   0.7,
+   0
+  ],
+  "test_shots": [
+   0.9,
+   0.7,
+   0
+  ],
+  "test_signed_routes": [
+   6.2,
+   2.7,
+   0
+  ],
+  "test_situations": [
+   28.3,
+   9.5,
+   0
+  ],
+  "test_situations_fast": [
+   4.8,
+   3.5,
+   0
+  ],
+  "test_snmp_bundled": [
+   1.6,
+   0.8,
+   0
+  ],
+  "test_source_versions": [
+   4.0,
+   1.0,
+   0
+  ],
+  "test_ssh_scan": [
+   13.9,
+   6.7,
+   0
+  ],
+  "test_stage_parallel": [
+   177.6,
+   160.5,
+   0
+  ],
+  "test_stage_run_drive_once": [
+   0.0,
+   0.0,
+   1
+  ],
+  "test_stale_page": [
+   1.1,
+   1.1,
+   0
+  ],
+  "test_state_machines": [
+   1.9,
+   1.4,
+   0
+  ],
+  "test_state_machines_findings": [
+   7.9,
+   1.9,
+   0
+  ],
+  "test_state_machines_ops": [
+   7.1,
+   5.6,
+   2
+  ],
+  "test_state_machines_sentinels": [
+   7.0,
+   2.0,
+   0
+  ],
+  "test_stats_fresh_after_write": [
+   5.6,
+   2.8,
+   0
+  ],
+  "test_stats_history": [
+   1.9,
+   0.8,
+   0
+  ],
+  "test_status_budget": [
+   19.9,
+   16.3,
+   1
+  ],
+  "test_status_efficiency": [
+   2.2,
+   1.2,
+   0
+  ],
+  "test_status_gevent": [
+   2.7,
+   2.7,
+   1
+  ],
+  "test_status_probe_speed": [
+   3.0,
+   1.2,
+   0
+  ],
+  "test_status_row_renewal": [
+   3.9,
+   1.8,
+   0
+  ],
+  "test_status_shared_counts": [
+   3.3,
+   1.5,
+   0
+  ],
+  "test_status_strip": [
+   0.0,
+   0.0,
+   1
+  ],
+  "test_status_warm": [
+   5.5,
+   2.7,
+   1
+  ],
+  "test_steady_default": [
+   0.1,
+   0.0,
+   0
+  ],
+  "test_storage_safe": [
+   0.1,
+   0.1,
+   0
+  ],
+  "test_store_unchanged": [
+   0.5,
+   0.2,
+   0
+  ],
+  "test_stuck_queued_scans": [
+   0.4,
+   0.2,
+   0
+  ],
+  "test_subdir_apps": [
+   29.3,
+   15.7,
+   0
+  ],
+  "test_suppliers": [
+   66.6,
+   21.0,
+   0
+  ],
+  "test_system_checks": [
+   0.0,
+   0.0,
+   1
+  ],
+  "test_system_status": [
+   37.1,
+   18.9,
+   0
+  ],
+  "test_tailscale": [
+   13.4,
+   5.1,
+   0
+  ],
+  "test_target_types": [
+   0.0,
+   0.0,
+   1
+  ],
+  "test_tarpit_and_filler": [
+   13.4,
+   11.4,
+   0
+  ],
+  "test_tech_depth": [
+   1.1,
+   0.3,
+   0
+  ],
+  "test_tech_identity": [
+   0.7,
+   0.2,
+   0
+  ],
+  "test_tech_links": [
+   1.2,
+   0.5,
+   0
+  ],
+  "test_tech_names": [
+   0.0,
+   0.0,
+   2
+  ],
+  "test_tech_normalisation": [
+   2.5,
+   2.4,
+   0
+  ],
+  "test_tech_search": [
+   39.2,
+   30.7,
+   0
+  ],
+  "test_technology_columns": [
+   0.0,
+   0.0,
+   0
+  ],
+  "test_template_fixture_regex_limit": [
+   0.6,
+   0.6,
+   1
+  ],
+  "test_template_hit_evidence": [
+   2.9,
+   1.0,
+   0
+  ],
+  "test_template_identity": [
+   4.7,
+   2.3,
+   0
+  ],
+  "test_template_security": [
+   0.1,
+   0.1,
+   0
+  ],
+  "test_template_validation": [
+   1.7,
+   0.6,
+   0
+  ],
+  "test_template_validation_gate": [
+   10.0,
+   6.0,
+   0
+  ],
+  "test_templategen": [
+   1.4,
+   0.6,
+   0
+  ],
+  "test_templategen_evidence": [
+   3.5,
+   3.4,
+   0
+  ],
+  "test_templategen_evidence_strict": [
+   4.2,
+   4.2,
+   0
+  ],
+  "test_templategen_revalidate": [
+   0.1,
+   0.1,
+   0
+  ],
+  "test_tenancy": [
+   7.5,
+   5.0,
+   0
+  ],
+  "test_tenancy_snapshot": [
+   9.8,
+   4.0,
+   0
+  ],
+  "test_tenant_visible_text": [
+   0.5,
+   0.3,
+   0
+  ],
+  "test_threat_machines": [
+   3.2,
+   3.2,
+   0
+  ],
+  "test_time_limits": [
+   0.1,
+   0.1,
+   1
+  ],
+  "test_tls_audit": [
+   11.8,
+   11.8,
+   0
+  ],
+  "test_tls_findings": [
+   0.7,
+   0.4,
+   0
+  ],
+  "test_tool_versions": [
+   0.0,
+   0.0,
+   1
+  ],
+  "test_triage": [
+   41.4,
+   21.0,
+   0
+  ],
+  "test_triage_retriage": [
+   2.5,
+   1.0,
+   0
+  ],
+  "test_trusted_proxies_guidance": [
+   0.0,
+   0.0,
+   1
+  ],
+  "test_tunables": [
+   19.1,
+   11.7,
+   0
+  ],
+  "test_tunnel_client_address": [
+   5.1,
+   5.0,
+   1
+  ],
+  "test_udp_empty_report": [
+   0.6,
+   0.3,
+   0
+  ],
+  "test_udp_ipv6_per_sentinel": [
+   2.9,
+   1.1,
+   0
+  ],
+  "test_udp_ipv6_unreachable": [
+   0.9,
+   0.8,
+   0
+  ],
+  "test_udp_scan": [
+   8.2,
+   2.3,
+   0
+  ],
+  "test_ui_a11y": [
+   0.0,
+   0.0,
+   1
+  ],
+  "test_ui_names_purpose": [
+   2.1,
+   1.2,
+   0
+  ],
+  "test_ui_nav": [
+   4.3,
+   2.4,
+   0
+  ],
+  "test_ui_tokens": [
+   0.2,
+   0.1,
+   1
+  ],
+  "test_ui_touch": [
+   0.0,
+   0.0,
+   1
+  ],
+  "test_uninstall_script": [
+   0.6,
+   0.6,
+   2
+  ],
+  "test_unique_ip": [
+   4.7,
+   2.4,
+   1
+  ],
+  "test_unresolved_archive": [
+   0.4,
+   0.4,
+   0
+  ],
+  "test_update_disk_state": [
+   2.1,
+   2.0,
+   0
+  ],
+  "test_update_no_wait": [
+   10.2,
+   4.1,
+   0
+  ],
+  "test_update_script": [
+   53.8,
+   41.8,
+   2
+  ],
+  "test_update_small_host_script": [
+   2.9,
+   1.8,
+   2
+  ],
+  "test_update_status": [
+   0.9,
+   0.9,
+   2
+  ],
+  "test_updater": [
+   10.0,
+   6.7,
+   0
+  ],
+  "test_upgrade_backfills": [
+   2.1,
+   1.2,
+   0
+  ],
+  "test_validate_findings_slices": [
+   0.0,
+   0.0,
+   1
+  ],
+  "test_validation": [
+   10.9,
+   4.1,
+   0
+  ],
+  "test_validation_cost": [
+   2.3,
+   1.0,
+   0
+  ],
+  "test_validation_plan": [
+   1.9,
+   1.4,
+   0
+  ],
+  "test_verdict_tenancy": [
+   21.2,
+   4.0,
+   0
+  ],
+  "test_version_groups": [
+   1.8,
+   1.8,
+   0
+  ],
+  "test_version_only_heat": [
+   13.4,
+   8.2,
+   0
+  ],
+  "test_version_sources": [
+   9.3,
+   7.2,
+   0
+  ],
+  "test_version_unknown": [
+   2.4,
+   2.4,
+   0
+  ],
+  "test_vhost_scan": [
+   34.3,
+   21.5,
+   0
+  ],
+  "test_waf_fingerprint": [
+   3.5,
+   3.3,
+   0
+  ],
+  "test_watchdog": [
+   28.4,
+   7.9,
+   0
+  ],
+  "test_watchdog_lane_naming": [
+   1.9,
+   1.0,
+   0
+  ],
+  "test_watchdog_page": [
+   0.0,
+   0.0,
+   1
+  ],
+  "test_watchdog_script": [
+   21.3,
+   21.3,
+   2
+  ],
+  "test_watchdog_state_writes": [
+   0.1,
+   0.1,
+   0
+  ],
+  "test_watchdog_tick_budget": [
+   2.1,
+   2.0,
+   1
+  ],
+  "test_web_shot": [
+   52.1,
+   10.7,
+   0
+  ],
+  "test_web_statement_timeout": [
+   0.0,
+   0.0,
+   1
+  ],
+  "test_web_version_tells": [
+   3.3,
+   3.3,
+   0
+  ],
+  "test_weekly_nuclei": [
+   0.5,
+   0.5,
+   0
+  ],
+  "test_welcome": [
+   1.1,
+   1.1,
+   0
+  ],
+  "test_windows_builds": [
+   1.9,
+   1.1,
+   0
+  ],
+  "test_wordpress": [
+   33.2,
+   13.1,
+   0
+  ],
+  "test_work_items_light": [
+   1.9,
+   1.9,
+   0
+  ],
+  "test_work_items_tier": [
+   2.7,
+   2.6,
+   0
+  ],
+  "test_work_planner": [
+   32.3,
+   10.8,
+   0
+  ],
+  "test_work_planner_load": [
+   53.1,
+   53.1,
+   0
+  ],
+  "test_worker_probe": [
+   0.2,
+   0.2,
+   0
+  ],
+  "test_wp_core": [
+   4.2,
+   4.2,
+   0
+  ],
+  "test_wpscan": [
+   13.9,
+   7.7,
+   0
+  ],
+  "test_wpscan_outcomes": [
+   7.9,
+   6.5,
+   0
+  ],
+  "test_wpscan_quick": [
+   8.1,
+   3.4,
+   0
+  ],
+  "test_wpscan_token_redaction": [
+   2.1,
+   2.1,
+   0
+  ],
+  "test_zombie": [
+   5.4,
+   2.3,
+   0
+  ]
  },
  "runs": 1,
  "samples": 5,
- "seconds_per_test": 0.2,
- "shard_one_seconds": 7.0,
+ "seconds_per_test": 0.208,
+ "shard_one_seconds": 6.0,
  "workers": 4
 }

@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 """Print the Django test labels of one CI shard: ``ci_shard.py INDEX COUNT`` (INDEX from 1), run from ``web/``.
 
-Test modules are dealt out by their measured run time, longest first, to the shard that would finish first, so the shards finish at about the same
-time and the split is the same on every run for the same files and the same weights. The weights are seconds per module from the CI logs
-(scripts/ci_shard_weights.json, written by ``ci_shard.py --refresh``: the Django test step runs with ``--module-times``, which prints one
-``MODULE-TIME`` line per module). A module with no measured time yet (a new file) weighs its number of test methods times the median seconds per
-test of the measured modules, so it lands in a shard by the same rule. The steps only shard 1 runs (the migration checks, the front-end tests) count
-toward shard 1. The labels of a shard are printed longest first. Every module is in exactly one shard (``--check`` proves it).
+The modules are split by their measured run time so the shards finish at about the same time, and the split is the same on every run for the same
+files and the same weights. The weights come from the CI logs (scripts/ci_shard_weights.json, written by ``ci_shard.py --refresh``): the Django
+test step runs with ``--module-times``, which prints one ``MODULE-TIME`` line per module with its seconds, the group Django runs it in and its
+longest class. A module with no measured time yet (a new file) weighs its number of test methods times the median seconds per test of the
+measured modules, so it lands in a shard by the same rule.
+
+Each module, longest first, goes to the shard whose predicted finish it delays least. A shard's finish is simulated the way Django runs it: the
+TestCase classes first, then the other SimpleTestCase ones, then plain unittest classes, each group in label order, each class on the first free
+worker. That matters because a long plain unittest class (the update script tests run about five minutes in one class) only starts when the rest
+of its shard is done. The steps only shard 1 runs (the migration checks, the front-end tests) count toward shard 1. The labels of a shard are
+printed longest first, the order the simulation assumes. Every module is in exactly one shard (``--check`` proves it).
 
   ci_shard.py INDEX COUNT        the labels of shard INDEX of COUNT
   ci_shard.py --check COUNT      every module in exactly one of COUNT shards
@@ -30,7 +35,7 @@ WORKFLOW = 'build-pr.yml'
 REPO = 'hevnsnt/CVEngine'
 JOB_NAME = 'Django security and tenancy tests'
 TEST_STEP = 'Django test suite'
-MODULE_TIME = re.compile(r'MODULE-TIME\s+([0-9.]+)\s+tests\.(test_\w+)')
+MODULE_TIME = re.compile(r'MODULE-TIME\s+([0-9.]+)\s+tests\.(test_\w+)(?:\s+group=(\d))?(?:\s+longest=([0-9.]+))?')
 DEFAULTS = {'workers': 4, 'fixed_seconds': 120.0, 'shard_one_seconds': 30.0, 'seconds_per_test': 0.5, 'modules': {}, 'runs': 0}
 
 
@@ -51,34 +56,72 @@ def load_weights(path=WEIGHTS):
         return dict(DEFAULTS)
 
 
-def weights(data=None):
-    """Seconds of one test process per module: measured, or test methods times the median seconds per test for a module not measured yet."""
+def table(data=None):
+    """``(seconds, longest class, group)`` per module: measured, or for a module not measured yet its test methods times the median seconds per
+    test, as one class of the TestCase group."""
     data = load_weights() if data is None else data
-    measured = data['modules']
-    return {name: float(measured[name]) if name in measured else round(size * data['seconds_per_test'], 1)
-            for name, size in modules().items()}
+    measured, out = data['modules'], {}
+    for name, size in modules().items():
+        if name in measured:
+            seconds, longest, group = measured[name]
+            out[name] = (float(seconds), float(longest), int(group))
+        else:
+            seconds = round(size * data['seconds_per_test'], 1)
+            out[name] = (seconds, seconds, 0)
+    return out
+
+
+def weights(data=None):
+    """Seconds of one test process per module."""
+    return {name: row[0] for name, row in table(data).items()}
+
+
+def label_order(names, rows):
+    """Longest first: Django keeps the label order inside each group it runs, so a long module starts while short ones can still fill the other
+    workers instead of running alone at the end."""
+    return sorted(names, key=lambda m: (-rows[m][0], m))
+
+
+def finish(names, rows, workers):
+    """Seconds until the last worker is done with these modules: each group in label order, a module's longest class on the first free worker and
+    the rest of the module spread over the workers that are free first (its other classes are short next to the longest)."""
+    free = [0.0] * workers
+    for name in sorted(label_order(names, rows), key=lambda m: rows[m][2]):  # a stable sort: label order inside each group
+        seconds, longest, _ = rows[name]
+        block = min(longest, seconds)
+        index = free.index(min(free))
+        free[index] += block
+        rest = seconds - block
+        while rest > 1e-9:  # fill the lowest workers up to the next level
+            free.sort()
+            low = [i for i, value in enumerate(free) if value == free[0]]
+            step = (free[len(low)] - free[0]) if len(low) < workers else rest / workers
+            step = min(step, rest / len(low))
+            for i in low:
+                free[i] += step
+            rest -= step * len(low)
+    return max(free)
 
 
 def shards(count, data=None):
     data = load_weights() if data is None else data
-    out, load = [[] for _ in range(count)], [0.0] * count
-    load[0] = data['shard_one_seconds'] * data['workers']  # shard 1's own steps, in the unit of a module (seconds of one process)
-    for name, weight in sorted(weights(data).items(), key=lambda item: (-item[1], item[0])):
-        index = load.index(min(load))
+    rows, workers = table(data), data['workers']
+    own = [data['shard_one_seconds']] + [0.0] * (count - 1)  # shard 1's own steps
+    out, done = [[] for _ in range(count)], [own[i] for i in range(count)]
+    for name in label_order(rows, rows):
+        candidates = [(own[i] + finish(out[i] + [name], rows, workers), done[i], i) for i in range(count)]
+        _, _, index = min(candidates)
         out[index].append(name)
-        load[index] += weight
+        done[index] = candidates[index][0]
     return out
 
 
 def predict(count, data=None):
-    """Predicted minutes of each shard's job: the fixed cost every job pays, shard 1's own steps, and its modules spread over the workers."""
+    """Predicted minutes of each shard's job: the fixed cost every job pays, shard 1's own steps, and the simulated finish of its modules."""
     data = load_weights() if data is None else data
-    every = weights(data)
-    minutes = []
-    for index, shard in enumerate(shards(count, data)):
-        seconds = data['fixed_seconds'] + (data['shard_one_seconds'] if index == 0 else 0) + sum(every[m] for m in shard) / data['workers']
-        minutes.append(round(seconds / 60, 1))
-    return minutes
+    rows = table(data)
+    return [round((data['fixed_seconds'] + (data['shard_one_seconds'] if index == 0 else 0) + finish(shard, rows, data['workers'])) / 60, 1)
+            for index, shard in enumerate(shards(count, data))]
 
 
 # --refresh: the module times and the fixed costs, read back from the CI logs
@@ -92,8 +135,10 @@ def _stamp(value):
 
 
 def parse_log(text):
-    """Module seconds, the test database setup seconds and the worker count from one Django test job log."""
-    times = {name: float(seconds) for seconds, name in MODULE_TIME.findall(text)}
+    """Per module ``(seconds, longest class, group)``, the test database setup seconds and the worker count from one Django test job log."""
+    times = {}
+    for seconds, name, group, longest in MODULE_TIME.findall(text):
+        times[name] = (float(seconds), float(longest or seconds), int(group or 0))
     lines = text.splitlines()
     created = next((line for line in lines if 'Creating test database for alias' in line), None)
     cloned = [line for line in lines if 'Cloning test database for alias' in line]
@@ -150,26 +195,41 @@ def collect(runs, repo, workflow=WORKFLOW, run_ids=()):
 
 
 def build(samples):
-    """The weights file from samples (one list of parsed job logs per run): the median of every number."""
-    per_module, outside, database, workers, shard_one = {}, [], [], [], []
-    for logs in samples:
-        for log in logs:
-            for name, seconds in log['modules'].items():
-                per_module.setdefault(name, []).append(seconds)
-            for target, key in ((outside, 'outside_seconds'), (database, 'database_seconds'), (workers, 'workers'), (shard_one, 'shard_one_seconds')):
-                if log.get(key) is not None:
-                    target.append(log[key])
+    """The weights file from samples (one list of parsed job logs per run). The same job can run on a machine a third faster or slower than the
+    next, so each job's times are first divided by its speed (its modules' sum over the sum of their plain medians), then the median is taken."""
+    jobs = [log for logs in samples for log in logs]
+    raw = {}
+    for log in jobs:
+        for name, row in log['modules'].items():
+            raw.setdefault(name, []).append(row[0])
+    plain = {name: statistics.median(values) for name, values in raw.items()}
+    per_module = {}
+    for log in jobs:
+        expected = sum(plain[name] for name in log['modules'])
+        speed = (sum(row[0] for row in log['modules'].values()) / expected) if expected else 1.0
+        for name, (seconds, longest, group) in log['modules'].items():
+            per_module.setdefault(name, []).append((seconds / speed, longest / speed, group))
     present = modules()
-    measured = {name: round(statistics.median(values), 1) for name, values in sorted(per_module.items()) if name in present}
-    per_test = statistics.median(measured[name] / present[name] for name in measured) if measured else DEFAULTS['seconds_per_test']
-    fixed = statistics.median(outside) + (statistics.median(database) if database else 0) if outside else DEFAULTS['fixed_seconds']
+    measured = {}
+    for name, rows in sorted(per_module.items()):
+        if name in present:
+            groups = [row[2] for row in rows]
+            group = max(sorted(set(groups)), key=groups.count)
+            measured[name] = [round(statistics.median(r[0] for r in rows), 1), round(statistics.median(r[1] for r in rows), 1), group]
+    per_test = statistics.median(measured[name][0] / present[name] for name in measured) if measured else DEFAULTS['seconds_per_test']
+
+    def median_of(key):
+        values = [log[key] for log in jobs if log.get(key) is not None]
+        return statistics.median(values) if values else None
+    outside, database, workers, shard_one = (median_of(key) for key in ('outside_seconds', 'database_seconds', 'workers', 'shard_one_seconds'))
     return {
-        'about': 'Seconds of one test process per test module, the median of the CI runs counted in runs. Written by scripts/ci_shard.py --refresh.',
+        'about': ('Per test module: [seconds of one test process, its longest class, the group Django runs it in (0 TestCase, 1 other SimpleTestCase, '
+                  '2 plain unittest)], the median of the CI jobs that ran it, each job scaled by its machine speed. Written by scripts/ci_shard.py --refresh.'),
         'runs': len(samples),
-        'samples': int(statistics.median(len(values) for values in per_module.values())) if per_module else 0,
-        'workers': int(statistics.median(workers)) if workers else DEFAULTS['workers'],
-        'fixed_seconds': round(fixed, 1),
-        'shard_one_seconds': round(statistics.median(shard_one), 1) if shard_one else DEFAULTS['shard_one_seconds'],
+        'samples': int(statistics.median(len(rows) for rows in per_module.values())) if per_module else 0,
+        'workers': int(workers) if workers else DEFAULTS['workers'],
+        'fixed_seconds': round(outside + (database or 0), 1) if outside is not None else DEFAULTS['fixed_seconds'],
+        'shard_one_seconds': round(shard_one, 1) if shard_one is not None else DEFAULTS['shard_one_seconds'],
         'seconds_per_test': round(per_test, 3),
         'modules': measured,
     }
@@ -221,7 +281,5 @@ if __name__ == '__main__':
         print(f'{len(flat)} modules in {count} shards')
     else:
         index, count = int(sys.argv[1]), int(sys.argv[2])
-        every = weights()
-        # longest first: Django keeps the label order inside each group it runs (TestCase classes, then the others), so a long module starts
-        # while the short ones can still fill the other workers, instead of running alone at the end
-        print(' '.join(f'tests.{m}' for m in sorted(shards(count)[index - 1], key=lambda m: (-every[m], m))))
+        rows = table()
+        print(' '.join(f'tests.{m}' for m in label_order(shards(count)[index - 1], rows)))

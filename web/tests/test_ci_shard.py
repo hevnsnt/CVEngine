@@ -61,8 +61,7 @@ class ShardTests(SimpleTestCase):
     def test_the_shards_are_about_the_same_size(self):
         # by their measured time (seconds of one process), no longer by their number of test methods: a test method takes from a millisecond to
         # two minutes, so equal counts left one shard five minutes behind the others
-        sizes = self.shard.weights()
-        loads = [sum(sizes[m] for m in shard) for shard in self.shard.shards(3)]
+        loads = self.shard.predict(3)
         self.assertLess(max(loads) - min(loads), 0.1 * max(loads))
 
     def test_every_test_module_is_in_exactly_one_shard_of_the_count_the_workflow_runs(self):
@@ -102,32 +101,57 @@ class ShardTests(SimpleTestCase):
             self.assertEqual(self.shard.shards(2, data), [['test_new_b'], ['test_new_a', 'test_new_c']])
 
     def test_shard_one_carries_its_own_steps(self):
-        data = {**self.shard.load_weights(), 'modules': {}, 'seconds_per_test': 1.0, 'workers': 2, 'shard_one_seconds': 3.0}
+        data = {**self.shard.load_weights(), 'modules': {}, 'seconds_per_test': 1.0, 'workers': 1, 'shard_one_seconds': 3.0}
         with mock.patch.object(self.shard, 'modules', return_value={'test_a': 6, 'test_b': 6}):
-            # shard 1 starts with 3 seconds of its own steps on each of 2 workers, so the first module goes to shard 2
+            # shard 1 starts with 3 seconds of its own steps, so the first module goes to shard 2
             self.assertEqual(self.shard.shards(2, data), [['test_b'], ['test_a']])
+
+    def test_a_long_plain_unittest_class_is_simulated_after_the_rest_of_its_shard(self):
+        rows = {'test_script': (100.0, 100.0, 2), 'test_pages': (40.0, 10.0, 0)}
+        # Django runs the TestCase module first: its longest class on one worker, the rest spread (all four workers busy to 10 s), then the
+        # plain unittest class alone from 10 s to 110 s
+        self.assertEqual(self.shard.finish(['test_script', 'test_pages'], rows, 4), 110.0)
+        # had it been a TestCase module it would have started first, at 0 s, with the other module beside it
+        self.assertEqual(self.shard.finish(['test_script', 'test_pages'], {**rows, 'test_script': (100.0, 100.0, 0)}, 4), 100.0)
+
+    def test_two_long_modules_of_one_group_go_to_different_shards(self):
+        data = {**self.shard.load_weights(), 'workers': 4, 'shard_one_seconds': 0,
+                'modules': {'test_a': [300, 300, 2], 'test_b': [300, 300, 2], 'test_c': [40, 1, 0], 'test_d': [40, 1, 0]}}
+        with mock.patch.object(self.shard, 'modules', return_value={'test_a': 1, 'test_b': 1, 'test_c': 1, 'test_d': 1}):
+            self.assertEqual(self.shard.shards(2, data), [['test_a', 'test_c'], ['test_b', 'test_d']])
 
     def test_refresh_reads_the_module_times_and_the_database_setup_from_a_log(self):
         log = '\n'.join([
             "2026-11-24T03:22:59.8533065Z Creating test database for alias 'default'...",
             "2026-11-24T03:23:56.8990346Z Cloning test database for alias 'default'...",
             "2026-11-24T03:23:57.4793105Z Cloning test database for alias 'default'...",
-            '2026-11-24T03:38:58.0000000Z MODULE-TIME    130.25 tests.test_report_memory',
+            '2026-11-24T03:38:58.0000000Z MODULE-TIME    130.25 tests.test_report_memory group=1 longest=120.50',
             '2026-11-24T03:38:58.0000000Z MODULE-TIME      0.20 tests.test_ci_shard',
             '2026-11-24T03:38:58.0000000Z MODULE-TIME total 130.45',
         ])
         parsed = self.shard.parse_log(log)
-        self.assertEqual(parsed['modules'], {'test_report_memory': 130.25, 'test_ci_shard': 0.2})
+        # a line without group and longest (a log from before they were printed) is one TestCase class
+        self.assertEqual(parsed['modules'], {'test_report_memory': (130.25, 120.5, 1), 'test_ci_shard': (0.2, 0.2, 0)})
         self.assertEqual(parsed['workers'], 2)
         self.assertAlmostEqual(parsed['database_seconds'], 57.6, places=1)
 
     def test_refresh_takes_the_median_of_the_runs_and_drops_removed_modules(self):
-        logs = [[{'modules': {'test_ci_shard': s, 'test_gone_long_ago': 9.0}, 'database_seconds': 60, 'workers': 4, 'outside_seconds': o,
-                  'shard_one_seconds': 20}] for s, o in ((1.0, 50), (2.0, 70), (9.0, 60))]
+        logs = [[{'modules': {'test_ci_shard': (s, s, 1), 'test_gone_long_ago': (9.0, 9.0, 0)}, 'database_seconds': 60, 'workers': 4,
+                  'outside_seconds': o, 'shard_one_seconds': 20}] for s, o in ((1.0, 50), (2.0, 70), (9.0, 60))]
         data = self.shard.build(logs)
-        self.assertEqual(data['modules']['test_ci_shard'], 2.0)
+        self.assertEqual(data['modules']['test_ci_shard'], [2.0, 2.0, 1])
         self.assertNotIn('test_gone_long_ago', data['modules'])
         self.assertEqual((data['runs'], data['workers'], data['fixed_seconds'], data['shard_one_seconds']), (3, 4, 120.0, 20))
+
+    def test_refresh_scales_each_job_by_its_machine_speed(self):
+        # the second job ran on a machine twice as slow: every module took twice as long there
+        fast = {'test_ci_shard': (10.0, 10.0, 0), 'test_docs_accuracy': (20.0, 20.0, 0)}
+        slow = {name: (2 * s, 2 * l, g) for name, (s, l, g) in fast.items()}
+        third = {'test_ci_shard': (10.0, 10.0, 0)}
+        data = self.shard.build([[{'modules': fast}], [{'modules': slow}], [{'modules': slow}], [{'modules': third}]])
+        # plain medians read 15 and 40, as if one module were 2.7 times the other; scaled to one machine they keep their real ratio of 2
+        ci, docs = data['modules']['test_ci_shard'][0], data['modules']['test_docs_accuracy'][0]
+        self.assertAlmostEqual(docs / ci, 2.0, places=1)  # each weight is rounded to a tenth of a second
 
 
 class ModuleTimesTests(SimpleTestCase):
@@ -162,11 +186,20 @@ class ModuleTimesTests(SimpleTestCase):
             suite.run(unittest.TestResult())
         with open(os.path.join(folder, f'times-{os.getpid()}.tsv'), encoding='utf-8') as handle:
             rows = [line.rstrip('\n').split('\t') for line in handle]
-        timed = {qualname.rsplit('.', 1)[-1]: float(seconds) for module, qualname, seconds in rows if module == __name__}
+        timed = {qualname.rsplit('.', 1)[-1]: float(seconds) for module, qualname, seconds, _ in rows if module == __name__}
         self.assertGreaterEqual(timed['SlowFixtures'], 0.2)
         self.assertGreaterEqual(timed['Quick'], 0.05)
         self.assertLess(timed['Quick'], 0.2)
-        self.assertAlmostEqual(runner.module_times(folder)[__name__], sum(timed.values()), places=2)
+        self.assertEqual([row[3] for row in rows if row[0] == __name__], ['2', '2'], 'plain unittest classes run last: group 2')
+        entry = runner.module_times(folder)[__name__]
+        self.assertAlmostEqual(entry['seconds'], sum(timed.values()), places=2)
+        self.assertEqual(entry['longest'], timed['SlowFixtures'])
+        self.assertEqual(entry['group'], 2)
+
+    def test_the_group_is_the_order_django_runs_the_class_in(self):
+        from django.test import SimpleTestCase as Simple
+        from django.test import TestCase, TransactionTestCase
+        self.assertEqual([runner.run_group(c) for c in (TestCase, TransactionTestCase, Simple, unittest.TestCase)], [0, 1, 1, 2])
 
     def test_nothing_is_written_while_the_variable_is_unset(self):
         folder = self.folder()
@@ -183,11 +216,11 @@ class ModuleTimesTests(SimpleTestCase):
     def test_the_printed_lines_are_what_refresh_reads(self):
         folder = self.folder()
         with open(os.path.join(folder, 'times-1.tsv'), 'w', encoding='utf-8') as handle:
-            handle.write('tests.test_a\tA\t1.5\ntests.test_a\tB\t2.0\ntests.test_b\tC\t0.25\n')
+            handle.write('tests.test_a\tA\t1.5\t2\ntests.test_a\tB\t2.0\t2\ntests.test_a\tC\t0.5\t0\ntests.test_b\tD\t0.25\t0\n')
         printer = runner.IsolatedRedisRunner.__new__(runner.IsolatedRedisRunner)
         printer.module_times_dir = folder
         with mock.patch('builtins.print') as printed:
             printer.print_module_times()
         text = '\n'.join(' '.join(str(a) for a in call.args) for call in printed.call_args_list)
-        self.assertEqual(load_script().parse_log(text)['modules'], {'test_a': 3.5, 'test_b': 0.25})
+        self.assertEqual(load_script().parse_log(text)['modules'], {'test_a': (4.0, 2.0, 2), 'test_b': (0.25, 0.25, 0)})
         self.assertFalse(os.path.exists(folder), 'the folder is removed once printed')

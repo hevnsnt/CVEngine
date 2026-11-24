@@ -335,8 +335,10 @@ def install_hermetic(block=None, restore_environment=True):
 
 
 # ``--module-times``: the wall time of every test class (its fixtures included) is written by the process that ran it, a parallel worker or the
-# runner itself, to a file in this directory, and the runner prints the sum per module at the end. scripts/ci_shard.py --refresh reads those
-# lines from the CI logs to weigh the modules when it splits the suite into shards.
+# runner itself, to a file in this directory, and the runner prints one line per module at the end: its seconds, the group Django runs it in and
+# its longest class. scripts/ci_shard.py --refresh reads those lines from the CI logs to weigh the modules when it splits the suite into shards.
+# The group is Django's run order (DiscoverRunner.reorder_by): 0 for TestCase classes, 1 for the other SimpleTestCase ones (TransactionTestCase
+# among them), 2 for plain unittest classes, which run last. A long class in group 2 starts only when the rest of its shard is done.
 MODULE_TIMES_ENV = 'CVENGINE_TEST_MODULE_TIMES'
 MODULE_TIME_LINE = 'MODULE-TIME'
 _times = {'installed': False, 'started': {}}
@@ -362,21 +364,34 @@ def time_classes(force=False):
                 folder = os.environ.get(MODULE_TIMES_ENV)
                 if began is not None and folder:
                     with open(os.path.join(folder, f'times-{os.getpid()}.tsv'), 'a', encoding='utf-8') as handle:  # one file per process
-                        handle.write(f'{previous.__module__}\t{previous.__qualname__}\t{now - began:.3f}\n')
+                        handle.write(f'{previous.__module__}\t{previous.__qualname__}\t{now - began:.3f}\t{run_group(previous)}\n')
                 if test is not None:
                     _times['started'][current] = now
     unittest.suite.TestSuite._tearDownPreviousClass = tear_down_previous_class
     _times['installed'] = True
 
 
+def run_group(case):
+    """The group Django runs a test class in: 0 TestCase, 1 another SimpleTestCase, 2 anything else (DiscoverRunner.reorder_by)."""
+    from django.test import SimpleTestCase, TestCase
+    return 0 if issubclass(case, TestCase) else 1 if issubclass(case, SimpleTestCase) else 2
+
+
 def module_times(folder):
-    """The seconds per test module recorded in ``folder`` by every process of the run, summed over its classes."""
-    totals = {}
+    """Per test module recorded in ``folder`` by every process of the run: its seconds summed over its classes, the group that holds most of
+    them, and its longest class."""
+    totals, groups = {}, {}
     for name in sorted(os.listdir(folder)):
         with open(os.path.join(folder, name), encoding='utf-8') as handle:
             for line in handle:
-                module, _, seconds = line.rstrip('\n').split('\t')
-                totals[module] = totals.get(module, 0.0) + float(seconds)
+                module, _, seconds, group = line.rstrip('\n').split('\t')
+                entry = totals.setdefault(module, {'seconds': 0.0, 'longest': 0.0})
+                entry['seconds'] += float(seconds)
+                entry['longest'] = max(entry['longest'], float(seconds))
+                groups.setdefault(module, {}).setdefault(int(group), 0.0)
+                groups[module][int(group)] += float(seconds)
+    for module, entry in totals.items():
+        entry['group'] = max(sorted(groups[module]), key=lambda g: groups[module][g])
     return totals
 
 
@@ -421,10 +436,10 @@ class IsolatedRedisRunner(DiscoverRunner):
         import shutil
         totals = module_times(self.module_times_dir)
         shutil.rmtree(self.module_times_dir, ignore_errors=True)
-        print(f'\nModule times ({len(totals)} modules, seconds of one process, class fixtures included):')
-        for module, seconds in sorted(totals.items(), key=lambda item: (-item[1], item[0])):
-            print(f'{MODULE_TIME_LINE} {seconds:9.2f} {module}')
-        print(f'{MODULE_TIME_LINE} total {sum(totals.values()):.2f}', flush=True)
+        print(f'\nModule times ({len(totals)} modules, seconds of one process, class fixtures included; the group Django runs it in; its longest class):')
+        for module, entry in sorted(totals.items(), key=lambda item: (-item[1]['seconds'], item[0])):
+            print(f'{MODULE_TIME_LINE} {entry["seconds"]:9.2f} {module} group={entry["group"]} longest={entry["longest"]:.2f}')
+        print(f'{MODULE_TIME_LINE} total {sum(entry["seconds"] for entry in totals.values()):.2f}', flush=True)
 
     def teardown_test_environment(self, **kwargs):
         self._remove_hermetic()
