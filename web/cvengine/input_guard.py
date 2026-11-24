@@ -41,6 +41,7 @@ from datetime import timedelta
 
 from django.http import JsonResponse
 from django.utils import timezone
+from cvengine.usage_stamps import durable_commit
 
 logger = logging.getLogger(__name__)
 
@@ -330,8 +331,9 @@ def record_and_maybe_ban(request, hits, ip, user, counted=True):
         ended = _end_session(request, user)
         _audit(user, 'abuse.session_ended' if ended else 'abuse.user_flagged', user.username, reason=reason, ip=ip)
     if ban_ip and _ip_is_banable(ip) and not AbuseBan.objects.filter(ip=ip, lifted=False, expires_at__gt=timezone.now()).exists():
-        AbuseBan.objects.create(ip=ip, username=getattr(user, 'username', '') if user else '', reason=reason,
-                                expires_at=timezone.now() + IP_BAN)
+        with durable_commit():  # a ban a crash could undo would let the address straight back in
+            AbuseBan.objects.create(ip=ip, username=getattr(user, 'username', '') if user else '', reason=reason,
+                                    expires_at=timezone.now() + IP_BAN)
         _audit(user, 'abuse.ip_banned', ip, reason=reason)
         invalidate_cache()
         banned = True

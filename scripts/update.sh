@@ -863,6 +863,10 @@ fi
 "${compose[@]}" up -d --no-deps db
 "${compose[@]}" up -d --no-deps redis  # recreated only when a newer image was pulled above
 for _ in $(seq 1 60); do "${compose[@]}" exec -T db pg_isready -q >/dev/null 2>&1 && break; sleep 1; done
+# One source for the database's settings: an ALTER SYSTEM value of a setting the compose files pass is removed (scripts/db-settings.sh; never fails)
+if [[ -f scripts/db-settings.sh ]] && . scripts/db-settings.sh; then
+    cvengine_db_settings_one_source "${compose[@]}"
+fi
 # A dump of the database first: a migration is never rolled back. A dump that fails stops the update here, before anything is changed (the
 # previous workers are resumed and the checkout is put back). CVENGINE_UPDATE_BACKUPS=0 skips it.
 if backup_file=$(scripts/db-backup.sh "$STATE" -- "${compose[@]}"); then
