@@ -481,6 +481,9 @@ fi
 # workers and Beat never run new code on the old schema (Beat's "migrate --check" would then fail forever).
 trap 'code=$?; trap - EXIT; (( code == 0 )) || revert_unmigrated; exit "$code"' EXIT
 python3 scripts/update-state.py migrate-requeue "$requeue_file"
+# An install made before 1.5.0 has the old names in its own files (.env, an overlay, its certificates): the new ones are added beside them before
+# Compose reads anything, and the old ones go once the update is verified (scripts/legacy_names.py)
+python3 scripts/legacy_names.py migrate -- "${compose[@]}" || die 'Could not move this install to the 1.5.0 names (see the line above).'
 "${compose[@]}" config --quiet
 diagnostic_log=$(mktemp /tmp/cvengine-update.XXXXXX)
 chmod 600 "$diagnostic_log"
@@ -1000,6 +1003,7 @@ while (( SECONDS < deadline )); do
         if declare -F cvengine_client_address_report >/dev/null; then cvengine_client_address_report "${compose[@]}" || true; fi
         # accounts the abuse guard of releases before 1.5.0 disabled, enabled again (web/cveFeed/guard_reenable.py: only those; tokens stay revoked)
         "${compose[@]}" exec -T web python3 manage.py reenable_guard_disabled_users --apply 2>/dev/null | tail -n 50 | sed 's/^/guard accounts: /' || true
+        python3 scripts/legacy_names.py cleanup -- "${compose[@]}" || true
         "${compose[@]}" ps
         rm -f "$diagnostic_log"
         # An install that never had the update watcher cannot act on Approve in Settings > Updates. This is the one manual update such an

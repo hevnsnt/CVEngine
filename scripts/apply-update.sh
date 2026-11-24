@@ -562,6 +562,15 @@ if [ "$SWITCH" = 0 ] && ! git merge-base --is-ancestor HEAD "$SHA" && ! git merg
   clear_approval
   exit 1
 fi
+# A tracked file changed on this server to exactly what the approved commit has (a fix applied by hand before it was released, such as one line of
+# the proxy configuration) is no local change to keep: it is put back to this checkout's version, and the fast-forward brings the same content.
+# Anything else stays a local change, and the update refuses it below.
+while IFS= read -r changed; do
+  [ -n "$changed" ] && [ -f "$changed" ] && [ ! -L "$changed" ] || continue
+  if git cat-file -e "$SHA:$changed" 2>/dev/null && [ "$(git hash-object -- "$changed")" = "$(git rev-parse "$SHA:$changed")" ]; then
+    git checkout -q -- "$changed" && log "$changed was changed on this server to what $SHA has; it is put back so the update brings the same content"
+  fi
+done < <(git diff --name-only 2>/dev/null)
 DIRTY=$(git status --porcelain --untracked-files=no | grep -vE '^.. "?\.env"?$' || true)
 if [ -n "$DIRTY" ]; then
   names=$(printf '%s\n' "$DIRTY" | sed 's/^...//' | head -n 5 | paste -sd, -)

@@ -162,6 +162,18 @@ warn_discovery_pin() {
 deploy_steps() {
   python3 "$STATE_HELPER" commit "$(git rev-parse HEAD)" || return 1
   local compose=("${COMPOSE[@]}")
+  # An install made before 1.5.0 has the old names in its own files (.env, an overlay, its certificates): the new ones are added beside them
+  # before Compose reads anything (scripts/legacy_names.py); the old ones go only after the updated site answered, below.
+  if [ -f scripts/legacy_names.py ]; then
+    local names_out
+    if ! names_out=$(python3 scripts/legacy_names.py migrate -- "${compose[@]}" 2>&1); then
+      names_out=$(tail -n 1 <<<"$names_out")
+      DEPLOY_WHY="The update stopped before the build: ${names_out:0:140}"
+      log "$DEPLOY_WHY"
+      return 1
+    fi
+    while IFS= read -r line; do [ -z "$line" ] || log "$line"; done <<<"$names_out"
+  fi
   local services=(web celery celery-beat) listed=''
   # the dev compose file has no proxy service; recreate it only where it exists (keep it if the list cannot be read)
   if listed=$("${compose[@]}" config --services 2>/dev/null); then
@@ -301,6 +313,10 @@ deploy_steps() {
   verify_serving || return 1
   # The proxy is what visitors reach, and a proxy whose configuration nginx refuses restarts over and over while `ps` calls it running.
   if printf '%s\n' "${services[@]}" | grep -qx proxy; then verify_proxy || return 1; fi
+  # the names used before 1.5.0, now that the update is verified (scripts/legacy_names.py): never fails the update
+  if [ -f scripts/legacy_names.py ]; then
+    while IFS= read -r line; do [ -z "$line" ] || log "$line"; done < <(python3 scripts/legacy_names.py cleanup -- "${compose[@]}" 2>&1)
+  fi
   # Which database role web, celery and celery-beat run as; a warning when any still uses the owner role (never fails the update).
   if declare -F cvengine_db_role_report >/dev/null; then
     while IFS= read -r line; do [ -z "$line" ] || log "$line"; done < <(cvengine_db_role_report "${compose[@]}")

@@ -11,6 +11,8 @@ cd "$(dirname "$0")/.."
 
 created=0
 [ -f .env ] || { (umask 077; cp .env.example .env); echo "Created .env from .env.example."; created=1; }
+# an install made before 1.5.0 (install.sh run again): its .env and certificates get the new names beside the old ones (scripts/legacy_names.py)
+if [ "$created" != 1 ] && [ -f scripts/legacy_names.py ]; then python3 scripts/legacy_names.py migrate; fi
 
 # letters and digits only: a `$` or `#` in .env breaks Make and Compose parsing
 random() { head -c 256 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 24; }

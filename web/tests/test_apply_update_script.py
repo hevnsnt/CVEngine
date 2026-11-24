@@ -1211,6 +1211,20 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.assertTrue(self.approved())
         self.assertEqual(self.head(), self.prev)
 
+    def test_a_file_changed_by_hand_to_what_the_approved_commit_has_does_not_block_the_update(self):
+        # the host applied a fix by hand (one line of the proxy configuration) that the approved commit brings word for word
+        (self.work / 'web' / 'README').write_text('v2\n')
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.head(), self.new)
+        self.assertEqual((self.work / 'web' / 'README').read_text(), 'v2\n')
+        self.assertIn('web/README was changed on this server to what', self.update_log())
+
+    def update_log(self):
+        state = self.git('rev-parse', '--git-dir', cwd=self.work)
+        return (self.work / state / 'cvengine-update' / 'update.log').read_text()
+
     def phase_file(self):
         import json
         path = self.work / 'web' / '.update-phase.json'

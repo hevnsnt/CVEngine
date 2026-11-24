@@ -32,6 +32,8 @@ certs: check-secrets	## Generate the HTTPS certificate.
 
 up: check-env		## Build and start all services.
 	@rm -f config/nginx/state/maintenance config/nginx/state/maintenance-failed
+	@# an install made before 1.5.0: its .env, overlay and certificates get the new names beside the old ones (scripts/legacy_names.py)
+	@python3 scripts/legacy_names.py migrate -- ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES}
 	@./scripts/upgrade-postgres.sh
 	@python3 scripts/update-state.py commit "$$(git rev-parse HEAD)"
 	@python3 scripts/update-state.py upstream || true
