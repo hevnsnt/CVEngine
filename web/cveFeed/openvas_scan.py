@@ -208,6 +208,23 @@ def _latest_row(project_id, host, scoped=False):
     return rows.select_related('scan_history', 'target_domain').annotate(held=held_expr()).order_by('held', '-scan_history_id').first()
 
 
+def _latest_rows(project_id, hosts, scoped=False):
+    """``{name: row}``: ``_latest_row`` of each of ``hosts`` in one query (the same filter and order, one row per name), with each row's addresses
+    read in one more. ``assess`` looks at every candidate of a project, up to a thousand names, and read them one query each."""
+    from cveFeed.manual_only import held_expr
+    from startScan.models import Subdomain
+    from targetApp.models import in_target_scope_q
+    hosts = list(hosts)
+    if not hosts:
+        return {}
+    rows = Subdomain.objects.filter(target_domain__project_id=project_id, name__in=hosts)
+    if scoped:
+        rows = rows.filter(in_target_scope_q())
+    rows = (rows.select_related('scan_history', 'target_domain').annotate(held=held_expr()).order_by('name', 'held', '-scan_history_id').distinct('name')
+            .prefetch_related('ip_addresses'))
+    return {row.name: row for row in rows}
+
+
 def _names(items):
     return {str(h).strip().lower() for h in (items or ()) if str(h).strip()}
 
@@ -253,6 +270,8 @@ def host_heat(project_id, names):
         return {}
     rows = (Subdomain.objects.filter(target_domain__project_id=project_id, name__in=wanted).order_by('name', '-scan_history_id').distinct('name')
             .prefetch_related('cve_matches__cve_entry', services.triage_prefetch('cve_matches__triage'), 'vulnerability_set', services.triage_prefetch('vulnerability_set__triage'), 'vulnerability_set__cve_ids', 'vulnerability_set__tags'))
+    rows = list(rows)
+    services._prime_nuclei(rows)  # whether nuclei ran, for every row at once: a host with nothing hot asked it once per host
     out = {}
     for sub in rows:
         reasons = services._heat_reasons(sub, capped=False)
@@ -311,9 +330,10 @@ def assess(project_id, candidates, forced=(), gate=True, resolve=None, blocked=N
     from targetApp.models import narrowed_names
     narrowed = narrowed_names(project_id, names)  # held only under a target that is now exactly one host: no person's naming lifts that
     passed = []
+    latest = _latest_rows(project_id, [host for host in names if host in heats], scoped=True)
     for host in names:
         heat = heats.get(host, ('', (0, 0)))[0]
-        sub = _latest_row(project_id, host, scoped=True) if host in heats else None
+        sub = latest.get(host) if host in heats else None
         if host in narrowed:
             refuse(host, heat, 'its target is set to this host only: a name under it is not scanned')
         elif sub is None:
@@ -339,10 +359,13 @@ def assess(project_id, candidates, forced=(), gate=True, resolve=None, blocked=N
         else:
             passed.append((host, sub, heat))
     chosen, by_ip = [], {}
+    # one vetting of every host that is left (the exclusions, the archive and a fresh bug bounty Gate are read once for the batch, as
+    # scannable_hosts does for any list); each entry is judged on its own, so the batch keeps exactly the hosts a call per host kept
+    vetted = set() if internal or not passed else set(scannable_hosts([host for host, _sub, _heat in passed], resolver=blocked, project=project_id))
     for host, sub, heat in passed:
         if internal:
             ip = host
-        elif not scannable_hosts([host], resolver=blocked, project=project_id):
+        elif host not in vetted:
             refuse(host, heat, 'a scanner may not be pointed at it (a prohibited address range)')
             continue
         else:
