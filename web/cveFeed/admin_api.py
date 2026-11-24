@@ -69,8 +69,10 @@ def _revoke_tokens(user):
     """A password or MFA reset must also cut off bearer tokens, which otherwise keep working."""
     from agentapi import agent_broker
     from dashboard.models import ApiToken
+    from cvengine.usage_stamps import durable_commit
     ids = list(ApiToken.objects.filter(user=user, revoked=False).values_list('pk', flat=True))
-    ApiToken.objects.filter(pk__in=ids).update(revoked=True)
+    with durable_commit():  # a revocation a crash could undo would let the token in again
+        ApiToken.objects.filter(pk__in=ids).update(revoked=True)
     agent_broker.release_for_tokens(ids)  # the agents' leases go back to the queue now, not when they run out
 
 

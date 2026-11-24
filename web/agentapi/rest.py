@@ -8,6 +8,7 @@ from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.db import transaction
 from django.http import JsonResponse
+from cvengine.usage_stamps import durable_commit
 from django.http.response import HttpResponseBase
 
 from agentapi import agent_broker as broker
@@ -117,7 +118,8 @@ def tokens_create(request, ctx, **_):
 
 def tokens_revoke(request, ctx, token_id, **_):
     _session_only(request)
-    updated = ctx.user.api_tokens.filter(id=token_id).update(revoked=True)
+    with durable_commit():  # a revocation a crash could undo would let the token in again
+        updated = ctx.user.api_tokens.filter(id=token_id).update(revoked=True)
     if not updated:
         raise ApiError(404, 'token not found')
     broker.release_for_tokens([token_id])

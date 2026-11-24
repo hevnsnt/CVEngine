@@ -329,3 +329,67 @@ class DiagnoseRuleTests(Case):
         for needle in ('POSTGRES_LOG_LOCK_WAITS', 'POSTGRES_TRACK_WAL_IO_TIMING', 'log_lock_waits=on', 'track_wal_io_timing=on', 'recreates the `db` container once',
                        'scripts/host-review.py'):
             self.assertIn(needle, section)
+
+
+class CommitRuleTests(Case):
+    """The commit rule: whether a commit waits for its WAL flush (synchronous_commit), off by default in the shipped compose files through
+    POSTGRES_SYNCHRONOUS_COMMIT. Said with who set it, never written, and silent for compose files that pass the database no settings."""
+
+    def said(self, result, kind=None):
+        return [f for f in result['findings'] if f['rule'] == 'commit' and (kind is None or f['kind'] == kind)]
+
+    def test_the_shipped_compose_files_turn_it_off_with_an_env_switch(self):
+        for name in ('docker-compose.yml', 'docker-compose.dev.yml'):
+            text = (ROOT / name).read_text()
+            self.assertIn('"-c", "synchronous_commit=${POSTGRES_SYNCHRONOUS_COMMIT:-off}"', text, name)
+            self.assertNotIn('wal_writer_delay', text.split('command: ["postgres"', 1)[1].split(']', 1)[0], name)  # left at its default
+            self.assertEqual(hr.pg_commit_default([str(ROOT / name)]), 'off')
+
+    def test_off_by_default_is_said_as_the_shipped_default_and_nothing_is_written(self):
+        for apply in (False, True):
+            said = self.said(self.review(apply=apply))
+            self.assertEqual([f['kind'] for f in said], ['info'])
+            self.assertIn('synchronous_commit=off (the shipped default; POSTGRES_SYNCHRONOUS_COMMIT=on in .env turns it back on)', said[0]['text'])
+            self.assertIn('0.6 s', said[0]['text'])
+        self.assertNotIn('SYNCHRONOUS_COMMIT', self.read())
+
+    def test_an_empty_value_takes_the_default(self):
+        self.env('DB_MEM_LIMIT=2g\nPOSTGRES_SYNCHRONOUS_COMMIT=\n')
+        said = self.said(self.review(apply=False))
+        self.assertIn('synchronous_commit=off (the shipped default', said[0]['text'])
+
+    def test_on_in_the_env_file_is_the_owners_own_and_left(self):
+        self.env('DB_MEM_LIMIT=2g\nPOSTGRES_SYNCHRONOUS_COMMIT=on\n')
+        said = self.said(self.review())
+        self.assertEqual([f['kind'] for f in said], ['info'])
+        self.assertIn('synchronous_commit=on (POSTGRES_SYNCHRONOUS_COMMIT=on in', said[0]['text'])
+        self.assertIn('your own, left as it is', said[0]['text'])
+        self.assertIn('every commit waits for its WAL flush', said[0]['text'])
+        self.assertEqual(self.read().count('POSTGRES_SYNCHRONOUS_COMMIT='), 1)
+
+    def test_a_compose_file_without_it_is_said_not_warned(self):
+        text = (self.d / 'docker-compose.yml').read_text()
+        text = text.replace(',\n              "-c", "synchronous_commit=${POSTGRES_SYNCHRONOUS_COMMIT:-off}"', '')
+        self.assertNotIn('synchronous_commit', text.split('command: ["postgres"', 1)[1].split(']', 1)[0])
+        (self.d / 'docker-compose.yml').write_text(text)
+        said = self.said(self.review())
+        self.assertEqual([f['kind'] for f in said], ['info'])
+        self.assertIn('do not pass synchronous_commit', said[0]['text'])
+
+    def test_a_compose_file_that_passes_no_database_setting_is_not_ours_and_says_nothing(self):
+        (self.d / 'docker-compose.yml').write_text('services:\n  db:\n    image: "postgres:18-alpine"\n')
+        self.assertEqual(self.said(self.review()), [])
+
+    def test_the_line_reaches_the_review_output(self):
+        out = subprocess.run([sys.executable, str(SCRIPT), '--mem-mb', '12288', '--env-file', str(self.d / '.env.vps'),
+                              '--compose-file', str(self.d / 'docker-compose.yml')], capture_output=True, text=True, check=True).stdout
+        self.assertIn('The database runs with synchronous_commit=off', out)
+
+    def test_the_docs_name_the_switch_and_the_update_step(self):
+        config = (ROOT / 'docs' / 'CONFIGURATION.md').read_text()
+        self.assertIn('| `POSTGRES_SYNCHRONOUS_COMMIT` | `off` |', config)
+        upgrade = (ROOT / 'docs' / 'UPGRADE.md').read_text()
+        section = upgrade.split('### Commits no longer wait for the disk', 1)[1].split('\n### ', 1)[0]
+        for needle in ('POSTGRES_SYNCHRONOUS_COMMIT', 'synchronous_commit=off', 'recreates the `db` container once', 'ALTER SYSTEM RESET',
+                       'scripts/db-settings.sh', 'scripts/host-review.py', '0.6 s'):
+            self.assertIn(needle, section)

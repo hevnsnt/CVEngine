@@ -26,6 +26,7 @@ from agentapi.auth import SCOPE_SENTINEL
 from agentapi.models import ACTIVE_TASK_STATUSES, Agent, AgentTask
 from agentapi.services import ApiError, AssetFilter
 from cvengine.lifecycle import Refused
+from cvengine.usage_stamps import durable_commit
 from cvengine.state_machines import AGENT
 from tenancy import audit, roles
 
@@ -1366,7 +1367,8 @@ def delete_agent(ctx, agent_id):
         raise ApiError(409, f'only a revoked agent can be deleted; this one is {agent.status} (revoke it first)')
     token, owner = agent.token, agent.token.user
     released = release_agent_tasks(agent, 'the agent was deleted', actor=ctx.user)
-    ApiToken.objects.filter(pk=token.pk).update(revoked=True)
+    with durable_commit():  # a revocation a crash could undo would let the token in again
+        ApiToken.objects.filter(pk=token.pk).update(revoked=True)
     held = list(Agent.objects.filter(held_by=agent, status__in=('suspended', 'pending'), status_inherited=True).order_by('id').values('id', 'name'))
     audit.record_for_user(ctx.user, 'agent.delete', owner, target=agent.name, agent_id=agent.pk, kind=agent.kind, token_id=token.pk,
                           revoked_since=svc._iso(agent.status_changed_at), released_tasks=released, still_held=[h['id'] for h in held])

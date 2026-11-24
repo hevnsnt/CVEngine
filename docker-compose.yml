@@ -33,13 +33,21 @@ services:
     # than deadlock_timeout (1s) for a lock is logged with the process that holds it, and the time spent writing and flushing WAL is counted (pg_stat_io).
     # Every login and logout is logged (POSTGRES_LOG_CONNECTIONS, POSTGRES_LOG_DISCONNECTIONS, default on; off turns either off): who connected, from
     # where, as which role. A setting given here wins over one made with ALTER SYSTEM.
+    # Commits do not wait for their WAL flush (synchronous_commit=off, POSTGRES_SYNCHRONOUS_COMMIT): on a disk that stalls, every commit used to
+    # queue behind the flushes of the others. The trade: a crash of the server or the host can lose the last writes acknowledged in about 0.6 s
+    # (three times wal_writer_delay, left at its 200 ms default), never corrupt anything. This application can accept that: progress, heartbeats
+    # and task leases are re-derived or retried by the Sentinel, and scan results are written in their own transactions and a lost last write is
+    # sent again. The writes that must survive a crash (audit rows, token revocations, address bans, validation budget) still commit durably
+    # (usage_stamps.durable_commit). POSTGRES_SYNCHRONOUS_COMMIT=on in .env turns it back on (docs/CONFIGURATION.md); the update also removes an
+    # ALTER SYSTEM value of it, so this line is the one source (scripts/update-deploy.sh).
     command: ["postgres", "-c", "max_connections=${POSTGRES_MAX_CONNECTIONS:-300}", "-c", "shared_buffers=${POSTGRES_SHARED_BUFFERS:-256MB}",
               "-c", "effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-768MB}", "-c", "maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM:-64MB}",
               "-c", "random_page_cost=${POSTGRES_RANDOM_PAGE_COST:-1.1}", "-c", "work_mem=${POSTGRES_WORK_MEM:-4MB}",
               "-c", "shared_preload_libraries=${POSTGRES_SHARED_PRELOAD_LIBRARIES:-}", "-c", "track_io_timing=${POSTGRES_TRACK_IO_TIMING:-off}",
               "-c", "log_min_duration_statement=${POSTGRES_LOG_MIN_DURATION_STATEMENT:--1}",
               "-c", "log_connections=${POSTGRES_LOG_CONNECTIONS:-on}", "-c", "log_disconnections=${POSTGRES_LOG_DISCONNECTIONS:-on}",
-              "-c", "log_lock_waits=${POSTGRES_LOG_LOCK_WAITS:-on}", "-c", "track_wal_io_timing=${POSTGRES_TRACK_WAL_IO_TIMING:-on}"]
+              "-c", "log_lock_waits=${POSTGRES_LOG_LOCK_WAITS:-on}", "-c", "track_wal_io_timing=${POSTGRES_TRACK_WAL_IO_TIMING:-on}",
+              "-c", "synchronous_commit=${POSTGRES_SYNCHRONOUS_COMMIT:-off}"]
     environment:
       - POSTGRES_DB=${POSTGRES_DB}
       - POSTGRES_USER=${POSTGRES_USER}
