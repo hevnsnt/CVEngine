@@ -61,9 +61,13 @@ class _Gate:
         return self.memo[name]
 
 
-def _same_site_hosts(project_id, sub, gate):
+def _same_site_hosts(project_id, sub, gate, known=None):
     """The other hosts of ``sub``'s site that a page of ``sub`` may read scripts from (``js_libraries.vetter``'s same-site rule): none for a
-    host-scoped, passive or manual only target; else this project's own hosts of that site held by a target that is none of those."""
+    host-scoped, passive or manual only target; else this project's own hosts of that site held by a target that is none of those.
+
+    The holder of each name (``manual_only.other_holder``) is looked up in batches (``manual_only.holders``), a batch being at most the names still
+    needed to reach the cap, so the gate is asked about exactly the names it was asked about one by one. ``known`` is a ``{name: holder}`` dict
+    the caller keeps for one policy build, so the hosts of one site are looked up once however many of its pages the task carries."""
     from cveFeed import js_libraries
     from startScan.models import Subdomain
     from targetApp.models import Domain
@@ -76,18 +80,32 @@ def _same_site_hosts(project_id, sub, gate):
     names = (Subdomain.objects.filter(target_domain__project_id=project_id, name__iendswith='.' + site)
              .exclude(target_domain__discovery_mode__in=(Domain.DISCOVERY_MANUAL, Domain.DISCOVERY_PASSIVE))
              .exclude(name__iexact=sub.name).values_list('name', flat=True).distinct()[:MAX_SAME_SITE * 2])
-    from cveFeed.manual_only import other_holder
-    out = []
+    from cveFeed.manual_only import holders
+    known = {} if known is None else known
+    out, pending = [], []
+
+    def settle():
+        """Look up the pending names' holders in one batch and keep the ones the vetter's own rule allows: held by a target that is neither
+        manual only nor passive."""
+        missing = [n for n in pending if n not in known]
+        if missing:
+            known.update(holders(project_id, missing))
+        for name in pending:
+            holder = known[name]
+            if holder is not None and not js_libraries._held_back(holder):
+                out.append(name)
+        pending.clear()
+
     for name in dict.fromkeys(n.lower().rstrip('.') for n in names):
         if js_libraries._site(name) != site or gate.refusal(name):
             continue
-        holder = other_holder(project_id, name)  # the vetter's own rule: held by a target that is neither manual only nor passive
-        if holder is None or js_libraries._held_back(holder):
-            continue
-        out.append(name)
-        if len(out) >= MAX_SAME_SITE:
-            break
-    return out
+        pending.append(name)
+        if len(out) + len(pending) >= MAX_SAME_SITE:  # the cap can be reached only now: settle before asking the gate about another name
+            settle()
+            if len(out) >= MAX_SAME_SITE:
+                break
+    settle()
+    return out[:MAX_SAME_SITE]
 
 
 def for_probes(project_id, planned, unattended=True):
@@ -115,9 +133,10 @@ def for_probes(project_id, planned, unattended=True):
         for name in sorted(probes.allowed_names(sub)):
             add(name)
     if libraries:
+        known = {}  # the holders of the names looked up for this task, so the pages of one site share one lookup
         for sub, entry in planned:
             if entry['probe'] == 'html-libraries':
-                for name in _same_site_hosts(project_id, sub, gate):
+                for name in _same_site_hosts(project_id, sub, gate, known):
                     add(name)
         for name in sorted(js_libraries.CDN_HOSTS):  # a public library CDN touches no target (the scanner asks nothing of one either)
             if name not in hosts and len(hosts) < MAX_HOSTS:
@@ -194,8 +213,9 @@ def for_routes(project_id, scan, hosts, unattended=False):
             listed.append(name)
     gate = _Gate(project_id, unattended=unattended)
     subs = Subdomain.objects.filter(scan_history=scan, name__in=listed).select_related('target_domain').order_by('name')
+    known = {}  # the holders of the names looked up for this task, so the hosts of one site share one lookup
     for sub in subs:
-        for name in sorted(_same_site_hosts(project_id, sub, gate)):
+        for name in sorted(_same_site_hosts(project_id, sub, gate, known)):
             if name in listed or name in excluded:
                 continue
             if gate.refusal(name):
