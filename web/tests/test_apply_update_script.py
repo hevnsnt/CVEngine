@@ -41,6 +41,8 @@ case " $* " in
   *" showmigrations "*) if [ -f "$STUB_DIR/migrations_state" ]; then cat "$STUB_DIR/migrations_state"; else echo "[X]  app.0001_initial"; fi; exit 0;;
   *"celery_healthcheck.py"*) if [ -f "$STUB_DIR/workers_down" ]; then echo "classic_worker does not answer"; exit 1; fi; exit 0;;
   *"http.client"*) if [ -f "$STUB_DIR/web_not_serving" ]; then exit 1; fi; exit 0;;
+  *" exec -T proxy nginx -t "*) if [ -f "$STUB_DIR/proxy_refuses" ]; then
+      echo "nginx: [emerg] could not build map_hash, you should increase map_hash_bucket_size: 64" >&2; exit 1; fi; exit 0;;
   *" exec "*) if [ -f "$STUB_DIR/web_down" ]; then exit 1; fi
     echo "banner line"; cat "$STUB_DIR/running_count" 2>/dev/null || echo 0; exit 0;;
   *" ps -a --filter "*) if [ -f "$STUB_DIR/running_config_files" ]; then echo abc123; fi; exit 0;;
@@ -456,8 +458,10 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.approve(newest)
         self.assertEqual(self.run_script().returncode, 0)
         from_file = [c for c in self.calls() if c.startswith('docker compose')]
-        # the deploy file also pulls the proxy image and reads the migration count (the built-in copy, for checkouts older than the deploy file, does not)
-        verification = lambda call: any(x in call for x in ('http.client', 'celery_healthcheck', 'migrate --check', 'image prune', ' info ', ' pull ', 'showmigrations'))
+        # the deploy file also pulls the proxy image, reads the migration count and checks that the proxy stays up (the built-in copy, for checkouts
+        # older than the deploy file, does not)
+        verification = lambda call: any(x in call for x in ('http.client', 'celery_healthcheck', 'migrate --check', 'image prune', ' info ', ' pull ', 'showmigrations',
+                                                            ' ps -q proxy', ' exec -T proxy nginx -t'))
         self.assertEqual([c for c in from_file if not verification(c)], built_in)
 
     def test_the_dev_stack_pulls_nothing(self):
@@ -885,6 +889,32 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.assertFalse(self.deployed_marker())
         self.assertNotIn('docker image prune -f', self.calls())
         self.assertIn('exec -T celery python3 celery_healthcheck.py', ' '.join(self.calls()))
+
+    def test_an_update_is_not_done_while_the_proxy_does_not_start(self):
+        # the web service answers and every worker too, but nginx refuses the proxy's configuration and the container restarts over and over:
+        # `ps` calls it running between two restarts, so the update was reported done and the page taken down while no visitor got an answer
+        (self.stub / 'proxy_refuses').write_text('')
+        self.new = self.publish_deploy_file()
+        self.approve()
+        result = self.run_script(CVENGINE_VERIFY_PROXY_TRIES='2', CVENGINE_VERIFY_POLL='0')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        log = (self.work / 'web' / '.update-log').read_text()
+        self.assertIn('the proxy does not stay up', log)
+        self.assertIn('could not build map_hash', log)
+        self.assertEqual(self.head(), self.new)  # after the migration: the new code is kept and retried, never the old code on the new schema
+        self.assertTrue(self.approved())
+        self.assertFalse(self.deployed_marker())
+        self.assertNotIn('docker image prune -f', self.calls())
+
+    def test_a_verified_update_has_checked_the_proxy_after_the_web_service(self):
+        self.new = self.publish_deploy_file()
+        self.approve()
+        self.assertEqual(self.run_script(CVENGINE_VERIFY_POLL='0').returncode, 0)
+        calls = self.calls()
+        self.assertIn('exec -T proxy nginx -t', ' '.join(calls))
+        served = max(i for i, c in enumerate(calls) if 'http.client' in c)
+        checked = next(i for i, c in enumerate(calls) if 'exec -T proxy nginx -t' in c)
+        self.assertGreater(checked, served)
 
     def run_with_env_file(self, text):
         """An update whose checkout carries the helper scripts (host-fit, redis-password) and an .env with ``text``; returns the update log."""

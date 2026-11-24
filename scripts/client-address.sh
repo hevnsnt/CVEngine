@@ -126,6 +126,8 @@ except ValueError:
     sys.exit(1)' "$1"
 }
 
+# Every command substitution below ends in `|| true`: it runs in a process substitution of the update script, where a failed pipeline (the proxy
+# or web container not answering an exec) set off the updater's error trap and logged "the update script stopped" although nothing stopped.
 cvengine_client_address_report() {
   local compose=("$@") env_file secret domain url token recorded seen trusted rendered
   say() { printf 'client address: %s\n' "$*"; }
@@ -136,11 +138,11 @@ cvengine_client_address_report() {
   elif ! [[ $secret =~ $CV_UPSTREAM_SECRET_RE ]]; then
     say "CVENGINE_UPSTREAM_SECRET in $env_file is not 32 to 256 letters, digits, '-' or '_': the proxy believes no X-Forwarded-For on 443. Remove the line; the next update generates a new one."
   fi
-  rendered=$("${compose[@]}" exec -T proxy sh -c 'grep -cE "^\"k[A-Za-z0-9_-]{32,256}\"" /etc/nginx/conf.d/cvengine-upstream-secret.inc 2>/dev/null || true' 2>/dev/null | tr -dc '0-9')
+  rendered=$("${compose[@]}" exec -T proxy sh -c 'grep -cE "^\"k[A-Za-z0-9_-]{32,256}\"" /etc/nginx/conf.d/cvengine-upstream-secret.inc 2>/dev/null || true' 2>/dev/null | tr -dc '0-9' || true)
   if [ -n "$secret" ] && [ "${rendered:-0}" = 0 ]; then
     say "the running proxy has no upstream secret loaded (it was started before the secret existed, or an overlay drops its environment or its templates mount): docker compose up -d --force-recreate proxy"
   fi
-  trusted=$("${compose[@]}" exec -T web python3 manage.py client_address_probe trusted 2>/dev/null | sed -n 's/^probe: //p' | tail -n 1 | tr -d '\r')
+  trusted=$("${compose[@]}" exec -T web python3 manage.py client_address_probe trusted 2>/dev/null | sed -n 's/^probe: //p' | tail -n 1 | tr -d '\r' || true)
   if [ -n "$trusted" ] && ! cvengine_ca_single_addresses "$trusted"; then
     say "warning: CVENGINE_TRUSTED_PROXIES is $trusted. A range lets any container in it (the built-in scanner, the AI reviewer) choose the client address the server records and bans. Remove CVENGINE_TRUSTED_PROXIES from .env so the default (the proxy's own address) applies, unless your own proxy needs it (docs/CONFIGURATION.md)."
   fi
@@ -152,14 +154,14 @@ cvengine_client_address_report() {
     say "no DOMAIN_NAME: the probe was not sent"
     return 0
   fi
-  token=$("${compose[@]}" exec -T web python3 manage.py client_address_probe start 2>/dev/null | sed -n 's/^probe: //p' | tail -n 1 | tr -dc '0-9a-f')
+  token=$("${compose[@]}" exec -T web python3 manage.py client_address_probe start 2>/dev/null | sed -n 's/^probe: //p' | tail -n 1 | tr -dc '0-9a-f' || true)
   if [ ${#token} -ne 32 ]; then
     say "the web service could not issue a probe token; the check was skipped"
     return 0
   fi
   cvengine_ca_fetch "$url/client-address-probe/$token/" >/dev/null
-  recorded=$("${compose[@]}" exec -T web python3 manage.py client_address_probe read "$token" 2>/dev/null | sed -n 's/^probe: //p' | tail -n 1 | tr -d '\r')
-  seen=$(cvengine_ca_fetch "$url/cdn-cgi/trace" | sed -n 's/^ip=//p' | head -n 1 | tr -d '\r')
+  recorded=$("${compose[@]}" exec -T web python3 manage.py client_address_probe read "$token" 2>/dev/null | sed -n 's/^probe: //p' | tail -n 1 | tr -d '\r' || true)
+  seen=$(cvengine_ca_fetch "$url/cdn-cgi/trace" | sed -n 's/^ip=//p' | head -n 1 | tr -d '\r' || true)
   if [ -z "$recorded" ]; then
     say "the probe sent to $url did not reach the server (DNS, a firewall, the IP allowlist or the maintenance page in front); nothing to compare"
   elif [ -n "$seen" ] && [ "$seen" = "$recorded" ]; then

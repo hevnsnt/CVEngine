@@ -297,6 +297,8 @@ deploy_steps() {
   phase applying verifying
   cv_status step verifying
   verify_serving || return 1
+  # The proxy is what visitors reach, and a proxy whose configuration nginx refuses restarts over and over while `ps` calls it running.
+  if printf '%s\n' "${services[@]}" | grep -qx proxy; then verify_proxy || return 1; fi
   # Which database role web, celery and celery-beat run as; a warning when any still uses the owner role (never fails the update).
   if declare -F cvengine_db_role_report >/dev/null; then
     while IFS= read -r line; do [ -z "$line" ] || log "$line"; done < <(cvengine_db_role_report "${compose[@]}")
@@ -342,6 +344,33 @@ verify_running() {
     sleep "${CVENGINE_VERIFY_POLL:-2}"
   done
   log "after the restart these services are not running:$missing (see docker compose ps and docker compose logs)"
+  return 1
+}
+
+# The bundled proxy must load its configuration and stay up. verify_running saw it "running", which is also what Docker says between two restarts
+# of a proxy nginx refuses to start (a 1.5 develop build did that: its map did not fit nginx's hash bucket), and verify_serving asks the web
+# service directly, not through the proxy. So the update reported "done" and took the maintenance page down while every visitor got no answer.
+# Here nginx checks the configuration it runs with (`nginx -t` in the proxy container) and the container's restart count must not move while it
+# is watched. A proxy that fails is a failed update after the migration: the new code is kept, the deploy retried, the page says it did not finish.
+verify_proxy() {
+  local compose=("${COMPOSE[@]}") attempt id before after said=''
+  for attempt in $(seq 1 "${CVENGINE_VERIFY_PROXY_TRIES:-15}"); do
+    id=$("${compose[@]}" ps -q proxy 2>/dev/null | head -n 1) || id=''
+    before=''
+    [ -z "$id" ] || before=$(docker inspect -f '{{.RestartCount}}' "$id" 2>/dev/null) || before=''
+    if said=$("${compose[@]}" exec -T proxy nginx -t 2>&1); then
+      sleep "${CVENGINE_VERIFY_POLL:-2}"
+      after=''
+      [ -z "$id" ] || after=$(docker inspect -f '{{.RestartCount}}' "$id" 2>/dev/null) || after=''
+      [ "$before" = "$after" ] && return 0
+      said="the proxy container restarted while it was watched (restart count ${before:-?} then ${after:-?})"
+    fi
+    sleep "${CVENGINE_VERIFY_POLL:-2}"
+  done
+  said=$(printf '%s\n' "$said" | grep -iE 'emerg|error|restart' | tail -n 1 || true)
+  [ -n "$said" ] || said=$("${compose[@]}" logs --tail 20 proxy 2>/dev/null | grep -iE 'emerg|error' | tail -n 1 || true)
+  log "after the restart the proxy does not stay up, so visitors get no answer: ${said:-see docker compose logs proxy}"
+  DEPLOY_WHY="The proxy (nginx) does not start with the new configuration: ${said:-see docker compose logs proxy}"
   return 1
 }
 

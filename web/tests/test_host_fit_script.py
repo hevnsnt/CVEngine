@@ -23,6 +23,10 @@ case " $* " in
     echo "docker $*" >> "$STUB_DIR/calls"
     if [ -e "$STUB_DIR/externals_unavailable" ]; then echo "ModuleNotFoundError: No module named 'cvengine_scanner'" >&2; exit 1; fi
     echo "EXTERNAL_SENTINELS_LIVE $(cat "$STUB_DIR/externals" 2>/dev/null || echo 0)"; exit 0;;
+  *" run --rm --no-deps -T migrate python3 manage.py external_sentinels "*)
+    echo "docker $*" >> "$STUB_DIR/calls"
+    if [ -e "$STUB_DIR/owner_externals" ]; then echo "EXTERNAL_SENTINELS_LIVE $(cat "$STUB_DIR/owner_externals")"; exit 0; fi
+    echo "no such service: migrate" >&2; exit 1;;
   *" inspect -f {{.HostConfig.Memory}} "*)
     id=${@: -1}; grep "^$id " "$STUB_DIR/limits" 2>/dev/null | cut -d' ' -f2-; exit 0;;
 esac
@@ -239,6 +243,24 @@ class ChoiceOfScannersTests(FitCase):
         self.assertEqual(self.env_text(), before)
         self.assertIn('Could not read how many Sentinels of your own are live', result.stdout)
         self.assertIn('which scanners run is not changed', result.stdout)
+
+    def test_before_the_app_role_exists_the_count_is_read_in_the_migrate_service(self):
+        # the first update from 1.4: the new image cannot log in as the app role, which the migration creates later in the same update. The
+        # count is then read as the owner in the one-off migrate service, so two live Sentinels are still noticed on that update
+        (self.stub / 'externals_unavailable').touch()
+        (self.stub / 'owner_externals').write_text('2\n')
+        result = self.update(16384)
+        calls = [c for c in self.calls() if 'external_sentinels' in c]
+        self.assertIn(' run --rm --no-deps -T --entrypoint python3 web manage.py external_sentinels', calls[0])
+        self.assertIn(' run --rm --no-deps -T migrate python3 manage.py external_sentinels', calls[1])
+        self.assertNotIn('Could not read how many Sentinels', result.stdout)
+        self.assertIn('2 Sentinels of your own', result.stdout)
+
+    def test_once_the_app_role_answers_the_migrate_service_is_not_asked(self):
+        self.set_externals(0)
+        (self.stub / 'owner_externals').write_text('5\n')
+        self.update(16384)
+        self.assertFalse(any(' migrate python3 manage.py external_sentinels' in c for c in self.calls()))
 
     def test_a_database_that_is_not_running_changes_nothing_and_says_so(self):
         (self.stub / 'db_down').touch()
