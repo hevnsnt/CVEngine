@@ -47,6 +47,14 @@ class OpenvasStateTests(unittest.TestCase):
         self.assertEqual(self.state('heartbeat').returncode, 0)
         self.assertEqual(self.victim.read_text(), 'keep me')
 
+    def test_a_long_phase_detail_is_cut_not_refused(self):
+        # a refused write left the Update screen on "applying" for good when a deploy's reason ran past 200 characters
+        result = self.state('phase', 'failed', 'x ' * 150)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        detail = json.loads((self.tmp / 'web' / '.update-phase.json').read_text())['detail']
+        self.assertLessEqual(len(detail), 200)
+        self.assertTrue(detail.endswith('...'))
+
     def test_the_old_openvas_actions_are_gone(self):
         # the in-stack OpenVAS add-on and its host switch are gone (OpenVAS runs on a Sentinel): update-state.py no longer takes their actions
         for action in ('openvas-wanted', 'openvas-applied', 'openvas-restarted', 'openvas-log'):

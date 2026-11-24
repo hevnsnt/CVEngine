@@ -346,7 +346,8 @@ def main():
                 raise ValueError('invalid phase')
             detail = sys.argv[3] if len(sys.argv) > 3 else ''
             if len(detail) > 200:
-                raise ValueError('phase detail is too long')
+                # cut, not refused: a refused write left the screen on the step before ("applying") for good, when a deploy's reason ran long
+                detail = detail[:197].rstrip() + '...'
             scans_running = None
             if len(sys.argv) > 4 and sys.argv[4] != '':
                 scans_running = int(sys.argv[4])

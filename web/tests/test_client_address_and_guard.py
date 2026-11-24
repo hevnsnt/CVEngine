@@ -519,6 +519,25 @@ def docker_ok():
         return False
 
 
+class SecretShapeCheckTests(SimpleTestCase):
+    """The update's report checks the secret in .env on the host and the rendered one in the proxy (nginx:alpine, whose grep is musl's). musl
+    refuses a regex bound above 255, so `{32,256}` made both checks read a good secret as broken on every install: the update log said the secret
+    was malformed and that the running proxy had none loaded."""
+
+    SCRIPT = ROOT / 'scripts' / 'client-address.sh'
+
+    def test_no_regex_in_the_script_has_a_bound_musl_refuses(self):
+        bounds = [int(m) for m in re.findall(r'\{\d+,(\d+)\}', self.SCRIPT.read_text())]
+        self.assertFalse([b for b in bounds if b > 255], bounds)
+
+    @unittest.skipUnless(shutil.which('bash'), 'needs bash')
+    def test_the_shape_check_takes_32_to_256_letters_digits_dash_and_underscore(self):
+        cases = {'a' * 31: 1, 'a' * 32: 0, 'Zq8-_' * 10: 0, 'a' * 256: 0, 'a' * 257: 1, 'a' * 40 + '!': 1, '': 1}
+        for secret, want in cases.items():
+            out = subprocess.run(['bash', '-c', f'. "{self.SCRIPT}"; cvengine_ca_secret_ok "$1"', 'check', secret], capture_output=True, text=True)
+            self.assertEqual(out.returncode, want, (len(secret), out.stderr))
+
+
 class ProxyContainerTests(SimpleTestCase):
     """The bundled proxy as compose runs it: nginx:alpine with the shipped conf, the template rendered by the image's own entrypoint from
     CVENGINE_UPSTREAM_SECRET, a fixed address on a fixed-subnet network, and a fake web container named "rengine" that echoes what it receives. The

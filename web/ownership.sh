@@ -8,7 +8,7 @@
 # are root's. This changes only what is not already right, says how many paths it changed in one line, and changes nothing on a second run:
 #   scan results          every entry to uid 10002 (groups kept); the folder itself 10002:101 (the proxy's nginx group), mode 0750
 #   static files, generated templates, ~/.config (the CVE seed folder), the owner fallback, the AI reviewer's token folder: every entry to 10002:10002
-#   the built-in scanner's enrollment folder: the folder only, 10002:10002 mode 2750 (setgid: the blob the server writes there is 0640, group 10002,
+#   the built-in scanner's enrollment folder: the folder only, 10002:10002 mode 2751 (setgid: the blob the server writes there is 0640, group 10002,
 #   which the scanner service is given with group_add); a blob left readable by others is made group 10002 and 0640
 #   the host's web/ folder (mounted at /var/lib/cvengine/web): group 10002 and mode 1775, so the application can create its update requests there
 #   but cannot change, rename or remove any file it does not own (the sticky bit); the Django secret (web/secret, mode 0600) and the request
@@ -25,7 +25,7 @@ R=${CVENGINE_OWNERSHIP_ROOT:-}
 HOST_WEB=$R${CVENGINE_HOST_DIR:-/var/lib/cvengine/web}
 INIT=$(dirname "$0")/reNgine/init.py
 # what the web and celery containers write in web/ (cveFeed/updater.py, cveFeed/scanner_plan.py, cveFeed/watchdog.py, agentapi/sentinel_autoupdate.py)
-REQUESTS='.update-approved .update-branch .update-sentinels .update-mode .update-wait-scans .update-source .scanner-update-requested .scanner-plan-wanted .watchdog-action .update-lock'
+REQUESTS='.update-approved .update-branch .update-sentinels .update-mode .update-wait-scans .update-source .scanner-update-requested .scanner-plan-wanted .watchdog-action'
 changed=0
 report=''
 
@@ -63,9 +63,11 @@ done
 # The setgid bit is set while the folder's group is still root's: this root has no FSETID capability and is not in group 10002, and the kernel
 # drops the bit from a chmod by such a process; a later change of a folder's group keeps it.
 scanner_dir="$R/var/lib/cvengine-scanner"
-if [ -d "$scanner_dir" ] && [ "$(stat -c '%u:%g %a' "$scanner_dir")" != "$APP_UID:$APP_GID 2750" ]; then
+# Others may pass through the folder (the 1 of 2751) but not list it: the previous release's scanner, which has no group 10002, still reaches the
+# 0600 blob of its own that the previous release writes there, so an update that is put back does not leave its scanner unable to enroll.
+if [ -d "$scanner_dir" ] && [ "$(stat -c '%u:%g %a' "$scanner_dir")" != "$APP_UID:$APP_GID 2751" ]; then
     chown "$APP_UID:$(id -g)" "$scanner_dir"
-    chmod 2750 "$scanner_dir"
+    chmod 2751 "$scanner_dir"
     chgrp "$APP_GID" "$scanner_dir"
     changed=$((changed + 1))
     report="$report cvengine-scanner/"
@@ -99,6 +101,22 @@ if [ -d "$HOST_WEB" ]; then
     done
     if [ -f "$HOST_WEB/secret" ] && [ ! -L "$HOST_WEB/secret" ] && [ "$(stat -c '%a' "$HOST_WEB/secret")" != 600 ]; then
         chmod 0600 "$HOST_WEB/secret"
+    fi
+    # The update lock (web/.update-lock) is opened in place, with O_CREAT, by three parties: the application (uid 10002, cveFeed/scan_control.py
+    # updater_idle), the host (scripts/watchdog.sh, as root or the checkout's owner) and, after an update that failed and put the previous release
+    # back, that release's root containers. In this folder (group writable, sticky) the kernel's fs.protected_regular (2 on Ubuntu) refuses such an
+    # open of a file that belongs to neither the opener nor the folder's owner, root included: with the lock as 10002's the host's watchdog read it
+    # as free and the previous release could not release the update's scan pause. So it belongs to the folder's owner, group 10002, mode 0660,
+    # which every one of them may open. An existing file is only given away and chmodded here, never opened (that open would be refused too).
+    lock="$HOST_WEB/.update-lock"
+    if [ ! -L "$lock" ] && { [ ! -e "$lock" ] || [ -f "$lock" ]; }; then
+        [ -e "$lock" ] || : > "$lock"
+        if [ "$(stat -c '%u:%g %a' "$lock")" != "$owner:$APP_GID 660" ]; then
+            chown -h "$owner:$APP_GID" "$lock"
+            chmod 0660 "$lock"
+            changed=$((changed + 1))
+            report="$report web/.update-lock"
+        fi
     fi
 fi
 
