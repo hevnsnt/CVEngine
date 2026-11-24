@@ -1155,6 +1155,10 @@ def collect(project, host=None, include_closed=False, now=None, kind='findings',
     opened = open_counts(open_sources)
     total, heat, severity = opened['findings'], opened['heat'], opened['severity']
     hygiene_total, _, hygiene_severity = _tally({'hygiene': open_sources['hygiene']})
+    # the same open findings as the Findings page and the Overview count them, per host: version-only CVE matches on one product and version of a host
+    # are one fix (cveFeed.counts.distinct_issues). Not this report's own issues, which fold one weakness across every host it is found on
+    from cveFeed import counts as counts_lib
+    finding_issues = counts_lib.distinct_issues(total, open_sources['cve'])
     rows, issues, closed, rows_cut = [], [], [], 0
     secrets_total, secrets = 0, []
     if hosts_report:
@@ -1189,7 +1193,11 @@ def collect(project, host=None, include_closed=False, now=None, kind='findings',
                'hygiene_severity': hygiene_severity, 'ruled_out': ruled_out,
                'hosts_exposed': sum(1 for h in hosts if h['heat'] in ('fire', 'smoke')),
                'status_counts': _status_counts(sources) if not hosts_report else {},
-               'issues': len(issues), 'levels': _severity_table(issues)}
+               'issues': len(issues), 'levels': _severity_table(issues),
+               # beside 'findings' (the hosts report) and 'findings' plus 'hygiene' (the executive summary): the distinct issues they are, and the words
+               'finding_issues': finding_issues, 'distinct_issues': finding_issues + hygiene_total,
+               'finding_issues_text': counts_lib.issues_text(total, finding_issues),
+               'distinct_issues_text': counts_lib.issues_text(total + hygiene_total, finding_issues + hygiene_total), 'issues_note': counts_lib.ISSUES_NOTE}
     executive = None if hosts_report else _executive(issues, summary, scope, method, host)
     actions = [] if hosts_report else _key_actions(issues)
     if host:

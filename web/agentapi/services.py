@@ -4378,7 +4378,10 @@ def _grouped_matches(project, qs, params):
         results.append(row)
     has_more = bool(size) and start + size < len(built)
     truncated = len(rows) >= version_groups.GROUP_SCAN_MAX
-    return {'count': len(built), 'page': page, 'page_size': size, 'group_by': 'product', 'findings_total': qs.count() if truncated else len(rows),
+    findings_total = qs.count() if truncated else len(rows)
+    # distinct issues: every group once and every match it did not read once (the figure cveFeed.counts.match_issues counts for the other surfaces)
+    return {'count': len(built), 'page': page, 'page_size': size, 'group_by': 'product', 'findings_total': findings_total,
+            'distinct_issues': len(built) + max(0, findings_total - len(rows)),
             'groups': sum(1 for item in built if len(item['members']) > 1), 'scan_truncated': truncated,
             'has_more': has_more, 'next_page': page + 1 if has_more else None, 'results': results}
 
@@ -4764,6 +4767,9 @@ def _grouped_findings(project, sources, counts, page, size, by='cve'):
     return {'count': min(total, MAX_FINDINGS), 'total': total, 'truncated': total > MAX_FINDINGS, 'page': page, 'page_size': size,
             'counts': {key: counts.get(key, 0) for key in FINDING_TYPES}, 'group': by, 'row_counts': row_counts,
             'findings_total': sum(counts.values()), 'groups': len(multi), 'grouped_findings': sum(len(g['members']) for g in multi),
+            # group=product: the rows are the distinct issues (a group of version-only matches on one product version of a host is one fix, every other
+            # finding one), the number the Findings page's header prints beside findings_total
+            **({'distinct_issues': total} if by == 'product' else {}),
             'group_scan_truncated': overflow > 0, 'results': results}
 
 

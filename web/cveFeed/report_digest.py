@@ -236,8 +236,13 @@ def build(scope, start, end, cadence, now, tz='UTC'):
     local_end = end.astimezone(report_schedule.zone(tz))
     label = report_schedule.period_label(start, end, tz, monthly=monthly)
     hygiene = _hygiene(scope, sources)
+    # the open findings above as distinct issues (cveFeed.counts.distinct_issues): the same actionable set compute_snapshot counted, the CVE matches grouped
+    # by product and version as the Findings list groups them
+    from cveFeed import counts
+    open_issues = counts.distinct_issues(now_numbers['open_findings'],
+                                         svc._finding_sources(scope.svc_scope(), {'status': 'actionable', 'type': 'cve'}, counting=True)['cve'])
     period_word = 'month' if monthly else 'week'
-    headline = {'open_findings': now_numbers['open_findings'], 'exposed_hosts': now_numbers['exposed_hosts'], 'hosts': now_numbers['hosts'],
+    headline = {'open_findings': now_numbers['open_findings'], 'open_issues': open_issues, 'exposed_hosts': now_numbers['exposed_hosts'], 'hosts': now_numbers['hosts'],
                 'heat': opened['heat'], 'heat_kinds': opened['by_kind'], 'new_findings': new_findings, 'new_worth_a_look': situations.new_worth_a_look(scope.ids, start, end), 'fixed': fixed,
                 'needs': host_groups['needs'], 'proven': host_groups['proven'], 'likely': host_groups['likely'], 'hygiene_high': host_groups['hygiene'],
                 'hygiene_open': hygiene['open'], 'compared': before is not None, 'compared_note': '' if before is not None else 'First report: no comparison yet',
@@ -311,6 +316,16 @@ def totals_line(digest):
     return f"{total:,} {'lower-priority ' if quiet else ''}item{'' if total == 1 else 's'} {'is' if total == 1 else 'are'} tracked in cvENGINE" + (f" ({', '.join(parts)})" if parts else '') + '.'
 
 
+def issues_line(digest):
+    """The open findings as distinct issues, beside the totals line: "1,712 findings in 310 distinct issues. Version-only matches on the same
+    product and version of one host are one fix, so they count as one issue." Empty when nothing is open (or the digest predates the figure)."""
+    from cveFeed import counts
+    h = digest['headline']
+    if not h.get('open_findings') or h.get('open_issues') is None:
+        return ''
+    return f"{counts.issues_text(h['open_findings'], h['open_issues'])}. {counts.ISSUES_NOTE}"
+
+
 def _preheader(digest):
     status = digest['status']['headline'].rstrip('.')
     text = f"{digest['scope_name']}: {status}."
@@ -345,7 +360,7 @@ def render(digest, sub=None, recipient='', unsubscribe_url='', attachment=None, 
     tiles = _tiles(digest)
     context = {'d': digest, 'tiles': tiles, 'tile_rows': [tiles[i:i + 2] for i in range(0, len(tiles), 2)], 'sub_name': clean(sub.name, 80) if sub is not None else digest['title'],
                'owner': clean(owner_name, 80), 'unsubscribe_url': unsubscribe_url, 'attachment': attachment, 'preheader': _preheader(digest),
-               'heat_line': heat_line(digest), 'heat_label': HEAT_LINE_LABEL, 'totals_line': totals_line(digest), 'colours': HEAT_COLOURS,
+               'heat_line': heat_line(digest), 'heat_label': HEAT_LINE_LABEL, 'totals_line': totals_line(digest), 'issues_line': issues_line(digest), 'colours': HEAT_COLOURS,
                'tone_colour': {'fire': HEAT_COLOURS['fire'], 'smoke': HEAT_COLOURS['smoke'], 'ok': '#2f6048'}.get(digest['status']['tone'], HEAT_COLOURS['ice']),
                'period_word': 'month' if digest['cadence'] == 'monthly' else 'week', 'cadence_upper': digest['cadence'].upper()}
     return (subject(digest), render_to_string('cveFeed/email/report_digest.txt', context), render_to_string('cveFeed/email/report_digest.html', context))

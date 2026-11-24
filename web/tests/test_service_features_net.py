@@ -1,6 +1,7 @@
 """SSH, SMTP, SMB and RDP service features (cveFeed.address_features, the rules in detection_classes.FEATURE_RULES): which advisories need which
 reading, what each reading does to a match (rule out, raise within the ceiling, unknown), and how the nmap fingerprint pass's and the ssh_probe
 kind's readings, made of an address, reach the project's host names at that address."""
+import re
 from types import SimpleNamespace
 from unittest import mock
 
@@ -258,3 +259,97 @@ class IndexTests(NetCase):
             self.cve(cve_id)
         found = {CVEEntry.objects.get(pk=pk).cve_id: set(needs) for pk, needs in service_features.index().items()}
         self.assertEqual(found, {cve_id: {feature} for cve_id, feature, _t in NEEDS})
+
+
+# Texts around the edges of the prefilter: a word it names inside a longer word, its spellings with and without the optional parts, a match in
+# each of the three columns alone, and texts that name nothing.
+EDGE_TEXTS = (
+    ('OAuth2 tokens leak through the h2o server', '', ''),  # "h2" only inside other words: no match
+    ('', 'The H2 database console allows code execution.', ''),  # H2 as a word
+    ('', 'nginx with HTTP2 enabled', ''), ('', 'when the http/2 module is used', ''), ('', 'an HTTP/3 QUIC endpoint', ''),
+    ('Samba SMB 1 negotiation flaw', '', ''), ('', 'SMBv1 server', ''), ('', '', 'An Ssl-Vpn portal bug.'), ('', 'SSLVPN web portal', ''),
+    ('', 'PHP CGI on Windows', ''), ('', 'php-cgi argument injection', ''), ('', 'the Best Fit mapping of Windows Code Pages', ''),
+    ('', 'when configured as a Gateway or an AAA virtual server', ''), ('', 'when configured as gateway', ''),
+    ('', 'a CBC-mode cipher', ''), ('', 'abcbcd', ''), ('', 'A crafted PNG file causes a crash in libfoo.', ''), ('', '', ''),
+    ('Plain title', 'Plain text with nothing in it.', 'The summary names WebDAV.'),
+)
+
+
+class PrefilterTests(NetCase):
+    """``service_features._worded`` picks, in Python, the rows the database regex used to pick (``title__iregex`` and so on)."""
+
+    def database(self):
+        from django.db.models import Q
+
+        from cveFeed.detection_classes import FEATURE_PREFILTER
+        words = Q(title__iregex=FEATURE_PREFILTER) | Q(original_description__iregex=FEATURE_PREFILTER) | Q(summary__iregex=FEATURE_PREFILTER)
+        return set(CVEEntry.objects.filter(words).values_list('pk', flat=True))
+
+    def entries(self):
+        for cve_id, _feature, _text in NEEDS:
+            self.cve(cve_id)
+        for n, (title, description, summary) in enumerate(EDGE_TEXTS):
+            CVEEntry.objects.create(cve_id=f'CVE-2099-{n:05d}', status='PUBLISHED', published_at=timezone.now(), title=title,
+                                    original_description=description, summary=summary)
+
+    def test_python_picks_the_rows_the_database_regex_picks(self):
+        self.entries()
+        picked = {row[0] for row in service_features._worded({})}
+        self.assertEqual(picked, self.database())
+        self.assertGreater(len(picked), len(NEEDS))  # the edge texts that name a feature are in it
+        self.assertLess(len(picked), CVEEntry.objects.count())  # and the ones that do not are not
+
+    def test_every_range_is_read_and_a_stated_record_is_kept_whatever_its_words(self):
+        self.entries()
+        plain = CVEEntry.objects.get(cve_id='CVE-2099-00016')  # "A crafted PNG file": no word of the prefilter
+        with mock.patch.object(service_features, 'WORDS_CHUNK', 3):
+            picked = {row[0] for row in service_features._worded({plain.pk: {}})}
+        self.assertEqual(picked, self.database() | {plain.pk})
+
+    def test_the_walk_holds_no_server_side_cursor(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+        self.entries()
+        with mock.patch.object(service_features, 'WORDS_CHUNK', 10), CaptureQueriesContext(connection) as queries:
+            list(service_features._worded({}))
+        sql = [q['sql'] for q in queries.captured_queries]
+        self.assertFalse([q for q in sql if 'DECLARE' in q or 'FETCH' in q])
+        self.assertEqual(len(sql), CVEEntry.objects.count() // 10 + 1)  # one query per range, and one that finds the end
+        self.assertTrue(all('~*' not in q and 'REGEXP' not in q.upper() for q in sql))
+
+
+class NeedleTests(SimpleTestCase):
+    """The substring test before the regex never drops a text the regex would take."""
+
+    def test_the_real_prefilter_has_needles(self):
+        regex, needles = service_features._prefilter()
+        self.assertTrue(needles)
+        self.assertIn('h2', needles)
+        self.assertIn('ssl-vpn', needles)
+        self.assertTrue(all(n.isascii() and n == n.lower() and len(n) >= 2 for n in needles))
+
+    def test_each_literal_spelling_of_the_prefilter_contains_a_needle(self):
+        from cveFeed.detection_classes import FEATURE_PREFILTER
+        _regex, needles = service_features._prefilter()
+        for spelling in ('http2', 'HTTP/2', 'ngx_http_v2', 'h2c', 'terrapin', 'smb 1', 'SMB1', 'ssl vpn', 'sslvpn', 'php-cgi', 'Best fit',
+                         'windows codepage', 'Windows Code Pages', 'configured as an gateway', 'port 427', 'service location protocol'):
+            self.assertTrue(re.search(service_features._python_regex(FEATURE_PREFILTER).pattern, spelling, re.I), spelling)
+            self.assertTrue(any(n in spelling.lower() for n in needles), spelling)
+
+    def test_the_fold_lists_every_letter_that_matches_an_ascii_one(self):
+        letter = re.compile('[a-z]', re.IGNORECASE)
+        found = {cp for cp in range(0x80, 0x110000) if letter.fullmatch(chr(cp))}
+        self.assertEqual(found, set(service_features._FOLD))
+
+    def test_the_substring_test_agrees_with_the_regex(self):
+        regex, needles = service_features._prefilter()
+        texts = [t for row in EDGE_TEXTS for t in row] + [t for _c, _f, t in NEEDS] + [
+            'CHUN\u212aING', 'NTLM over STARTTLS', 'smbv\u0131', 'S\u0130MB', 'webdav\u017f', 'Wind\u00f6ws', 'h\u2082', '\u212a']
+        for text in texts:
+            self.assertEqual(service_features._passes([text], regex, needles), bool(text and regex.search(text)), text)
+        self.assertTrue(service_features._passes(['CHUN\u212aING'], regex, needles))  # the Kelvin sign is a K to a case-blind match
+
+    def test_a_pattern_without_needles_sends_every_text_to_the_regex(self):
+        regex = re.compile(r'\w+|x', re.I)
+        self.assertIsNone(service_features._needles(regex))
+        self.assertTrue(service_features._passes(['anything'], regex, None))

@@ -424,6 +424,81 @@ def match_group_count():
     return finding_groups.row_count(exposed_matches())
 
 
+# Distinct issues: the findings counted as the grouped Findings list shows them.
+
+ISSUES_NOTE = 'Version-only matches on the same product and version of one host are one fix, so they count as one issue.'
+_ISSUE_FIELDS = ('matched_product', 'matched_version', 'subdomain__name', 'subdomain__target_domain__project_id', 'hard')
+
+
+def _issue_rows(qs):
+    """The CVE matches of ``qs`` grouped by what ``version_groups.group_key`` reads (product, version, host name, project) and whether the
+    match has hard evidence of its own (``match_policy.hard_evidence_q``), with how many matches each holds: ONE grouped query."""
+    from django.db.models import BooleanField, Case, Count, Value, When
+
+    from cveFeed.match_policy import hard_evidence_q
+    hard = Case(When(hard_evidence_q(), then=Value(True)), default=Value(False), output_field=BooleanField())
+    return list(qs.order_by().annotate(hard=hard).values(*_ISSUE_FIELDS).annotate(n=Count('id')).order_by())
+
+
+def _shared_sites(rows):
+    """``site_of`` for ``version_groups.group_key``, read only for the names that share a product version with another name of their project:
+    only there can the Hosts page's fold of names onto one host (``agentapi.services._version_sites``, the Findings list's own) change the count.
+    None when no two names do, so a count with nothing to fold reads no host at all."""
+    from cveFeed import version_groups
+    names_of = {}
+    for row in rows:
+        key = version_groups.group_key(row)  # by the host name alone
+        if key is not None:
+            names_of.setdefault(key[:3], set()).add(row['subdomain__name'])
+    shared = {(key[0], name) for key, names in names_of.items() if len(names) > 1 for name in names}
+    if not shared:
+        return None
+    from agentapi.services import _version_sites
+    return _version_sites([{'subdomain__target_domain__project_id': project_id, 'subdomain__name': name} for project_id, name in shared])
+
+
+def match_issues(qs, site_of=None, by_project=False):
+    """``(findings, issues)`` of a CVE match queryset: how many matches, and how many distinct issues they are as the grouped Findings list
+    (``group=product``) shows them. The matches that rest on one product and version reading of one host (every name of it) are one issue,
+    because one upgrade fixes them all (``cveFeed.version_groups``); a match with hard evidence of its own (a confirmed one), with no version or
+    no host counts once, as the list shows it on its own row. ``site_of``: the host of a name when the caller has the Hosts page's fold already;
+    by default it is read for the names that need it (``_shared_sites``). ``by_project``: ``{project id: (findings, issues)}`` instead.
+    One grouped query, plus two small host reads when two names of one project share a product version. Unlike the list, which reads at most
+    ``version_groups.GROUP_SCAN_MAX`` matches and counts the rest one row each, this is exact at any size."""
+    from cveFeed import version_groups
+    rows = _issue_rows(qs)
+    if site_of is None:
+        site_of = _shared_sites(rows)
+    findings, singles, keys = {}, {}, {}
+    for row in rows:
+        project_id = row['subdomain__target_domain__project_id']
+        findings[project_id] = findings.get(project_id, 0) + row['n']
+        key = version_groups.group_key(row, site_of)
+        if key is None:
+            singles[project_id] = singles.get(project_id, 0) + row['n']
+        else:
+            keys.setdefault(project_id, set()).add(key)
+    per = {pid: (n, singles.get(pid, 0) + len(keys.get(pid, ()))) for pid, n in findings.items()}
+    if by_project:
+        return per
+    return sum(n for n, _ in per.values()), sum(i for _, i in per.values())
+
+
+def distinct_issues(findings, cve_qs, site_of=None):
+    """The distinct issues of a set of ``findings`` (a count of CVE matches, scanner and hygiene findings together) whose CVE matches are
+    ``cve_qs`` (None: no CVE match among them): every scanner and hygiene finding is an issue of its own, and the CVE matches count as
+    ``match_issues`` counts them. The one function every surface that prints the figure calls (the Overview, the email, the PDF, the system status)."""
+    if cve_qs is None:
+        return findings
+    matched, issues = match_issues(cve_qs, site_of)
+    return findings - matched + issues
+
+
+def issues_text(findings, issues):
+    """``2,140 findings in 310 distinct issues``: the label every surface prints beside its raw count."""
+    return (f"{findings:,} finding{'' if findings == 1 else 's'} in {issues:,} distinct issue{'' if issues == 1 else 's'}")
+
+
 def actionable_findings(qs):
     """Open scanner findings of low severity or worse. This is the Findings page's Actionable filter for scanner findings:
     informational detections, closed findings (fixed, an accepted risk or a false positive too) and dismissed ones (``dismissed_q``) are the rest
