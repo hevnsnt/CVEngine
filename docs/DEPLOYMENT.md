@@ -386,7 +386,7 @@ templates, the scan results (with group 101, the proxy's nginx group, mode 0750)
 so it needs no capability at all, not even `NET_BIND_SERVICE` or `NET_RAW`. The host's `web/` folder has group 10002 and mode `1775`: the containers create their
 update requests there, and the sticky bit keeps them from changing, renaming or removing anything they did not create (the source, `.version`, what the host
 writes). The image is built from an allow list of `web/` (`web/.dockerignore`), so a file the application creates there is never built into the next image.
-The built-in scanner's enrollment folder (the `scanner_bootstrap` volume) is 10002's with group 10002 and mode `2750`, and celery writes the blob in it mode
+The built-in scanner's enrollment folder (the `scanner_bootstrap` volume) is 10002's with group 10002 and mode `2751` (others may pass through it but not list it, so a previous release that a failed update puts back still reaches the 0600 blob it writes for its own scanner), and celery writes the blob in it mode
 0640: the scanner service keeps its image's own user and is given group 10002 (`group_add`), so it reads the blob and no other account does. celery never
 falls back to a blob readable by others; it logs `built-in scanner: no enrollment written` instead ([BUILTIN-SCANNER.md](BUILTIN-SCANNER.md)).
 The one-off `ownership` service (`web/ownership.sh`) sets all of this up; every update and `make up` run it after the build and before the migrations, and it

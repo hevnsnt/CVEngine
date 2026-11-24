@@ -89,7 +89,7 @@ def _write_blob(text):
     tmp = f'{path}.{os.getpid()}.tmp'
     gid = blob_gid()
     # Created 0600, then given the scanner's group and opened to it (0640): the scanner runs as its own account with group 10002 added
-    # (docker-compose.yml, group_add), and the folder is 10002's with mode 2750 (web/ownership.sh). The writer is uid 10002 with no capability, so
+    # (docker-compose.yml, group_add), and the folder is 10002's with mode 2751 (web/ownership.sh). The writer is uid 10002 with no capability, so
     # it can set its own group on its own file but never give the file away. When the file cannot be made 0640 with that group it is removed and
     # the run fails: the secret is never left readable by others.
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)

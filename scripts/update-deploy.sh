@@ -251,6 +251,8 @@ deploy_steps() {
   if [ -f scripts/client-address.sh ] && . scripts/client-address.sh && cvengine_ensure_upstream_secret "$(cvengine_compose_env_file "${compose[@]}")"; then
     log "generated the upstream secret (CVENGINE_UPSTREAM_SECRET in .env); a host nginx in front of the proxy needs it to pass on the client address: scripts/client-address-check.sh --snippet"
   fi
+  # nginx must accept the proxy configuration it will start with (the new files, the secret just written) before anything is changed for good
+  proxy_preflight || return 1
   # The database's own settings are in the compose file (max_connections). `up -d --no-deps db` recreates the db container only when its
   # definition changed since it was created (once, on the update that brings the change: a restart of a few seconds), and is a no-op otherwise.
   "${compose[@]}" up -d --no-deps db || return 1
@@ -297,6 +299,8 @@ deploy_steps() {
   phase applying verifying
   cv_status step verifying
   verify_serving || return 1
+  # The proxy is what visitors reach, and a proxy whose configuration nginx refuses restarts over and over while `ps` calls it running.
+  if printf '%s\n' "${services[@]}" | grep -qx proxy; then verify_proxy || return 1; fi
   # Which database role web, celery and celery-beat run as; a warning when any still uses the owner role (never fails the update).
   if declare -F cvengine_db_role_report >/dev/null; then
     while IFS= read -r line; do [ -z "$line" ] || log "$line"; done < <(cvengine_db_role_report "${compose[@]}")
@@ -342,6 +346,38 @@ verify_running() {
     sleep "${CVENGINE_VERIFY_POLL:-2}"
   done
   log "after the restart these services are not running:$missing (see docker compose ps and docker compose logs)"
+  return 1
+}
+
+# The bundled proxy after the restart (scripts/proxy-check.sh): verify_running saw it "running", which is also what Docker says between two restarts
+# of a proxy nginx refuses (the 1.5 upstream secret did that: its map key did not fit nginx's hash bucket), and verify_serving asks the web service
+# directly, not through the proxy, so the update said "done" and took the page down while no visitor got an answer. A proxy that fails here is a
+# failed update after the migration: the new code is kept and the deploy retried, and the page says the update did not finish.
+verify_proxy() {
+  local out
+  [ -f scripts/proxy-check.sh ] || return 0
+  . scripts/proxy-check.sh
+  if out=$(cvengine_proxy_verify "${COMPOSE[@]}"); then
+    log "$out"
+    return 0
+  fi
+  log "$out"
+  DEPLOY_WHY="The new version started, but the proxy does not answer for the site (see the update log). The maintenance page stays up."
+  return 1
+}
+
+# Before anything is migrated or recreated: nginx must accept the proxy configuration the new files and .env give it (scripts/proxy-check.sh).
+# Still DEPLOY_STAGE=datastores, so a refusal puts the previous version back on the unchanged database and its proxy keeps serving.
+proxy_preflight() {
+  local out
+  [ -f scripts/proxy-check.sh ] || return 0
+  . scripts/proxy-check.sh
+  if out=$(cvengine_proxy_preflight "${COMPOSE[@]}"); then
+    [ -z "$out" ] || log "$out"
+    return 0
+  fi
+  log "$out"
+  DEPLOY_WHY="The update stopped before migrating: nginx refuses the new proxy configuration (see the update log). The previous version was put back."
   return 1
 }
 
