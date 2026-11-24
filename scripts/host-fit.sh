@@ -146,13 +146,7 @@ cvengine_fit_externals() {  # COMPOSE...: how many Sentinels of the owner's own 
     [[ -n $("$@" ps -q --status running web 2>/dev/null) ]] || return 0
     out=$("$@" exec -T web python3 manage.py external_sentinels 2>/dev/null) || return 0
   else
-    out=$("$@" run --rm --no-deps -T --entrypoint python3 web manage.py external_sentinels 2>/dev/null) || out=''
-    # The first update from a release before the database role split (1.4) asks before the application's own database role exists: the migration
-    # below creates it, so the new image cannot log in as it yet and the count was never read on that update. The one-off migrate service holds the
-    # owner's password and reads the same count (read only); a layout without that service has nothing to fall back on.
-    if ! grep -qE '^EXTERNAL_SENTINELS_LIVE [0-9]+$' <<<"$out"; then
-      out=$("$@" run --rm --no-deps -T migrate python3 manage.py external_sentinels 2>/dev/null) || return 0
-    fi
+    out=$("$@" run --rm --no-deps -T --entrypoint python3 web manage.py external_sentinels 2>/dev/null) || return 0
   fi
   out=$(grep -E '^EXTERNAL_SENTINELS_LIVE [0-9]+$' <<<"$out" | tail -n1 | cut -d' ' -f2) || out=''
   printf '%s' "$out"

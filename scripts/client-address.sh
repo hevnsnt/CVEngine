@@ -15,7 +15,10 @@
 # A host nginx in front of the bundled proxy sends the secret in X-CVEngine-Upstream (config/nginx/host-proxy-client-address.conf), and only then
 # does the proxy pass its X-Forwarded-For on to the application. Without the secret, or without that snippet, nothing changes: the proxy believes
 # no header on 443, as before.
-CV_UPSTREAM_SECRET_RE='^[A-Za-z0-9_-]{32,256}$'
+# The shape of a secret: 32 to 256 letters, digits, '-' or '_'. The length is counted apart from the character class: a bound above 255 in a
+# POSIX regex is refused by musl (Alpine: the proxy image's grep, a host on Alpine), which made every check of a good secret read as broken.
+CV_UPSTREAM_SECRET_RE='^[A-Za-z0-9_-]+$'
+cvengine_ca_secret_ok() { [ "${#1}" -ge 32 ] && [ "${#1}" -le 256 ] && [[ $1 =~ $CV_UPSTREAM_SECRET_RE ]]; }
 
 cvengine_ca_value() { [ -f "$2" ] && grep -E "^$1=" "$2" | tail -n 1 | cut -d= -f2- | tr -d '\r' | sed -e 's/^["'"'"']//' -e 's/["'"'"']$//' || true; }
 
@@ -89,7 +92,7 @@ cvengine_client_address_snippet() {
   local env_file secret
   env_file=$(cvengine_ca_env_file "$@")
   secret=$(cvengine_ca_value CVENGINE_UPSTREAM_SECRET "$env_file")
-  [[ $secret =~ $CV_UPSTREAM_SECRET_RE ]] || { echo "CVENGINE_UPSTREAM_SECRET in $env_file is missing or not 32 to 256 letters, digits, '-' or '_'; run make up or the update first." >&2; return 1; }
+  cvengine_ca_secret_ok "$secret" || { echo "CVENGINE_UPSTREAM_SECRET in $env_file is missing or not 32 to 256 letters, digits, '-' or '_'; run make up or the update first." >&2; return 1; }
   CVENGINE_AWK_VALUE="$secret" awk '{ gsub(/@CVENGINE_UPSTREAM_SECRET@/, ENVIRON["CVENGINE_AWK_VALUE"]); print }' config/nginx/host-proxy-client-address.conf
 }
 
@@ -135,10 +138,10 @@ cvengine_client_address_report() {
   secret=$(cvengine_ca_value CVENGINE_UPSTREAM_SECRET "$env_file")
   if [ -z "$secret" ]; then
     say "no upstream secret (CVENGINE_UPSTREAM_SECRET in $env_file): the proxy believes no X-Forwarded-For on 443, as before. make up or the next update generates one."
-  elif ! [[ $secret =~ $CV_UPSTREAM_SECRET_RE ]]; then
+  elif ! cvengine_ca_secret_ok "$secret"; then
     say "CVENGINE_UPSTREAM_SECRET in $env_file is not 32 to 256 letters, digits, '-' or '_': the proxy believes no X-Forwarded-For on 443. Remove the line; the next update generates a new one."
   fi
-  rendered=$("${compose[@]}" exec -T proxy sh -c 'grep -cE "^\"k[A-Za-z0-9_-]{32,256}\"" /etc/nginx/conf.d/cvengine-upstream-secret.inc 2>/dev/null || true' 2>/dev/null | tr -dc '0-9' || true)
+  rendered=$("${compose[@]}" exec -T proxy sh -c 'grep -cE "^\"k[A-Za-z0-9_-]{32}[A-Za-z0-9_-]*\"" /etc/nginx/conf.d/cvengine-upstream-secret.inc 2>/dev/null || true' 2>/dev/null | tr -dc '0-9' || true)
   if [ -n "$secret" ] && [ "${rendered:-0}" = 0 ]; then
     say "the running proxy has no upstream secret loaded (it was started before the secret existed, or an overlay drops its environment or its templates mount): docker compose up -d --force-recreate proxy"
   fi
