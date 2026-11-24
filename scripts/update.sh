@@ -533,6 +533,9 @@ if grep -qx reviewer < <("${compose[@]}" config --services 2>/dev/null); then
     "${compose[@]}" build reviewer || echo 'Could not build the AI reviewer image; scanning is not affected (the next update tries again).' >&2
 fi
 images_built=1
+# an install made before 1.5.0: its database and Redis are still on the old network until they are recreated below; the one-off containers of the
+# new images (celery_cli, web_python) join only the new one (scripts/legacy_names.py bridge)
+if [[ -f scripts/legacy_names.py ]]; then python3 scripts/legacy_names.py bridge -- "${compose[@]}" || true; fi
 # The application runs as its own account (uid 10002): the paths it writes are handed to it before anything of the new image runs, and again
 # right before the application is recreated (scripts/app-ownership.sh; idempotent, one line each time).
 if [[ -f scripts/app-ownership.sh ]]; then

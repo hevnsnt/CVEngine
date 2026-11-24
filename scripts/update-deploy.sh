@@ -223,6 +223,11 @@ deploy_steps() {
     "${compose[@]}" build reviewer || log "could not build the AI reviewer image; scanning is not affected (the next update tries again)"
   fi
   build_restore_memory
+  # an install made before 1.5.0: the running database and Redis, still on the old network, are attached to the new one for the one-off
+  # containers of the new images until they are recreated (scripts/legacy_names.py bridge; never fails the update)
+  if [ -f scripts/legacy_names.py ]; then
+    while IFS= read -r line; do [ -z "$line" ] || log "$line"; done < <(python3 scripts/legacy_names.py bridge -- "${compose[@]}" 2>&1)
+  fi
   # The application runs as its own account (uid 10002) from this image on: the paths it writes (the volumes, the Django secret, its own update
   # requests in web/) are handed to it before anything of the new image runs (the host-fit count below, the migrate service, the application).
   # Idempotent: an install that has it already changes nothing (scripts/app-ownership.sh, web/ownership.sh).

@@ -217,6 +217,40 @@ class NetworkAndPackageTests(Base):
         self.assertIn('removed the old network cvengine_rengine_network (moved to the new one first: cloudflared)', out)
         self.assertEqual(self.run_script('cleanup', 'docker', 'compose', '-p', 'cvengine')[1], '')  # gone: nothing more to do
 
+    def test_bridge_attaches_the_old_database_and_redis_to_the_new_network_under_their_names(self):
+        from unittest import mock
+        calls, made = [], []
+
+        def fake_run(argv, **kw):
+            calls.append(argv)
+            out, code = '', 0
+            if argv[:3] == ['docker', 'network', 'inspect']:
+                code = 0 if argv[3] == 'p_rengine_network' or made else 1
+            elif argv[:2] == ['docker', 'ps']:
+                out = 'p-db-1\tdb\np-redis-1\tredis\np-web-1\tweb\n'
+            elif 'run' in argv and argv[-1] == 'celery':
+                made.append(1)
+            return subprocess.CompletedProcess(argv, code, out, '')
+        with mock.patch.object(names, 'run', fake_run):
+            code, out = self.run_script('bridge', 'docker', 'compose', '-p', 'p')
+        self.assertEqual(code, 0)
+        self.assertIn(['docker', 'compose', '-p', 'p', 'run', '--rm', '--no-deps', '-T', '--entrypoint', 'true', 'celery'], calls)
+        self.assertIn(['docker', 'network', 'connect', '--alias', 'db', 'p_cvengine_network', 'p-db-1'], calls)
+        self.assertIn(['docker', 'network', 'connect', '--alias', 'redis', 'p_cvengine_network', 'p-redis-1'], calls)
+        self.assertFalse(any('p-web-1' in c for c in calls if c[:3] == ['docker', 'network', 'connect']))
+        self.assertIn('db, redis also reachable on p_cvengine_network', out)
+
+    def test_bridge_does_nothing_without_the_old_network(self):
+        from unittest import mock
+        calls = []
+
+        def fake_run(argv, **kw):
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, 1 if argv[:3] == ['docker', 'network', 'inspect'] else 0, '', '')
+        with mock.patch.object(names, 'run', fake_run):
+            self.assertEqual(self.run_script('bridge', 'docker', 'compose', '-p', 'p'), (0, ''))
+        self.assertEqual([c[:3] for c in calls], [['docker', 'network', 'inspect']])
+
     def test_a_container_of_another_project_keeps_the_old_network(self):
         calls = self.fake_docker('someone-else\\trunning\\tother\\tapp\\tFalse\\n')
         code, out = self.run_script('cleanup', 'docker', 'compose', '-p', 'cvengine')
@@ -262,9 +296,13 @@ class ScriptsCallItTests(unittest.TestCase):
         deploy = (ROOT / 'scripts' / 'update-deploy.sh').read_text()
         self.assertLess(deploy.index('legacy_names.py migrate'), deploy.index('config --services', deploy.index('deploy_steps() {')))
         self.assertLess(deploy.index('verify_serving || return 1'), deploy.index('legacy_names.py cleanup'))
+        self.assertLess(deploy.index('build web celery celery-beat'), deploy.index('legacy_names.py bridge'))
+        self.assertLess(deploy.index('legacy_names.py bridge'), deploy.index('app_ownership || return 1'))
         update = (ROOT / 'scripts' / 'update.sh').read_text()
         self.assertLess(update.index('legacy_names.py migrate'), update.index('\n"${compose[@]}" config --quiet\n'))
         self.assertIn('legacy_names.py cleanup', update)
+        self.assertLess(update.index('images_built=1'), update.index('legacy_names.py bridge'))
+        self.assertLess(update.index('legacy_names.py bridge'), update.index('celery_cli inspect'))
         self.assertIn('legacy_names.py migrate', (ROOT / 'Makefile').read_text())
         self.assertIn('legacy_names.py migrate', (ROOT / 'scripts' / 'init-env.sh').read_text())
 

@@ -11,6 +11,8 @@ before Compose reads anything (``migrate``) and again after the updated site ans
              hard link under the new name for each certificate file, the new network and file names in an overlay of the install's own.
              The old names stay until the update is verified, so a failed update that goes back to the previous commit still finds them.
              A backup of each file it edits is kept once, as <file>.pre-cvengine-rename (mode 0600).
+    bridge   (after the build) attaches the running db and redis containers, still on the old network, to the new one under their service
+             names, so the update's one-off containers of the new Compose file reach them until they are recreated.
     cleanup  removes the old names: the old variable lines, the old certificate names (only when the new name is the same file), the old
              Compose network once no container of the install is on it (a container of the install still on it is moved first), and a
              leftover web/<old package> folder that only holds Python byte code.
@@ -307,6 +309,32 @@ def cleanup_network(root, argv):
     return f'removed the old network {network}' + (f' (moved to the new one first: {", ".join(moved)})' if moved else '')
 
 
+def bridge(root, argv):
+    """An install made before 1.5.0 has the database and Redis on the old network, and they keep running there until the update recreates them;
+    a one-off container of the new Compose file (the Celery command line, a Django shell) joins only the new network, so it cannot find them by
+    name. Attach the running db and redis containers to the new network too, under their service names, until they are recreated."""
+    project = project_name(root, argv)
+    if not project:
+        return None
+    old, new = f'{project}_{OLD}_network', f'{project}_{NEW}_network'
+    if run(['docker', 'network', 'inspect', old]).returncode != 0:
+        return None
+    rows = run(['docker', 'ps', '--filter', f'network={old}', '--filter', f'label=com.docker.compose.project={project}', '--format',
+                '{{.Names}}\t{{.Label "com.docker.compose.service"}}']).stdout.splitlines()
+    targets = [tuple(r.split('\t', 1)) for r in rows if r.endswith(('\tdb', '\tredis'))]
+    if not targets:
+        return None
+    if run(['docker', 'network', 'inspect', new]).returncode != 0:
+        run(list(argv) + ['run', '--rm', '--no-deps', '-T', '--entrypoint', 'true', 'celery'], cwd=root)  # Compose creates the network
+    if run(['docker', 'network', 'inspect', new]).returncode != 0:
+        return f'could not create {new}; a one-off container may not reach the database until it is recreated'
+    joined = []
+    for name, service in targets:
+        if run(['docker', 'network', 'connect', '--alias', service, new, name]).returncode == 0:
+            joined.append(service)
+    return f'{", ".join(joined)} also reachable on {new} until the update recreates them' if joined else None
+
+
 def cleanup_package(root):
     folder = os.path.join(root, 'web', OLD_PACKAGE)
     if not os.path.isdir(folder) or os.path.islink(folder):
@@ -380,8 +408,8 @@ def cleanup(root, argv):
 
 
 def main(args):
-    if not args or args[0] not in ('migrate', 'cleanup'):
-        print('usage: legacy_names.py migrate|cleanup [--root DIR] [-- COMPOSE COMMAND...]', file=sys.stderr)
+    if not args or args[0] not in ('migrate', 'bridge', 'cleanup'):
+        print('usage: legacy_names.py migrate|bridge|cleanup [--root DIR] [-- COMPOSE COMMAND...]', file=sys.stderr)
         return 2
     action, rest = args[0], args[1:]
     root = os.getcwd()
@@ -395,6 +423,14 @@ def main(args):
         except OSError as exc:
             print(f'names: could not move this install to the 1.5.0 names: {exc.strerror or exc} ({getattr(exc, "filename", "") or ""})', file=sys.stderr)
             return 1
+    if action == 'bridge':
+        try:
+            line = bridge(root, rest) if rest else None
+        except OSError as exc:
+            line = f'could not attach the database to the new network: {exc}'
+        if line:
+            say(line)
+        return 0
     try:
         return cleanup(root, rest)
     except Exception as exc:  # never fails the update: the old names only stay one more update
