@@ -2397,6 +2397,9 @@ section.internal[hidden]{display:none}
 .scannerbar .ab-label{font-weight:var(--fw-semi)}
 .scannerbar .ab-more{margin:0;font-size:var(--fs-2)}
 .scannerbar .ab-decision{display:inline-flex;align-items:center;margin-top:var(--s-1);min-height:var(--hit,auto);color:inherit;font-weight:var(--fw-semi);text-decoration:underline}
+/* the client address notice (client-address-notice.js): the host nginx lines wrap inside the notice, never widen the page */
+.ca-buttons{display:flex;flex-wrap:wrap;gap:var(--s-1);margin-top:var(--s-1)}
+.ca-lines{max-width:100%;overflow-x:auto;white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;margin:var(--s-1) 0 0}
 
 /* ---- CVE catalog (/cve/cves/, explorer.js): a search box, ranked rows in the feed's heat style, and a detail drawer ---- */
 .cvx-sr{position:absolute;width:1px;height:1px;padding:0;margin:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}

@@ -2504,9 +2504,12 @@ def status_warm_rows(project_ids, token=None):
 @app.task(name="reviewer_ops_checks", bind=False, queue="cve_feed_queue", time_limit=600, soft_time_limit=540)
 def reviewer_ops_checks():
     """Every half hour: the operations checks of docs/AI-REVIEWER.md, raising and resolving the admin alerts (``cveFeed.reviewer``). No AI is
-    involved; the reviewer container adds its diagnosis a few times a day."""
-    from cveFeed import reviewer
-    return reviewer.run_ops_checks()
+    involved; the reviewer container adds its diagnosis a few times a day. While a client address notice is open its check runs again here, at
+    most once an hour, so the notice clears itself soon after the host nginx lines are installed (``cveFeed.client_address.recheck_if_open``)."""
+    from cveFeed import client_address, reviewer
+    result = reviewer.run_ops_checks()
+    client_address.recheck_if_open()
+    return result
 
 
 @app.task(name="apply_ai_job", bind=False, queue="cve_feed_queue", time_limit=900, soft_time_limit=840)

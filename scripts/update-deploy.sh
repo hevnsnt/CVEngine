@@ -306,6 +306,11 @@ deploy_steps() {
   if declare -F cvengine_client_address_report >/dev/null; then
     while IFS= read -r line; do [ -z "$line" ] || log "$line"; done < <(cvengine_client_address_report "${compose[@]}" 2>/dev/null)
   fi
+  # Accounts the abuse guard of releases before 1.5.0 disabled are enabled again (web/cveFeed/guard_reenable.py: only those; their revoked API tokens
+  # stay revoked and are listed). Its last line counts them for the update log. It is also an update step (cveFeed/upgrade_backfills.py), so an
+  # install updated another way gets it too; a second run finds nothing to change. Never a failure.
+  while IFS= read -r line; do [ -z "$line" ] || log "guard accounts: $line"; done \
+    < <("${compose[@]}" exec -T web python3 manage.py reenable_guard_disabled_users --apply 2>/dev/null | tail -n 50)
   # The built-in scanner, once the server answers: recreated on its own network (the Tailscale sidecar follows it), kept on the new image only once a
   # heartbeat of it reaches the server, else put back on the previous one. Never a failed update: until it runs, the scans that need it wait.
   if declare -F cvengine_scanner_start >/dev/null; then

@@ -998,6 +998,8 @@ while (( SECONDS < deadline )); do
         if declare -F cvengine_db_role_report >/dev/null; then cvengine_db_role_report "${compose[@]}" || true; fi
         # whether the real client address reaches the server (scripts/client-address.sh); a report, never a failure
         if declare -F cvengine_client_address_report >/dev/null; then cvengine_client_address_report "${compose[@]}" || true; fi
+        # accounts the abuse guard of releases before 1.5.0 disabled, enabled again (web/cveFeed/guard_reenable.py: only those; tokens stay revoked)
+        "${compose[@]}" exec -T web python3 manage.py reenable_guard_disabled_users --apply 2>/dev/null | tail -n 50 | sed 's/^/guard accounts: /' || true
         "${compose[@]}" ps
         rm -f "$diagnostic_log"
         # An install that never had the update watcher cannot act on Approve in Settings > Updates. This is the one manual update such an

@@ -882,6 +882,7 @@ def _system_probes(user):
         Probe('tools', lambda p, n, d: _tools()),
         Probe('finding_hosts', lambda p, n, d: _finding_hosts(p)),
         Probe('ct_watch', lambda p, n, d: _ct_watch()),
+        Probe('client_address', lambda p, n, d: _client_address(n)),
     ]
 
 
@@ -890,6 +891,16 @@ def _ct_watch():
     the last success and its source, and ``line``, the sentence the Timings page shows. A stall is the ``ct_watch_stalled`` notice, not a problem here."""
     from cveFeed import ct_health
     return ct_health.summary()
+
+
+def _client_address(notes):
+    """The open client address notice (``cveFeed.client_address``: a host proxy in front whose client address is not believed yet), as
+    ``{notice}``; with a note when there is one. None when every check passed or nothing is in front of the bundled proxy."""
+    from cveFeed import client_address
+    found = client_address.notice()
+    if found:
+        notes.append(f"client address: {found['title']}. Settings, Updates shows the host nginx lines to install.")
+    return {'notice': found}
 
 
 def _finding_hosts(problems):
@@ -980,6 +991,7 @@ def _system(user, problems, notes, run=None):
     out['tools'] = take('tools')
     out['finding_hosts'] = take('finding_hosts')
     out['ct_watch'] = take('ct_watch')
+    out['client_address'] = take('client_address')
     out['timings'] = run.timings()
     problem = _template_problem((out['tools'] or {}).get('nuclei_templates') or {})
     if problem:

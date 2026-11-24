@@ -84,6 +84,8 @@ NOT_EXPOSED = {
     ('settings', 'autotune/decisions/(?P<decision_id>\\d+)/apply'): 'apply_tuning_suggestion.',
     ('settings', 'autotune/decisions/(?P<decision_id>\\d+)/revert'): 'revert_tuning_decision.',
     ('settings', 'autotune/release'): 'release_tuning_pin.',
+    ('settings', 'client_address/snippet'): 'the host nginx lines hold the install\'s upstream secret; a person reads them in the web interface.',
+    ('settings', 'client_address/recheck'): 'the button of the client address notice; every update and the operations checks run the same check.',
 }
 # Entries an agent may read but not change. The allowlist is the perimeter: its handlers refuse a change that would lock the caller out by looking at the
 # caller's address, and an agent has no address of its own (the bridge's request is built here), so it must not be able to move the perimeter at all.

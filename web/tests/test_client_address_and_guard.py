@@ -377,6 +377,11 @@ if 'client_address_probe read' in joined:
     sys.exit(1)
 if 'client_address_probe trusted' in joined:
     print('probe: ' + state.get('trusted', '172.16.238.10/32')); sys.exit(0)
+if 'client_address_probe verdict' in joined:
+    if state.get('verdict'): print('probe: ' + state['verdict'])
+    sys.exit(0)
+if args[-3:] == ['port', 'proxy', '443']:
+    print(state.get('published', '')); sys.exit(0)
 sys.exit(0)
 '''
 
@@ -485,6 +490,17 @@ class CheckScriptTests(unittest.TestCase):
         self.assertIn('an internal address', self.report(self.serve('')))
         self.set_state()
         self.assertIn('did not reach the server', self.report(self.serve('')))
+
+    def test_the_report_ends_with_the_servers_verdict_and_passes_it_the_facts(self):
+        self.set_state(recorded=GATEWAY, published='127.0.0.1:18443', verdict='verdict: a host proxy in front sends the client address')
+        out = self.report(self.serve(REAL))
+        self.assertEqual(out.splitlines()[-1], 'client address: verdict: a host proxy in front sends the client address')
+        call = [line for line in self.log.read_text().splitlines() if 'client_address_probe verdict' in line][0]
+        self.assertIn(f"verdict {'c' * 32} --seen {REAL} --published 127.0.0.1:18443", call)
+        self.set_state()  # no probe arrived: no verdict asked
+        self.log.write_text('')
+        self.report(self.serve(''))
+        self.assertNotIn('client_address_probe verdict', self.log.read_text())
 
     def test_the_report_warns_about_a_trusted_range_and_an_unloaded_secret(self):
         self.set_state(recorded=REAL, trusted='172.16.0.0/12', rendered='0')

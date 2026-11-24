@@ -1040,10 +1040,10 @@ def _update_row():
 
 def _updates_state(row):
     """The update state plus the question the Update button asks first (which scanners run) and what an unattended update left to say."""
-    from cveFeed import autotune, scanner_plan, updater
+    from cveFeed import autotune, client_address, scanner_plan, updater
     pin = autotune.discovery_pin()
     return {**updater.state(row), 'scanner_choice': scanner_plan.decision(), 'scanner_notice': scanner_plan.notice(),
-            'discovery_pin_notice': pin['text'] if pin else None}
+            'discovery_pin_notice': pin['text'] if pin else None, 'client_address_notice': client_address.notice()}
 
 
 def updates_get(request):
@@ -1329,6 +1329,30 @@ def setup_questions_post(request):
         raise SettingsError(exc.status, exc.message)
 
 
+def client_address_snippet(request):
+    """The lines a host nginx needs so the bundled proxy believes the client address it passes on (cveFeed.client_address.snippet), with this
+    install's upstream secret in them. A person only: an agent's call (the settings bridge) or an API token is refused, the answer is never
+    cached, and the reading is in the audit log."""
+    from cveFeed import client_address
+    from cveFeed.admin_api import audit
+    if getattr(request, 'via_agent', False) or getattr(request, 'api_token', None) is not None:
+        raise SettingsError(403, 'the host nginx lines hold the install\'s secret: a person reads them in the web interface')
+    text = client_address.snippet()
+    if not text:
+        raise SettingsError(409, 'this install has no upstream secret yet (CVENGINE_UPSTREAM_SECRET); the next update generates it')
+    audit(request.user, 'client_address.snippet_shown', 'host nginx lines')
+    response = JsonResponse({'snippet': text})
+    response['Cache-Control'] = 'no-store'
+    return response
+
+
+def client_address_recheck(request):
+    """Check again now whether the client address arrives (cveFeed.client_address.recheck): clears the notice when it does, never opens one."""
+    from cveFeed import client_address
+    out = client_address.recheck()
+    return {**out, 'notice': client_address.notice()}
+
+
 def alert_dismiss(request, alert_id):
     from cveFeed import reviewer
     if not reviewer.dismiss_alert(int(alert_id), request.user):
@@ -1345,6 +1369,8 @@ ROUTES = [
     ('GET', r'alerts', lambda r, **k: alerts_get(r)),
     ('GET', r'setup_questions', lambda r, **k: setup_questions_get(r)), ('POST', r'setup_questions', lambda r, **k: setup_questions_post(r)),
     ('POST', r'alerts/(?P<alert_id>\d{1,12})/dismiss', lambda r, alert_id, **k: alert_dismiss(r, alert_id)),
+    ('GET', r'client_address/snippet', lambda r, **k: client_address_snippet(r)),
+    ('POST', r'client_address/recheck', lambda r, **k: client_address_recheck(r)),
     ('PUT', r'ai/usage/rate', lambda r, **k: ai_usage_rate_put(r)),
     ('GET', r'scan_policy', lambda r, **k: scan_policy_get(r)), ('PUT', r'scan_policy', lambda r, **k: scan_policy_put(r)),
     ('POST', r'ai/test', lambda r, **k: ai_test(r)),
