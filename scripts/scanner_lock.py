@@ -37,6 +37,7 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -146,6 +147,10 @@ def library_commit(text):
     return found.group(2) if found else None
 
 
+REMOTE_ATTEMPTS = 3
+REMOTE_PAUSE = 5  # seconds, times the number of tries so far
+
+
 def remote_check(data):
     """The pinned commit is the tip of, or behind, the Sentinel repository's main branch: ``(ok, why)``."""
     repo = re.sub(r'^https://github\.com/|\.git$', '', data['source']['repository'])
@@ -155,13 +160,27 @@ def remote_check(data):
     if token:  # CI has one; it only lifts the anonymous rate limit
         headers['Authorization'] = f'Bearer {token}'
     request = urllib.request.Request(url, headers=headers)
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            status = json.load(response).get('status')
-    except urllib.error.HTTPError as exc:
-        if exc.code == 404:
-            return False, f'floor commit {floor_commit(data)[:12]} is not in {repo}'
-        raise
+    status = None
+    for attempt in range(REMOTE_ATTEMPTS):
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                status = json.load(response).get('status')
+            break
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                return False, f'floor commit {floor_commit(data)[:12]} is not in {repo}'
+            if exc.code not in (403, 429) and exc.code < 500:  # rate limits and server errors are GitHub's trouble, not the pin's
+                raise
+            why = f'GitHub answered {exc.code}'
+        except (urllib.error.URLError, OSError, ValueError) as exc:  # a timeout or a dropped connection: the network, not the pin
+            why = str(getattr(exc, 'reason', exc))
+        if attempt + 1 < REMOTE_ATTEMPTS:
+            time.sleep(REMOTE_PAUSE * (attempt + 1))
+    else:
+        # Every try failed on the network. The pin itself is checked in full without it (the lock, the compose default and the requirements
+        # agree), so an unreachable GitHub is said out loud and does not fail a build: a CI shard must not die on someone else's outage.
+        print(f'scanner_lock.py: could not reach GitHub after {REMOTE_ATTEMPTS} tries ({why}); the remote check was skipped', file=sys.stderr)
+        return True, ''
     if status in ('ahead', 'identical'):  # main is ahead of the floor, or is the floor
         return True, ''
     return False, f'floor commit {floor_commit(data)[:12]} is not on the main branch of {repo} (compare says {status})'

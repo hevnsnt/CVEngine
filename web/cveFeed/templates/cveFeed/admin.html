@@ -6,6 +6,7 @@
   <div>
     <h1>Administration</h1>
     <p class="sub" id="admin-sub">People, organizations and projects.</p>
+    <p class="note" id="admin-mfa" data-admins-without-mfa="{{ admins_without_mfa|length }}">{% if admins_without_mfa %}Administrators without two-step sign-in: {{ admins_without_mfa|join:", " }}.{% else %}Every administrator has two-step sign-in turned on.{% endif %}</p>
   </div>
 </div>
 <div id="admin"><div id="view"></div></div>
