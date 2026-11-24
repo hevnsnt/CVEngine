@@ -55,6 +55,11 @@ lane_memory.install()
 from reNgine import queue_age
 
 queue_age.install()
+# The certificate transparency watch adds its lookup outcomes up in memory and writes its daily row once a minute, not once per lookup
+# (cveFeed/ct_health.py)
+from cveFeed import ct_health
+
+ct_health.install()
 
 
 @setup_logging.connect()
