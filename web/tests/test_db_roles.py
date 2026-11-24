@@ -548,8 +548,10 @@ class ComposeTests(SimpleTestCase):
             (tmp / '.env').write_text('POSTGRES_USER=cvengine\nPOSTGRES_PASSWORD=owner-canary\nDJANGO_SUPERUSER_PASSWORD=admin-canary\n'
                                       'CVENGINE_DB_APP_PASSWORD=app\nPOSTGRES_DB=cvengine\nPOSTGRES_HOST=db\nPOSTGRES_PORT=5432\nDOMAIN_NAME=x.test\n')
             (tmp / 'secrets' / 'certs').mkdir(parents=True)
+            # CI exports its own POSTGRES_* values, and the shell wins over .env; only the .env canaries may count here.
+            clean_env = {k: v for k, v in os.environ.items() if not k.startswith(('POSTGRES_', 'CVENGINE_DB_', 'DJANGO_SUPERUSER_', 'DOMAIN_NAME'))}
             for name in self.FILES:
-                out = subprocess.run(['docker', 'compose', '-f', name, 'config', '--format', 'json'], cwd=tmp, capture_output=True, text=True)
+                out = subprocess.run(['docker', 'compose', '-f', name, 'config', '--format', 'json'], cwd=tmp, capture_output=True, text=True, env=clean_env)
                 self.assertEqual(out.returncode, 0, out.stderr[-2000:])
                 services = json.loads(out.stdout)['services']
                 holders = sorted(n for n, spec in services.items() if 'owner-canary' in json.dumps(spec.get('environment') or {}))

@@ -915,7 +915,7 @@ class ComposeTests(SimpleTestCase):
         self.services = self.compose['services']
 
     def test_no_greenbone_service_volume_or_network_remains(self):
-        self.assertEqual({n for n, s in self.services.items() if 'profiles' not in s}, {'db', 'redis', 'celery', 'celery-beat', 'web', 'proxy', 'reviewer', 'scanner'})
+        self.assertEqual({n for n, s in self.services.items() if 'profiles' not in s}, {'db', 'redis', 'celery', 'celery-beat', 'web', 'proxy', 'reviewer', 'scanner', 'migrate'})
         self.assertFalse([n for n in self.services if n.startswith('openvas')])
         self.assertFalse([v for v in self.compose['volumes'] if 'openvas' in v])
         self.assertNotIn('openvas_network', self.compose['networks'])
