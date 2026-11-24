@@ -44,6 +44,7 @@ Paths are relative to `/api/v1/`. `{slug}` is a project slug.
 | inventory | `GET projects/{slug}/hosts` | `list_hosts` |
 | search | `GET projects/{slug}/search?q=...` (`page_size=0`: the count alone; `facets=none`: no facets) | `search_hosts` |
 | host list file (for a penetration test) | `GET projects/{slug}/hosts/export`, `GET orgs/{org}/hosts/export` (`format=csv\|txt`, `scope=external\|all`, `archived=0\|1`) | `export_hosts` |
+| one host, everything known (ZIP) | `GET projects/{slug}/hosts/{host_id}/export` | `export_host` (the JSON record only) |
 | saved searches | `GET/POST projects/{slug}/saved-searches`, `GET/PATCH/DELETE .../saved-searches/{id}`, `POST .../{id}/run`, `GET .../{id}/matches` | `list_saved_searches`, `create_saved_search`, `update_saved_search`, `delete_saved_search`, `run_saved_search`, `get_saved_search_matches` |
 | routes | `GET projects/{slug}/routes` | `list_routes` |
 | changes | `GET projects/{slug}/changes?since=7d` | `list_changes` |
@@ -470,6 +471,21 @@ Each probe is independent: one that fails or times out comes back as `{"error": 
 - `POST tuning/decisions/{id}/revert` (`revert_tuning_decision`; a signed-in App Admin only, 403 for a token): the newest applied change of a setting only (409 otherwise); its layer gets back exactly what it held, and the tuner does not raise that setting for 24 hours.
 - `POST tuning/release` (`release_tuning_pin`; a signed-in App Admin only, 403 for a token), `auto` only: `{"setting": "<key>"}` removes the saved value of a pinned setting and gives the same number to the tuner.
 
+
+### Export one host
+
+`GET projects/{slug}/hosts/{host_id}/export` downloads everything cvENGINE knows about one host as a ZIP file named `host-<name>-<date>.zip`, streamed as it is written. `host_id` is the id `search_hosts` returns (the number after `#` in the Hosts page address). Any role that can read the project may export it, a read-only token included; a host id of another project, or of a project you cannot see, is a 404. Each export is written to the audit log as `host.export` with `kind: host`, the host and its id, the number of findings and of screenshots.
+
+| File | What it holds |
+| --- | --- |
+| `host.json` | The complete record, versioned by its `schema` field (`cvengine.host-export/1`): `host` (names, aliases, alias and note, target, hosting, labels, asset profile, state per name with first and last seen, archive and zombie state, heat with its reasons, score with its lines), `services` (each address with its open ports, versions, banners, CPE and TLS details, the service features), `web` (HTTP status, title, headers, technologies with versions and where each came from, routes, certificates with every name), `findings` (`cve`, `scanner`, `hygiene`, every status, each with heat, severity, status, triage, AI review, assignee, comment count and retest state; a CVE match also has its evidence and plain explanation), `secrets` (masked values only, with where each was seen), `history` (every recorded change of the host, from the first scan on), `inventory` (the host's own report with its packages, patches and services, the Java runtimes and version sources), `probes`, `check_coverage`, `scans` (each scan that saw the host), `assessment`, `ai_review`, `screenshots` (the manifest: each capture, whether its picture is in the ZIP and why not), `truncated` and `limits`. |
+| `findings.csv`, `services.csv`, `history.csv`, `certificates.csv`, `inventory.csv` | The tabular parts, one row each, formula-safe cells. |
+| `screenshots/` | The pictures of the host's pages and RDP login screens (PNG or JPEG, checked by their first bytes, read from the media folder only). |
+| `README.txt` | What each file holds, when it was made, the cvENGINE version and anything left out. |
+
+Limits: each list holds at most 20,000 rows (`truncated` names a list that was cut), and the screenshots at most 60 files and 64 MB together (the manifest and the README name any left out). No secret value is ever written: secrets appear as their mask, and any stored value under a credential key (an Authorization header, a cookie, a password, a token, an API key) is replaced with `[masked]`. The record is read with a fixed number of statements whatever the number of findings. The answer carries `X-Export-Findings` and `X-Export-Screenshots`.
+
+The MCP tool `export_host` (`project`, `host_id`) returns the same `host.json` as text, `{filename, schema, bytes, screenshots, screenshots_note, content}`, with no images (the note names the REST route for them). A record over 3 MiB is a 413 that points at the download.
 ### Grouped findings
 
 The same library file on sibling hosts of one site (jQuery 3.2.1 on `www.`, `blog.`, `info.`, `careers.`, `learn.` and `donate.example.com`) is one problem, but it is one CVE match per host. `GET projects/{slug}/findings?group=cve` (MCP `list_findings` with `group: "cve"`) folds those matches into one row. The default, `group=none`, is one row per host exactly as before, so existing callers see no change.
