@@ -4,6 +4,7 @@ import re
 import secrets
 from datetime import timedelta
 
+from django.db.models import Q
 from django.http import JsonResponse
 from django.utils import timezone
 
@@ -81,6 +82,26 @@ def request_allowed(token, request):
     return bool(request.method == 'POST' and match and token.project_id and match.group('slug') == token.project.slug)
 
 
+def stamp_last_used(token, now=None):
+    """Record that ``token`` was just used: ``last_used_at``, shown on the API keys list and the reviewer card, at most once per
+    ``LAST_USED_RESOLUTION``. Usage telemetry, never an access decision (``authenticate`` reads ``revoked`` and ``expires_at``, not this), so it is
+    written by one request at a time per stale value (``usage_stamps.one_writer``: the requests of a busy Sentinel no longer queue on the row lock behind each
+    other) with a commit that does not wait for the WAL flush (``usage_stamps.relaxed_commit``). The UPDATE keeps the same staleness condition, so a
+    time another request just wrote is left as it is. Returns whether it wrote."""
+    from reNgine import usage_stamps
+    now = now or timezone.now()
+    stored = token.last_used_at
+    if stored and now - stored <= LAST_USED_RESOLUTION:
+        return False
+    with usage_stamps.one_writer('apitoken', token.pk, stored, LAST_USED_RESOLUTION.total_seconds()) as wrote:
+        if wrote:
+            stale = Q(last_used_at__isnull=True) | Q(last_used_at__lt=now - LAST_USED_RESOLUTION)
+            with usage_stamps.relaxed_commit():
+                type(token).objects.filter(stale, pk=token.pk).update(last_used_at=now)
+    token.last_used_at = now
+    return wrote
+
+
 def bearer_from(request):
     header = request.META.get('HTTP_AUTHORIZATION', '')
     return header[7:].strip() if header[:7].lower() == 'bearer ' else None
@@ -112,9 +133,7 @@ class AgentTokenMiddleware:
             request.user = token.user
             request.api_token = token
             request._dont_enforce_csrf_checks = True
-            now = timezone.now()
-            if not token.last_used_at or now - token.last_used_at > LAST_USED_RESOLUTION:
-                type(token).objects.filter(pk=token.pk).update(last_used_at=now)
+            stamp_last_used(token)
         elif not request.user.is_authenticated:
             return JsonResponse({'error': 'authentication required (Authorization: Bearer <token>)'}, status=401)
         # /api/v1/ and /mcp/ are exempt from the tenancy MFA redirect, so enforce the same rule here, for
