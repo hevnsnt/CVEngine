@@ -295,8 +295,10 @@ def graph_payload(domain_id=None, scan_id=None):
     total_hosts, per_project = drawn_hosts, {}
     if capped:
         from django.db.models import Count
-        per_project = {slug or '': n for slug, n in subs.filter(LIVE_HOST_Q).distinct().order_by().values_list('target_domain__project__slug')
-                       .annotate(n=Count('pk', distinct=True))}
+        # sorted by project: a GROUP BY with no ORDER BY comes back in whatever order the plan finds the groups, so the same data could draw
+        # the project counts in a different order from one request to the next
+        per_project = dict(sorted({slug or '': n for slug, n in subs.filter(LIVE_HOST_Q).distinct().order_by().values_list('target_domain__project__slug')
+                                   .annotate(n=Count('pk', distinct=True))}.items()))
         total_hosts = max(sum(per_project.values()), drawn_hosts)
     return {'nodes': list(nodes.values()), 'edges': [{'from': a, 'to': b} for a, b in sorted(edges)],
             'hosts': {'drawn': drawn_hosts, 'total': total_hosts, 'projects': per_project},
