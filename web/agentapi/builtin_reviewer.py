@@ -11,6 +11,7 @@ import os
 from datetime import timedelta
 
 from django.utils import timezone
+from cvengine.usage_stamps import durable_commit
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +87,8 @@ def ensure(now=None):
     from tenancy import audit
     now = now or timezone.now()
     if not reviewer.env_enabled():
-        revoked = ApiToken.objects.filter(scope=SCOPE_REVIEWER, revoked=False).update(revoked=True)
+        with durable_commit():  # a revocation a crash could undo would let the token in again
+            revoked = ApiToken.objects.filter(scope=SCOPE_REVIEWER, revoked=False).update(revoked=True)
         _remove()
         return {'state': 'disabled', 'revoked': revoked}
     token = _current()
@@ -98,7 +100,8 @@ def ensure(now=None):
         return {'state': 'no_admin'}
     new, raw = create_token(owner, NAME, expires_at=now + TTL, scope=SCOPE_REVIEWER)
     _write(raw)
-    ApiToken.objects.filter(scope=SCOPE_REVIEWER, revoked=False).exclude(pk=new.pk).update(revoked=True)
+    with durable_commit():
+        ApiToken.objects.filter(scope=SCOPE_REVIEWER, revoked=False).exclude(pk=new.pk).update(revoked=True)
     audit.record(owner, 'reviewer.token', 'token for the AI reviewer container', token_id=new.pk)
     logger.info('AI reviewer: token %s written, valid until %s', new.prefix, new.expires_at.isoformat())
     return {'state': 'written', 'expires_at': new.expires_at.isoformat()}

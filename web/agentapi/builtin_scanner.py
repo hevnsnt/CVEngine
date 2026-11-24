@@ -13,6 +13,7 @@ import stat
 from datetime import timedelta
 
 from django.utils import timezone
+from cvengine.usage_stamps import durable_commit
 
 logger = logging.getLogger(__name__)
 
@@ -183,7 +184,8 @@ def _turn_off():
         if agent.token.revoked:
             continue
         release_agent_tasks(agent, 'the built-in scanner was turned off (CVENGINE_BUILTIN_SCANNER=0)')
-        revoked += ApiToken.objects.filter(pk=agent.token_id, revoked=False).update(revoked=True)
+        with durable_commit():  # a revocation a crash could undo would let the token in again
+            revoked += ApiToken.objects.filter(pk=agent.token_id, revoked=False).update(revoked=True)
         Agent.objects.filter(pk=agent.pk).exclude(status='revoked').update(status='revoked', status_changed_at=timezone.now(),
                                                                           status_note='the built-in scanner was turned off (CVENGINE_BUILTIN_SCANNER=0)')
         audit.record_for_user(None, 'agent.revoke', agent.token.user, target=agent.name, agent_id=agent.pk, kind=agent.kind,
