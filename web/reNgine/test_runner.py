@@ -109,6 +109,7 @@ def _init_isolated_worker(counter, *args, **kwargs):
     isolate_redis(runner._worker_id)
     install_hermetic()  # a forked worker has the parent's guards already; a spawned one has none
     hermetic_egress()
+    time_classes()
 
 
 class NetworkBlocked(RuntimeError):
@@ -333,6 +334,52 @@ def install_hermetic(block=None, restore_environment=True):
     return _installed
 
 
+# ``--module-times``: the wall time of every test class (its fixtures included) is written by the process that ran it, a parallel worker or the
+# runner itself, to a file in this directory, and the runner prints the sum per module at the end. scripts/ci_shard.py --refresh reads those
+# lines from the CI logs to weigh the modules when it splits the suite into shards.
+MODULE_TIMES_ENV = 'CVENGINE_TEST_MODULE_TIMES'
+MODULE_TIME_LINE = 'MODULE-TIME'
+_times = {'installed': False, 'started': {}}
+
+
+def time_classes(force=False):
+    """Record the wall time of each test class run in this process, from the first test's class setup to the class teardown, to the
+    ``MODULE_TIMES_ENV`` directory. Installed once per process, when the variable is set (or ``force``); writes nothing while it is unset."""
+    import time
+    if _times['installed'] or not (force or os.environ.get(MODULE_TIMES_ENV)):
+        return
+    real = unittest.suite.TestSuite._tearDownPreviousClass
+
+    def tear_down_previous_class(self, test, result):
+        previous = getattr(result, '_previousTestClass', None)
+        current = type(test)
+        try:
+            return real(self, test, result)
+        finally:
+            if previous is not current:
+                now = time.perf_counter()
+                began = _times['started'].pop(previous, None)
+                folder = os.environ.get(MODULE_TIMES_ENV)
+                if began is not None and folder:
+                    with open(os.path.join(folder, f'times-{os.getpid()}.tsv'), 'a', encoding='utf-8') as handle:  # one file per process
+                        handle.write(f'{previous.__module__}\t{previous.__qualname__}\t{now - began:.3f}\n')
+                if test is not None:
+                    _times['started'][current] = now
+    unittest.suite.TestSuite._tearDownPreviousClass = tear_down_previous_class
+    _times['installed'] = True
+
+
+def module_times(folder):
+    """The seconds per test module recorded in ``folder`` by every process of the run, summed over its classes."""
+    totals = {}
+    for name in sorted(os.listdir(folder)):
+        with open(os.path.join(folder, name), encoding='utf-8') as handle:
+            for line in handle:
+                module, _, seconds = line.rstrip('\n').split('\t')
+                totals[module] = totals.get(module, 0.0) + float(seconds)
+    return totals
+
+
 class IsolatedRedisParallelSuite(ParallelTestSuite):
     init_worker = _init_isolated_worker
 
@@ -340,16 +387,44 @@ class IsolatedRedisParallelSuite(ParallelTestSuite):
 class IsolatedRedisRunner(DiscoverRunner):
     parallel_test_suite = IsolatedRedisParallelSuite
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, module_times=False, **kwargs):
         super().__init__(*args, **kwargs)
         if self.parallel > MAX_WORKERS:
             print(f'--parallel {self.parallel} lowered to {MAX_WORKERS}: each worker needs two of Redis\'s 16 databases.')
             self.parallel = MAX_WORKERS
+        self.module_times_dir = None
+        if module_times:
+            import tempfile
+            # in the environment before any worker starts, so a forked or spawned worker writes to the same place
+            self.module_times_dir = os.environ[MODULE_TIMES_ENV] = tempfile.mkdtemp(prefix='cvengine-module-times-')
+
+    @classmethod
+    def add_arguments(cls, parser):
+        super().add_arguments(parser)
+        parser.add_argument('--module-times', action='store_true',
+                            help='Print the wall time of every test module at the end (scripts/ci_shard.py --refresh reads it from the CI logs).')
 
     def setup_test_environment(self, **kwargs):
         super().setup_test_environment(**kwargs)
         self._remove_hermetic = install_hermetic()
         hermetic_egress()  # after install_hermetic: the egress settings are part of every test's starting environment
+        time_classes()
+
+    def run_suite(self, suite, **kwargs):
+        try:
+            return super().run_suite(suite, **kwargs)
+        finally:
+            if self.module_times_dir:
+                self.print_module_times()
+
+    def print_module_times(self):
+        import shutil
+        totals = module_times(self.module_times_dir)
+        shutil.rmtree(self.module_times_dir, ignore_errors=True)
+        print(f'\nModule times ({len(totals)} modules, seconds of one process, class fixtures included):')
+        for module, seconds in sorted(totals.items(), key=lambda item: (-item[1], item[0])):
+            print(f'{MODULE_TIME_LINE} {seconds:9.2f} {module}')
+        print(f'{MODULE_TIME_LINE} total {sum(totals.values()):.2f}', flush=True)
 
     def teardown_test_environment(self, **kwargs):
         self._remove_hermetic()

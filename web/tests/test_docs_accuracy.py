@@ -19,6 +19,7 @@ NOT_SETTINGS = {
     'CVENGINE_ROOT',  # a test hook of the host inventory script
     'CVENGINE_SCALE_FIXTURE',  # the scale-test fixture
     'CVENGINE_TEST_BLOCK_NETWORK',  # the test runner
+    'CVENGINE_TEST_MODULE_TIMES',  # the test runner's --module-times, set by the runner itself for its workers
 }
 
 
