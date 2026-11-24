@@ -12,8 +12,8 @@ import re
 ALIAS_MAX, NOTE_MAX = 60, 1000
 
 # control characters, line and paragraph separators and the bidirectional overrides and isolates that can make text read differently
-_BAD = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f​-‏ -‮⁦-⁩﻿]')
-_BAD_LINE = re.compile(r'[\x00-\x1f\x7f-\x9f​-‏ -‮⁦-⁩﻿]')
+_BAD = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u200b-\u200f\u2028-\u202e\u2066-\u2069\ufeff]')
+_BAD_LINE = re.compile(r'[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028-\u202e\u2066-\u2069\ufeff]')
 
 
 def clean_alias(value):

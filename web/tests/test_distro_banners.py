@@ -143,10 +143,10 @@ class TableTests(unittest.TestCase):
 
 class HostileBannerTests(unittest.TestCase):
 	def test_control_characters_and_escapes_never_reach_a_reading(self):
-		info = parse('OpenSSH', '8.9p1 Ubuntu 3ubuntu0.6\x1b[31m\x00', 'Ubuntu Linux‮; protocol 2.0')
+		info = parse('OpenSSH', '8.9p1 Ubuntu 3ubuntu0.6\x1b[31m\x00', 'Ubuntu Linux\u202e; protocol 2.0')
 		self.assertEqual(info['package_release'], '8.9p1-3ubuntu0.6')
 		for value in info.values():
-			self.assertFalse(re.search(r'[\x00-\x1f\x7f‮]', str(value)), info)
+			self.assertFalse(re.search(r'[\x00-\x1f\x7f\u202e]', str(value)), info)
 
 	def test_text_after_the_build_is_not_part_of_it(self):
 		info = parse('OpenSSH', '8.9p1 Ubuntu 3ubuntu0.6;rm -rf /', 'Ubuntu Linux')

@@ -64,10 +64,10 @@ class SchemaTests(SimpleTestCase):
 
 	def test_text_is_cleaned_and_capped(self):
 		data = json.loads(good_ai())
-		data['summary'] = 'x‮' + 'y' * 5000
+		data['summary'] = 'x\u202e' + 'y' * 5000
 		strategy, _ = detection.validate_strategy(data)
 		self.assertLessEqual(len(strategy['summary']), 400)
-		self.assertNotIn('‮', strategy['summary'])
+		self.assertNotIn('\u202e', strategy['summary'])
 
 
 class RulesTests(TestCase):
