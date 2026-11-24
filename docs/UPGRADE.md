@@ -8,6 +8,65 @@ Older installs (reNgine and pre-release cvENGINE builds) ran PostgreSQL 12. The 
 
 To roll back, check out the previous commit and start it. It still uses the untouched old volume, without anything written since the upgrade.
 
+## Rolling back
+
+This covers going back from the 1.5.0 changes (everything after 1.4.2: the pinned Python in the image, the migrations listed below, the database role split, the separate network for the database and Redis, and the log limits) to 1.4.2. Going back means building and running the previous image again; the database keeps what the migrations did, so read the migration list before you start.
+
+**Before you go back**
+
+1. Stop updates from bringing the new version straight back: set **Settings, Updates** to Manual and approve nothing until you are ready.
+2. Run the two statements under "Migrations that 1.4.2 cannot live with" below. Each is safe to run on 1.5.0 too.
+3. Save what you need from the container logs (`docker compose logs --no-color web > web.log`): every container is recreated, and Docker deletes a container's log when it does that.
+
+**Return to the previous image.** The images are built on the host from the checkout, and the in-app updater removes the replaced image once an update is verified, so the old image is built again from the old commit:
+
+```bash
+git checkout v1.4.2
+env -i PATH="$PATH" HOME="$HOME" docker compose up -d --build
+```
+
+Add the `-p`, `--env-file` and `-f` options your installation uses (for example `-p cvengine --env-file .env.vps -f docker-compose.yml -f docker-compose.vps.yml`), and keep `env -i`: Docker Compose takes a variable exported in your shell before the one in the env file, and a stale password in the shell breaks the database login. On a plain installation `make up` does the same. The build takes a few minutes, and the containers are recreated on the 1.4.2 Compose file. To come forward again later, `git checkout master` and update as usual.
+
+**What each 1.5.0 change means for the way back**
+
+- **Python in the image.** 1.4.2's image runs Ubuntu's CPython 3.14.4, whose garbage collector crashes the celery workers now and then (*Fatal Python error: Segmentation fault*, see [The application image runs Python 3.14.10](#the-application-image-runs-python-31410)). Going back brings those crashes back; the workers restart by themselves, but come forward again as soon as you can. Nothing in the database depends on the interpreter.
+- **Database roles.** 1.4.2 ignores `CVENGINE_DB_APP_USER` and `CVENGINE_DB_APP_PASSWORD` and connects as the owner (`POSTGRES_USER`), as it always did; nothing has to be changed for it. The role `cvengine_app` stays in the database unused, and the next update to 1.5.0 uses it again. To stay on 1.5.0 and only go back to the owner role, you do not need a rollback at all: set `CVENGINE_DB_APP_USER=` (empty) in `.env` and in the Compose env file, then recreate `web`, `celery` and `celery-beat` ([Database roles](#database-roles-the-server-no-longer-runs-as-the-database-owner)).
+- **Networks.** 1.4.2 puts the database and Redis back on `rengine_network` with every other service (the proxy and the AI reviewer can reach them again). The `<project>_data_network` network is left behind empty; `docker network rm <project>_data_network` removes it.
+- **Log limits.** 1.4.2's Compose file sets no log rotation, so each container's log grows again until Docker's own default limits it (none, unless `/etc/docker/daemon.json` sets one). PostgreSQL stops logging connections, because 1.4.2's command line does not ask for it (a value set earlier with `ALTER SYSTEM` comes back).
+
+**Migrations already run.** 1.4.2 has none of the 1.5.0 migrations, so `migrate` on 1.4.2 neither applies nor reverses them: their rows stay in `django_migrations`, and the next update to 1.5.0 skips them. What each leaves behind:
+
+| Migrations | What they did | On 1.4.2 |
+| --- | --- | --- |
+| `agentapi` 0026, `cveFeed` 0186, 0187, 0188, 0189, 0192, `dashboard` 0038, `startScan` 0029, 0030 | Indexes only, built concurrently | Harmless. They are used where they help and cost a little disk and write time. |
+| `agentapi` 0027, `cveFeed` 0190 | Autovacuum settings of the busiest tables | Harmless; keep them. |
+| `cveFeed` 0180, 0182, 0185, 0191 | New tables (email reports and their deliveries, the Zero Wire briefings and their settings, the MCP call history, the certificate transparency rollup) | Harmless: 1.4.2 never reads them, and they are there again when you come forward. |
+| `cveFeed` 0179, 0184, `dashboard` 0039 | New columns with a database default or nullable (report scope and format, the needs attention count of a snapshot, the CT fallback switch) | Harmless: 1.4.2 writes rows without them. 1.4.2 does not show the organization reports made on 1.5.0. |
+| `cveFeed` 0178 | `front` on the host assessment: NOT NULL with **no database default** | **Breaks host assessments on 1.4.2** until fixed: see below. |
+| `cveFeed` 0181, 0183 | Two beat schedules, `cvengine-report-digests` and `cvengine-zero-wire`, for tasks 1.4.2 does not have | Each run is an "unregistered task" error in the worker log: disable them, below. |
+| `startScan` 0031 to 0035 | Merged duplicate hosts, technology names and finding tags, CVE ids and CWE ids, then made those keys unique | **Not reversible**: the merged rows stay merged, also after a restore of nothing but the code. The unique constraints stay; 1.4.2 can then fail with *duplicate key value violates unique constraint "uniq_..."* where it used to store a second row. |
+
+**Migrations that 1.4.2 cannot live with.** As the owner (`docker compose exec db psql -U "$POSTGRES_USER" "$POSTGRES_DB"`), before or right after you go back:
+
+```sql
+ALTER TABLE "cveFeed_hostassessment" ALTER COLUMN front SET DEFAULT false;
+UPDATE django_celery_beat_periodictask SET enabled = false WHERE name IN ('cvengine-report-digests', 'cvengine-zero-wire');
+```
+
+The first lets 1.4.2 queue host assessments again (without it every new assessment fails with *null value in column "front"*). The second stops the two schedules; coming forward to 1.5.0 does not switch them on again by itself, so set `enabled = true` for both after that update. Only if 1.4.2 then reports *duplicate key value violates unique constraint* for one of the keys above, drop that constraint (the merge stays):
+
+```sql
+ALTER TABLE "startScan_subdomain" DROP CONSTRAINT IF EXISTS uniq_sub_scan_dom_name;
+ALTER TABLE "startScan_technology" DROP CONSTRAINT IF EXISTS uniq_technology_name;
+ALTER TABLE "startScan_vulnerabilitytags" DROP CONSTRAINT IF EXISTS uniq_vulntag_name;
+ALTER TABLE "startScan_cveid" DROP CONSTRAINT IF EXISTS uniq_cveid_name;
+ALTER TABLE "startScan_cweid" DROP CONSTRAINT IF EXISTS uniq_cweid_name;
+```
+
+and when you come forward again, before the update, delete the `django_migrations` row of each migration whose constraint you dropped (0031 hosts, 0032 technology names, 0033 tags, 0034 CVE ids, 0035 CWE ids), for example `DELETE FROM django_migrations WHERE app = 'startScan' AND name = '0032_uniq_technology_name';`. The update then runs that migration again: it merges the duplicates written meanwhile and builds the constraint again. Leave the rows of the constraints you kept, because adding a constraint that exists fails.
+
+**To undo the migrations themselves**, the only complete way back is the database dump the update took just before it migrated (`.git/cvengine-update/backups`, or `.git/cvengine-auto-deploy/backups` with automatic deployment, or a nightly dump from before the update, [DEPLOYMENT.md](DEPLOYMENT.md#backups)). Restoring it loses everything written since. Reversing the migrations with `manage.py migrate APP NUMBER` works only while 1.5.0's code is still checked out (1.4.2 does not have the migration files), drops the new tables with their data, and for `cveFeed` 0179 fails once an organization report exists; it is not needed for any of the above.
+
 ## Upgrading to 1.4
 
 ### Each Sentinel is auto-tuned
@@ -39,15 +98,37 @@ What the update does, in order, all by itself:
 1. It writes a new random password, `CVENGINE_DB_APP_PASSWORD`, to `.env` (and to the Compose env file the install uses, such as `.env.vps`). Nothing else in `.env` changes. It does not do this when `CVENGINE_DB_APP_USER=` is set empty.
 2. It recreates the `db` and `redis` containers once, a few seconds each, with their data kept: their compose definitions changed (the database now logs every connection, both move to a network of their own, and every container's log now rotates). **Docker deletes a container's log when it recreates it**: if you need the database's current log (for example for an investigation), save it first with `docker compose logs --no-color db > db-before-update.log`.
 3. It takes its usual database backup, as the owner.
-4. It migrates, as the owner. The migration ends by creating `cvengine_app` with that password and granting it what the server needs.
-5. It recreates `web`, `celery`, `celery-beat` and the proxy, as every update does. Each checks at start that `cvengine_app` can log in and then runs as it. The AI reviewer and the built-in scanner are recreated as on every update; the reviewer is no longer on the network the database and Redis are on (it never had their passwords, and it only talks to `web`).
+4. In the one-off `migrate` service (the only container with the owner's password, see the next section) it creates `cvengine_app` with that password, grants it what the server needs and checks that it logs in; then it migrates, as the owner.
+5. It recreates `web`, `celery`, `celery-beat` and the proxy, as every update does. They run as `cvengine_app`. The AI reviewer and the built-in scanner are recreated as on every update; the reviewer is no longer on the network the database and Redis are on (it never had their passwords, and it only talks to `web`).
 6. The update log ends with one line per service, `Database role of web: app cvengine_app`, and a warning if any still runs as the owner.
 
-So the switch happens in this one update with the one restart of the application it always does; nothing has to be restarted a second time. If the role cannot be created (an owner that may not create roles) or cannot log in, nothing is locked out: those containers keep the owner role and say so in the update log.
+So the switch happens in this one update with the one restart of the application it always does; nothing has to be restarted a second time. If the role cannot be created (an owner that may not create roles) or cannot log in, the update stops before it migrates, the previous version keeps running, and the update log says why with a one-line `Fix:` (next section).
 
 The database's connection log (`log_connections`, `log_disconnections`) is on by default (`POSTGRES_LOG_CONNECTIONS`, `POSTGRES_LOG_DISCONNECTIONS`). A value turned on earlier with `ALTER SYSTEM` is now also set on the database's command line, which wins over `ALTER SYSTEM`; set either to `off` in `.env` to turn it off. Every container's Docker log now keeps at most 5 files of 50 MB (`CVENGINE_LOG_MAX_FILE`, `CVENGINE_LOG_MAX_SIZE`).
 
-**To go back to the owner role**, set `CVENGINE_DB_APP_USER=` (empty) in `.env` and in the Compose env file, then `docker compose up -d web celery celery-beat` (with your usual `-f` and `--env-file`). The role stays in the database unused; the owner can remove it with `DROP OWNED BY cvengine_app; DROP ROLE cvengine_app;`. Going back to an older version needs nothing: it ignores these settings and uses the owner role. A database dump made after this update names `cvengine_app` in its grants: loading it into an empty new database prints errors for those lines (the role does not exist there yet) and loads everything else, and the next update or `make up` creates the role and grants it again.
+**To go back to the owner role**, set `CVENGINE_DB_ALLOW_OWNER_FALLBACK=1` in `.env`, then run the update again or `make up`, which run the `migrate` service's check and let it hand the owner password over (next section). The role stays in the database unused; the owner can remove it with `DROP OWNED BY cvengine_app; DROP ROLE cvengine_app;`. Going back to an older version needs nothing: it ignores these settings and uses the owner role. A database dump made after this update names `cvengine_app` in its grants: loading it into an empty new database prints errors for those lines (the role does not exist there yet) and loads everything else, and the next update or `make up` creates the role and grants it again.
+
+### The owner password leaves the application containers
+
+`web`, `celery` and `celery-beat` no longer have the database owner's password at all. Before, they connected as `cvengine_app` but still held `POSTGRES_PASSWORD` (and `DJANGO_SUPERUSER_PASSWORD`) in their environment, so code running in any of them could read the owner's password and log in as the owner. Now:
+
+* A new one-off compose service, **`migrate`** (the same image as `web`, `web/migrate-entrypoint.sh`), is the only container that gets `POSTGRES_PASSWORD` and `DJANGO_SUPERUSER_PASSWORD`. It runs the migrations as the owner, then `manage.py db_app_role gate`, which creates and grants `cvengine_app` and checks that it logs in, and exits. The update scripts, `make up` and `make migrate` run it before they start the application; `docker compose up` runs it first too (`depends_on`, `condition: service_completed_successfully`).
+* `web` no longer migrates when it starts. It, `celery` and `celery-beat` wait until `migrate --check` passes (as `cvengine_app`) and then start.
+* Their compose entries set `POSTGRES_PASSWORD=` and `DJANGO_SUPERUSER_PASSWORD=` **empty**, which also overrides the values `env_file: .env` would pass them. The update and `make up` refuse an overlay (such as `docker-compose.vps.yml`) that still lists `POSTGRES_PASSWORD` under one of them, and name the service.
+* **No silent fallback.** When `cvengine_app` cannot be used (no `CVENGINE_DB_APP_PASSWORD`, `CVENGINE_DB_APP_USER=` set empty, the owner may not create roles, the login is refused), the check fails with a one-line `Fix:`: the update stops before it migrates and puts the previous version back, and `make up` and `docker compose up` do not start the server. `CVENGINE_DB_ALLOW_OWNER_FALLBACK=1` in `.env` (default off) is the only way to run on the owner role: the check then writes the owner password to the `db_owner_fallback` volume, which only those three services mount, read-only, and takes it out again once `cvengine_app` works. `CVENGINE_DB_APP_USER=` (empty) is no longer a way back by itself.
+* `make admin`, `make admin-password`, `make username` (`createsuperuser`), `make migrate` and `make test` run in the `migrate` service. `make dbshell` (new) and the backups run `psql` and `pg_dump` inside the `db` container with `docker exec`, as the owner; no password leaves it.
+
+**What restarts.** The update recreates `web`, `celery`, `celery-beat` and the proxy once, as every update does (their environment, volumes and `depends_on` changed). It creates the `db_owner_fallback` volume and runs two short `migrate` containers (the check, then the migration); `docker compose ps -a` lists the last one as exited, which is normal. `db` and `redis` are not recreated for this (only for the changes of the previous section, on the update that brings them). Nothing is restarted a second time.
+
+**What an operator does on an existing install.** Normally nothing: run the update as usual (Settings, Updates, or `scripts/update.sh`). Then:
+
+1. Read the end of the update log: `db_app_role: web, celery and celery-beat run as the database role cvengine_app` and `Database role of web: app cvengine_app` (one line per service) mean it worked.
+2. If the install uses an overlay (`CVENGINE_COMPOSE_FILES`, for example `docker-compose.yml,docker-compose.vps.yml`), check before updating that it does not list `POSTGRES_PASSWORD` or `DJANGO_SUPERUSER_PASSWORD` under `web`, `celery` or `celery-beat`; the update refuses one that lists `POSTGRES_PASSWORD` and says which service, and the previous version keeps running until the line is removed.
+3. If the update stops with `db_app_role: ERROR: ...`, do what its `Fix:` line says and run the update again. To get the server back on the owner role in the meantime, add `CVENGINE_DB_ALLOW_OWNER_FALLBACK=1` to `.env` and run the update again; remove it once the cause is fixed and update once more.
+4. Optional, and recommended after a suspected compromise: since the owner password was in the application containers until this update, change it. As the owner, inside the db container: `docker compose exec db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'`, then `\password` followed by the role name (the value of `POSTGRES_USER`) and a new password; put the same value in `POSTGRES_PASSWORD` in `.env` (and the Compose env file); then `make up`. Only `db` (which uses it for nothing after its first start) and `migrate` read it.
+5. Optional: remove `DJANGO_SUPERUSER_PASSWORD` from `.env`. Only `make admin` reads it, in the `migrate` service; without it, `make admin` generates a password and prints it once.
+
+`docker compose exec web python3 manage.py migrate` and `docker compose exec web python3 manage.py createsuperuser` no longer work (that container has no owner password): use `make migrate` and `make username`, or `docker compose run --rm migrate python3 manage.py <command>`. Going back to an older version needs nothing: its compose file hands the owner password to the application again.
 
 ### Questions after an update
 
@@ -165,6 +246,10 @@ Read the state from a terminal: `scripts/update.sh --check` prints the memory th
 **The cve.now window a walk wrongly declared covered is read again (`recover_feed_gap`).** cve.now renamed its list cursor and limited listings without a key to the newest 400, and the coverage walk took the end of its first page for the floor of its window: it moved the feed watermark to the head of the feed, and the CVEs the incremental sync missed since then were never read (the status said the feed was complete). The update step moves the watermark back to 2026-11-06 (the published seed's `covers_through`; a watermark already earlier is left as it is) and queues `recover_cve_feed_window`, which runs the corrected walk until the window is covered (each past day from cve.now's archive page, today from the `since` delta listing, at most 1,500 entry reads a run, 0.5 s apart) and matches every CVE it reads against the inventory, whatever its tier. It needs the cve.now feed to be reachable; a run that is refused or cannot list a day stops, and the hourly backfill carries on from the same watermark. System status (`cve_feed_watermark`) shows the lag until it is done. A dry run by default when run by hand: `python3 manage.py recover_feed_gap [--apply] [--through 2026-11-06T00:00:00Z]`.
 
 **Open ranges from an upper bound written as text are checked (`repair_open_ranges`, issue 696).** A CVE List entry whose `lessThan` is text ("Apache HTTP Server 2.4*") was stored as an open range, so every later release matched. The update step reads the CVE List record of each stored CVE with an open range on a vendor's product (a bounded, resumable walk; it continues with every threat-intelligence run), leaves out each range the record bounds with text, notes the ranges the record means open, and marks the changed CVEs for re-correlation, so their matches outside the real range close. A dry run by default when run by hand: `python3 manage.py repair_open_ranges [--apply]`.
+
+**Matches past a branch fix their own advisory states are re-correlated (`recheck_branch_fixes`).** An advisory that states a fix for one release line beside a wider range (F5's nginx records: 1.13.10 up to 1.31.2 plus 1.30.2 up to 1.30.3) now reads a version at or past that line's fix as outside the wider range; no stored range is rewritten. The update step finds the stored in-range matches this changes, by itself and once (one read of the in-range matches and of their CVEs' ranges: 0.3 s on an install with 10,355 version matches, where it found 162 matches of 12 nginx CVEs), and marks those CVEs for re-correlation; the next `correlate_refreshed_cves` run, which the 30 minute feed sync queues, closes the matches in one batch (it handles 100 CVEs per walk of the inventory). By hand: `python3 manage.py recheck_branch_fixes [--apply]`. No migration.
+
+**Dismissed findings are not counted as open.** A finding the triage classed a likely false positive or not applicable is left out of every open count (the dashboard tiles, the Findings list's Actionable view and its counts, the weekly email, the PDF report, Situations and the hosts that need attention), as the PDF report already did; it is still listed under **All** and keeps its heat. On the install this was measured on, the scanner findings counted fall by 11 (5 in Marino Management). Nothing is stored or migrated.
 
 **Ranges bounded by distribution package builds are typed (`retype_distro_ranges`).** A bound such as `0:8.7p1-38.el9_4.4` was read as the upstream release. The update step types those stored ranges `RPM` or `DEB` (database only, no request) and marks the CVEs for re-correlation. `python3 manage.py retype_distro_ranges [--apply]`.
 

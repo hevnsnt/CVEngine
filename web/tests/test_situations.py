@@ -514,10 +514,12 @@ class QueryCountTests(Seeded):
 					self.assertEqual(self.api(path, **params)[0], 200)
 				return len(ctx)
 			cold, warm = run('projects/sa/situations', page_size=2), run('projects/sa/situations', page_size=2)
-			# 2 inventory and 4 grouped queries, and one read of the current scan ids (cveFeed.current_scans) shared by every statement of the snapshot
-			self.assertEqual(cold - warm, 7, 'the second request must not rank again (2 inventory and 4 grouped queries)')
+			# 2 inventory queries, one pass over the 4 sources, the AI reviewer's demotions, the proofs of the proven items, and one read of the current scan ids
+			# (cveFeed.current_scans) shared by every statement of the snapshot; a list page reads no items of its own (the ranking carries them)
+			self.assertEqual(cold - warm, 9, 'the second request must not rank again (2 inventory queries, 4 sources, demotions, proofs, current scans)')
 			detail = run('projects/sa/situations/proven.sa.test')
-			self.assertLess(detail, warm + 3, 'the detail of a host reads the same ranking and then only that host')
+			# the same ranking, then only that host's items: one windowed query per source, the demotions, the proofs, the current scans and the project names
+			self.assertLessEqual(detail, warm + 8, 'the detail of a host reads the same ranking and then only that host')
 			before = self.names()
 			CVEMatch.objects.filter(pk=self.m_proven.pk).update(remediation_status='fixed')  # a person closes the proven finding ...
 			self.assertEqual(self.names(), before)  # ... within the 10 seconds the old copy is served,

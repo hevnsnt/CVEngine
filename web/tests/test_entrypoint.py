@@ -199,10 +199,12 @@ def web_command(**env):
 
 
 class WebEntrypointTests(SimpleTestCase):
-    def test_production_runs_gunicorn_after_migrating(self):
+    def test_production_runs_gunicorn_and_never_migrates_itself(self):
+        # the one-off migrate service migrates (the only container with the owner's password); web only waits for migrate --check
         lines = web_command(DEBUG='0')
-        self.assertEqual(lines[0], 'manage.py migrate --noinput')
-        self.assertIn('-m gunicorn reNgine.wsgi:application', lines[1])
+        self.assertNotIn('manage.py migrate --noinput', lines)
+        self.assertIn('-m gunicorn reNgine.wsgi:application', lines[0])
+        lines = [''] + lines  # the assertions below read the gunicorn line as lines[1]
         self.assertIn('--bind 0.0.0.0:8000', lines[1])  # the proxy's upstream is rengine:8000
         self.assertIn('--worker-class gthread', lines[1])
         self.assertNotIn('runserver', ' '.join(lines))
@@ -211,13 +213,13 @@ class WebEntrypointTests(SimpleTestCase):
         self.assertIn('gunicorn', ' '.join(web_command()))
 
     def test_timeout_covers_the_proxy_read_timeout_and_is_tunable(self):
-        self.assertIn('--timeout 300', web_command(DEBUG='0')[1])
-        self.assertIn('--timeout 600 ', web_command(DEBUG='0', GUNICORN_TIMEOUT='600')[1] + ' ')
-        self.assertIn('--workers 2', web_command(DEBUG='0', GUNICORN_WORKERS='2')[1])
+        self.assertIn('--timeout 300', web_command(DEBUG='0')[0])
+        self.assertIn('--timeout 600 ', web_command(DEBUG='0', GUNICORN_TIMEOUT='600')[0] + ' ')
+        self.assertIn('--workers 2', web_command(DEBUG='0', GUNICORN_WORKERS='2')[0])
 
     def test_development_keeps_runserver(self):
         lines = web_command(DEBUG='1')
-        self.assertEqual(lines[1], 'manage.py runserver 0.0.0.0:8000')
+        self.assertEqual(lines[0], 'manage.py runserver 0.0.0.0:8000')
         self.assertNotIn('gunicorn', ' '.join(lines))
 
     def test_proxy_upstream_port_matches(self):

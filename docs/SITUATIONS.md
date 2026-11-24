@@ -103,7 +103,7 @@ Each row of `results` has:
 
 ## How it is computed
 
-`cveFeed/situations.py`. Set-based: four grouped queries (CVE matches, scanner findings, hygiene findings, secrets) give each host's counts, two queries give the hosts (the same collapse the Hosts page uses), and only the hosts of the page are read item by item (one windowed query per source). The number of queries does not depend on the number of hosts or findings (`tests/test_situations.py` pins it). Nothing is stored: there is no table and no migration, so the page is always as current as the findings.
+`cveFeed/situations.py`. Set-based: one pass reads each source once (CVE matches, scanner findings, hygiene findings, secrets: one query each), and the same rows give each host's counts and the first 12 items its list row shows; two queries give the hosts (the same collapse the Hosts page uses) and one small query reads which findings the AI reviewer demotes. A list page reads no items of its own; the detail of one host reads its items (one windowed query per source). The number of queries does not depend on the number of hosts or findings (`tests/test_situations.py` and `tests/test_situations_fast.py` pin it). Nothing is stored: there is no table and no migration, so the page is always as current as the findings.
 
 ### Timings
 

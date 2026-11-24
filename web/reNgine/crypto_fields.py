@@ -91,6 +91,38 @@ def decrypt_text(value):
         return ''
 
 
+def stored_value_state(raw):
+    """What a raw database value of an encrypted column is, without returning any plaintext: ``plain`` (empty, or a value from before
+    encryption), ``current`` (decrypts with the key new values are written under), ``older`` (decrypts only with a key that is going away:
+    ``CVENGINE_FIELD_KEY_PREVIOUS``, or the key derived from ``SECRET_KEY`` while a dedicated key is set) or ``unreadable`` (no key here
+    decrypts it, so it reads as empty). ``scripts/rotate-secrets.sh`` checks this before and after it replaces a key."""
+    if isinstance(raw, str) and raw.startswith('{'):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            return 'plain'
+    if isinstance(raw, dict):
+        if set(raw) != {JSON_MARKER}:
+            return 'plain'
+        raw = raw[JSON_MARKER]
+    if not isinstance(raw, str) or not raw.startswith(PREFIX):
+        return 'plain'
+    from cryptography.fernet import Fernet, InvalidToken
+    token = raw[len(PREFIX):].encode()
+    dedicated = dedicated_keys()
+    current = Fernet(_derive(dedicated[0], b'cvengine/field-encryption/v2')) if dedicated else _fernet(settings.SECRET_KEY)
+    try:
+        current.decrypt(token)
+        return 'current'
+    except InvalidToken:
+        pass
+    try:
+        _cipher(settings.SECRET_KEY, dedicated).decrypt(token)
+        return 'older'
+    except InvalidToken:
+        return 'unreadable'
+
+
 def encrypted_fields():
     """Every ``(model, [encrypted field names])`` in the project, for rotation."""
     from django.apps import apps

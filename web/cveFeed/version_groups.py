@@ -21,10 +21,13 @@ A group carries its product and version, the host names, how many CVEs and findi
 members (a group's heat is the max of its members'; no member's heat changes), the triage mix, the fixed-in version and its members.
 
 The fixed-in version (``fix_summary``) is read from the members' own data and never made up: ``version`` is the highest ``fixed`` bound
-of the ranges the members were matched on (the range ``explain`` names); ``also`` lists, when the CVEs' affected ranges are given, the
-highest fix of another release line that lies outside every bounded range of every member (a range with no upper bound, such as an old
-line an advisory leaves unfixed, is not read as holding a fix of another line); ``unstated`` names the CVEs whose range states no fix,
-and ``held_by`` the CVEs whose own data puts ``version`` inside another of their ranges.
+of the ranges the members were matched on (the range ``explain`` names), raised to a later fix of the same release line another member
+states when no member's data holds that one; ``also`` lists, when the CVEs' affected ranges are given, the highest fix of each other
+release line that lies outside every bounded range of every member (a range with no upper bound, such as an old line an advisory leaves
+unfixed, is not read as holding a fix of another line), so nginx 1.31.1 reads ``upgrade to 1.31.9 or 1.30.7``. Whether a range holds a
+fix is ``correlation.range_verdict``'s reading, so a wide range (1.13.10 up to 1.31.2) does not hold 1.30.7 when the same advisory states
+the 1.30 line's own fix (1.30.2 up to 1.30.3, ``correlation.branch_fixed``). ``unstated`` names the CVEs whose range states no fix, and
+``held_by`` the CVEs whose own data puts ``version`` inside another of their ranges.
 
 Cost: the caller's one ``values()`` read of the matches (``rows_of``) and a pass in memory; the fix's other lines read the page's CVEs'
 affected ranges in one query (``affected_of``).
@@ -152,6 +155,11 @@ def _line(parsed):
     return tuple(parsed[:2]) if parsed is not None else None
 
 
+def _vcmp(a, b):
+    from cveFeed.correlation import _vcmp as compare
+    return compare(a, b)
+
+
 def _bounded(ranges):
     """The ranges with an upper bound (``fixed`` or ``last_affected``), in the form ``correlation.range_verdict`` reads."""
     out = []
@@ -216,20 +224,36 @@ def fix_summary(members, affected_of=None):
     if affected_of is None:
         return out
     everies = [every for _cve, _own, every in per_cve.values()]
-    out['held_by'] = sorted(cve for cve, _own, every in per_cve.values() if _holds(version, every))[:50]
-    # the other release lines: a fix every member's data leaves outside all its bounded ranges, the highest of each line
+    # every fix the members' data states, by release line (the bounded ranges of every member, and each member's own fix)
     candidates = {}
     for every in everies:
         for rng in every:
             parsed = _parsed(rng.get('fixed'))
-            if parsed is None or _line(parsed) == _line(top):
-                continue
-            candidates.setdefault(_line(parsed), {})[rng['fixed']] = parsed
-    for line in sorted(candidates, reverse=True):
-        for text, parsed in sorted(candidates[line].items(), key=lambda pair: pair[1], reverse=True):
+            if parsed is not None:
+                candidates.setdefault(_line(parsed), {})[rng['fixed']] = parsed
+    for text, parsed in fixes:
+        candidates.setdefault(_line(parsed), {})[text] = parsed
+
+    def clear(line):
+        """The highest fix of ``line`` that every member's data leaves outside all its bounded ranges, or None."""
+        for text, parsed in sorted(candidates.get(line, {}).items(), key=lambda pair: pair[1], reverse=True):
             if not any(_holds(text, every) for every in everies):
-                out['also'].append(text)
-                break
+                return text, parsed
+        return None
+    # the line of the highest own fix: a later fix of the same line another member states (1.31.9 beside an own 1.31.2) is the one that
+    # settles them all, when no member's data holds it
+    best = clear(_line(top))
+    if best is not None and _vcmp(best[1], top) > 0:
+        version, top = best
+        out['version'] = version
+    out['held_by'] = sorted(cve for cve, _own, every in per_cve.values() if _holds(version, every))[:50]
+    # the other release lines: a fix every member's data leaves outside all its bounded ranges, the highest of each line
+    for line in sorted(candidates, reverse=True):
+        if line == _line(top):
+            continue
+        best = clear(line)
+        if best is not None:
+            out['also'].append(best[0])
     return out
 
 
