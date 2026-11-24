@@ -90,6 +90,3 @@ def verify_hackerone(username, token, get=None):
     return {"verified": None, "reason": f"HackerOne answered HTTP {resp.status_code}; try again later."}
 
 
-def check_hackerone(username, token, get=None):
-    """True when the credentials are accepted, False when refused, None when unreachable."""
-    return verify_hackerone(username, token, get=get)["verified"]

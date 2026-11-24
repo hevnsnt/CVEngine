@@ -214,16 +214,6 @@ def siblings_of(subs, hosts):
     return out - hosts
 
 
-def wordpress_sites(scan):
-    """``[(Subdomain, base URL)]`` for this scan's hosts with any sign of WordPress, excluded and blocked names removed."""
-    from startScan.models import Subdomain
-    allowed, _ips, _ports = _scan_targets(scan)
-    subs = list(Subdomain.objects.filter(scan_history=scan, name__in=allowed).prefetch_related('technologies', 'ip_addresses'))
-    found = candidate_signals(scan, subs)
-    by_name = {s.name.lower(): s for s in subs}
-    return [(by_name[name], _base_of(by_name[name])) for name in sorted(found)]
-
-
 def _base_of(sub):
     base = (sub.http_url or f'https://{sub.name}').split('?')[0]
     return base if base.startswith(('http://', 'https://')) else f'https://{sub.name}'

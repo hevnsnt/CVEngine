@@ -109,6 +109,7 @@ def _init_isolated_worker(counter, *args, **kwargs):
     isolate_redis(runner._worker_id)
     install_hermetic()  # a forked worker has the parent's guards already; a spawned one has none
     hermetic_egress()
+    time_classes()
 
 
 class NetworkBlocked(RuntimeError):
@@ -333,6 +334,67 @@ def install_hermetic(block=None, restore_environment=True):
     return _installed
 
 
+# ``--module-times``: the wall time of every test class (its fixtures included) is written by the process that ran it, a parallel worker or the
+# runner itself, to a file in this directory, and the runner prints one line per module at the end: its seconds, the group Django runs it in and
+# its longest class. scripts/ci_shard.py --refresh reads those lines from the CI logs to weigh the modules when it splits the suite into shards.
+# The group is Django's run order (DiscoverRunner.reorder_by): 0 for TestCase classes, 1 for the other SimpleTestCase ones (TransactionTestCase
+# among them), 2 for plain unittest classes, which run last. A long class in group 2 starts only when the rest of its shard is done.
+MODULE_TIMES_ENV = 'CVENGINE_TEST_MODULE_TIMES'
+MODULE_TIME_LINE = 'MODULE-TIME'
+_times = {'installed': False, 'started': {}}
+
+
+def time_classes(force=False):
+    """Record the wall time of each test class run in this process, from the first test's class setup to the class teardown, to the
+    ``MODULE_TIMES_ENV`` directory. Installed once per process, when the variable is set (or ``force``); writes nothing while it is unset."""
+    import time
+    if _times['installed'] or not (force or os.environ.get(MODULE_TIMES_ENV)):
+        return
+    real = unittest.suite.TestSuite._tearDownPreviousClass
+
+    def tear_down_previous_class(self, test, result):
+        previous = getattr(result, '_previousTestClass', None)
+        current = type(test)
+        try:
+            return real(self, test, result)
+        finally:
+            if previous is not current:
+                now = time.perf_counter()
+                began = _times['started'].pop(previous, None)
+                folder = os.environ.get(MODULE_TIMES_ENV)
+                if began is not None and folder:
+                    with open(os.path.join(folder, f'times-{os.getpid()}.tsv'), 'a', encoding='utf-8') as handle:  # one file per process
+                        handle.write(f'{previous.__module__}\t{previous.__qualname__}\t{now - began:.3f}\t{run_group(previous)}\n')
+                if test is not None:
+                    _times['started'][current] = now
+    unittest.suite.TestSuite._tearDownPreviousClass = tear_down_previous_class
+    _times['installed'] = True
+
+
+def run_group(case):
+    """The group Django runs a test class in: 0 TestCase, 1 another SimpleTestCase, 2 anything else (DiscoverRunner.reorder_by)."""
+    from django.test import SimpleTestCase, TestCase
+    return 0 if issubclass(case, TestCase) else 1 if issubclass(case, SimpleTestCase) else 2
+
+
+def module_times(folder):
+    """Per test module recorded in ``folder`` by every process of the run: its seconds summed over its classes, the group that holds most of
+    them, and its longest class."""
+    totals, groups = {}, {}
+    for name in sorted(os.listdir(folder)):
+        with open(os.path.join(folder, name), encoding='utf-8') as handle:
+            for line in handle:
+                module, _, seconds, group = line.rstrip('\n').split('\t')
+                entry = totals.setdefault(module, {'seconds': 0.0, 'longest': 0.0})
+                entry['seconds'] += float(seconds)
+                entry['longest'] = max(entry['longest'], float(seconds))
+                groups.setdefault(module, {}).setdefault(int(group), 0.0)
+                groups[module][int(group)] += float(seconds)
+    for module, entry in totals.items():
+        entry['group'] = max(sorted(groups[module]), key=lambda g: groups[module][g])
+    return totals
+
+
 class IsolatedRedisParallelSuite(ParallelTestSuite):
     init_worker = _init_isolated_worker
 
@@ -340,16 +402,44 @@ class IsolatedRedisParallelSuite(ParallelTestSuite):
 class IsolatedRedisRunner(DiscoverRunner):
     parallel_test_suite = IsolatedRedisParallelSuite
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, module_times=False, **kwargs):
         super().__init__(*args, **kwargs)
         if self.parallel > MAX_WORKERS:
             print(f'--parallel {self.parallel} lowered to {MAX_WORKERS}: each worker needs two of Redis\'s 16 databases.')
             self.parallel = MAX_WORKERS
+        self.module_times_dir = None
+        if module_times:
+            import tempfile
+            # in the environment before any worker starts, so a forked or spawned worker writes to the same place
+            self.module_times_dir = os.environ[MODULE_TIMES_ENV] = tempfile.mkdtemp(prefix='cvengine-module-times-')
+
+    @classmethod
+    def add_arguments(cls, parser):
+        super().add_arguments(parser)
+        parser.add_argument('--module-times', action='store_true',
+                            help='Print the wall time of every test module at the end (scripts/ci_shard.py --refresh reads it from the CI logs).')
 
     def setup_test_environment(self, **kwargs):
         super().setup_test_environment(**kwargs)
         self._remove_hermetic = install_hermetic()
         hermetic_egress()  # after install_hermetic: the egress settings are part of every test's starting environment
+        time_classes()
+
+    def run_suite(self, suite, **kwargs):
+        try:
+            return super().run_suite(suite, **kwargs)
+        finally:
+            if self.module_times_dir:
+                self.print_module_times()
+
+    def print_module_times(self):
+        import shutil
+        totals = module_times(self.module_times_dir)
+        shutil.rmtree(self.module_times_dir, ignore_errors=True)
+        print(f'\nModule times ({len(totals)} modules, seconds of one process, class fixtures included; the group Django runs it in; its longest class):')
+        for module, entry in sorted(totals.items(), key=lambda item: (-item[1]['seconds'], item[0])):
+            print(f'{MODULE_TIME_LINE} {entry["seconds"]:9.2f} {module} group={entry["group"]} longest={entry["longest"]:.2f}')
+        print(f'{MODULE_TIME_LINE} total {sum(entry["seconds"] for entry in totals.values()):.2f}', flush=True)
 
     def teardown_test_environment(self, **kwargs):
         self._remove_hermetic()

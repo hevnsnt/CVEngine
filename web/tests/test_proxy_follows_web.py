@@ -26,7 +26,8 @@ from django.test import SimpleTestCase
 from tests.test_tunnel_client_address import CONF, REPO, free_port, nginx_runner
 
 # how the three routes looked before: the first with a trailing slash (and so the cleaned-up path), the other two without a URI (the raw one)
-OLD_FORMS = (('location / {', 'http://rengine:8000/'), ('location ~ ^/api/v1/sentinel/tasks', 'http://rengine:8000'), ('location = /cve/api/settings/cve_seed/import {', 'http://rengine:8000'))
+OLD_FORMS = (('location / {', 'http://rengine:8000/'), ('location ~ ^/api/v1/sentinel/tasks', 'http://rengine:8000'), ('location = /cve/api/settings/cve_seed/import {', 'http://rengine:8000'),
+             ('location ^~ /client-address-probe/ {', 'http://rengine:8000'))
 
 
 def old_conf():
@@ -60,12 +61,12 @@ class ConfShapeTests(SimpleTestCase):
     def test_the_conf_has_a_resolver_and_no_fixed_upstream_name_in_proxy_pass(self):
         self.assertRegex(CONF, r'resolver\s+127\.0\.0\.11 valid=10s ipv6=off;')
         self.assertNotRegex(CONF, r'(?m)^\s*proxy_pass\s+http://')  # a name written in proxy_pass is looked up once, at start
-        self.assertEqual(len(re.findall(r'(?m)^\s*proxy_pass\s+\$cvengine_web;', CONF)), 3)
-        self.assertEqual(len(re.findall(r'set\s+\$cvengine_web http://rengine:8000;', CONF)), 3)
+        self.assertEqual(len(re.findall(r'(?m)^\s*proxy_pass\s+\$cvengine_web;', CONF)), 4)
+        self.assertEqual(len(re.findall(r'set\s+\$cvengine_web http://rengine:8000;', CONF)), 4)
 
     def test_the_old_form_helper_really_gives_the_old_form(self):
         old = old_conf()
-        self.assertEqual(re.findall(r'(?m)^\s*proxy_pass\s+(\S+);', old), ['http://rengine:8000/', 'http://rengine:8000', 'http://rengine:8000'])
+        self.assertEqual(re.findall(r'(?m)^\s*proxy_pass\s+(\S+);', old), ['http://rengine:8000/', 'http://rengine:8000', 'http://rengine:8000', 'http://rengine:8000'])
         code = re.sub(r'(?m)^\s*#.*$', '', old)
         self.assertNotIn('cvengine_web', code)
         self.assertNotIn('resolver', code)

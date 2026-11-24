@@ -1,10 +1,8 @@
 import base64
-import colorsys
 import math
 from xml.sax.saxutils import escape
 
 from django.db.models import Count
-from reNgine.definitions import NUCLEI_SEVERITY_MAP
 
 from startScan.models import *
 

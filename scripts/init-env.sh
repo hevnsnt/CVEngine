@@ -146,6 +146,9 @@ fill POSTGRES_PASSWORD
 grep -q '^CVENGINE_DB_APP_PASSWORD=' .env || echo 'CVENGINE_DB_APP_PASSWORD=' >> .env
 grep -qE '^CVENGINE_DB_APP_USER=[[:space:]]*$' .env || fill CVENGINE_DB_APP_PASSWORD
 fill AUTHORITY_PASSWORD
+# The secret a host nginx in front of the bundled proxy sends so its X-Forwarded-For is believed (scripts/client-address.sh, docs/DEPLOYMENT.md).
+# shellcheck source=client-address.sh
+. scripts/client-address.sh && cvengine_ensure_upstream_secret >/dev/null && echo "Generated CVENGINE_UPSTREAM_SECRET." || true
 fill_domain "${1:-}"
 [ "${CVENGINE_ENABLE_BUILTIN_SCANNER:-}" != 0 ] || disable_builtin_scanner
 apply_sentinel_plan

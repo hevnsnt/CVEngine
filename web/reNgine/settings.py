@@ -24,26 +24,25 @@ environ.Env.read_env(os.path.join(BASE_DIR, os.pardir, '.env'))
 # Root env vars
 RENGINE_HOME = env('RENGINE_HOME', default='/usr/src/app')
 RENGINE_RESULTS = env('RENGINE_RESULTS', default=f'{RENGINE_HOME}/scan_results')
-RENGINE_RAISE_ON_ERROR = env.bool('RENGINE_RAISE_ON_ERROR', default=False)
+# The host's web/ folder where it is not the source folder: production runs the image's own copy of the source and mounts web/ at this path for the
+# update channel's files and the Django secret (docker-compose.yml sets it and RENGINE_HOME to /var/lib/cvengine/web). Empty: the source folder.
+CVENGINE_HOST_DIR = env('CVENGINE_HOST_DIR', default='')
 
 # Common env vars
 DEBUG = env.bool('DEBUG', default=False)
 # Production is served behind HTTPS. Cookies must not accompany a request to the HTTP redirect listener.
 SESSION_COOKIE_SECURE = not DEBUG
 SESSION_ENGINE = 'reNgine.hashed_sessions'  # the table stores a keyed hash of the cookie value, never the value
+# A session ends after 12 hours without a request (Django's default was 14 days from sign-in, however long the browser sat idle). Each request
+# that carries a session saves it again, so the 12 hours start over while the user is active.
+SESSION_COOKIE_AGE = 12 * 60 * 60
+SESSION_SAVE_EVERY_REQUEST = True
 CSRF_COOKIE_SECURE = not DEBUG
 # Start with a short HSTS lifetime. Operators can raise it after confirming
 # their public TLS path; never preload or include sibling subdomains implicitly.
 SECURE_HSTS_SECONDS = env.int('CVENGINE_HSTS_SECONDS', default=0 if DEBUG else 3600)
 DOMAIN_NAME = env('DOMAIN_NAME', default='localhost:8000')
-TEMPLATE_DEBUG = env.bool('TEMPLATE_DEBUG', default=False)
 SECRET_FILE = os.path.join(RENGINE_HOME, 'secret')
-DEFAULT_ENABLE_HTTP_CRAWL = env.bool('DEFAULT_ENABLE_HTTP_CRAWL', default=True)
-DEFAULT_RATE_LIMIT = env.int('DEFAULT_RATE_LIMIT', default=150) # requests / second
-DEFAULT_HTTP_TIMEOUT = env.int('DEFAULT_HTTP_TIMEOUT', default=5) # seconds
-DEFAULT_RETRIES = env.int('DEFAULT_RETRIES', default=1)
-DEFAULT_THREADS = env.int('DEFAULT_THREADS', default=30)
-DEFAULT_GET_GPT_REPORT = env.bool('DEFAULT_GET_GPT_REPORT', default=True)
 
 # Globals
 from urllib.parse import urlsplit
@@ -243,6 +242,7 @@ LOGIN_REQUIRED_IGNORE_VIEW_NAMES = [
     'admin_login_redirect',
     'invite',
     'report_unsubscribe',
+    'client_address_probe',  # answers 204 to anyone; records an address only for a token the server issued (reNgine/client_probe.py)
 ]
 
 # A Sentinel's very first call has no bearer token and no session yet: it authenticates with a one-time enrollment
@@ -256,9 +256,6 @@ LOGIN_URL = 'login'
 LOGIN_REDIRECT_URL = 'cve_dashboard'
 LOGOUT_REDIRECT_URL = 'login'
 
-# Number of endpoints that have the same content_length
-DELETE_DUPLICATES_THRESHOLD = 10
-
 '''
 CELERY settings
 '''
@@ -266,9 +263,6 @@ CELERY_BROKER_URL = env("CELERY_BROKER", default="redis://redis:6379/0")
 CELERY_RESULT_BACKEND = env("CELERY_BROKER", default="redis://redis:6379/0")
 CELERY_ENABLE_UTC = False
 CELERY_TIMEZONE = 'UTC'
-CELERY_IGNORE_RESULTS = False
-CELERY_EAGER_PROPAGATES_EXCEPTIONS = True
-CELERY_TRACK_STARTED = True
 CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
 # Scans run for hours and a bulk add queues dozens. A worker takes one task at a time instead of reserving a batch it cannot
 # start for hours, and Redis waits hours (not its default hour) before it hands an unacknowledged task to someone else;
@@ -295,17 +289,14 @@ ROLES and PERMISSIONS
 ROLEPERMISSIONS_MODULE = 'reNgine.roles'
 ROLEPERMISSIONS_REDIRECT_TO_LOGIN = True
 
-'''
-Cache settings
-'''
-RENGINE_TASK_IGNORE_CACHE_KWARGS = ['ctx']
-
-
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 '''
 LOGGING settings
 '''
+# Where errors.log, db.log and celery.log are written (every line also goes to the container log). Empty: the working directory, as always (the
+# tests, a checkout). The image sets /home/cvengine/logs: the application source is read only to the account the containers run as (web/Dockerfile).
+CVENGINE_LOG_DIR = env('CVENGINE_LOG_DIR', default='')
 LOGGING = {
     'version': 1,
     # False: this configuration is applied more than once in a process (django.setup() runs again when reNgine.celery is imported and when a
@@ -317,7 +308,7 @@ LOGGING = {
         'file': {
             'level': 'ERROR',
             'class': 'logging.FileHandler',
-            'filename': 'errors.log',
+            'filename': os.path.join(CVENGINE_LOG_DIR, 'errors.log'),
         },
         'null': {
             'class': 'logging.NullHandler'
@@ -341,14 +332,14 @@ LOGGING = {
         'db': {
             'class': 'logging.handlers.RotatingFileHandler',
             'formatter': 'brief',
-            'filename': 'db.log',
+            'filename': os.path.join(CVENGINE_LOG_DIR, 'db.log'),
             'maxBytes': 1024,
             'backupCount': 3
         },
         'celery': {
             'class': 'logging.handlers.RotatingFileHandler',
             'formatter': 'simple',
-            'filename': 'celery.log',
+            'filename': os.path.join(CVENGINE_LOG_DIR, 'celery.log'),
             'maxBytes': 1024 * 1024 * 100,  # 100 mb
             'backupCount': 3,
         },
@@ -450,5 +441,10 @@ CACHES = {
         'BACKEND': 'django.core.cache.backends.redis.RedisCache',
         'LOCATION': _cache_url(),
         'TIMEOUT': 60 * 30,  # 30 minutes caching will be used
+        # Every pickled value is signed and a value without a valid signature is never unpickled (reNgine/cache_serializer.py), so write
+        # access to Redis is not code execution here. VERSION 2 keeps these signed values apart from the unsigned ones of earlier releases:
+        # an update starts with an empty cache, as after a Redis restart, and a rollback never reads a signed value.
+        'VERSION': 2,
+        'OPTIONS': {'serializer': 'reNgine.cache_serializer.SignedRedisSerializer'},
     }
 }

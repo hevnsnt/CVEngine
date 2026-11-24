@@ -4,7 +4,6 @@ Evaluators are pure functions over plain data (records, cert info) so every rule
 reads of the host (certificates, TLS, DNS) are a Sentinel's (the ``hygiene_check`` kind, ``cvengine_scanner.probes``): this module judges what comes back. Each run upserts findings and
 resolves the ones that no longer apply, so the table always reflects the current state.
 """
-import base64
 import datetime
 import json
 import logging
@@ -16,12 +15,6 @@ logger = logging.getLogger(__name__)
 INFO, LOW, MEDIUM, HIGH, CRITICAL = 0, 1, 2, 3, 4
 TLS_PORTS = (443, 8443, 9443, 993, 995, 465, 636)
 MAX_TLS_TARGETS = 300
-# Mail providers rotate selector names; these cover Google, Microsoft 365, Mailchimp, SendGrid and the usual defaults.
-DKIM_SELECTORS = ('default', 'google', 'selector1', 'selector2', 'k1', 'k2', 'k3', 's1', 's2', 'dkim', 'mail', 'smtp',
-                  'mandrill', 'mxvault', 'zoho', 'protonmail', 'fm1', 'fm2')
-SPF_LOOKUP_LIMIT = 10
-SPF_MAX_QUERIES = 50  # records fetched for one domain: the owner of a scanned domain controls how wide its include tree is
-SPF_MAX_TERMS = 200  # terms read from one record
 EXPIRY_BANDS = ((0, CRITICAL, 'has expired'), (7, HIGH, 'expires within 7 days'),
                 (30, MEDIUM, 'expires within 30 days'), (60, LOW, 'expires within 60 days'))
 
@@ -36,165 +29,7 @@ class Finding:
     evidence: dict = field(default_factory=dict)
 
 
-# ----------------------------------------------------------------------------- SPF
-
-def _txt_value(record):
-    return record.strip().strip('"')
-
-
-def evaluate_spf(domain, txt_records, has_mx, lookup_count=None):
-    """SPF review. ``txt_records`` are the domain's TXT strings; ``lookup_count`` the resolved DNS-lookup total."""
-    spf = [_txt_value(r) for r in txt_records if _txt_value(r).lower().startswith('v=spf1')]
-    if not spf:
-        sev, why = (MEDIUM, 'This domain receives mail, so anyone can spoof it.') if has_mx else \
-            (LOW, 'The domain does not appear to send mail; publish "v=spf1 -all" so nobody can spoof it.')
-        return [Finding('spf_missing', sev, 'No SPF record', why, domain)]
-    if len(spf) > 1:
-        return [Finding('spf_multiple', HIGH, 'More than one SPF record',
-                        'Receivers treat several SPF records as a permanent error, so SPF fails for everyone.', domain,
-                        {'records': spf})]
-    record, findings = spf[0], []
-    terms = record.lower().split()
-    all_term = next((t for t in terms if re.fullmatch(r'[+\-~?]?all', t)), None)
-    redirect = any(t.startswith('redirect=') for t in terms)
-    if all_term in ('+all', 'all'):
-        findings.append(Finding('spf_allow_all', CRITICAL, 'SPF allows any server to send as this domain',
-                                f'"{record}" ends in +all, which authorises the whole internet.', domain, {'record': record}))
-    elif all_term == '?all':
-        findings.append(Finding('spf_neutral', MEDIUM, 'SPF ends in ?all (neutral)',
-                                'A neutral result gives receivers no reason to reject spoofed mail. Use -all.', domain, {'record': record}))
-    elif all_term == '~all':
-        findings.append(Finding('spf_softfail', LOW, 'SPF ends in ~all (soft fail)',
-                                'Spoofed mail is marked, not rejected. Move to -all once all senders are listed.', domain, {'record': record}))
-    elif all_term is None and not redirect:
-        findings.append(Finding('spf_no_all', MEDIUM, 'SPF has no "all" mechanism',
-                                'Without a closing -all or redirect, unlisted servers are not told to fail.', domain, {'record': record}))
-    if 'ptr' in terms or any(t.lstrip('+-~?').startswith('ptr') for t in terms):
-        findings.append(Finding('spf_ptr', LOW, 'SPF uses the discouraged ptr mechanism',
-                                'ptr is slow and unreliable; list explicit ip4/ip6/include instead.', domain, {'record': record}))
-    if lookup_count is not None and lookup_count > SPF_LOOKUP_LIMIT:
-        findings.append(Finding('spf_too_many_lookups', MEDIUM, f'SPF needs {lookup_count} DNS lookups (limit {SPF_LOOKUP_LIMIT})',
-                                'Over the limit, SPF returns a permanent error and legitimate mail can fail.', domain,
-                                {'lookups': lookup_count}))
-    return findings
-
-
-def count_spf_lookups(domain, fetch_txt, depth=0, seen=None):
-    """DNS-lookup cost of a domain's SPF record, following include/redirect (a, mx, ptr, exists, include, redirect each cost one)."""
-    seen = seen if seen is not None else set()
-    if depth > 10 or domain in seen or len(seen) >= SPF_MAX_QUERIES:
-        return 0  # past the budget the count is already far over the limit of 10
-    seen.add(domain)
-    spf = next((_txt_value(r) for r in fetch_txt(domain) if _txt_value(r).lower().startswith('v=spf1')), None)
-    if not spf:
-        return 0
-    total = 0
-    for term in spf.split()[1:SPF_MAX_TERMS]:
-        t = term.lstrip('+-~?').lower()
-        if t.startswith(('include:', 'redirect=')):
-            total += 1 + count_spf_lookups(re.split('[:=]', t, 1)[1], fetch_txt, depth + 1, seen)
-        elif t.split(':')[0].split('/')[0] in ('a', 'mx', 'ptr', 'exists'):
-            total += 1
-    return total
-
-
-# ----------------------------------------------------------------------------- DMARC
-
-def parse_tags(record):
-    tags = {}
-    for part in _txt_value(record).split(';'):
-        if '=' in part:
-            k, _, v = part.partition('=')
-            tags[k.strip().lower()] = v.strip()
-    return tags
-
-
-def evaluate_dmarc(domain, txt_records, has_mx):
-    dmarc = [_txt_value(r) for r in txt_records if _txt_value(r).lower().startswith('v=dmarc1')]
-    if not dmarc:
-        sev, why = (HIGH, 'Mail for this domain can be spoofed and receivers have no policy to follow.') if has_mx else \
-            (LOW, 'Publish "v=DMARC1; p=reject" so the domain cannot be used to send spoofed mail.')
-        return [Finding('dmarc_missing', sev, 'No DMARC record', why, domain)]
-    if len(dmarc) > 1:
-        return [Finding('dmarc_multiple', MEDIUM, 'More than one DMARC record', 'Receivers ignore DMARC when several records exist.',
-                        domain, {'records': dmarc})]
-    tags, findings = parse_tags(dmarc[0]), []
-    policy = tags.get('p', '').lower()
-    if policy not in ('none', 'quarantine', 'reject'):
-        findings.append(Finding('dmarc_invalid', MEDIUM, 'DMARC record has no valid policy', f'"{dmarc[0]}" is missing p=none|quarantine|reject.',
-                                domain, {'record': dmarc[0]}))
-        return findings
-    if policy == 'none':
-        findings.append(Finding('dmarc_none', MEDIUM, 'DMARC policy is p=none (monitoring only)',
-                                'Spoofed mail is still delivered. Move to quarantine, then reject, once reports look clean.', domain,
-                                {'record': dmarc[0]}))
-    elif policy == 'quarantine':
-        findings.append(Finding('dmarc_quarantine', INFO, 'DMARC policy is p=quarantine',
-                                'Good. p=reject is the strongest setting.', domain, {'record': dmarc[0]}))
-    pct = tags.get('pct')
-    if pct and pct.isdigit() and int(pct) < 100 and policy != 'none':
-        weaker = 'quarantine' if policy == 'reject' else 'none'
-        findings.append(Finding('dmarc_partial', LOW, f'DMARC applies to only {pct}% of mail',
-                                f'The other {100 - int(pct)}% of failing mail is treated as p={weaker} (RFC 7489 §6.6.4). Raise pct to 100.',
-                                domain, {'pct': int(pct)}))
-    if not tags.get('rua'):
-        findings.append(Finding('dmarc_no_reports', LOW, 'DMARC has no aggregate report address (rua)',
-                                'Without reports you cannot see who is sending as this domain.', domain, {'record': dmarc[0]}))
-    sp = tags.get('sp', '').lower()
-    if sp == 'none' and policy in ('quarantine', 'reject'):
-        findings.append(Finding('dmarc_subdomain_weak', MEDIUM, 'DMARC subdomain policy is weaker (sp=none)',
-                                'Attackers can spoof subdomains even though the apex is protected.', domain, {'record': dmarc[0]}))
-    return findings
-
-
-def has_dmarc_record(records):
-    return any(_txt_value(r).lower().startswith('v=dmarc1') for r in records)
-
-
-def dmarc_policy(records, subdomain=False):
-    """The policy a receiver applies from a DMARC record set (``sp`` for a subdomain when it is valid, else ``p``), '' when there is no
-    single valid record or it covers less than all mail (pct below 100)."""
-    values = [_txt_value(r) for r in records if _txt_value(r).lower().startswith('v=dmarc1')]
-    if len(values) != 1:
-        return ''
-    tags = parse_tags(values[0])
-    policy, sp = tags.get('p', '').lower(), tags.get('sp', '').lower()
-    if subdomain and sp in ('none', 'quarantine', 'reject'):
-        policy = sp
-    pct = tags.get('pct', '100')
-    if policy not in ('none', 'quarantine', 'reject') or (pct.isdigit() and int(pct) < 100):
-        return ''
-    return policy
-
-
-def evaluate_inherited_dmarc(domain, apex, records, has_mx):
-    """DMARC review of a name that publishes no record of its own: a receiver falls back to the organizational domain's record
-    (RFC 7489 section 6.6.3) and applies its ``sp`` tag to subdomains, so the apex's policy is the one the name has. When that policy is
-    weak the cause is the apex's record, so the finding is the apex's (host ``apex``, the same check the apex's own review raises),
-    listing the names it covers in ``evidence['covers']``: one row for the parent, not one per subdomain. An enforcing policy is no
-    finding for the name."""
-    values = [_txt_value(r) for r in records if _txt_value(r).lower().startswith('v=dmarc1')]
-    own = evaluate_dmarc(apex, records, has_mx)
-    if len(values) != 1:
-        wanted = {'dmarc_multiple'}
-    else:
-        tags = parse_tags(values[0])
-        policy, sp = tags.get('p', '').lower(), tags.get('sp', '').lower()
-        effective = sp if sp in ('none', 'quarantine', 'reject') else policy
-        if policy not in ('none', 'quarantine', 'reject'):
-            wanted = {'dmarc_invalid'}
-        elif effective == 'none':
-            wanted = {'dmarc_none'} if policy == 'none' else {'dmarc_subdomain_weak'}
-        else:
-            wanted = set()
-    found = []
-    for f in own:
-        if f.check in wanted:
-            f.host = apex
-            f.evidence = {**f.evidence, 'inherited_from': apex, 'covers': [domain]}
-            found.append(f)
-    return found
-
+# ----------------------------------------------------------------------------- merging (a parent's DMARC finding reported by its subdomains)
 
 def merge_findings(found):
     """One finding per (host, check): the subdomains that inherit a parent's DMARC policy each report the parent's finding, and the
@@ -222,55 +57,6 @@ def merge_findings(found):
             f.detail = (f.detail.split(' Names with no DMARC record')[0] + note).strip()
         out.append(f)
     return out
-
-
-# ----------------------------------------------------------------------------- DKIM
-
-def dkim_key_bits(record):
-    """RSA key size in bits from a DKIM TXT record, 0 if revoked/unparseable."""
-    p = parse_tags(record).get('p', '').replace(' ', '')
-    if not p:
-        return 0
-    try:
-        from cryptography.hazmat.primitives.serialization import load_der_public_key
-        key = load_der_public_key(base64.b64decode(p + '=' * (-len(p) % 4)))
-        return getattr(key, 'key_size', 0)
-    except Exception:  # noqa: BLE001
-        return 0
-
-
-def evaluate_dkim(domain, found, has_mx):
-    """``found`` maps selector -> TXT record for the selectors that exist."""
-    if not found:
-        if not has_mx:
-            return []
-        return [Finding('dkim_not_found', INFO, 'No DKIM key found on common selectors',
-                        'Not conclusive: DKIM selectors are arbitrary names. Check your mail provider that outbound mail is signed.',
-                        domain, {'tried': list(DKIM_SELECTORS)})]
-    findings = []
-    found = {s: r for s, r in found.items() if parse_tags(r).get('p', '')}  # revoked selectors do not count as present
-    if not found and has_mx:
-        return [Finding('dkim_not_found', INFO, 'No DKIM key found on common selectors',
-                        'Not conclusive: DKIM selectors are arbitrary names. Check your mail provider that outbound mail is signed.',
-                        domain, {'tried': list(DKIM_SELECTORS)})]
-    for selector, record in sorted(found.items()):
-        bits = dkim_key_bits(record)
-        host = f'{selector}._domainkey.{domain}'
-        if parse_tags(record).get('p', '') == '':
-            continue  # an empty key is a revoked selector (or a wildcard placeholder): nothing to fix
-        if 0 < bits < 1024:
-            findings.append(Finding('dkim_weak_key', HIGH, f'DKIM key for {selector} is only {bits} bits',
-                                    'Keys under 1024 bits can be factored. Rotate to 2048.', host, {'selector': selector, 'bits': bits}))
-        elif bits == 1024:
-            findings.append(Finding('dkim_short_key', LOW, f'DKIM key for {selector} is 1024 bits', 'Rotate to 2048 bits.', host,
-                                    {'selector': selector, 'bits': bits}))
-    return findings
-
-
-def evaluate_caa(domain, caa_records):
-    if caa_records:
-        return []
-    return [Finding('caa_missing', INFO, 'No CAA record', 'A CAA record limits which certificate authorities may issue for this domain.', domain)]
 
 
 # ----------------------------------------------------------------------------- TLS

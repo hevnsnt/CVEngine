@@ -3528,11 +3528,13 @@ const pages = {
     }
     const inventoryBtn = el("button", "new-toggle", "Host inventory", { type: "button", title: "Have hosts report their own OS, packages and patches" });
     inventoryBtn.onclick = () => openInventoryDialog({ project: slug });
-    // "Export all hosts" sits in the page head, not in the list's tools: a scope list for a testing company, made by the server (not the CSV of the current filter beside it)
+    // "Export all hosts" sits in the page head, not in the list's tools: a scope list for a testing company, made by the server (not the CSV of the current filter beside it).
+    // With a host selected (#id in the address) it reads "Export host" and downloads that host's whole record as a ZIP; showHost repaints it.
     const pageHead = document.querySelector(".page-head");
+    const exportBtn = pageHead ? hostExportButton({ slug, all: ALL, hostOf: (id) => byId.get(id) }) : null;
     if (pageHead) {
       pageHead.querySelectorAll(".head-action").forEach((n) => n.remove());
-      pageHead.append(hostExportButton({ slug, all: ALL }));
+      pageHead.append(exportBtn);
     }
     metaTools.append(fresh.node, galleryBtn, ...(ALL ? [] : [inventoryBtn]), csv, bulk.toggle);
     metaRow.append(countLine, metaTools);
@@ -3788,6 +3790,7 @@ const pages = {
     }
     function showHost(h) {
       current = h && h.id;
+      if (exportBtn) exportBtn.sync(); // the page-head button follows the address: Export host with #id, Export all hosts without
       rows.querySelectorAll(".host-row").forEach((r) =>
         r.classList.toggle("sel", Number(r.dataset.id) === current),
       );
@@ -4305,6 +4308,19 @@ const pages = {
         }
       },
     });
+    // a hash typed or followed (a link to #id, back and forward between them) opens that host, and an address without one goes back to the list
+    const followHash = () => {
+      if (!split.isConnected) {
+        window.removeEventListener("hashchange", followHash);
+        return;
+      }
+      const id = Number(location.hash.slice(1));
+      if (id && byId.has(id)) {
+        if (current !== id) showHost(byId.get(id));
+      } else if (!location.hash && current != null) showHost(null);
+      else if (exportBtn) exportBtn.sync();
+    };
+    window.addEventListener("hashchange", followHash);
     showHost(null);
     applyGallery();
     list.start();

@@ -14,6 +14,7 @@ from django.core.exceptions import RequestDataTooBig
 from agentapi import db_timeout, mcp_log, storage_safe
 from agentapi import agent_broker as broker
 from agentapi import host_export
+from agentapi import host_export_one
 from agentapi import host_manage as hosts
 from agentapi import report_subscriptions as subscriptions
 from agentapi import saved_search as saved
@@ -249,6 +250,9 @@ TOOLS = [
      _schema({'project': SLUG, 'org': {'type': 'string', 'description': 'Organization slug: every project of it you can access (give project or org, not both)'},
               'format': {'type': 'string', 'enum': ['csv', 'txt']}, 'scope': {'type': 'string', 'enum': ['external', 'all']}, 'archived': {'type': 'boolean'}}),
      lambda c, a: host_export.tool(c, a), False),
+    ('export_host', 'Everything cvENGINE knows about one host, as the JSON text of host.json (schema cvengine.host-export/1): names, aliases, addresses, hosting, state, first and last seen, labels, heat and score with reasons, services and ports with versions and banners, web routes, technologies and certificates, every finding (CVE matches with explanation and triage, scanner and hygiene findings) with status, heat, severity, assignment, retest state and comment count, exposed secrets as masked values only, the full change history, the host inventory report, probes and check coverage, the scans that saw it, the latest assessment and AI review, and the screenshots manifest. host_id is the id search_hosts returns. No images here: GET projects/{slug}/hosts/{host_id}/export downloads the ZIP with screenshots/ and the CSV files. Returns {filename, schema, bytes, screenshots, screenshots_note, content}; a record over 3 MiB is a 413 that points at the download. Read only; written to the audit log.',
+     _schema({'project': SLUG, 'host_id': {'type': 'integer', 'description': 'The host id (search_hosts results[].id)'}}, ['project', 'host_id']),
+     lambda c, a: host_export_one.tool(c, a), False),
     ('list_saved_searches', 'Your saved searches in a project (private to you): query, alert settings, last run, last match count and status, plus the limits and which notification channels are on.',
      _schema({'project': SLUG}, ['project']), lambda c, a: saved.list_saved_searches(c, a.get('project')), False),
     ('create_saved_search', 'Save a host search (the search_hosts syntax) and optionally be alerted. It is evaluated on its frequency (default daily) with your own access. The first evaluation only records the hosts that match now; later ones alert, in one message per search per evaluation, on new matches (alert_new), on hosts that stopped matching (alert_gone) and when the count reaches a threshold. The query is validated like a live search. Limits: 25 per user, 100 per project.',
@@ -919,7 +923,7 @@ def _without_waiting(message):
 # so twenty in one request were twenty of them back to back on one web thread (database review, MCP batch guard).
 HEAVY_TOOLS = frozenset(('search_hosts', 'list_hosts', 'list_situations', 'technology_coverage',
                          'list_findings', 'list_cve_matches', 'list_vulnerabilities', 'list_hygiene_findings', 'list_scan_vulnerabilities',
-                         'list_triage', 'list_activity', 'get_system_status', 'export_hosts', 'get_saved_search_matches'))
+                         'list_triage', 'list_activity', 'get_system_status', 'export_hosts', 'export_host', 'get_saved_search_matches'))
 
 
 def _heavy_call(message):

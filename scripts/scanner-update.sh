@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# The "Scanner update": bring the built-in scanner to the newest published Sentinel image, safely, without touching the server.
+# The "Scanner update": bring the built-in scanner to the Sentinel image this release pins, safely, without touching the server.
 #   scripts/scanner-update.sh
-# It pulls the moving tag scanner.lock.json names (ghcr.io/hevnsnt/cvengine-sentinel:main), and only when that is not the image already running it lets
+# It pulls the digest scanner.lock.json pins (never a moving tag: a newer Sentinel arrives with an update that moved the pin, docs/UPDATES.md), and only
+# when that is not the image already running it lets
 # the scanner finish its tasks, starts the new container and waits until it is healthy AND has checked in with a contract version this server accepts.
 # Otherwise it puts the previous image back and says why (the log, and the Sentinels page). A failed pull keeps the running scanner. Nothing is stopped
-# or changed when the scanner already runs the newest image. A scanner held with CVENGINE_SCANNER_IMAGE in .env (a digest or a tag) is left alone.
+# or changed when the scanner already runs the pinned image. A scanner held with CVENGINE_SCANNER_IMAGE in .env (a digest or a tag) is left alone.
 #
 # For a host that does not use the updater, run it from cron (or a timer) in the checkout, for example daily:
 #   17 4 * * *  cd /opt/cvengine && scripts/scanner-update.sh >> /var/log/cvengine-scanner-update.log 2>&1

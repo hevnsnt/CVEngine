@@ -190,12 +190,6 @@ def canonical_names(names, scan=None):
     return found
 
 
-def canonical_name(name):
-    """The name a hostname's CNAME chain ends at ('' when it is not an alias or nothing answered), through ``canonical_names``."""
-    key = _host(name)
-    return canonical_names([key]).get(key, "") if key else ""
-
-
 def shared_by_address(addresses, lookup=None):
     """``{address: classification}`` for the addresses that belong to a shared platform: some name recorded on the address has a
     platform CNAME, Server header or CDN flag. A name with no recorded CNAME is resolved once (cached, at most MAX_LOOKUPS names

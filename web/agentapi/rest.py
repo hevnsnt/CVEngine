@@ -14,6 +14,7 @@ from agentapi import agent_broker as broker
 from agentapi import db_timeout, storage_safe
 from agentapi import host_manage as hosts
 from agentapi import host_export
+from agentapi import host_export_one
 from agentapi import host_review_api as hostreview
 from agentapi import report_subscriptions as subscriptions
 from agentapi import saved_search as saved
@@ -296,6 +297,8 @@ ROUTES = [
      lambda r, c, slug, host_id, **k: (svc.request_host_screenshot(c, slug, host_id), 202)),
     ('GET', r'projects/(?P<slug>[-\w]+)/hosts/(?P<host_id>\d+)/screenshots', 'The browser captures of one host: each page\'s outcome, reason, final URL, status and title, and what is queued',
      lambda r, c, slug, host_id, **k: svc.host_screenshots(c, slug, host_id)),
+    ('GET', r'projects/(?P<slug>[-\w]+)/hosts/(?P<host_id>\d+)/export', 'Export one host: a ZIP (host-<name>-<date>.zip, streamed) with host.json (the complete record: identity, services, web data, every finding with its triage, assignment and retest state, masked secrets, the full change history, inventory, probes and check coverage, the scans that saw it, screenshots manifest; versioned by its schema field), findings.csv, services.csv, history.csv, certificates.csv, inventory.csv, README.txt and screenshots/ (at most 60 images and 64 MB). Any role that can read the project; a host of another project is a 404. Never a secret value. Written to the audit log',
+     lambda r, c, slug, host_id, **k: host_export_one.response(c, slug, host_id)),
     ('POST', r'projects/(?P<slug>[-\w]+)/hosts/(?P<host>[^/]+)/profile', 'Set a host\'s asset information: body {owner, purpose, criticality: unknown|low|medium|high|critical, alias (a short display name, up to 60 characters, one line), note (free text, up to 1000 characters)}, any subset; an empty alias or note clears it',
      lambda r, c, slug, host, **k: hosts.update_host_profile(c, slug, host, owner=_body(r).get('owner'), purpose=_body(r).get('purpose'),
                                                              criticality=_body(r).get('criticality'), alias=_body(r).get('alias'), note=_body(r).get('note'))),

@@ -51,8 +51,13 @@ class EnsureTests(BuiltinBase):
         self.assertFalse(os.path.exists(builtin.blob_path()))
 
     def test_it_writes_one_private_instance_wide_blob_owned_by_the_app_admin(self):
-        out = builtin.ensure()
+        # A writer that can give the file to the scanner's account keeps it 0600. Whether the real chown works depends on who runs the tests (root in
+        # the test image, an ordinary user on CI), so it is recorded here; the fallback for a writer that cannot (0644) is tested in
+        # tests/test_image_user.py HostDirTests.
+        with mock.patch('os.chown') as chown:
+            out = builtin.ensure()
         self.assertEqual(out['state'], 'blob_written')
+        self.assertEqual(chown.call_args.args[1:], (builtin.scanner_uid(), builtin.scanner_uid()))
         self.assertEqual(oct(os.stat(builtin.blob_path()).st_mode & 0o777), '0o600')
         payload = self.blob()
         self.assertEqual(payload['scope'], 'instance')

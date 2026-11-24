@@ -208,7 +208,6 @@ def timezone_now():
 def get_host_review(ctx, slug, host_id):
     """The newest AI review of one host with its verdicts and next step; ``review`` is null while the host has never been reviewed. ``mode`` is the
     project's host review mode, ``readiness`` whether "Review now" would be accepted and, if not, why."""
-    from cveFeed import host_review
     project, sub, host = _host_row(ctx, slug, host_id)
     row = _newest(project, host)
     facts = _HostFacts(project, host)  # the mode, open rows and unchanged review are read once for the whole answer

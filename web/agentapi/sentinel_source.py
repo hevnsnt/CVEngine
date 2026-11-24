@@ -1,8 +1,7 @@
 """Which Sentinel commit this server's scanner library (and so the result contract it reads) comes from.
 
-The image installs ``cvengine-scanner`` from the Sentinel repository at build time: ``web/requirements.txt`` names the known-good floor commit that CI and a
-plain ``pip install`` use, and the Dockerfile's ``SENTINEL_REF`` build argument (default ``main``, resolved to a commit sha when the image is built) installs the
-newest build over it. pip records the commit it installed in the package's ``direct_url.json`` whichever way it was installed, so this reads the answer from
+The image installs ``cvengine-scanner`` from the Sentinel repository at build time, at exactly the commit ``web/requirements.txt`` pins (the one CI and a plain
+``pip install`` use too, and the one scanner.lock.json pins the built-in scanner's image from); nothing is resolved from a branch. pip records the commit it installed in the package's ``direct_url.json`` whichever way it was installed, so this reads the answer from
 the install itself: no label or file that could disagree with what is really there. The About page and the Sentinels page say ``contract read from Sentinel <sha>``.
 """
 import json

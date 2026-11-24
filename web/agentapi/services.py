@@ -1203,12 +1203,6 @@ BULK_MAX_PROJECTS = 50
 BULK_MAX_EXCLUSIONS = 100  # ``-domain`` lines one Add targets paste may carry; each one purges a whole domain tree organization-wide
 
 
-def has_org_headers(text):
-    """True when the paste uses group headers: a ``##Org`` line or any ``#Name`` line (``# a comment`` with a space
-    after the hash is a comment, not a header)."""
-    return any(re.match(r'^\s*#\S', line) for line in (text or '').splitlines())
-
-
 def parse_org_text(text, default_project=None, max_entries=None, max_projects=None):
     """Parse the grouped bulk format: an optional ``##Organization``, ``#Project`` to open a project, and the targets
     (any separator parse_target_list takes) under it. Returns (org_name or None, [(project, [targets])], errors).

@@ -49,9 +49,11 @@ class RollupTests(FallbackTestCase):
 		self.assertEqual(sorted(CtLookupDay.objects.values_list('day', flat=True)), [today - timedelta(days=2), today])
 
 	def test_a_monitoring_write_never_fails_the_lookup(self):
+		self.addCleanup(ct_health._pending.clear)
 		with mock.patch('cveFeed.models.CtLookupDay.objects') as rows:
 			rows.filter.side_effect = RuntimeError('database gone')
 			ct_health.record('crt.sh', 'ok')  # no exception
+		self.assertEqual(sum(entry['ok'] for entry in ct_health._pending.values()), 1)  # kept for the next write
 
 
 class SummaryLineTests(TestCase):

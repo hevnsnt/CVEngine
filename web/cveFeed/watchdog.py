@@ -847,7 +847,8 @@ def prune_events(now):
 
 def _home():
     """The directory the web container shares with the host (``web/`` on the host): where every request file lives."""
-    return getattr(settings, 'BASE_DIR', '') or ''
+    from cveFeed.updater import host_dir
+    return host_dir() or ''
 
 
 def request_host_action(action, rule, now=None, home=None):

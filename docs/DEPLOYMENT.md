@@ -76,13 +76,15 @@ Three `.env` values help find the statements that cost the database the most. Al
 
 To turn them off, remove the lines from `.env` (or set `off` and `-1`) and run `docker compose up -d db` again. `pg_stat_statements` costs little and may stay loaded.
 
+Two more diagnostics are on by default, because the evidence they keep is needed after the fact: `POSTGRES_LOG_LOCK_WAITS` (`log_lock_waits`: a statement that waits longer than a second for a lock is logged with the process that holds it; `docker compose logs db | grep 'still waiting'`) and `POSTGRES_TRACK_WAL_IO_TIMING` (`track_wal_io_timing`: the time spent writing and flushing the write-ahead log, in `pg_stat_io` where `object = 'wal'`). Together they tell a slow single row `UPDATE` that waited on another transaction's lock from one that waited on its commit's flush to a busy disk. The host review says whether they are on ([CONFIGURATION.md](CONFIGURATION.md)).
+
 ## Ports
 
 | Port | Bound to | Service |
 | --- | --- | --- |
 | 443 | all interfaces | `proxy`, the HTTPS front door |
 | 8082 | all interfaces | `proxy`, redirects to HTTPS |
-| 8000 | `127.0.0.1` | `web`, for your own reverse proxy |
+| 8000 | not published | `web`. Opt in on `127.0.0.1` with `docker-compose.webport.yml` (your own reverse proxy) or `docker-compose.hostnet.yml` (which publishes it for the scanner) |
 | 5432 | `127.0.0.1` | `db` |
 
 Firewall 443 and 8082 to the people who need them. The development stack has no proxy and publishes 8000 and 5432 on `127.0.0.1` only. The optional `tailscale` and `openvas` profiles publish no ports at all.
@@ -186,9 +188,35 @@ An install made before this release holds a 10-year server certificate: it is re
 
 For a public site with a browser-trusted certificate (Let's Encrypt, Cloudflare), follow [HOSTING-ONLINE.md](HOSTING-ONLINE.md). For a server with no inbound port, published through a Cloudflare Tunnel, see [Through a Cloudflare Tunnel](HOSTING-ONLINE.md#c-through-a-cloudflare-tunnel-no-inbound-port): the tunnel needs the bundled proxy told to believe it (`config/nginx/trusted-upstreams.conf`), which is the one thing that differs from the proxy of your own below.
 
-To use your own proxy or CDN, point it at the web service (`127.0.0.1:8000` on the host) and have it set `X-Forwarded-Proto` and `X-Forwarded-For`, replacing any values from the client. Then add `CVENGINE_CSRF_TRUSTED_ORIGINS` (your https address) to `.env` and run `make up`.
+**Client addresses.** The IP allowlist, the abuse guard, the sign-in lockout and the audit log need the real client address. The web service reads it from `X-Forwarded-For`, but only when the peer connecting to it is listed in `CVENGINE_TRUSTED_PROXIES`, and by default that is the bundled proxy alone: the proxy has a fixed address (`172.16.238.10`, `CVENGINE_PROXY_ADDRESS`) on `proxy_network`, a network only it and `web` are on, and it reaches `web` there and nowhere else. The built-in scanner, the AI reviewer and anything on the host reach `web` from other addresses, so the header they send is ignored and they cannot choose the address the server records or bans. The bundled proxy in turn replaces any `X-Forwarded-For` it receives with the address that connected to it, except in two cases, where it passes the chain on unchanged (the application takes its right-most address):
 
-**Client addresses.** The IP allowlist and the abuse guard need the real client address. CVEngine reads it from `X-Forwarded-For`, but only when the peer connecting to the web container is listed in `CVENGINE_TRUSTED_PROXIES`. That setting names the addresses the web container sees *connecting to it*, not your proxy's public or LAN address. A proxy on the Docker host reaches the container through the Docker bridge gateway, which the default `172.16.0.0/12` already covers, so for a proxy on the same host you set nothing. Do not replace the default with your proxy's own network: the gateway is then untrusted, `X-Forwarded-For` is ignored, and every request appears to come from the gateway. If you need to trust more, add to the default (`172.16.0.0/12,203.0.113.0/24`): the address the container sees if your proxy does not arrive through the bridge, and the networks of any further hops (a CDN edge) that append to `X-Forwarded-For` instead of replacing it. Your outermost proxy must overwrite any `X-Forwarded-For` the client sent. The bundled proxy does the same to what it receives, unless the request arrived on the tunnel listener (container port 8443, not published by default) from a peer listed in the file mounted at `/etc/nginx/trusted-upstreams.conf` (empty by default): then it keeps the chain and appends the peer. Port 443 never does.
+- the request came in on the tunnel listener (container port 8443, not published by default) from a peer listed in the file mounted at `/etc/nginx/trusted-upstreams.conf` (empty by default; [Through a Cloudflare Tunnel](HOSTING-ONLINE.md#c-through-a-cloudflare-tunnel-no-inbound-port));
+- the request came in on port 443 with this install's upstream secret in `X-CVEngine-Upstream` ([Client addresses behind a host proxy](#client-addresses-behind-a-host-proxy)). The proxy removes that header before the request reaches the application.
+
+Port 443 never believes the peer alone: Docker's port publishing shows an outside client (every IPv6 client, for one) to the proxy as the same gateway address a host nginx has. Run `scripts/client-address-check.sh` to see which address the server takes for a request through your public name; every update runs it and writes the answer to its log.
+
+### Client addresses behind a host proxy
+
+When a web server on the host terminates TLS and forwards to the bundled proxy (for example Cloudflare, then the host's nginx, then `127.0.0.1:18443`, which a Compose overlay publishes for the proxy's port 443), the proxy sees the Docker gateway connect, so without this step every visitor is one address: five wrong passwords from anyone lock the account out for everyone, and a ban or the IP allowlist acts on everybody at once.
+
+1. The install has a secret: `CVENGINE_UPSTREAM_SECRET` in `.env` (and in the Compose env file, such as `.env.vps`). `make up`, the installer and every update generate it when it is missing, and recreate the proxy, which loads it.
+2. Print the lines for the host nginx with the secret filled in, into a file only root can read:
+
+   ```bash
+   (umask 077; scripts/client-address-check.sh --snippet | sudo tee /etc/nginx/snippets/cvengine-client-address.conf >/dev/null)
+   ```
+
+   The shipped file is `config/nginx/host-proxy-client-address.conf`. It holds exactly two lines, `proxy_set_header X-Forwarded-For $remote_addr;` (the address this nginx saw, replacing anything the client sent) and `proxy_set_header X-CVEngine-Upstream "<secret>";`.
+3. Include it in the `location` that holds the `proxy_pass` to the bundled proxy (`include snippets/cvengine-client-address.conf;`), next to the other `proxy_set_header` lines, and remove any other `X-Forwarded-For` line there. Behind Cloudflare, `$remote_addr` must already be the visitor: `real_ip_header CF-Connecting-IP;` and one `set_real_ip_from` line per Cloudflare range (https://www.cloudflare.com/ips/).
+4. `sudo nginx -t && sudo systemctl reload nginx`, then `scripts/client-address-check.sh`. `ok: a request through https://... arrived as <address>, the address Cloudflare saw` means it works; `PROBLEM` names what is still missing.
+
+Without the snippet, or with an empty secret, the proxy behaves as before (it believes no header on 443): nothing breaks, the addresses are just all the gateway. A new secret (remove the line from `.env` and update) must be put into the host snippet again. Anyone who holds the secret and can reach the proxy's port 443 directly can choose the address the server records, so keep the snippet root-only and the proxy's port on loopback where a host proxy fronts it.
+
+A Compose overlay for such a host (for example `docker-compose.vps.yml`) may move the proxy's published ports, but it must not: set `CVENGINE_TRUSTED_PROXIES` to a range, publish `web`'s port 8000 again (use `docker-compose.webport.yml` only for your own reverse proxy), replace the proxy's `networks` (its fixed address on `proxy_network`), its `environment` (`CVENGINE_UPSTREAM_SECRET`) or the `./config/nginx/templates` mount, or move `web`'s `rengine` alias off `proxy_network`. Each of these either lets other containers choose the client address again or stops the secret from loading (the check script reports the second).
+
+### Your own reverse proxy
+
+To use your own proxy in place of the bundled one, publish the web service with `docker-compose.webport.yml` (`127.0.0.1:8000`, `CVENGINE_WEB_HOST_PORT` moves it; add it to `CVENGINE_COMPOSE_FILES`), point the proxy at it, and have it set `X-Forwarded-Proto` and `X-Forwarded-For`, replacing any values from the client. The web container sees your proxy connect from a Docker gateway address (`docker compose exec web python3 manage.py client_address_probe trusted` prints what it trusts; your proxy's address is in the web container's logs, or `docker network inspect`), so add that one address to `CVENGINE_TRUSTED_PROXIES` beside the default (`CVENGINE_TRUSTED_PROXIES=172.16.238.10,<gateway>`). Anything else on the host that can reach `127.0.0.1:8000` can then choose its client address too. Then add `CVENGINE_CSRF_TRUSTED_ORIGINS` (your https address) to `.env` and run `make up`.
 
 Django sends an HSTS header with a one-hour lifetime by default and does not include subdomains or ask for preloading. Raise `CVENGINE_HSTS_SECONDS` only once your public TLS path is reliable.
 
@@ -279,7 +307,7 @@ A `SCANNER_MEM_LIMIT` you set, or any `CVENGINE_BUILTIN_SCANNER`, is never chang
 
 **Updating on a small host.** The same under-7-GB rule decides one more thing about the Update button: the cold build of the server image needs about 2 GB and the workers keep the memory they grew to, so on such a host the updater stops `celery` and the built-in `scanner` for the build and starts them again right after it (`web`, `db`, `redis` and `proxy` stay up; `CVENGINE_UPDATE_STOP_CELERY=0` turns it off). It also checks the disk first (about 14 GB free for the first update to 1.4; `CVENGINE_UPDATE_MIN_FREE_MB` replaces the figure) and closes scans that are stuck "running" with no worker instead of waiting for them. All three are automatic and need no terminal: [UPDATES.md](UPDATES.md#small-hosts-disk-memory-and-stuck-scans). If you update by hand with `scripts/update.sh`, none of them applies: check `df -h "$(docker info -f '{{.DockerRootDir}}')"`, and on a small host run `docker compose stop celery scanner` before `docker compose build` and `docker compose start celery scanner` after it.
 
-**The host review** runs before anything is stopped, on every way of updating (`scripts/host-review.py`, called by `cvengine_fit_review` in `scripts/host-fit.sh`): a leftover `DISCOVERY_CONCURRENCY` pin below 4 is removed, a database or web ceiling below what it needs on this host is raised, and the database's memory settings still at their small defaults are sized for the memory it can use ([Sizing the database](#sizing-the-database); the database then restarts once during the update), each with a backup and a line in the update log. See [UPGRADE.md](UPGRADE.md). Run it by hand with `python3 scripts/host-review.py` (report only) or `--apply`.
+**The host review** runs before anything is stopped, on every way of updating (`scripts/host-review.py`, called by `cvengine_fit_review` in `scripts/host-fit.sh`): a leftover `DISCOVERY_CONCURRENCY` pin below 4 is removed, a database or web ceiling below what it needs on this host is raised, and the database's memory settings still at their small defaults are sized for the memory it can use ([Sizing the database](#sizing-the-database); the database then restarts once during the update), each with a backup and a line in the update log. It also says whether the database logs lock waits and times its WAL writes (`log_lock_waits`, `track_wal_io_timing`), and warns when the compose files leave them off; it never changes them. See [UPGRADE.md](UPGRADE.md). Run it by hand with `python3 scripts/host-review.py` (report only) or `--apply`.
 
 **The budget check** runs at the end of every update, after the containers started. It adds up the memory limits of the project's running containers and compares the sum with the host: under 90 percent it prints one line, over it prints *Memory warning* with the sum, the largest container and the setting that lowers it (`CELERY_MEM_LIMIT`, `SCANNER_MEM_LIMIT`, `WEB_MEM_LIMIT`, `BEAT_MEM_LIMIT`, `REVIEWER_MEM_LIMIT`, `DB_MEM_LIMIT`). Limits are ceilings, so a sum over the host is a risk, not a failure, and the update does not fail on it. On a 4.5 GB host with the defaults the workers' 4 GB is the largest: lower `CELERY_MEM_LIMIT` (look at what the workers really use with `docker stats` first), or choose **Use my own Sentinels only** to free the scanner's.
 
@@ -341,6 +369,29 @@ The owner's password (`POSTGRES_PASSWORD`) is in one container only: the one-off
 
 An install that starts the stack with its own `docker compose up` gets the `migrate` service first through `depends_on`; when its check fails, `docker compose up` reports `service "migrate" didn't complete successfully` and `docker compose logs migrate` shows the `Fix:` line. An overlay must not list `POSTGRES_PASSWORD` under `web`, `celery` or `celery-beat`: Compose would merge it back in, and the updaters refuse such a layout. The database and Redis sit on `data_network` with `web`, `celery` and `celery-beat` only. PostgreSQL logs every connection and disconnection (`log_connections`, `log_disconnections`), and every container's Docker log rotates at 5 files of 50 MB (`CVENGINE_LOG_MAX_FILE`, `CVENGINE_LOG_MAX_SIZE`).
 
+## Who the containers run as
+
+| Service | User | Capabilities | `./web` | Static volume |
+| --- | --- | --- | --- | --- |
+| `web` | 10002 | none, `no-new-privileges` | at `/var/lib/cvengine/web`, writable (the update requests of Settings, Updates) | read-only |
+| `celery` | 10002 | none, `no-new-privileges` | at `/var/lib/cvengine/web`, writable (the watchdog's and the scanner's requests) | **writable** (`collectstatic`) |
+| `celery-beat` | 10002 | none, `no-new-privileges` | at `/var/lib/cvengine/web`, read-only (the Django secret) | not mounted; every volume read-only |
+| `migrate` (one-off) | 10002 | none, `no-new-privileges` | at `/var/lib/cvengine/web`, read-only (the Django secret) | not mounted |
+| `ownership` (one-off) | root | CHOWN, FOWNER, DAC_OVERRIDE only; no network | at `/var/lib/cvengine/web`, writable | writable (hands it over) |
+| `proxy` | the nginx image's | the image's | `static/cve/maintenance.html` and `config/nginx`, read-only | read-only |
+
+The application runs the copy of the source its image was built with (`/usr/src/app`, root's and read-only to uid 10002): nothing it can write is ever imported.
+uid 10002 owns only what it must write: its home (`/home/cvengine`: `~/.config` with the CVE seed folder, a volume, and `~/logs`, `CVENGINE_LOG_DIR`), the generated
+templates, the scan results (with group 101, the proxy's nginx group, mode 0750) and, in celery, the static files. The server listens on 8000 and runs no scan tool,
+so it needs no capability at all, not even `NET_BIND_SERVICE` or `NET_RAW`. The host's `web/` folder has group 10002 and mode `1775`: the containers create their
+update requests there, and the sticky bit keeps them from changing, renaming or removing anything they did not create (the source, `.version`, what the host
+writes). The image is built from an allow list of `web/` (`web/.dockerignore`), so a file the application creates there is never built into the next image.
+The one-off `ownership` service (`web/ownership.sh`) sets all of this up; every update and `make up` run it after the build and before the migrations, and it
+changes nothing the second time. File modes of the secret and the field key: [CONFIGURATION.md](CONFIGURATION.md#the-account-the-server-runs-as).
+
+A command you run in a container runs as uid 10002 too (`docker compose exec web ...`); add `-u 0` only for a one-off look as root. To run a management command
+that writes a file for you, write it below `/var/lib/cvengine/web` (that is `web/` on the host), as `make export-cve-seed` does.
+
 ## Backups
 
 Back up the database, `.env` and the secret file, but keep the keys apart from the dump. The dump holds the database only: scan result files (screenshots and raw output) live in the `scan_results` Docker volume, and the optional add-ons keep their state in volumes of their own (`tailscale_state` and the `openvas_*` volumes), so none of those are in it. `web/secret` also keys the hashes of the session table and the recovery codes, so a restore without it signs everyone out and breaks new recovery codes. Stored secrets are encrypted with `CVENGINE_FIELD_KEY` from `.env` (older values with a key derived from `web/secret`), so a restored database needs the same keys. A dump stored in the same archive, bucket or folder as those keys gives away every stored API key, webhook URL and two-step seed to anyone who can read that place, which is exactly what the encryption is there to prevent: put `.env` and `web/secret` in a password manager or another store with different access, and the database dumps wherever backups normally go. Keep every copy private (mode 0600).
@@ -386,7 +437,7 @@ docker compose exec -T db sh -c 'pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB
 
 | Target | What it does |
 | --- | --- |
-| `make up` | Creates `.env` if it is missing, clears a leftover maintenance flag, moves a PostgreSQL 12 database to 18 ([UPGRADE.md](UPGRADE.md)), records the installed commit, then builds and starts the core services, and fetches the newest published built-in scanner image and starts it on its own network, with the Tailscale sidecar in its namespace when that profile is on ([BUILTIN-SCANNER.md](BUILTIN-SCANNER.md)). |
+| `make up` | Creates `.env` if it is missing, clears a leftover maintenance flag, moves a PostgreSQL 12 database to 18 ([UPGRADE.md](UPGRADE.md)), records the installed commit, then builds the image, hands the application's files to its account (the one-off `ownership` service, [Who the containers run as](#who-the-containers-run-as)), runs the migrations and starts the core services, and fetches the built-in scanner image this release pins and starts it on its own network, with the Tailscale sidecar in its namespace when that profile is on ([BUILTIN-SCANNER.md](BUILTIN-SCANNER.md)). |
 | `make build` | Records the installed commit and builds the images. |
 | `make certs` | Creates the HTTPS certificate ([HTTPS](#https)). Refuses while the database or certificate password still says `change-me`. |
 | `make admin`, `make admin-password` | Create the admin account with a generated password, or reset that account's password and print a new one (in the one-off `migrate` service). |
@@ -400,7 +451,7 @@ docker compose exec -T db sh -c 'pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB
 | `make rotate-secrets` | Rotates the database passwords, the Redis password, the field key and the Django secret, then verifies the site; `ARGS=--dry-run` prints the plan ([CONFIGURATION.md](CONFIGURATION.md#rotating-secrets)). |
 | `make db-backup`, `make db-backup-schedule`, `make restore-check` | Dump the database now, dump it every night, or prove the newest dump restores ([Backups](#nightly-dump)). |
 | `make export-cve-seed` | Writes this instance's CVE catalog to `web/cve-seed.jsonl.gz` ([PIPELINE.md](PIPELINE.md#seeding-the-catalog)). |
-| `make scanner-update` | The Scanner update: pull the newest published scanner image, start it, keep it only once it has checked in with a contract version the server accepts, else put the previous image back ([BUILTIN-SCANNER.md](BUILTIN-SCANNER.md#keeping-it-current-the-scanner-update)). Run it from cron on a host without the updater timer. |
+| `make scanner-update` | The Scanner update: pull the scanner image this release pins (a no-op when it already runs), start it, keep it only once it has checked in with a contract version the server accepts, else put the previous image back ([BUILTIN-SCANNER.md](BUILTIN-SCANNER.md#keeping-it-current-the-scanner-update)). Run it from cron on a host without the updater timer. |
 | `make scanner-build`, `make scanner-logs` | Build the built-in scanner's image from the known-good floor commit `scanner.lock.json` names (the offline fallback when the published image cannot be pulled), or follow its log ([BUILTIN-SCANNER.md](BUILTIN-SCANNER.md)). |
 | `make inventory-sync` | Copies the host inventory reporter scripts to the copies the server hands out (a development task). |
 
@@ -429,7 +480,7 @@ docker compose -f docker-compose.dev.yml up -d db redis web celery celery-beat  
 docker compose -f docker-compose.dev.yml run --rm migrate python3 manage.py createsuperuser
 ```
 
-`make admin` only targets the production file, so use `createsuperuser` here.
+`make admin` only targets the production file, so use `createsuperuser` here. The development file mounts `./web` writable over the image's source (edit and reload) and therefore runs web, celery, celery-beat and migrate as root (`user: "0:0"`): the bind-mounted files belong to your account, not to uid 10002. It is for a development machine only; production runs as described in [Who the containers run as](#who-the-containers-run-as).
 
 ## The watchdog
 

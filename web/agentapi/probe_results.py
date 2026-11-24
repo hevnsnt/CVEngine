@@ -194,8 +194,8 @@ def clean_bucket_check(body):
 MAX_CERTS = 300
 MAX_MAIL = 101
 MAX_MAIL_FINDINGS = 200
-# The check families the email review raises (``hygiene.evaluate_*``, ``mailfail``). A Sentinel can report only these: a finding named like another
-# stage's (tls_*, ts_*, bkt_*, udp_*, src_*, cleartext_*) is dropped, so it can neither file nor resolve a row that belongs to that stage.
+# The check families the Sentinel's email review raises (SPF, DMARC, DKIM, CAA and the MailFail checks). A Sentinel can report only these:
+# a finding named like another stage's (tls_*, ts_*, bkt_*, udp_*, src_*, cleartext_*) is dropped, so it can neither file nor resolve a row that belongs to that stage.
 MAIL_CHECK_PREFIXES = ('spf_', 'dmarc_', 'dkim_', 'caa_', 'mx_', 'mta_sts_', 'smtp_tlsrpt_', 'dane_', 'dnssec_', 'bimi_', 'arc_', 'adsp_', 'mailchannels_')
 _CHECK_NAME = re.compile(r'[a-z0-9_]{1,64}')
 _HOST_NAME = re.compile(r'[A-Za-z0-9_.\-]{1,300}')

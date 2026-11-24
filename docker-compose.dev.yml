@@ -9,18 +9,21 @@ x-logging: &default-logging
 services:
   db:
     restart: always
-    image: "postgres:18-alpine"
+    image: "postgres:18-alpine@sha256:0115267ab5a509022df9319c77be365cef335adb71556c75f60f5360ee247e71"
     # Every worker task holds a database connection while it runs (gevent greenlets, no pooling), and the discovery worker alone may run up to 32
     # at once: PostgreSQL's default of 100 connections is too few. An update recreates this container once when this line changes (scripts/update.sh).
     # The memory settings default to what this file always used (work_mem 4MB and no preloaded library are PostgreSQL's own defaults); a bigger host
     # raises them in .env (docs/DEPLOYMENT.md, Sizing the database). POSTGRES_SHARED_PRELOAD_LIBRARIES=pg_stat_statements turns on query statistics.
     # POSTGRES_TRACK_IO_TIMING (off) and POSTGRES_LOG_MIN_DURATION_STATEMENT (-1, no slow query log) are diagnostics, PostgreSQL's own defaults when unset.
+    # Two diagnostics are on by default (POSTGRES_LOG_LOCK_WAITS, POSTGRES_TRACK_WAL_IO_TIMING; off turns either off): a statement that waits longer
+    # than deadlock_timeout (1s) for a lock is logged with the process that holds it, and the time spent writing and flushing WAL is counted (pg_stat_io).
     command: ["postgres", "-c", "max_connections=${POSTGRES_MAX_CONNECTIONS:-300}", "-c", "shared_buffers=${POSTGRES_SHARED_BUFFERS:-256MB}",
               "-c", "effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-768MB}", "-c", "maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM:-64MB}",
               "-c", "random_page_cost=${POSTGRES_RANDOM_PAGE_COST:-1.1}", "-c", "work_mem=${POSTGRES_WORK_MEM:-4MB}",
               "-c", "shared_preload_libraries=${POSTGRES_SHARED_PRELOAD_LIBRARIES:-}", "-c", "track_io_timing=${POSTGRES_TRACK_IO_TIMING:-off}",
               "-c", "log_min_duration_statement=${POSTGRES_LOG_MIN_DURATION_STATEMENT:--1}",
-              "-c", "log_connections=${POSTGRES_LOG_CONNECTIONS:-on}", "-c", "log_disconnections=${POSTGRES_LOG_DISCONNECTIONS:-on}"]
+              "-c", "log_connections=${POSTGRES_LOG_CONNECTIONS:-on}", "-c", "log_disconnections=${POSTGRES_LOG_DISCONNECTIONS:-on}",
+              "-c", "log_lock_waits=${POSTGRES_LOG_LOCK_WAITS:-on}", "-c", "track_wal_io_timing=${POSTGRES_TRACK_WAL_IO_TIMING:-on}"]
     environment:
       - POSTGRES_DB=${POSTGRES_DB}
       - POSTGRES_USER=${POSTGRES_USER}
@@ -37,7 +40,7 @@ services:
     logging: *default-logging
 
   redis:
-    image: "redis:alpine"
+    image: "redis:alpine@sha256:5af80107c1eeecb484a2269b80a26d12bfa6521787da4663bd9f19f60a163483"
     hostname: redis
     environment:
       - REDIS_PASSWORD=${REDIS_PASSWORD:-}
@@ -62,6 +65,10 @@ services:
       context: ./web
     image: cvengine/web:latest
     entrypoint: /usr/src/app/migrate-entrypoint.sh
+    # DEVELOPMENT ONLY: ./web is bind-mounted writable over the image's source (edit and reload), and those files belong to your account, not to the
+    # image's (uid 10002), so these containers run as root here. Production (docker-compose.yml) runs the image's own source as uid 10002 with no
+    # capabilities and mounts nothing of web/ over it (docs/DEPLOYMENT.md, "Who the containers run as").
+    user: "0:0"
     restart: "no"
     env_file:
       - path: .env
@@ -100,6 +107,10 @@ services:
     init: true  # tini as PID 1; the entrypoint turns SIGTERM into a warm worker shutdown and exits when a worker dies (see docker-compose.yml)
     stop_grace_period: 60s
     entrypoint: /usr/src/app/celery-entrypoint.sh
+    # DEVELOPMENT ONLY: ./web is bind-mounted writable over the image's source (edit and reload), and those files belong to your account, not to the
+    # image's (uid 10002), so these containers run as root here. Production (docker-compose.yml) runs the image's own source as uid 10002 with no
+    # capabilities and mounts nothing of web/ over it (docs/DEPLOYMENT.md, "Who the containers run as").
+    user: "0:0"
     healthcheck:  # all four workers answer and consume their queue (web/celery_healthcheck.py; the entrypoint exits when one is gone)
       test: ["CMD", "python3", "celery_healthcheck.py"]
       interval: 60s
@@ -111,7 +122,7 @@ services:
       - ./web:/usr/src/app
       - scan_results:/usr/src/scan_results
       - generated_templates:/root/cvengine-generated-templates  # validated AI-written templates survive an update
-      - tool_config:/root/.config
+      - tool_config:/home/cvengine/.config  # HOME of the image (web/Dockerfile)
       - db_owner_fallback:/var/lib/cvengine-db-owner:ro  # empty unless CVENGINE_DB_ALLOW_OWNER_FALLBACK=1 (the migrate service writes it)
     # every variable in .env reaches the container (the explicit entries below win, so the internal
     # settings compose sets on purpose, such as the broker URLs and DEBUG, cannot be overridden from .env)
@@ -154,6 +165,10 @@ services:
     restart: always
     build: ./web
     entrypoint: /usr/src/app/beat-entrypoint.sh
+    # DEVELOPMENT ONLY: ./web is bind-mounted writable over the image's source (edit and reload), and those files belong to your account, not to the
+    # image's (uid 10002), so these containers run as root here. Production (docker-compose.yml) runs the image's own source as uid 10002 with no
+    # capabilities and mounts nothing of web/ over it (docs/DEPLOYMENT.md, "Who the containers run as").
+    user: "0:0"
     command: celery -A reNgine beat -l INFO --scheduler cveFeed.scan_control:PauseAwareScheduler
     depends_on:
       migrate:  # the one-off owner service: migrations, the app role and its check; nothing starts when it fails
@@ -185,7 +200,7 @@ services:
       - ./web:/usr/src/app
       - scan_results:/usr/src/scan_results
       - generated_templates:/root/cvengine-generated-templates  # validated AI-written templates survive an update
-      - tool_config:/root/.config
+      - tool_config:/home/cvengine/.config  # HOME of the image (web/Dockerfile)
       - db_owner_fallback:/var/lib/cvengine-db-owner:ro  # empty unless CVENGINE_DB_ALLOW_OWNER_FALLBACK=1 (the migrate service writes it)
     networks:
       - rengine_network
@@ -199,6 +214,10 @@ services:
     build:
       context: ./web
     entrypoint: /usr/src/app/entrypoint.sh
+    # DEVELOPMENT ONLY: ./web is bind-mounted writable over the image's source (edit and reload), and those files belong to your account, not to the
+    # image's (uid 10002), so these containers run as root here. Production (docker-compose.yml) runs the image's own source as uid 10002 with no
+    # capabilities and mounts nothing of web/ over it (docs/DEPLOYMENT.md, "Who the containers run as").
+    user: "0:0"
     restart: always
     image: cvengine/web:latest
     # every variable in .env reaches the container (the explicit entries below win, so the internal
@@ -227,7 +246,7 @@ services:
       - ./web:/usr/src/app
       - scan_results:/usr/src/scan_results
       - generated_templates:/root/cvengine-generated-templates  # validated AI-written templates survive an update
-      - tool_config:/root/.config
+      - tool_config:/home/cvengine/.config  # HOME of the image (web/Dockerfile)
       - db_owner_fallback:/var/lib/cvengine-db-owner:ro  # empty unless CVENGINE_DB_ALLOW_OWNER_FALLBACK=1 (the migrate service writes it)
     ports:
       - "127.0.0.1:8000:8000"

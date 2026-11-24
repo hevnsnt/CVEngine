@@ -186,7 +186,6 @@ def pause(agent, kind, hours, reason, by='auto-tuning', now=None):
     """Withhold ``kind`` from ``agent`` for ``hours`` (held to ``PAUSE_MIN_HOURS``..``PAUSE_MAX_HOURS``). Refused (``PauseRefused``) for an unknown kind, when
     ``MAX_PAUSED_KINDS`` other kinds are paused already, or when this is the last live Sentinel that can run the kind (a pause must never leave the work nowhere to
     go). Returns the time the pause ends."""
-    from agentapi.models import Agent
     now = now or timezone.now()
     if kind not in SentinelTask.KINDS:
         raise PauseRefused(f'{kind} is not a task kind')

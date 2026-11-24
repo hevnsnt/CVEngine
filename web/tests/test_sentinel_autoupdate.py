@@ -364,12 +364,27 @@ class HeartbeatTests(Base):
         self.assertEqual((shown['code'], shown['running'], shown['newest']), ('requested', OLD, HEAD[:12]))
         self.assertTrue(shown['requested_at'])
 
-    def test_the_built_in_scanner_is_asked_through_the_host_watcher_not_the_heartbeat(self):
+    def test_the_built_in_scanner_is_never_asked_it_runs_the_pinned_image(self):
+        # scanner.lock.json pins the built-in scanner's image by digest: a newer Sentinel build reaches it with the next cvENGINE update, never
+        # through the host watcher (which would only pull the same pin, and the scanner would be flagged for not moving)
         agent = self.sentinel()
         self.refresh()
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(au, '_is_builtin', return_value=True), mock.patch.object(au, '_host_watcher_alive', return_value=True), \
                 mock.patch('cveFeed.updater._file', side_effect=lambda name: os.path.join(tmp, name)):
-            au.consider(agent, self.now)
+            found = au.consider(agent, self.now)
+            self.assertFalse(os.path.exists(os.path.join(tmp, au.HOST_REQUEST_FILE)))
+        self.assertEqual(found['code'], 'release_pinned')
+        self.assertEqual(found['target'], HEAD)
+        self.assertEqual(self.audits('sentinel.update_requested'), [])
+        agent.refresh_from_db()
+        self.assertIsNone(agent.update_requested_at)
+
+    def test_a_request_made_for_the_built_in_scanner_still_goes_through_the_host_watcher(self):
+        agent = self.sentinel()
+        self.refresh()
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(au, '_is_builtin', return_value=True), mock.patch.object(au, '_host_watcher_alive', return_value=True), \
+                mock.patch('cveFeed.updater._file', side_effect=lambda name: os.path.join(tmp, name)):
+            au.request_now(agent, HEAD, now=self.now)
             with open(os.path.join(tmp, au.HOST_REQUEST_FILE)) as handle:
                 wrote = json.loads(handle.read())
         self.assertEqual(wrote['target'], HEAD)
@@ -377,16 +392,6 @@ class HeartbeatTests(Base):
         self.assertIsNone(agent.update_requested_at)  # the built-in scanner's daemon is never told to update itself
         self.assertEqual(au.stored(agent)['host'], True)
         self.assertEqual(self.audits('sentinel.update_requested')[0].detail['how'], 'host watcher')
-
-    def test_without_a_listening_host_watcher_the_built_in_scanner_is_not_asked(self):
-        agent = self.sentinel()
-        self.refresh()
-        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(au, '_is_builtin', return_value=True), mock.patch.object(au, '_host_watcher_alive', return_value=False), \
-                mock.patch('cveFeed.updater._file', side_effect=lambda name: os.path.join(tmp, name)):
-            found = au.consider(agent, self.now)
-            self.assertFalse(os.path.exists(os.path.join(tmp, au.HOST_REQUEST_FILE)))
-        self.assertEqual(found['code'], 'host_watcher')
-        self.assertEqual(self.audits('sentinel.update_requested'), [])
 
 
 class PinnedTargetTests(Base):

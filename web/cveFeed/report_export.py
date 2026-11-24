@@ -24,7 +24,7 @@ from django.http import FileResponse
 from django.utils import timezone
 
 from agentapi import report_scope
-from agentapi.services import ALL_PROJECTS, ApiError, Ctx
+from agentapi.services import ALL_PROJECTS, ApiError
 from tenancy import scope as tenancy_scope
 
 logger = logging.getLogger(__name__)

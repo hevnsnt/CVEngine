@@ -1641,7 +1641,7 @@ class ComposeProfileTests(SimpleTestCase):
 
     def test_the_rest_of_the_stack_is_unchanged_without_the_profile(self):
         services = self.compose['services']
-        self.assertEqual({n for n, s in services.items() if 'profiles' not in s}, {'db', 'redis', 'migrate', 'celery', 'celery-beat', 'web', 'proxy', 'reviewer', 'scanner'})  # the AI reviewer and the built-in scanner are part of the default stack; migrate is the one-off owner service web, celery and celery-beat wait for
+        self.assertEqual({n for n, s in services.items() if 'profiles' not in s}, {'db', 'redis', 'migrate', 'celery', 'celery-beat', 'web', 'proxy', 'reviewer', 'scanner', 'ownership'})  # the AI reviewer and the built-in scanner are part of the default stack; migrate is the one-off owner service web, celery and celery-beat wait for; ownership is the one-off service that hands the volumes to uid 10002 before migrate runs
         for name in ('celery', 'web'):
             self.assertNotIn('cap_add', services[name])
             self.assertNotIn('network_mode', services[name])

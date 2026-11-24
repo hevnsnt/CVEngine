@@ -303,6 +303,8 @@ if (( ! keep_secret )); then
     else
         (umask 077; printf '%s\n' "$new_secret" > web/secret.rotating)
         chmod 600 web/secret.rotating
+        # the application reads it as its own account (uid 10002, docs/DEPLOYMENT.md): the new file must be that account's, as the old one was
+        chown --reference=web/secret web/secret.rotating 2>/dev/null || chown 10002:10002 web/secret.rotating 2>/dev/null || true
         mv -f -- web/secret.rotating web/secret
     fi
 fi
