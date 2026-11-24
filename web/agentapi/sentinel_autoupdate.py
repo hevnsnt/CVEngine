@@ -54,6 +54,7 @@ TEXT = {
     'busy': 'A long task is running; cvENGINE asks again when it is done',
     'rate_limited': 'Asked recently; the next request is not due yet',
     'host_watcher': 'The host updater of this server is not reporting, so the built-in scanner cannot be asked to update',
+    'release_pinned': 'The built-in scanner runs the image this cvENGINE release pins; a newer one arrives with the next cvENGINE update',
     'requested': 'Update requested',
     'flagged': 'Did not come back on a newer version',
     'request': 'An update will be requested at this Sentinel\'s next check-in',
@@ -159,6 +160,10 @@ def decide(agent, now=None, verdict=None, keep=None, instance_update=None, check
     status = verdict.get('status')
     if status == 'current':
         return out('none', 'current')
+    if status == 'behind' and _is_builtin(agent):
+        # the install's own scanner runs exactly the digest scanner.lock.json pins (docs/UPDATES.md, "Pinned images"): the host never pulls a newer
+        # build, so asking would only flag it later for not moving. It moves when an update of this server brings a moved pin.
+        return out('none', 'release_pinned', target=verdict.get('latest_full'))
     if status != 'behind':
         return out('none', 'unknown', text=verdict.get('detail') or TEXT['unknown'])
     target = verdict.get('latest_full')

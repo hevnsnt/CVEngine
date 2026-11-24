@@ -13,7 +13,6 @@ import os
 import re
 import time
 
-from django.conf import settings
 
 PLANS = ('internal', 'both', 'external')
 SMALL_HOST_KB = 7000000  # the same threshold as scripts/host-fit.sh and install.sh: under it the built-in scanner gets 1g, not the 3g default
@@ -30,7 +29,8 @@ class PlanError(Exception):
 
 
 def _file(name):
-    return os.path.join(settings.BASE_DIR, name)
+    from cveFeed.updater import host_dir
+    return os.path.join(host_dir(), name)
 
 
 def host_memory_mb():

@@ -5,7 +5,6 @@
 
 # This for future release of Compose that will use Docker Buildkit, which is much efficient.
 COMPOSE_PREFIX_CMD := COMPOSE_DOCKER_CLI_BUILD=1
-SENTINEL_BUILD_ENV = SENTINEL_SHA=$$(./scripts/sentinel-ref.sh)# the newest Sentinel library, resolved when an image is built (docs/UPDATES.md)
 
 COMPOSE_ALL_FILES := -f docker-compose.yml
 SERVICES          := db web proxy redis celery celery-beat reviewer
@@ -44,10 +43,15 @@ up: check-env		## Build and start all services.
 	@# output shows: the migrations, then the app role's grants and login check, which stops make up with the one-line fix when the role cannot be
 	@# used (CVENGINE_DB_ALLOW_OWNER_FALLBACK=1 in .env is the explicit way to run on the owner role instead).
 	@bash -c '. scripts/db-app-role.sh && cvengine_owner_password_check ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES}'
-	${SENTINEL_BUILD_ENV} ${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} build web
+	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} build web
+	@# The application runs as its own account (uid 10002): the one-off ownership service hands it the paths it writes (the volumes, the Django
+	@# secret, its update requests in web/) before the migrate service and the application start; it prints one line and changes nothing the
+	@# second time (scripts/app-ownership.sh, web/ownership.sh). It runs again right before the application is recreated below.
+	@bash -c '. scripts/app-ownership.sh && cvengine_app_ownership ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES}'
 	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} up -d db redis
 	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} run --rm -e CVENGINE_DB_ALLOW_OWNER_FALLBACK=$$(bash -c '. scripts/db-app-role.sh && cvengine_db_owner_fallback "$(CVENGINE_COMPOSE_ENV_FILE)"') migrate
-	${SENTINEL_BUILD_ENV} ${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} up -d --build --no-deps ${SERVICES}
+	@bash -c '. scripts/app-ownership.sh && cvengine_app_ownership ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES}'
+	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} up -d --build --no-deps ${SERVICES}
 	@# the old in-stack OpenVAS containers (no longer in docker-compose.yml) are stopped and removed; their volumes are kept
 	@bash -c '. scripts/retire-openvas.sh && cvengine_retire_openvas'
 	@# The built-in scanner (docs/BUILTIN-SCANNER.md), on its own network: the newest published image is fetched and the scanner recreated, and the optional
@@ -57,7 +61,7 @@ up: check-env		## Build and start all services.
 
 build: check-env		## Build all services.
 	@python3 scripts/update-state.py commit "$$(git rev-parse HEAD)"
-	${SENTINEL_BUILD_ENV} ${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} build ${SERVICES}
+	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} build ${SERVICES}
 
 admin:		## Create the admin account; its password is generated and printed once (after make up).
 	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} run --rm --no-deps -T migrate python3 manage.py create_admin
@@ -66,7 +70,7 @@ admin-password:	## Lost the admin password? Generate a new one and print it once
 	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} run --rm --no-deps -T migrate python3 manage.py create_admin --reset
 
 export-cve-seed:	## Write this instance's whole CVE catalog to web/cve-seed.jsonl.gz (see docs/PIPELINE.md, Seeding the catalog).
-	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} exec -T web python3 manage.py export_cve_seed --out /usr/src/app/cve-seed.jsonl.gz
+	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} exec -T web python3 manage.py export_cve_seed --out /var/lib/cvengine/web/cve-seed.jsonl.gz
 
 redis-auth:	## Put a password on the Redis broker of an older installation (see docs/CONFIGURATION.md).
 	./scripts/enable-redis-auth.sh

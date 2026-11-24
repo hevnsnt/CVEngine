@@ -14,7 +14,7 @@ class ProxyImageTests(unittest.TestCase):
 		pull it up front and keep the image on the host when that fails."""
 		compose = yaml.safe_load((ROOT / 'docker-compose.yml').read_text())
 		proxy = compose['services']['proxy']
-		self.assertEqual(proxy['image'], 'nginx:alpine')
+		self.assertRegex(proxy['image'], r'^nginx:alpine@sha256:[0-9a-f]{64}$')  # pinned by digest (scripts/image_pins.py); a moved pin is pulled early
 		self.assertNotIn('pull_policy', proxy)
 		self.assertNotIn('proxy', yaml.safe_load((ROOT / 'docker-compose.dev.yml').read_text())['services'])
 		for script in ('update-deploy.sh', 'update.sh'):

@@ -36,7 +36,6 @@ class SbomTests(SimpleTestCase):
 			self.assertNotIn(gone, self.by_name)
 
 	def test_what_is_not_pinned_is_marked_as_such(self):
-		self.assertEqual(self.by_name['ubuntu']['properties'][0]['value'], 'false')
 		self.assertEqual(self.by_name['Pillow']['properties'][0]['value'], 'false')  # a version range in requirements.txt
 		self.assertNotIn('version', self.by_name['Pillow'])
 		self.assertEqual(self.by_name['Django']['purl'], f"pkg:pypi/django@{self.by_name['Django']['version']}")
@@ -66,7 +65,14 @@ class SbomTests(SimpleTestCase):
 		self.assertEqual(listed['example.test/a/b']['properties'][0]['value'], 'true')
 		self.assertEqual(listed['nginx']['properties'][0]['value'], 'false')
 		self.assertEqual(listed['example.test/c/x-data']['properties'][0]['value'], 'false')
-		self.assertIn('refreshed with every update', listed['nginx']['properties'][1]['value'])
+		self.assertIn('a moving tag', listed['nginx']['properties'][1]['value'])
+
+	def test_the_base_and_service_images_are_pinned_by_digest(self):
+		# security review S5: ubuntu (web/Dockerfile) and postgres, redis, nginx (docker-compose.yml) carry their digest, which the bill lists as the hash
+		images = {c['name']: c for c in self.doc['components'] if c['type'] == 'container'}  # by type: `redis` is a Python package too
+		for name in ('ubuntu', 'postgres', 'redis', 'nginx', 'ghcr.io/hevnsnt/cvengine-sentinel'):  # the last: the built-in scanner's pinned digest
+			self.assertEqual(images[name]['properties'][0]['value'], 'true', name)
+			self.assertRegex(images[name]['hashes'][0]['content'], r'^[0-9a-f]{64}$', name)
 
 	def test_the_same_commit_gives_the_same_document(self):
 		self.assertEqual(json.dumps(sbom.build(), sort_keys=True), json.dumps(self.doc, sort_keys=True))

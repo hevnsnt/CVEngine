@@ -49,10 +49,12 @@ def component(name, version, purl, kind='application', hashes=(), pinned=True, n
 
 def tools(dockerfile):
     out = []  # the server image builds and ships no scan tool and no template set: those are the Sentinel image's (cvENGINE-sentinel's own pins)
-    base = re.search(r'(?m)^FROM ([\w.-]+):([\w.-]+)', dockerfile)
-    if base:
-        out.append(component(base.group(1), base.group(2), f'pkg:docker/{base.group(1)}@{base.group(2)}', kind='container',
-                             pinned=False, note='a tag, not a digest: the operating system packages are those of the day the image was built'))
+    base = re.search(r'(?m)^FROM ([\w.-]+):([\w.-]+)(?:@sha256:([0-9a-f]{64}))?', dockerfile)
+    if base:  # pinned by digest (scripts/image_pins.py); the apt packages installed on top are still those of the day the image was built (apt_packages)
+        digest = base.group(3)
+        out.append(component(base.group(1), base.group(2), f'pkg:docker/{base.group(1)}@{base.group(2)}', kind='container', pinned=bool(digest),
+                             hashes=[digest] if digest else (),
+                             note=None if digest else 'a tag, not a digest: the operating system packages are those of the day the image was built'))
     python = arg(dockerfile, 'PYTHON_VERSION')
     if python:  # the interpreter is a pinned CPython build (python-build-standalone, installed by uv), not the base release's python3
         out.append(component('cpython', python, f'pkg:generic/cpython@{python}', url='https://github.com/astral-sh/python-build-standalone',
@@ -94,20 +96,20 @@ def python_packages(requirements):
 
 
 def image_note(name):
-    return 'a moving tag, by design: refreshed with every update' if name == 'nginx' else 'a moving tag'
+    return 'a moving tag, not pinned by digest (scripts/image_pins.py pins it)'
 
 
 def service_images(compose):
     out, seen = [], set()
     for image in re.findall(r'(?m)^\s*image:\s*"?([^"\s]+)"?\s*$', compose):
-        match = re.search(r'\$\{[A-Z_]+:-([^}]+)\}', image)
-        image = match.group(1) if match else image
+        while (match := re.fullmatch(r'\$\{[A-Z_]+:-(.+)\}', image)):  # the default of each variable, nested ones too (the scanner's)
+            image = match.group(1)
         if image in seen or image.startswith('cvengine/'):
             continue
         seen.add(image)
         image, _, digest = image.partition('@sha256:')  # a digest pin: the tag is a label, the digest is what runs
         name, _, tag = image.partition(':')
-        tag = tag or 'latest'
+        tag = tag or (f'sha256:{digest}' if digest else 'latest')  # a digest alone (the built-in scanner) is its own version
         exact = bool(re.fullmatch(r'v?\d+(\.\d+){2,}', tag))
         out.append(component(name, tag.lstrip('v') if exact else tag, f'pkg:docker/{name}@{tag}', kind='container', pinned=exact or bool(digest),
                              hashes=[digest] if digest else (),

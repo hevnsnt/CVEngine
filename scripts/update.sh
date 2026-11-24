@@ -507,25 +507,29 @@ fi
 # Do the expensive, fallible build while the old workers are still processing work.
 # Only then pause dispatch and perform a bounded drain before migration/recreation.
 step 'Building application images while everything keeps running'
-# The proxy image is a moving tag that is meant to move with every update (nginx's security releases). Fetch it now, while nothing is stopped:
+# The proxy image is pinned by digest (scripts/image_pins.py); a moved pin arrives with the commit. Fetch it now, while nothing is stopped:
 # an unreachable registry only keeps the image already on the host, where a pull inside `up` after the migration would fail the update.
 if grep -qx proxy < <("${compose[@]}" config --services 2>/dev/null); then
     "${compose[@]}" pull --quiet proxy || echo 'Could not pull the newest proxy image (offline, or the registry is limiting pulls); the one on this host is kept.' >&2
 fi
-# Redis and Postgres are moving tags inside one major version (redis:alpine, postgres:18-alpine). Fetched now too (the production stack only, as
-# for the proxy); recreated below only when moved.
+# Redis and Postgres are pinned by digest too (redis:alpine, postgres:18-alpine). Fetched now (the production stack only, as for the proxy);
+# recreated below only when their pin moved.
 if grep -qx proxy < <("${compose[@]}" config --services 2>/dev/null); then
     "${compose[@]}" pull --quiet db redis || echo 'Could not pull the newest Redis and Postgres images (offline, or the registry is limiting pulls); the ones on this host are kept.' >&2
 fi
-SENTINEL_SHA=$(scripts/sentinel-ref.sh 2>/dev/null) || SENTINEL_SHA=''  # the newest Sentinel library, resolved now: a moved main rebuilds that layer
-export SENTINEL_SHA
-"${compose[@]}" build web celery celery-beat
+"${compose[@]}" build web celery celery-beat  # the Sentinel library is the commit web/requirements.txt pins: nothing is resolved at build time
 # The AI reviewer has its own small image (docs/AI-REVIEWER.md); an install whose compose file has it builds it here too. A failed build
 # never fails the update: the reviewer is not needed for scanning, and the next update builds it again.
 if grep -qx reviewer < <("${compose[@]}" config --services 2>/dev/null); then
     "${compose[@]}" build reviewer || echo 'Could not build the AI reviewer image; scanning is not affected (the next update tries again).' >&2
 fi
 images_built=1
+# The application runs as its own account (uid 10002): the paths it writes are handed to it before anything of the new image runs, and again
+# right before the application is recreated (scripts/app-ownership.sh; idempotent, one line each time).
+if [[ -f scripts/app-ownership.sh ]]; then
+    . scripts/app-ownership.sh
+    cvengine_app_ownership "${compose[@]}"
+fi
 # Counted after the build, in the new image: the running containers read the new code on the old image (see celery_cli), so they cannot count.
 scans=$(web_python "$scan_count_code" | grep '^SCANS ' || true)
 if [[ -n $scans ]]; then
@@ -893,7 +897,7 @@ fi
 database_migrated=1
 # The proxy reads a shared static volume. Refresh it before the new web/JS is served.
 echo 'Publishing current static assets to the proxy volume...'
-"${compose[@]}" run --rm --no-deps --entrypoint python3 web manage.py collectstatic --noinput
+"${compose[@]}" run --rm --no-deps --entrypoint python3 celery manage.py collectstatic --noinput  # celery: the one service that writes it
 services=(web celery celery-beat)
 ready_url=http://127.0.0.1:8000/
 if grep -qx proxy < <("${compose[@]}" config --services); then
@@ -909,6 +913,7 @@ step "Recreating application processes: ${services[*]}"
 if [[ -f scripts/renew-certs.sh ]]; then
     scripts/renew-certs.sh --if-due --no-reload >/dev/null 2>&1 || echo 'The certificate check failed (see Settings > Updates); the update goes on.' >&2
 fi
+[[ ! -f scripts/app-ownership.sh ]] || cvengine_app_ownership "${compose[@]}"  # what the old containers, which ran as root, wrote since the first pass
 "${compose[@]}" up -d --no-deps --force-recreate "${services[@]}"
 app_recreated=1
 # The old in-stack OpenVAS containers, which docker-compose.yml no longer defines, are stopped and removed; their volumes are kept (scripts/retire-openvas.sh).

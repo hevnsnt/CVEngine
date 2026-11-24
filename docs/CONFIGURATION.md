@@ -249,10 +249,29 @@ Many hosting providers (Contabo, AWS, GCP, Azure, DigitalOcean, Hetzner and othe
 
 See [AGENT-API.md](AGENT-API.md#sentinels-scan-stage-agents) for the enrollment secret's 24-hour expiry (not configurable). The settings of a Sentinel itself (`CVENGINE_SENTINEL_BLOB`, `CVENGINE_SENTINEL_NETWORK`, and the rest) are in its own repository, not in this installation's `.env`.
 
+## The account the server runs as
+
+web, celery, celery-beat and the one-off migrate service run as uid 10002 (`cvengine`, group 10002, supplementary group 101) with every capability dropped
+and `no-new-privileges` ([DEPLOYMENT.md](DEPLOYMENT.md#who-the-containers-run-as)). What that means for the files you manage on the host:
+
+| File | Mode and owner | Why |
+|---|---|---|
+| `web/secret` (the Django `SECRET_KEY`) | `0600`, uid 10002 | The containers read it as that account. The ownership service creates it on a first start and hands an existing one over; `scripts/rotate-secrets.sh` keeps the owner when it writes a new one. A secret you copy in by hand needs `sudo chown 10002:10002 web/secret && sudo chmod 600 web/secret` (or `docker compose run --rm ownership`). `RENGINE_SECRET_KEY` in `.env` instead needs nothing. |
+| `CVENGINE_FIELD_KEY` | in `.env` | Reaches the containers as an environment variable, so file modes do not matter. |
+| `CVENGINE_FIELD_KEY_FILE` (a Docker secret or a mounted file) | readable by uid 10002 (`0400` owned by 10002, or `0440` with group 10002) | An unreadable file is logged (`the field key file ... cannot be read`) and the fields fall back to the key derived from `SECRET_KEY`. |
+| `web/` itself | group 10002, mode `1775` | The containers create their update requests there (`.update-approved` and the rest); the sticky bit keeps them from changing, renaming or removing any file they did not create. |
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `CVENGINE_HOST_DIR` | empty (the source folder) | Set by docker-compose.yml to `/var/lib/cvengine/web`: where the containers see the host's `web/` folder (the update channel and the secret), now that they run the image's own copy of the source. Not for `.env`. |
+| `CVENGINE_LOG_DIR` | `/home/cvengine/logs` in the image, else the working directory | Where `errors.log`, `db.log` and `celery.log` are written (inside the container; every line is in the container log too, `docker compose logs`). |
+| `CVENGINE_APP_UID`, `CVENGINE_APP_GID`, `CVENGINE_PROXY_GID` | `10002`, `10002`, `101` | Read by the ownership service (`web/ownership.sh`): the account and the proxy group it hands the paths to. They must match the image; change them only together with `web/Dockerfile`. |
+| `CVENGINE_OWNERSHIP_ROOT` | empty | Puts every path of the ownership service below another folder; for its tests only. |
+
 ## Built-in scanner
 
 The built-in scanner is a Sentinel that runs next to the server as the `scanner` compose service, is enrolled by it, and runs the scan tools
-([BUILTIN-SCANNER.md](BUILTIN-SCANNER.md)). It is on by default and needs nothing in `.env`; the image follows the newest published Sentinel (`ghcr.io/hevnsnt/cvengine-sentinel:main`; `scanner.lock.json` is the known-good floor, not a pin), and the updates and a daily Scanner update pull it, start it and roll it back on their own ([UPDATES.md](UPDATES.md#the-built-in-scanner)).
+([BUILTIN-SCANNER.md](BUILTIN-SCANNER.md)). It is on by default and needs nothing in `.env`; the image is the one this release pins by digest (`scanner.lock.json`; a newer Sentinel arrives with an update that moved the pin, [UPDATES.md](UPDATES.md#pinned-images)), and the updates pull it, start it and roll it back on their own ([UPDATES.md](UPDATES.md#the-built-in-scanner)).
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -260,16 +279,15 @@ The built-in scanner is a Sentinel that runs next to the server as the `scanner`
 | `CVENGINE_BUILTIN_FALLBACK_SECONDS` | `120` | How long a queued task waits for an external Sentinel before the built-in scanner (the path of last resort) may take it. While at least one live, eligible external Sentinel (kind, scope, host, not denied, not updating; slots not counted) could run the task, the built-in scanner leaves it alone; after this many seconds in the queue, or at once when no such external exists, it takes it. `0` takes work as soon as it asks (the behavior before this setting). Kinds only the built-in scanner runs (`path_probe`, `nuclei_validate`, `route_probe_signed`) and signed-in work are never held. It is cut to the stage's queue budget (`CVENGINE_SENTINEL_QUEUE_TIMEOUT`, 300 s) less one claim window and two seconds, so it never costs a stage its task. [SENTINELS.md](SENTINELS.md#the-built-in-scanner-is-the-last-resort) |
 | `CVENGINE_LOCAL_FALLBACK` | ignored | Ignored since 1.4: a kind never runs on this server (`sentinel_dispatch.NEVER_LOCAL` holds every kind), so there is nothing for it to allow. It used to name the kinds that may run here when no scanner took them (`all`, `none`, a comma list). With no scanner able to take the work a stage waits for one instead of failing ([how that reads](SCANNER-ARCHITECTURE.md#the-scanner-offline-reading)), and the hosts it waited for are queued again for when a scanner is back (`CVENGINE_SCANNER_REQUEUE_MINUTES`). Remove it from `.env`; a value set there changes nothing, and nothing warns about it. |
 | `CVENGINE_SCANNER_REQUEUE_MINUTES` | `10` | How long after a scan's stage waited for a scanner its hosts are tried again (a deferred re-test, held back for as long as a scanner is still missing). At least `1`. |
-| `CVENGINE_SCANNER_IMAGE` | unset | **To hold the scanner at one version, set this** (read by compose and the update scripts) to a digest (`ghcr.io/hevnsnt/cvengine-sentinel@sha256:...`) or a tag, or to `cvengine-sentinel-local:latest` after `make scanner-build`. An image set here is used as it is: never pulled over, never updated by the Scanner update, never rolled back. Unset, the scanner follows `ghcr.io/hevnsnt/cvengine-sentinel:main`, the newest published build. |
-| `CVENGINE_SCANNER_ROLLBACK_IMAGE` | unset | Written and removed by the update scripts, not by hand: `cvengine-sentinel-rollback:previous`, the image that ran before, kept while the newest image was not healthy and checked in after an update. The next update removes it and pulls the newest image again. |
+| `CVENGINE_SCANNER_IMAGE` | unset | **To run another scanner image than the pinned one, set this** (read by compose and the update scripts) to a digest (`ghcr.io/hevnsnt/cvengine-sentinel@sha256:...`) or a tag, or to `cvengine-sentinel-local:latest` after `make scanner-build`. An image set here is used as it is: never pulled over, never updated by the Scanner update, never rolled back. Unset, the scanner follows `ghcr.io/hevnsnt/cvengine-sentinel:main`, the newest published build. |
+| `CVENGINE_SCANNER_ROLLBACK_IMAGE` | unset | Written and removed by the update scripts, not by hand: `cvengine-sentinel-rollback:previous`, the image that ran before, kept while the new image was not healthy and checked in after an update. The next update removes it and pulls the pinned image again. |
 | `CVENGINE_SCANNER_EXTRA_CAP` | unset | Written and removed by `scripts/scanner.sh`, not by hand: `NET_ADMIN` for a built-in scanner image from before the reduced capability set (its nmap and naabu cannot start without it), so a held or rolled-back older image keeps scanning. Removed again when a newer image runs. See [BUILTIN-SCANNER.md](BUILTIN-SCANNER.md#capabilities). |
 | `CVENGINE_SCANNER_EXEC_WAIT` | `30` | Seconds the scanner scripts wait for a just-started scanner container to accept a command before they look at its capabilities. |
-| `CVENGINE_SCANNER_PULL_POLICY` | `missing` | Compose's `pull_policy` for the scanner. `missing` is on purpose: the scripts pull the newest image themselves and tolerate a registry that cannot be reached. `always` makes a plain `docker compose up` pull each time, and an outage then fails that `up` for the whole stack. |
+| `CVENGINE_SCANNER_PULL_POLICY` | `missing` | Compose's `pull_policy` for the scanner. `missing` is on purpose: the scripts pull the pinned image themselves and tolerate a registry that cannot be reached. `always` makes a plain `docker compose up` pull each time, and an outage then fails that `up` for the whole stack. |
 | `CVENGINE_SCANNER_READY_SECONDS` | `300` | How long an update waits for the new scanner image to be healthy and checked in with an accepted contract before it rolls back to the previous image. Read by the update scripts. |
 | `CVENGINE_SCANNER_DRAIN_SECONDS` | `900` | How long the Scanner update lets a running scanner finish its tasks before it gives up for this run (it tries again at the next). |
-| `CVENGINE_SCANNER_UPDATE_HOURS` | `24` | How often the updater timer (`scripts/auto-deploy.sh`) runs the Scanner update, whatever the update mode. `0` turns the schedule off (the updates still pull the newest image). |
+| `CVENGINE_SCANNER_UPDATE_HOURS` | `24` | How often the updater timer (`scripts/auto-deploy.sh`) runs the Scanner update, whatever the update mode. `0` turns the schedule off (the updates still pull the pinned image). |
 | `CVENGINE_SENTINEL_UPDATE_GRACE_MINUTES` | `90` | How long a Sentinel that was asked to update (Settings, Sentinels, Keep Sentinels on the newest version) has to report a new version before the Sentinels page flags it and the server stops asking, unless its updater keeps reporting progress on the request (then up to 12 hours). 5 to 1440. |
-| `SENTINEL_REF` | `main` | Read by compose and the build scripts: the Sentinel branch, tag or full commit whose library the server image installs (resolved to a commit at build time by `scripts/sentinel-ref.sh`). To hold a server on one Sentinel library, set a commit. See [UPDATES.md](UPDATES.md#the-sentinel-library-in-the-server-image). |
 | `SCANNER_MEM_LIMIT` | `3g` | Memory limit of the `scanner` container, read by compose. The installer writes `1g` on a host with less than about 7 GB of memory. The workers' own limit is `CELERY_MEM_LIMIT` ([DEPLOYMENT.md](DEPLOYMENT.md#memory)). |
 | `CVENGINE_WEB_HOST_PORT` | `8000` | Only with `docker-compose.hostnet.yml`: the loopback port the web service is published on, where the built-in scanner (on the host network) reaches the server. |
 

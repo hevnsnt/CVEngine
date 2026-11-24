@@ -177,21 +177,19 @@ deploy_steps() {
   phase applying "$DEPLOY_STAGE"
   cv_status step build
   check_disk || return 1
-  # The proxy image is a moving tag and is meant to move with every update (nginx's security releases). It is fetched here, before anything is
-  # stopped, and an unreachable registry only keeps the image already on the host: a pull that failed inside `up` after the migration (as
-  # `pull_policy: always` did) failed an update that was otherwise done, and an offline host could never update at all.
+  # The proxy image is pinned by digest (scripts/image_pins.py): a new nginx release arrives with the commit that moved the pin. It is fetched here,
+  # before anything is stopped, and an unreachable registry only keeps the image already on the host: a pull that failed inside `up` after the
+  # migration (as `pull_policy: always` did) failed an update that was otherwise done, and an offline host could never update at all.
   if grep -qx proxy <<<"$listed"; then
     "${compose[@]}" pull --quiet proxy || log "could not pull the newest proxy image (offline, or the registry is limiting pulls); the one on this host is kept"
   fi
-  # Redis and Postgres are moving tags too (redis:alpine, postgres:18-alpine: security and bug-fix releases inside one major version, never a
-  # new major). Fetched here with the proxy, before anything is stopped; the datastores step below recreates each one only when its image moved.
-  # Without this an install kept the Redis and Postgres it was installed with forever. A failed pull keeps the images on this host.
+  # Redis and Postgres are pinned by digest too (redis:alpine, postgres:18-alpine at the digest scripts/image_pins.py wrote). Fetched here with the
+  # proxy, before anything is stopped; the datastores step below recreates each one only when its pin moved. A failed pull keeps the images on this host.
   if grep -qx proxy <<<"$listed"; then  # the production stack, as for the proxy: the dev stack pulls nothing
     "${compose[@]}" pull --quiet db redis || log "could not pull the newest Redis and Postgres images (offline, or the registry is limiting pulls); the ones on this host are kept"
   fi
   build_free_memory
-  SENTINEL_SHA=$(scripts/sentinel-ref.sh 2>/dev/null) || SENTINEL_SHA=''  # the newest Sentinel library, resolved now (docs/UPDATES.md)
-  export SENTINEL_SHA
+  # the Sentinel library is the commit web/requirements.txt pins: nothing is resolved at build time (docs/UPDATES.md)
   if ! "${compose[@]}" build web celery celery-beat; then
     build_restore_memory
     DEPLOY_WHY="The new version could not be built (see the update log). Nothing was changed: the version that was running is still running."
@@ -204,6 +202,10 @@ deploy_steps() {
     "${compose[@]}" build reviewer || log "could not build the AI reviewer image; scanning is not affected (the next update tries again)"
   fi
   build_restore_memory
+  # The application runs as its own account (uid 10002) from this image on: the paths it writes (the volumes, the Django secret, its own update
+  # requests in web/) are handed to it before anything of the new image runs (the host-fit count below, the migrate service, the application).
+  # Idempotent: an install that has it already changes nothing (scripts/app-ownership.sh, web/ownership.sh).
+  app_ownership || return 1
   # Which scanners run, decided before anything is stopped and before the scanner's image is fetched (it removes the scanner when the answer is external)
   # (scripts/host-fit.sh, the rules scripts/update.sh and install.sh use too; after the build, because the count of Sentinels is read with the new image).
   # The answer the Update button's dialog collected comes with the approval (web/.update-sentinels, read without following a link); without one (the button
@@ -251,13 +253,16 @@ deploy_steps() {
   run_migrations || return 1
   DEPLOY_STAGE=migrated
   phase applying "$DEPLOY_STAGE"
-  "${compose[@]}" run --rm --no-deps --entrypoint python3 web manage.py collectstatic --noinput || return 1
+  # in celery, the one service that writes the static volume (web and the proxy mount it read-only)
+  "${compose[@]}" run --rm --no-deps --entrypoint python3 celery manage.py collectstatic --noinput || return 1
   # The web interface certificate is renewed here when its check is due, so the proxy recreated below starts with the new one (a host with
   # neither the update watcher nor cron has no other trigger). A failure is logged and never stops the update.
   if [ -f scripts/renew-certs.sh ]; then
     scripts/renew-certs.sh --if-due --no-reload >/dev/null 2>&1 || log "the certificate check failed (see the Settings > Updates page); the update goes on"
   fi
   cv_status step starting
+  # again, for what the old containers (which ran as root) wrote since the first pass; nothing to do on a second update
+  app_ownership || return 1
   "${compose[@]}" up -d --no-deps --force-recreate "${services[@]}" || return 1
   # The Tailscale sidecar (tailscale profile) is not recreated here: it runs in the built-in scanner's network namespace, not celery's, and is put
   # back into it when the scanner is started below (scripts/scanner.sh, cvengine_scanner_sidecar), including on an install that had it in celery's.
@@ -291,6 +296,20 @@ deploy_steps() {
   fi
   if declare -F cvengine_fit_budget >/dev/null; then cvengine_fit_budget "${compose[@]}" || true; fi
   prune_old_images
+}
+
+# The one-off ownership service (scripts/app-ownership.sh): one log line; a failure stops the deploy before the application is recreated.
+app_ownership() {
+  local out
+  [ -f scripts/app-ownership.sh ] || return 0
+  . scripts/app-ownership.sh
+  if out=$(cvengine_app_ownership "${COMPOSE[@]}"); then
+    log "$out"
+    return 0
+  fi
+  log "$out"
+  DEPLOY_WHY="The application's files could not be handed to its own account (docker compose run --rm ownership; see the update log)."
+  return 1
 }
 
 # `up -d` can leave a service created but not started (a published port that is already taken, for one): that is a failed update, not a done one.

@@ -341,6 +341,29 @@ The owner's password (`POSTGRES_PASSWORD`) is in one container only: the one-off
 
 An install that starts the stack with its own `docker compose up` gets the `migrate` service first through `depends_on`; when its check fails, `docker compose up` reports `service "migrate" didn't complete successfully` and `docker compose logs migrate` shows the `Fix:` line. An overlay must not list `POSTGRES_PASSWORD` under `web`, `celery` or `celery-beat`: Compose would merge it back in, and the updaters refuse such a layout. The database and Redis sit on `data_network` with `web`, `celery` and `celery-beat` only. PostgreSQL logs every connection and disconnection (`log_connections`, `log_disconnections`), and every container's Docker log rotates at 5 files of 50 MB (`CVENGINE_LOG_MAX_FILE`, `CVENGINE_LOG_MAX_SIZE`).
 
+## Who the containers run as
+
+| Service | User | Capabilities | `./web` | Static volume |
+| --- | --- | --- | --- | --- |
+| `web` | 10002 | none, `no-new-privileges` | at `/var/lib/cvengine/web`, writable (the update requests of Settings, Updates) | read-only |
+| `celery` | 10002 | none, `no-new-privileges` | at `/var/lib/cvengine/web`, writable (the watchdog's and the scanner's requests) | **writable** (`collectstatic`) |
+| `celery-beat` | 10002 | none, `no-new-privileges` | at `/var/lib/cvengine/web`, read-only (the Django secret) | not mounted; every volume read-only |
+| `migrate` (one-off) | 10002 | none, `no-new-privileges` | at `/var/lib/cvengine/web`, read-only (the Django secret) | not mounted |
+| `ownership` (one-off) | root | CHOWN, FOWNER, DAC_OVERRIDE only; no network | at `/var/lib/cvengine/web`, writable | writable (hands it over) |
+| `proxy` | the nginx image's | the image's | `static/cve/maintenance.html` and `config/nginx`, read-only | read-only |
+
+The application runs the copy of the source its image was built with (`/usr/src/app`, root's and read-only to uid 10002): nothing it can write is ever imported.
+uid 10002 owns only what it must write: its home (`/home/cvengine`: `~/.config` with the CVE seed folder, a volume, and `~/logs`, `CVENGINE_LOG_DIR`), the generated
+templates, the scan results (with group 101, the proxy's nginx group, mode 0750) and, in celery, the static files. The server listens on 8000 and runs no scan tool,
+so it needs no capability at all, not even `NET_BIND_SERVICE` or `NET_RAW`. The host's `web/` folder has group 10002 and mode `1775`: the containers create their
+update requests there, and the sticky bit keeps them from changing, renaming or removing anything they did not create (the source, `.version`, what the host
+writes). The image is built from an allow list of `web/` (`web/.dockerignore`), so a file the application creates there is never built into the next image.
+The one-off `ownership` service (`web/ownership.sh`) sets all of this up; every update and `make up` run it after the build and before the migrations, and it
+changes nothing the second time. File modes of the secret and the field key: [CONFIGURATION.md](CONFIGURATION.md#the-account-the-server-runs-as).
+
+A command you run in a container runs as uid 10002 too (`docker compose exec web ...`); add `-u 0` only for a one-off look as root. To run a management command
+that writes a file for you, write it below `/var/lib/cvengine/web` (that is `web/` on the host), as `make export-cve-seed` does.
+
 ## Backups
 
 Back up the database, `.env` and the secret file, but keep the keys apart from the dump. The dump holds the database only: scan result files (screenshots and raw output) live in the `scan_results` Docker volume, and the optional add-ons keep their state in volumes of their own (`tailscale_state` and the `openvas_*` volumes), so none of those are in it. `web/secret` also keys the hashes of the session table and the recovery codes, so a restore without it signs everyone out and breaks new recovery codes. Stored secrets are encrypted with `CVENGINE_FIELD_KEY` from `.env` (older values with a key derived from `web/secret`), so a restored database needs the same keys. A dump stored in the same archive, bucket or folder as those keys gives away every stored API key, webhook URL and two-step seed to anyone who can read that place, which is exactly what the encryption is there to prevent: put `.env` and `web/secret` in a password manager or another store with different access, and the database dumps wherever backups normally go. Keep every copy private (mode 0600).
@@ -386,7 +409,7 @@ docker compose exec -T db sh -c 'pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB
 
 | Target | What it does |
 | --- | --- |
-| `make up` | Creates `.env` if it is missing, clears a leftover maintenance flag, moves a PostgreSQL 12 database to 18 ([UPGRADE.md](UPGRADE.md)), records the installed commit, then builds and starts the core services, and fetches the newest published built-in scanner image and starts it on its own network, with the Tailscale sidecar in its namespace when that profile is on ([BUILTIN-SCANNER.md](BUILTIN-SCANNER.md)). |
+| `make up` | Creates `.env` if it is missing, clears a leftover maintenance flag, moves a PostgreSQL 12 database to 18 ([UPGRADE.md](UPGRADE.md)), records the installed commit, then builds the image, hands the application's files to its account (the one-off `ownership` service, [Who the containers run as](#who-the-containers-run-as)), runs the migrations and starts the core services, and fetches the built-in scanner image this release pins and starts it on its own network, with the Tailscale sidecar in its namespace when that profile is on ([BUILTIN-SCANNER.md](BUILTIN-SCANNER.md)). |
 | `make build` | Records the installed commit and builds the images. |
 | `make certs` | Creates the HTTPS certificate ([HTTPS](#https)). Refuses while the database or certificate password still says `change-me`. |
 | `make admin`, `make admin-password` | Create the admin account with a generated password, or reset that account's password and print a new one (in the one-off `migrate` service). |
@@ -400,7 +423,7 @@ docker compose exec -T db sh -c 'pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB
 | `make rotate-secrets` | Rotates the database passwords, the Redis password, the field key and the Django secret, then verifies the site; `ARGS=--dry-run` prints the plan ([CONFIGURATION.md](CONFIGURATION.md#rotating-secrets)). |
 | `make db-backup`, `make db-backup-schedule`, `make restore-check` | Dump the database now, dump it every night, or prove the newest dump restores ([Backups](#nightly-dump)). |
 | `make export-cve-seed` | Writes this instance's CVE catalog to `web/cve-seed.jsonl.gz` ([PIPELINE.md](PIPELINE.md#seeding-the-catalog)). |
-| `make scanner-update` | The Scanner update: pull the newest published scanner image, start it, keep it only once it has checked in with a contract version the server accepts, else put the previous image back ([BUILTIN-SCANNER.md](BUILTIN-SCANNER.md#keeping-it-current-the-scanner-update)). Run it from cron on a host without the updater timer. |
+| `make scanner-update` | The Scanner update: pull the scanner image this release pins (a no-op when it already runs), start it, keep it only once it has checked in with a contract version the server accepts, else put the previous image back ([BUILTIN-SCANNER.md](BUILTIN-SCANNER.md#keeping-it-current-the-scanner-update)). Run it from cron on a host without the updater timer. |
 | `make scanner-build`, `make scanner-logs` | Build the built-in scanner's image from the known-good floor commit `scanner.lock.json` names (the offline fallback when the published image cannot be pulled), or follow its log ([BUILTIN-SCANNER.md](BUILTIN-SCANNER.md)). |
 | `make inventory-sync` | Copies the host inventory reporter scripts to the copies the server hands out (a development task). |
 
@@ -429,7 +452,7 @@ docker compose -f docker-compose.dev.yml up -d db redis web celery celery-beat  
 docker compose -f docker-compose.dev.yml run --rm migrate python3 manage.py createsuperuser
 ```
 
-`make admin` only targets the production file, so use `createsuperuser` here.
+`make admin` only targets the production file, so use `createsuperuser` here. The development file mounts `./web` writable over the image's source (edit and reload) and therefore runs web, celery, celery-beat and migrate as root (`user: "0:0"`): the bind-mounted files belong to your account, not to uid 10002. It is for a development machine only; production runs as described in [Who the containers run as](#who-the-containers-run-as).
 
 ## The watchdog
 

@@ -80,10 +80,12 @@ def _write_blob(text):
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, 'w') as handle:
         handle.write(text)
-    try:  # the scanner container runs as an unprivileged user that must be able to read it; where this process is not root there is nothing to hand over
+    try:  # the scanner container runs as an unprivileged user that must be able to read it
         os.chown(tmp, scanner_uid(), scanner_uid())
     except OSError:
-        pass
+        # This process is not root (the server runs as its own account, docs/DEPLOYMENT.md) and cannot give the file away, so the scanner reads it
+        # as "other". Only celery (which writes it) and the scanner (read-only) mount this volume, and Docker's volume folder is root's on the host.
+        os.chmod(tmp, 0o644)
     os.replace(tmp, path)
 
 
