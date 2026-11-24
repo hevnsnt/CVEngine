@@ -153,6 +153,13 @@ recreated, for what the old containers wrote in between, and on every later upda
 up` runs it through `depends_on`. The first pass walks the scan results once; on a large results folder that takes a moment. A failure stops the update before
 the database is touched (the previous version is put back) and the log names it; `docker compose run --rm ownership` runs it by hand.
 
+**The built-in scanner's enrollment stays private.** celery, now uid 10002 with no capability, cannot give the enrollment blob to the scanner's account as the
+root process did. It writes it mode 0640 with group 10002 instead, the ownership service makes the enrollment folder 10002's with mode `2750`, and the scanner
+service is given group 10002 (`group_add` in `docker-compose.yml`), so the scanner reads it and nothing else on the host or in another container can. A blob is
+never written readable by others: when the group or mode cannot be set, celery writes nothing and logs `built-in scanner: no enrollment written` with the
+reason ([BUILTIN-SCANNER.md](BUILTIN-SCANNER.md)). An install that replaces `docker-compose.yml` with its own file gives its scanner service the same
+`group_add: ["10002"]`.
+
 **Every image is pinned by digest, and the Sentinel too** (security review S5). The server image installs exactly the Sentinel library commit
 `web/requirements.txt` pins (the `SENTINEL_REF` build argument and `scripts/sentinel-ref.sh` are gone; a `SENTINEL_REF` left in `.env` is ignored), the built-in
 scanner runs the image `scanner.lock.json` pins by digest instead of the moving tag `:main`, and `ubuntu`, `uv`, `postgres`, `redis` and `nginx` are pinned by

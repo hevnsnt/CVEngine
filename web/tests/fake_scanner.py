@@ -156,7 +156,9 @@ class FakeScanner:
         stack = contextlib.ExitStack()
         try:
             directory = stack.enter_context(tempfile.TemporaryDirectory(prefix='fake-scanner-'))
-            stack.enter_context(mock.patch.dict(os.environ, {'CVENGINE_BUILTIN_SCANNER': '1', 'CVENGINE_SCANNER_BOOTSTRAP_DIR': directory}))
+            # the blob's group: the test runner's own (10002, the image's, is not the CI runner's)
+            stack.enter_context(mock.patch.dict(os.environ, {'CVENGINE_BUILTIN_SCANNER': '1', 'CVENGINE_SCANNER_BOOTSTRAP_DIR': directory,
+                                                             'CVENGINE_APP_GID': str(os.getgid())}))
             env = {name: '1' for name in ('CVENGINE_SENTINEL_CLAIM_TIMEOUT', 'CVENGINE_SENTINEL_DISPATCH_TIMEOUT') if name not in os.environ}
             stack.enter_context(mock.patch.dict(os.environ, env))
             admin = self._admin()

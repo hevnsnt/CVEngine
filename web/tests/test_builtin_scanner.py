@@ -21,7 +21,9 @@ class BuiltinBase(TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.dir.cleanup)
-        env = mock.patch.dict(os.environ, {'CVENGINE_BUILTIN_SCANNER': '1', 'CVENGINE_SCANNER_BOOTSTRAP_DIR': self.dir.name}, clear=False)
+        # the blob's group is the application's (10002 in the image); here it is the test runner's own, which it may always give its own file
+        env = mock.patch.dict(os.environ, {'CVENGINE_BUILTIN_SCANNER': '1', 'CVENGINE_SCANNER_BOOTSTRAP_DIR': self.dir.name,
+                                           'CVENGINE_APP_GID': str(os.getgid())}, clear=False)
         env.start()
         self.addCleanup(env.stop)
         self.admin = User.objects.create_superuser('root-admin', 'a@example.test', 'x')
@@ -51,14 +53,13 @@ class EnsureTests(BuiltinBase):
         self.assertFalse(os.path.exists(builtin.blob_path()))
 
     def test_it_writes_one_private_instance_wide_blob_owned_by_the_app_admin(self):
-        # A writer that can give the file to the scanner's account keeps it 0600. Whether the real chown works depends on who runs the tests (root in
-        # the test image, an ordinary user on CI), so it is recorded here; the fallback for a writer that cannot (0644) is tested in
-        # tests/test_image_user.py HostDirTests.
-        with mock.patch('os.chown') as chown:
-            out = builtin.ensure()
+        # 0640 with the group the scanner service is given (group_add 10002): the writer and the scanner read it, nobody else
+        out = builtin.ensure()
         self.assertEqual(out['state'], 'blob_written')
-        self.assertEqual(chown.call_args.args[1:], (builtin.scanner_uid(), builtin.scanner_uid()))
-        self.assertEqual(oct(os.stat(builtin.blob_path()).st_mode & 0o777), '0o600')
+        info = os.stat(builtin.blob_path())
+        self.assertEqual(oct(info.st_mode & 0o777), '0o640')
+        self.assertEqual(info.st_gid, builtin.blob_gid())
+        self.assertEqual(os.listdir(self.dir.name), ['blob'], 'no temporary file is left behind')
         payload = self.blob()
         self.assertEqual(payload['scope'], 'instance')
         self.assertEqual(payload['server_url'], 'http://web:8000')
@@ -92,6 +93,38 @@ class EnsureTests(BuiltinBase):
         with mock.patch.dict(os.environ, {'CVENGINE_SCANNER_SERVER_URL': 'https://scanner-host.example.test'}):
             builtin.ensure()
         self.assertEqual(self.blob()['server_url'], 'https://scanner-host.example.test')
+
+    def assert_fails_closed(self, logs):
+        self.assertFalse(os.path.exists(builtin.blob_path()))
+        self.assertEqual(os.listdir(self.dir.name), [], 'no temporary file is left behind')
+        self.assertFalse(SentinelEnrollment.objects.exists(), 'the enrollment whose secret was never handed over is deleted')
+        self.assertTrue(any('built-in scanner: no enrollment written' in line for line in logs.output), logs.output)
+
+    def test_a_blob_that_cannot_get_the_scanners_group_fails_closed_and_is_never_world_readable(self):
+        modes = []
+        real_fchmod, real_chmod = os.fchmod, os.chmod
+        with mock.patch('os.fchown', side_effect=PermissionError(1, 'Operation not permitted')), \
+                mock.patch('os.fchmod', side_effect=lambda fd, mode: (modes.append(mode), real_fchmod(fd, mode))), \
+                mock.patch('os.chmod', side_effect=lambda path, mode, **kw: (modes.append(mode), real_chmod(path, mode, **kw))), \
+                self.assertLogs('agentapi.builtin_scanner', 'ERROR') as logs, self.assertRaises(builtin.BlobPermissionError):
+            builtin.ensure()
+        self.assertFalse([m for m in modes if m & 0o007], 'no mode readable by others is ever set')
+        self.assert_fails_closed(logs)
+
+    def test_a_blob_that_does_not_come_out_0640_fails_closed(self):
+        # the group is set but the mode does not take (a file system that ignores it): the check after the write refuses it
+        with mock.patch('os.fchmod'), self.assertLogs('agentapi.builtin_scanner', 'ERROR') as logs, \
+                self.assertRaises(builtin.BlobPermissionError):
+            builtin.ensure()
+        self.assert_fails_closed(logs)
+
+    def test_after_a_refusal_the_next_run_writes_the_blob(self):
+        with mock.patch('os.fchown', side_effect=PermissionError(1, 'Operation not permitted')), self.assertLogs('agentapi.builtin_scanner', 'ERROR'), \
+                self.assertRaises(builtin.BlobPermissionError):
+            builtin.ensure()
+        self.assertEqual(builtin.ensure()['state'], 'blob_written')
+        self.assertEqual(oct(os.stat(builtin.blob_path()).st_mode & 0o777), '0o640')
+        self.assertEqual(SentinelEnrollment.objects.count(), 1)
 
 
 class RedeemTests(BuiltinBase):

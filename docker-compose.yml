@@ -503,6 +503,10 @@ services:
       HTTPS_PROXY: "${HTTPS_PROXY:-}"
       HTTP_PROXY: "${HTTP_PROXY:-}"
       NO_PROXY: "${NO_PROXY:-},web,localhost,127.0.0.1"  # the server is never reached through a host proxy
+    # The image's own user (sentinel, uid 10001) plus group 10002, the server's: the enrollment blob is 0640 and group 10002 in a folder of mode
+    # 2750 (agentapi/builtin_scanner.py, web/ownership.sh), so the scanner reads it and nobody else does.
+    group_add:
+      - "10002"
     volumes:
       - scanner_bootstrap:/bootstrap:ro
       - scanner_state:/var/lib/cvengine-sentinel
