@@ -40,12 +40,20 @@ def _cache():
 
 
 def _generation():
-    """The current generation token, made when there is none (a token, not a counter: a lost key can never bring back an older generation's entries)."""
+    """The current generation token, made when there is none (a token, not a counter: a lost key can never bring back an older generation's entries).
+
+    A token this installation cannot read (written before the secret key changed: the cache ignores a value whose signature does not check out) is
+    replaced with a new one. ``add`` cannot do that, because the key exists, so without this every lookup found no token and cached nothing until the
+    next exclusion change: on production that read the lists from the database on every call for as long as the old key lived, which is for ever. A
+    new token only drops the cached lists, like any exclusion change."""
     cache = _cache()
     token = cache.get(GENERATION_KEY)
     if token is None:
         cache.add(GENERATION_KEY, uuid.uuid4().hex, None)
         token = cache.get(GENERATION_KEY)
+        if token is None:
+            token = uuid.uuid4().hex
+            cache.set(GENERATION_KEY, token, None)
     return token
 
 

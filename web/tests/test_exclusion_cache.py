@@ -207,3 +207,36 @@ class IngestAndScanTests(Base):
 			self.assertEqual(address_guard.filter_batch(task, batch)[1], 1)
 		self.assertIsNone(address_guard.task_refusal(task, wait_for_unknown=False))
 		self.assertIsNotNone(address_guard.dispatch_refusal(self.project, 'nmap_ports', {'targets': [{'ip': '198.51.100.7'}]}, note=False))
+
+
+class UnreadableGenerationTests(Base):
+	"""A generation token written under an earlier secret key (the cache ignores it) is replaced, so the lists are cached again. On production the
+	token from before a secret rotation had no expiry, every lookup found no token, and the lists were read from the database on every call."""
+
+	def plant_foreign_token(self):
+		from django.core.cache import cache
+		from django.test import override_settings
+		with override_settings(SECRET_KEY='an-earlier-secret-key-of-this-install-' + 'x' * 26):
+			cache.set(exclusions.GENERATION_KEY, 'old-token', None)
+		self.assertIsNone(cache.get(exclusions.GENERATION_KEY))  # unreadable now, and the key is still there
+		self.assertFalse(cache.add(exclusions.GENERATION_KEY, 'x', None))
+
+	def test_a_token_from_an_earlier_secret_is_replaced(self):
+		self.plant_foreign_token()
+		token = exclusions._generation()
+		self.assertTrue(token)
+		self.assertEqual(exclusions._generation(), token)
+
+	def test_the_lists_are_cached_again(self):
+		HostExclusion.objects.create(org=self.org, host='x.unreadable.test')
+		self.plant_foreign_token()
+		self.assertIn('x.unreadable.test', self.names())
+		with CaptureQueriesContext(connection) as queries:
+			self.assertIn('x.unreadable.test', self.names())
+		self.assertFalse([q for q in queries.captured_queries if 'cvefeed_hostexclusion' in q['sql'].lower()])
+
+	def test_a_change_after_the_replacement_still_takes_effect(self):
+		self.plant_foreign_token()
+		self.assertNotIn('y.unreadable.test', self.names())
+		HostExclusion.objects.create(org=self.org, host='y.unreadable.test')
+		self.assertIn('y.unreadable.test', self.names())
