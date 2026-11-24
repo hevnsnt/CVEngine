@@ -11,9 +11,14 @@ from cvengine import gevent_db, gevent_gc, lane_memory
 
 def _fresh_state(case):
     """The timer's counters start from zero in each test and are put back after it; nothing stays frozen."""
+    from celery.signals import worker_ready
     saved = dict(gevent_gc._state)
     case.addCleanup(lambda: (gevent_gc._state.clear(), gevent_gc._state.update(saved)))
     case.addCleanup(gc.unfreeze)
+    # install() connects its worker_ready receiver once per dispatch_uid: one left by an earlier test would keep setting that test's event,
+    # and a later install() could not connect its own
+    worker_ready.disconnect(dispatch_uid='gevent-gc-loaded')
+    case.addCleanup(worker_ready.disconnect, dispatch_uid='gevent-gc-loaded')
     gevent_gc._state.update({'ticks': 0, 'frozen': False, 'collections': 0, 'last_s': None, 'last_full_s': None, 'worst_s': 0.0, 'freeze_s': None, 'slow_logged_at': None,
                              'slow_skipped': 0, 'loaded': None})
 
@@ -95,6 +100,9 @@ class FrozenStartupTests(SimpleTestCase):
         self.was_enabled = gc.isenabled()
         self.addCleanup(lambda: gc.enable() if self.was_enabled else gc.disable())
         _fresh_state(self)
+        # an earlier test's Cycle objects are garbage once it unfroze them: collect them now, or the first collection of this test frees
+        # them too and counts 201 where it freed one (a shuffled order runs the 200 object freeze test first)
+        gc.collect()
         gc.disable()
         Cycle.freed = 0
 

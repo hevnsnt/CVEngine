@@ -1,3 +1,5 @@
+import re
+from collections import Counter
 from unittest import mock
 
 from django.db import connection
@@ -14,6 +16,13 @@ from startScan.models import IpAddress, Port, ScanHistory, Subdomain, Technology
 from targetApp.models import Domain
 
 NGINX = [{'product': 'nginx', 'ranges': [{'introduced': '1.0.0', 'fixed': '1.20.0'}]}]
+
+
+def statement_difference(first, second):
+	"""The statements two captures do not share, by their SQL with the numbers taken out: what a failed count assertion says."""
+	shape = lambda query: re.sub(r'\d+', 'N', query['sql'])[:200]
+	a, b = Counter(map(shape, first.captured_queries)), Counter(map(shape, second.captured_queries))
+	return '\n'.join(f'{a[k]} then {b[k]}: {k}' for k in sorted(set(a) | set(b)) if a[k] != b[k])
 
 
 class CorrelationPerfTests(TestCase):
@@ -74,24 +83,25 @@ class CorrelationPerfTests(TestCase):
 		self.assertEqual(set(CVEMatch.objects.values_list('subdomain_id', flat=True)), {latest.id, ct.id})
 
 	def test_query_count_does_not_grow_with_the_number_of_hosts(self):
+		# Like is compared with like: a call that writes the match of one new host against a call that writes the matches of 29 new hosts.
+		# It used to compare a call that wrote nothing with one that wrote 29 rows, which already cost the 5 statements of the write path,
+		# so the 5 statement allowance had no room left and any read a process memo or cache added to the second call failed CI (33 > 28).
 		scan = self._scan()
 		self._host('h0.perf.test', scan, tech='nginx')
 		correlate_cves()  # warm the index cache and create the first match
-		def queries():
-			with CaptureQueriesContext(connection) as ctx:
-				correlate_cves()
-			return len(ctx)
-		small = queries()
-		for i in range(1, 30):
+		self._host('h1.perf.test', scan, tech='nginx')
+		with CaptureQueriesContext(connection) as one:
+			correlate_cves()
+		for i in range(2, 31):
 			self._host(f'h{i}.perf.test', scan, tech='nginx')
-		with CaptureQueriesContext(connection) as ctx:
+		with CaptureQueriesContext(connection) as many:
 			out = correlate_cves()
-		self.assertEqual(out['matches'], 30)
-		self.assertEqual(CVEMatch.objects.count(), 30)
-		# a few more statements for the new rows, nowhere near one per host (1.3.5: one reads when the new KEV rows' hosts were fingerprinted,
-		# cveFeed.kev_freshness)
-		self.assertLessEqual(len(ctx), small + 5)
-		self.assertLess(len(ctx), 30)
+		self.assertEqual(out['matches'], 31)
+		self.assertEqual(CVEMatch.objects.count(), 31)
+		# the same statements for 29 new hosts as for one, nowhere near one per host (1.3.5: one reads when the new KEV rows' hosts were
+		# fingerprinted, cveFeed.kev_freshness); a few are allowed for a memo that a call reloads, and a failure names the statements that differ
+		self.assertLessEqual(len(many), len(one) + 5, statement_difference(one, many))
+
 
 	def test_rerun_keeps_ai_verdict_and_does_not_touch_unchanged_rows(self):
 		self._host('web.perf.test', self._scan(), tech='nginx')

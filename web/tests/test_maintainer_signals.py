@@ -494,8 +494,9 @@ class ClaimRefusalTests(SimpleTestCase):
         self.addCleanup(self.clean)
 
     def clean(self):
-        from cvengine import resources
-        client = resources.redis_client()
+        # the counters live in the cache's Redis (claim_refusals._client), not the broker's: cleaning the broker's database left an earlier
+        # test's callers in the hour, and a shuffled order then found the two field cap already full
+        client = claim_refusals._client(claim_refusals.KEY)
         for key in client.scan_iter(match=claim_refusals.KEY + '*'):
             client.delete(key)
 
