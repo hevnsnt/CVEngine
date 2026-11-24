@@ -4,6 +4,7 @@
 import { setNotices } from "/staticfiles/cve/statusstrip.js";
 import { localTimes } from "/staticfiles/cve/watchdog-text.js";
 import { afterPoll } from "/staticfiles/cve/statusstrip-logic.js";
+import { snippetBlock } from "/staticfiles/cve/client-address-notice.js";
 
 const csrf = document.querySelector("[name=csrfmiddlewaretoken]");
 const el = (tag, cls, text) => {
@@ -37,6 +38,7 @@ function render(alerts, force = false) {
       ai.append(el("span", "ab-label", `AI reviewer${a.ai_model ? ` (${a.ai_model})` : ""}: `), document.createTextNode(a.ai_detail));
       text.append(ai);
     }
+    if (a.snippet) text.append(snippetBlock({ onChecked: (body) => { if (!body.notice) render(current.filter((x) => x.id !== a.id), true); } })); // the host nginx lines (client-address-notice.js)
     if (a.decision_id != null) {  // auto-tune answered this alert: the link opens its line in Settings, configMaxxing, Auto-tuning
       const link = el("a", "ab-decision", "See what auto-tune did about this");
       link.setAttribute("href", `/cve/settings/#configmaxxing/autotune/${encodeURIComponent(a.decision_id)}`);

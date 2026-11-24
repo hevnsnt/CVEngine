@@ -64,6 +64,7 @@ BACKFILLS = (
     'close_archived_findings',            # the open findings of hosts archived before archiving closed them: closed as fixed, the note says the host was archived
     'recheck_branch_fixes',               # matches past a fix the advisory states for their own release line (F5's nginx records), re-correlated
     'audit_finding_hosts',                # the open findings of hosts gone from the current inventory (or archived): closed as fixed, reopened when the host is back
+    'reenable_guard_disabled_users',      # 1.5.0: accounts the old abuse guard disabled, enabled again (only those; tokens stay revoked)
     'rerate_findings',                    # 1.3.5: rescore hosts for the new heat rules, clear stale fire marks (last: counts everything above)
 )
 MAX_ATTEMPTS = 3

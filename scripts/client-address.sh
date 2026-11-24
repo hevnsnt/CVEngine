@@ -11,6 +11,7 @@
 #       cannot be read.
 #   cvengine_client_address_report docker compose [ARGS...]
 #       The check: prints lines that start with "client address:" and always returns 0 (it never fails an update). See client-address-check.sh.
+#       Its last line is the server's verdict ("client address: verdict: ..."), which also opens or clears the App Admin notice.
 #
 # A host nginx in front of the bundled proxy sends the secret in X-CVEngine-Upstream (config/nginx/host-proxy-client-address.conf), and only then
 # does the proxy pass its X-Forwarded-For on to the application. Without the secret, or without that snippet, nothing changes: the proxy believes
@@ -132,7 +133,7 @@ except ValueError:
 # Every command substitution below ends in `|| true`: it runs in a process substitution of the update script, where a failed pipeline (the proxy
 # or web container not answering an exec) set off the updater's error trap and logged "the update script stopped" although nothing stopped.
 cvengine_client_address_report() {
-  local compose=("$@") env_file secret domain url token recorded seen trusted rendered
+  local compose=("$@") env_file secret domain url token recorded seen trusted rendered published verdict
   say() { printf 'client address: %s\n' "$*"; }
   env_file=$(cvengine_ca_env_file "${compose[@]}")
   secret=$(cvengine_ca_value CVENGINE_UPSTREAM_SECRET "$env_file")
@@ -175,6 +176,15 @@ cvengine_client_address_report() {
     say "a request through $url arrived as $recorded, an internal address. If nothing is in front of the bundled proxy (the probe went straight to this host) that is expected. If a host nginx or a CDN is in front, it is not passing the client address: install the snippet (scripts/client-address-check.sh --snippet)."
   else
     say "a request through $url arrived as $recorded, a public address (no Cloudflare trace to compare with): it should be this host's own public address."
+  fi
+  # What it means, decided by the server (cveFeed/client_address.py) from the label the proxy put on the probe and where the proxy's port 443 is
+  # published: nothing in front of the proxy (nothing to do), ok, or a host proxy whose address is not believed yet. The server opens the App Admin
+  # notice with the lines to install (Settings, Updates and the status strip) or clears it; nothing here believes or changes a header.
+  if [ -n "$recorded" ]; then
+    published=$("${compose[@]}" port proxy 443 2>/dev/null | tr -d '\r' | head -n 4 | tr '\n' ' ')
+    verdict=$("${compose[@]}" exec -T web python3 manage.py client_address_probe verdict "$token" --seen "$seen" --published "$published" 2>/dev/null \
+      | sed -n 's/^probe: //p' | tail -n 1 | tr -d '\r')
+    [ -z "$verdict" ] || say "$verdict"
   fi
   return 0
 }

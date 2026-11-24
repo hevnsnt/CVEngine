@@ -6,6 +6,7 @@ import { askScannerPlan } from "/staticfiles/cve/scanner-plan.js";
 import { seedCard } from "/staticfiles/cve/seed-card.js";
 import { openvasPanel } from "/staticfiles/cve/openvas-panel.js";
 import { apiKeysPanel } from "/staticfiles/cve/api-keys-panel.js";
+import { snippetBlock } from "/staticfiles/cve/client-address-notice.js";
 import { buildSection, cards } from "/staticfiles/cve/config-maxxing.js";
 import "/staticfiles/cve/autotune-card.js"; // registers the Auto-tuning card first: the mode sits at the top of configMaxxing
 import "/staticfiles/cve/scan-concurrency-card.js"; // registers its card with configMaxxing
@@ -770,6 +771,13 @@ const sections = {
       }
       if (s.scanner_notice) kids.push(el("p", "msg", `${s.scanner_notice.text} `, { style: "margin-top:10px", role: "status" }), el("a", "note", "Open Sentinels", { href: "/cve/sentinels/" }), document.createTextNode(" "));
       if (s.discovery_pin_notice) kids.push(el("p", "msg", s.discovery_pin_notice, { style: "margin-top:10px", role: "status" }));
+      // a host proxy in front whose visitor address cvENGINE does not believe yet (cveFeed/client_address.py): what to install, Copy, Check again
+      if (s.client_address_notice) {
+        const ca = el("div", "msg", null, { style: "margin-top:10px", role: "status", id: "update-client-address" });
+        ca.append(el("strong", "", s.client_address_notice.title), el("p", "", s.client_address_notice.detail));
+        if (s.client_address_notice.snippet) ca.append(snippetBlock({ onChecked: (body) => { if (!body.notice) ca.remove(); } }));
+        kids.push(ca);
+      }
       if (s.branch_warning) kids.push(el("p", "msg err", s.branch_warning, { style: "margin-top:10px" }));
       if (s.status === "approved") {
         kids.push(

@@ -1742,7 +1742,7 @@ def open_alerts(user=None, now=None):
             detail = f'Not re-checked for {maintainer_checks.span(age.total_seconds())}, so this may no longer be true. {detail}'
         out.append({'id': a.pk, 'code': a.code, 'severity': a.severity, 'title': a.title, 'detail': detail, 'ai_detail': ai_detail, 'stale': stale,
                     'age_minutes': int(age.total_seconds() // 60), 'ai_model': a.ai_model if ai_detail else '', 'first_seen': a.first_seen.isoformat(), 'last_seen': a.last_seen.isoformat(),
-                    'decision_id': decisions.get(a.pk)})
+                    'decision_id': decisions.get(a.pk), 'snippet': a.code == 'client_address'})  # the host nginx lines come with it (cveFeed.client_address)
     return out
 
 
