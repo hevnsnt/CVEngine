@@ -32,13 +32,15 @@ class RetestFixture(ChangeFixture):
 		return AssetChange.objects.create(project=self.project, domain=self.domain, scan=scan, host=host, kind=kind, before=before, after=after)
 
 
-class HostsToRetestTests(RetestFixture, TestCase):
+class ChangedEvidenceTests(RetestFixture, TestCase):
+	"""Which changes of a scan are worth a re-test (``_changed_evidence``, what ``queue_retests`` reads)."""
+
 	def setUp(self):
 		super().setUp()
 		self.scan_ = self.scan({'a.ct.test': HOST})
 
 	def hosts(self):
-		return retest.hosts_to_retest(self.scan_)
+		return sorted(retest._changed_evidence(self.scan_))
 
 	def test_a_version_bump_counts_and_a_product_only_change_does_not(self):
 		self.change(self.scan_, 'a.ct.test', 'service_changed', {'port': '443/tcp', 'product': 'nginx', 'version': '1.18.0'},
@@ -66,20 +68,10 @@ class HostsToRetestTests(RetestFixture, TestCase):
 		self.change(self.scan_, 'a.ct.test', 'port_opened')
 		self.assertEqual(self.hosts(), ['a.ct.test'])
 
-	def test_the_cap_keeps_the_highest_scores(self):
-		for i, score in enumerate((10, 90, 50, 70, 30)):
-			name = f'h{i}.ct.test'
-			Subdomain.objects.create(name=name, target_domain=self.domain, scan_history=self.scan_, score=score)
-			self.change(self.scan_, name, 'host_new')
-		with mock.patch.dict(os.environ, {'CVENGINE_RETEST_MAX_HOSTS': '3'}):
-			self.assertEqual(self.hosts(), ['h1.ct.test', 'h3.ct.test', 'h2.ct.test'])
-		self.assertEqual(len(self.hosts()), 5)  # the default cap is 25
-
-	def test_hosts_re_tested_inside_the_window_are_left_out(self):
-		self.change(self.scan_, 'a.ct.test', 'host_new')
-		self.change(self.scan_, 'b.ct.test', 'host_new')
-		ledger.record(retest.RETEST_SERVICE, ['a.ct.test'], self.project)
-		self.assertEqual(self.hosts(), ['b.ct.test'])
+	def test_the_superseded_helpers_are_gone(self):
+		from agentapi import scanner_state
+		self.assertFalse(hasattr(retest, 'hosts_to_retest'))  # queue_retests and dispatch_deferred_retests replaced it
+		self.assertFalse(hasattr(scanner_state, 'offline_kinds'))  # messages() says which kinds wait for a scanner
 
 
 class QueueTests(RetestFixture, TestCase):

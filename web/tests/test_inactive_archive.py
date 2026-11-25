@@ -150,6 +150,17 @@ class InactiveArchiveTests(TestCase):
         self.assertEqual(InactiveArchiveReview.objects.get(pk=first['run_id']).status, 'completed')
         self.assertEqual(run_page(resolver=resolver)['skipped'], 'already completed today')
 
+    def test_a_continuation_the_broker_refuses_is_logged_and_the_run_stops_partial(self):
+        for i in range(27):
+            self.state(f'b{i}.inactive.example')
+        with mock.patch('cveFeed.scan_control.pause_requested', return_value=False), \
+             mock.patch('cveFeed.tasks.review_inactive_hosts.apply_async', side_effect=RuntimeError('broker gone')), \
+             self.assertLogs('cveFeed.inactive_archive', 'WARNING') as logs:
+            out = run_page(resolver=lambda host: ('absent', set()))
+        self.assertEqual((out['status'], out['more']), ('partial', True))
+        self.assertEqual(InactiveArchiveReview.objects.get(pk=out['run_id']).status, 'partial')
+        self.assertIn('broker gone', '\n'.join(logs.output))
+
     def test_a_review_that_meets_only_permanent_states_completes(self):
         # a private address answers the same every day: counted as deferred, it kept every daily review partial
         self.state('private.inactive.example')

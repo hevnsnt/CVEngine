@@ -73,7 +73,7 @@ class ReaderTests(SimpleTestCase):
         self.assertEqual((versions(behind), behind['exposed']), ([('ollama', '', 'product', 'exact')], False))
         # a catch-all JSON API that answers {"version"} on every path is not Ollama
         self.assertEqual(read('ollama', HTML_LOGIN, OLLAMA_VERSION, ok({'version': '1.2.3'}))['readings'], [])
-        self.assertEqual(ai_servers.names({'a': 'x' * 300, 'b': 'ok/name:1', 'c': '<b>x</b>', 'd': 'a‮b'}, 'abcd'), ['ok/name:1'])
+        self.assertEqual(ai_servers.names({'a': 'x' * 300, 'b': 'ok/name:1', 'c': '<b>x</b>', 'd': 'a\u202eb'}, 'abcd'), ['ok/name:1'])
 
     def test_llama_cpp_is_open_without_a_key_and_shut_with_one(self):
         got = read('llama-cpp', LLAMA_PROPS, LLAMA_MODELS)

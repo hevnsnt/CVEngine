@@ -174,7 +174,6 @@ class DenyTests(PolicyBase):
             self.assertEqual(snapshot['disabled'], ['openvas'])
             self.assertIn('openvas', scanner_state.waiting_kinds(now))  # still waiting: the sweeps stay off it
             self.assertEqual(scanner_state.disabled_kinds(now), ['openvas'])
-            self.assertNotIn('openvas', scanner_state.offline_kinds(now))
             text = scanner_state.messages(snapshot)
             self.assertIn('OpenVAS is turned off on every Sentinel that has it', text['disabled'])
             self.assertNotIn('openvas', text['offline'] or '')  # the offline sentence is for kinds that are really waiting for a scanner
@@ -191,7 +190,6 @@ class DenyTests(PolicyBase):
         with LocalFallback('none'):
             snapshot = scanner_state.state(now=timezone.now())
             self.assertNotIn('disabled', snapshot)
-            self.assertIn('openvas', scanner_state.offline_kinds(timezone.now()))
             self.assertIn('Scanner offline', scanner_state.messages(snapshot)['offline'])
             self.assertEqual(scanner_state.skip_note('openvas', timezone.now()), 'no scanner is online for openvas; the targets stay due')
         state = sb.capacity_state(self.project, 'openvas', why=True)

@@ -271,7 +271,7 @@ def host_heat(project_id, names):
     rows = (Subdomain.objects.filter(target_domain__project_id=project_id, name__in=wanted).order_by('name', '-scan_history_id').distinct('name')
             .prefetch_related('cve_matches__cve_entry', services.triage_prefetch('cve_matches__triage'), 'vulnerability_set', services.triage_prefetch('vulnerability_set__triage'), 'vulnerability_set__cve_ids', 'vulnerability_set__tags'))
     rows = list(rows)
-    services._prime_nuclei(rows)  # whether nuclei ran, for every row at once: a host with nothing hot asked it once per host
+    services._prime_nuclei(rows)  # whether the template scan ran, for every row at once: a host with nothing hot asked it once per host
     out = {}
     for sub in rows:
         reasons = services._heat_reasons(sub, capped=False)

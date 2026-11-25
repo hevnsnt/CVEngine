@@ -19,10 +19,24 @@ What a policy lists:
 
 ``domains`` and ``excluded_trees`` are part of the contract for kinds that need a whole tree (none of the probe kinds does: every name is listed).
 """
+import functools
+
 MAX_HOSTS = 5000  # the contract's bound
 MAX_EXCLUDED = 5000  # the contract's bound for ``excluded``
 MAX_EXCLUDED_TREES = 1000  # and for ``excluded_trees``
 MAX_SAME_SITE = 1000  # other hosts of one site a page's scripts may be read from, per task
+MAX_BLOCKED = 100  # the contract's bound for ``blocked`` (``$defs/probe_scope``)
+
+
+def _one_read(build):
+    """Build one task's policy with each exclusion list of the project read once (``exclusions.memo``): the build is one call, so nothing is kept
+    past it, and a write of a list made meanwhile still resets the copy."""
+    @functools.wraps(build)
+    def wrapped(*args, **kwargs):
+        from cveFeed import exclusions
+        with exclusions.memo():
+            return build(*args, **kwargs)
+    return wrapped
 
 
 def address_rules(project_id):
@@ -33,7 +47,30 @@ def address_rules(project_id):
         authorised = sorted(ip for ip, owner in tailscale_scope.authorised_addresses().items() if owner == project_id)
     except Exception:  # noqa: BLE001 - the safe answer when the table cannot be read: no device is authorised
         authorised = []
-    return {'private': private_targets_allowed(), 'addresses': authorised[:1000], 'blocked': [str(n) for n in _extra_blocked()][:100]}
+    return {'private': private_targets_allowed(), 'addresses': authorised[:1000], 'blocked': blocked_networks(project_id, _extra_blocked())}
+
+
+def blocked_networks(project_id, extra=()):
+    """The ``blocked`` ranges of a probe policy: the server's own (``CVENGINE_BLOCKED_CIDRS``) and the organization's do-not-scan list, merged where they
+    touch. The Sentinel refuses every address in them at every hop, so a listed name that now resolves into the list, or a redirect to one, is never
+    reached even when the inventory has not seen that address yet. Fails closed: a list that cannot be read, or more ranges than a policy can carry
+    (``MAX_BLOCKED``), raises ``AddressExcluded`` and no task is made (the work stays due)."""
+    import ipaddress
+
+    from cveFeed import exclusions
+    from cvengine.resources import AddressExcluded
+    try:
+        listed = exclusions.address_networks(project_id)
+    except Exception:  # noqa: BLE001 - fail closed
+        raise AddressExcluded('probe', exclusions.Refusal(exclusions.UNREADABLE, unreadable=True)) from None
+    merged = []
+    for version in (4, 6):
+        merged += [str(n) for n in ipaddress.collapse_addresses([n for n in (*extra, *listed) if n.version == version])]
+    if len(merged) > MAX_BLOCKED:
+        raise AddressExcluded('probe', exclusions.Refusal(f'the do-not-scan list and the blocked ranges are {len(merged)} separate networks, more than the '
+                                                          f'{MAX_BLOCKED} a probe task can carry to its scanner, so no probe runs for this project until the '
+                                                          'list is shorter (merge neighbouring networks)'))
+    return merged
 
 
 class _Gate:
@@ -108,6 +145,7 @@ def _same_site_hosts(project_id, sub, gate, known=None):
     return out[:MAX_SAME_SITE]
 
 
+@_one_read
 def for_probes(project_id, planned, unattended=True):
     """The policy of an http_probe task: ``planned`` is ``[(sub, entry)]`` (``probes.plan_for_host`` entries of the http family)."""
     from cveFeed import js_libraries, probes
@@ -144,6 +182,7 @@ def for_probes(project_id, planned, unattended=True):
     return {'hosts': hosts, 'domains': [], 'excluded': sorted(excluded)[:5000], 'excluded_trees': [], **address_rules(project_id)}
 
 
+@_one_read
 def for_page_read(project_id, sub, unattended=True):
     """The policy of a page_read task about the host ``sub``: the host itself, then, unless its target is host scoped (which reads its own host only), the
     names a redirect or a script may lead to (``probes.allowed_names``: the apex and ``www``) and the other hosts of the same site this project holds
@@ -180,6 +219,7 @@ def for_page_read(project_id, sub, unattended=True):
     return {'hosts': hosts, 'domains': [], 'excluded': sorted(excluded)[:5000], 'excluded_trees': [], **address_rules(project_id)}
 
 
+@_one_read
 def for_hosts(project_id, hosts, unattended=False):
     """The policy of a page_read task that reads the named hosts and nothing else (the result screen's control read of a finding's origin): each
     host as itself, unless a gate refuses it now (excluded, archived, outside the bug bounty program's scope), in which case it is named in ``excluded``
@@ -195,6 +235,7 @@ def for_hosts(project_id, hosts, unattended=False):
     return {'hosts': hosts_ok, 'domains': [], 'excluded': excluded[:MAX_EXCLUDED], 'excluded_trees': [], **address_rules(project_id)}
 
 
+@_one_read
 def for_routes(project_id, scan, hosts, unattended=False):
     """The policy of a route_probe task: the hosts the route plan chose (``route_auth._plan`` already applied the exclusions and the bug bounty gate;
     an exclusion made since is applied again here), then, for the scripts of their front pages, the other hosts of the same site this project holds
@@ -228,6 +269,7 @@ def for_routes(project_id, scan, hosts, unattended=False):
     return {'hosts': listed, 'domains': [], 'excluded': sorted(excluded)[:5000], 'excluded_trees': [], **address_rules(project_id)}
 
 
+@_one_read
 def for_signed_routes(project_id, hosts):
     """The policy of a route_probe_signed task: exactly the hosts the signed-in route plan chose, and nothing else (no same-site host, no library CDN: no
     script is read signed in). A host that is excluded since the plan was made is dropped; the scanner holds every hop and address to the list, and the
@@ -239,6 +281,7 @@ def for_signed_routes(project_id, hosts):
     return {'hosts': listed, 'domains': [], 'excluded': excluded[:5000], 'excluded_trees': [], **address_rules(project_id)}
 
 
+@_one_read
 def for_addresses(project_id, addresses):
     """The policy of an alive_check task: the last known addresses it asks, each as itself (``zombie.endpoints`` already kept only the ones a
     scanner may touch, by this server's address rules, which travel along for the scanner to apply again)."""
@@ -246,6 +289,7 @@ def for_addresses(project_id, addresses):
     return {'hosts': hosts, 'domains': [], 'excluded': [], 'excluded_trees': [], **address_rules(project_id)}
 
 
+@_one_read
 def for_ssh(project_id, addresses):
     """The policy of an ssh_probe task: the addresses it inspects, each asked as itself on the ports the task names (``ssh_scan.candidates`` already kept
     only the ones a scanner may touch, by this server's address rules, which travel along for the scanner to apply again). Nothing else is listed."""
@@ -254,6 +298,7 @@ def for_ssh(project_id, addresses):
 
 
 
+@_one_read
 def for_java(project_id, subs, addresses, unattended=True):
     """The policy of a java_runtime task: each web host's own name and its redirect group (``probes.allowed_names``), less what is excluded,
     archived or outside a bug bounty program's scope (listed in ``excluded`` so the Sentinel names the reason), and the JDWP endpoints' addresses,
@@ -277,6 +322,7 @@ def for_java(project_id, subs, addresses, unattended=True):
             hosts.append(address)
     return {'hosts': hosts, 'domains': [], 'excluded': sorted(excluded)[:MAX_EXCLUDED], 'excluded_trees': [], **address_rules(project_id)}
 
+@_one_read
 def for_versions(project_id, subs, unattended=True):
     """The policy of a version_read task: each host's own name and its redirect group (``probes.allowed_names``), less what is excluded,
     archived or outside a bug bounty program's scope (listed in ``excluded`` so the Sentinel names the reason), and this server's address rules
@@ -296,6 +342,7 @@ def for_versions(project_id, subs, unattended=True):
     return {'hosts': hosts, 'domains': [], 'excluded': sorted(excluded)[:MAX_EXCLUDED], 'excluded_trees': [], **address_rules(project_id)}
 
 
+@_one_read
 def for_buckets(project_id, candidates):
     """The policy of a bucket_check task: the storage platforms' own endpoints, never a project host. An S3 bucket's regional host is learnt
     from the platform's answer, so S3 and GCS are named by their endpoint domain (the scanner also holds every request to the documented
@@ -307,6 +354,7 @@ def for_buckets(project_id, candidates):
     return {'hosts': hosts, 'domains': domains, 'excluded': [], 'excluded_trees': [], **address_rules(project_id)}
 
 
+@_one_read
 def for_hygiene(project_id, tls, mail_names, unattended=True):
     """The policy of a hygiene_check task: the TLS endpoints' hosts (``tls`` is ``[(host, port)]``, already the names a scanner may touch now) and, for
     each mail name, its ``mta-sts.<name>`` host (the one HTTPS request the mail review makes of a target's own). A name that is excluded, archived or
@@ -327,6 +375,7 @@ def for_hygiene(project_id, tls, mail_names, unattended=True):
     return {'hosts': hosts, 'domains': [], 'excluded': sorted(excluded)[:5000], 'excluded_trees': [], **address_rules(project_id)}
 
 
+@_one_read
 def for_dangling(project_id, hosts, unattended=True):
     """The policy of a dangling_dns_check task: the hosts of the findings it rates (the HTTP control request goes to a host's own addresses). The
     name servers it asks are learnt from the delegation chain, so they are public addresses the Sentinel judges itself (its floor and these address
@@ -344,6 +393,7 @@ def for_dangling(project_id, hosts, unattended=True):
     return {'hosts': listed, 'domains': [], 'excluded': sorted(excluded)[:5000], 'excluded_trees': [], **address_rules(project_id)}
 
 
+@_one_read
 def for_suppliers(project_id, domains):
     """The policy of a supplier_check task: the exact names of one supplier (``supplier_scan.clean_domain`` already refused anything but a bare
     DNS name) and each one's ``mta-sts.`` host, which the policy file is fetched from. Never a wildcard, never a tree. A supplier is not an owned
@@ -355,6 +405,7 @@ def for_suppliers(project_id, domains):
     return {'hosts': hosts[:MAX_HOSTS], 'domains': [], 'excluded': [], 'excluded_trees': [], **{**address_rules(project_id), 'private': False, 'addresses': []}}
 
 
+@_one_read
 def for_vhosts(project_id, addresses, names):
     """The policy of a vhost_probe task: the addresses it asks (each as itself, for its default request) and the names it sends as the Host
     header. The names were already filtered by the project's exclusions and archived hosts; a name's own front page is asked at the address the
@@ -363,6 +414,7 @@ def for_vhosts(project_id, addresses, names):
     return {'hosts': hosts, 'domains': [], 'excluded': [], 'excluded_trees': [], **address_rules(project_id)}
 
 
+@_one_read
 def for_subdirs(project_id, names):
     """The policy of a subdir_probe task: the host names it asks (a virtual host is asked at its address with its name; the address is pinned
     by the task, never resolved)."""
@@ -370,6 +422,7 @@ def for_subdirs(project_id, names):
     return {'hosts': hosts, 'domains': [], 'excluded': [], 'excluded_trees': [], **address_rules(project_id)}
 
 
+@_one_read
 def for_names(project_id, domain, names, unattended=False):
     """The policy of a dns_resolve task for ``names`` of target ``domain``: each name the target holds that no gate refuses. A lookup asks the
     Sentinel's resolver, never the host, so this is about which names the scanner is told of at all."""
@@ -387,6 +440,7 @@ def for_names(project_id, domain, names, unattended=False):
 
 
 
+@_one_read
 def for_screenshots(project_id, hosts):
     """``(policy, open_web)`` of a web_screenshot task: ``hosts`` are the names of its pages (``web_shot`` already judged each: still in the inventory, not
     excluded or archived, inside the bug bounty program's scope; an exclusion made since is applied again here). The policy lists those names and
@@ -408,6 +462,7 @@ def for_screenshots(project_id, hosts):
     return policy, open_web
 
 
+@_one_read
 def for_identity(project_id, names, unattended=True, allow_archived=False, ungated=()):
     """The policy of an identity_check task: the exact names and addresses it asks about (a DNS question about a name, a reverse question about an
     address, a certificate read at an endpoint), each once. A name that is excluded, archived or outside the bug bounty program's scope is never
