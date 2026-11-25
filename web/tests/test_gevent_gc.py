@@ -10,7 +10,11 @@ from cvengine import gevent_db, gevent_gc, lane_memory
 
 
 def _fresh_state(case):
-    """The timer's counters start from zero in each test and are put back after it; nothing stays frozen."""
+    """The timer's counters start from zero in each test and are put back after it; nothing stays frozen.
+
+    A frozen count of zero is not a fixed point to assert against: on Python 3.12 the first full collection after ``gc.unfreeze()`` reports a few
+    hundred objects as frozen again (375 on CI and on a plain 3.12.3, none on 3.14), so a test compares the count with its own reading from before
+    the step it checks."""
     from celery.signals import worker_ready
     saved = dict(gevent_gc._state)
     case.addCleanup(lambda: (gevent_gc._state.clear(), gevent_gc._state.update(saved)))
@@ -108,11 +112,12 @@ class FrozenStartupTests(SimpleTestCase):
 
     def test_install_waits_for_the_worker_to_have_loaded(self):
         from celery.signals import worker_ready
+        before = gc.get_freeze_count()
         with mock.patch.object(gevent_db, 'gevent_patched', return_value=True), mock.patch('gevent.spawn'):
             self.assertTrue(gevent_gc.install())
         loaded = gevent_gc._state['loaded']
         self.assertFalse(loaded.is_set())
-        self.assertEqual(gc.get_freeze_count(), 0)  # install itself freezes nothing: the task modules are not imported yet
+        self.assertEqual(gc.get_freeze_count(), before)  # install itself freezes nothing: the task modules are not imported yet
         self.addCleanup(worker_ready.disconnect, dispatch_uid='gevent-gc-loaded')
         ours = [r for r in worker_ready.receivers if r[0][0] == 'gevent-gc-loaded']
         self.assertEqual(len(ours), 1)
@@ -125,11 +130,14 @@ class FrozenStartupTests(SimpleTestCase):
         before = gc.get_freeze_count()
         frozen = gevent_gc.freeze_after_load()
         self.assertGreaterEqual(frozen, before + 200)
-        # at most what was frozen: a frozen object that another thread of the process lets go leaves the count (436134 != 436210 on CI),
-        # while a second freeze would add every object made since
-        self.assertLessEqual(gc.get_freeze_count(), frozen)
-        self.assertEqual(gevent_gc.freeze_after_load(), 0)  # never a second time
-        self.assertLessEqual(gc.get_freeze_count(), frozen)
+        # The freeze count is live: a frozen object that another thread frees leaves the permanent generation, so the count may drop but never rise.
+        after = gc.get_freeze_count()
+        self.assertLessEqual(after, frozen)
+        self.assertGreaterEqual(after, 200)  # the start-up objects are still alive and still frozen
+        with mock.patch.object(gevent_gc.gc, 'freeze', wraps=gc.freeze) as freeze:
+            self.assertEqual(gevent_gc.freeze_after_load(), 0)  # never a second time
+        freeze.assert_not_called()
+        self.assertLessEqual(gc.get_freeze_count(), after)
         del startup
 
     def test_the_timer_freezes_on_its_first_wake_after_load_and_ticks_after_that(self):
@@ -184,13 +192,14 @@ class FrozenStartupTests(SimpleTestCase):
 
     def test_switching_off_the_timer_restores_the_interpreters_collector_and_freezes_nothing(self):
         gc.enable()
+        before = gc.get_freeze_count()
         with mock.patch.dict('os.environ', {'CVENGINE_GC_MANUAL': '0'}), mock.patch.object(gevent_db, 'gevent_patched', return_value=True), \
                 mock.patch('gevent.spawn') as spawn:
             self.assertFalse(gevent_gc.install())
         spawn.assert_not_called()
         self.assertTrue(gc.isenabled())
         self.assertIsNone(gevent_gc._state['loaded'])
-        self.assertEqual(gc.get_freeze_count(), 0)
+        self.assertEqual(gc.get_freeze_count(), before)
 
     def test_no_collection_starts_inside_a_greenlet_switch(self):
         import gevent
