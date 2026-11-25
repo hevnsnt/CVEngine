@@ -590,6 +590,10 @@ def save_notify(request):
     parsed = urlparse(url)
     if parsed.scheme != 'https' or (parsed.hostname or '') not in hosts or not parsed.path.strip('/'):
         raise WizardError(400, f'That does not look like a {kind.title()} webhook address (https://{hosts[0]}/...).')
+    from cvengine.hook_guard import hook_refusal
+    reason = hook_refusal(url)
+    if reason:
+        raise WizardError(400, f'That webhook address {reason}. A webhook must be a public https address.')
     limit(request.user, 'write')
     row = Notification.objects.first() or Notification()
     setattr(row, field, url)

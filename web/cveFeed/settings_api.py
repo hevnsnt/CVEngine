@@ -649,6 +649,7 @@ NOTIFY_FLAGS = ('send_to_slack', 'send_to_lark', 'send_to_discord', 'send_to_tel
                 'send_interesting_notif', 'send_vuln_notif', 'send_subdomain_changes_notif', 'send_scan_output_file',
                 'send_scan_tracebacks')
 NOTIFY_SECRETS = ('slack_hook_url', 'lark_hook_url', 'discord_hook_url', 'telegram_bot_token', 'telegram_bot_chat_id')
+NOTIFY_URLS = ('slack_hook_url', 'lark_hook_url', 'discord_hook_url')
 
 
 def notifications_get(request):
@@ -668,9 +669,21 @@ def notifications_put(request):
         if data.get(f'clear_{name}'):
             setattr(row, name, '')
         else:
-            setattr(row, name, _text(data, name, getattr(row, name) or '', secret=True, max_len=200))
+            value = _text(data, name, getattr(row, name) or '', secret=True, max_len=200)
+            if name in NOTIFY_URLS and value != (getattr(row, name) or ''):
+                _check_hook_url(name, value)
+            setattr(row, name, value)
     row.save()
     return notifications_get(request)
+
+
+def _check_hook_url(name, url):
+    """A webhook address must resolve to public addresses only (cvengine.hook_guard): the notification sender POSTs to it from the server,
+    so a loopback, link local, metadata or private address would have the server send its scan messages inside its own network."""
+    from cvengine.hook_guard import hook_refusal
+    reason = hook_refusal(url)
+    if reason:
+        raise SettingsError(400, f'{name} {reason}. A webhook must be a public http or https address.')
 
 
 # --- email -------------------------------------------------------------------------
