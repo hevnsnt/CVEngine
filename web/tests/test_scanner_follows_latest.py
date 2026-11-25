@@ -1,6 +1,7 @@
 """The built-in scanner follows the newest published Sentinel, which removes the human who used to approve each image. These are the rails that stay:
 the server offers no work to a Sentinel whose contract is below what it speaks (and says so, on screen), a Sentinel on a NEWER contract keeps working on the
 kinds the server knows, and the Sentinels page and the system status say which build runs, whether it is the newest the server saw, and since when."""
+from datetime import datetime, timedelta
 from unittest import mock
 
 from django.core.cache import cache
@@ -102,10 +103,13 @@ class ReleaseTests(BuiltinVisibleBase):
         self.assertTrue(first)
         sentinel_settings.record_info(Agent.objects.get(pk=agent.pk), {'version': 'aaaaaaaaaaaa', 'contract_version': 3})
         self.assertEqual(Agent.objects.get(pk=agent.pk).info['version_since'], first, 'the same version again moves nothing')
-        sentinel_settings.record_info(Agent.objects.get(pk=agent.pk), {'version': 'bbbbbbbbbbbb', 'version_since': '1999-01-01T00:00:00+00:00'})
+        # a server clock whose microseconds read 019993 (a stamp that once failed a run): the check below must read the year, not the digits
+        at = (datetime.fromisoformat(first) + timedelta(seconds=1)).replace(microsecond=19993)
+        sentinel_settings.record_info(Agent.objects.get(pk=agent.pk), {'version': 'bbbbbbbbbbbb', 'version_since': '1999-01-01T00:00:00+00:00'}, now=at)
         later = Agent.objects.get(pk=agent.pk).info['version_since']
         self.assertGreater(later, first)
-        self.assertNotIn('1999', later)
+        # the year, not the text: the stamp's microseconds can hold the digits 1999 (.019993 did, and failed a run)
+        self.assertNotEqual(datetime.fromisoformat(later).year, 1999)
 
     def test_the_sentinels_page_rows_and_the_detail_carry_it(self):
         agent = self.enroll()

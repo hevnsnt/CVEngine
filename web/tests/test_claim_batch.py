@@ -88,14 +88,16 @@ class _RedisCase(unittest.TestCase):
         return keys
 
     def assertSameState(self, a, b):
-        """Values equal, and each TTL equal within one second (no TTL, -1, must be equal exactly)."""
+        """Values equal, and each TTL equal within five seconds (no TTL, -1, must be equal exactly). The two sides are set one after the
+        other with a 300 s hold, so their TTLs differ by the time between the two calls: about a second on a slow CI runner (1063 ms seen).
+        Five seconds still tells a renewed hold (about 300 s) from one left at its old TTL or not set."""
         self.assertEqual(len(a), len(b))
         for i, ((va, ta), (vb, tb)) in enumerate(zip(a, b)):
             self.assertEqual(va, vb, f'value of key {i}')
             if ta < 0 or tb < 0:
                 self.assertEqual(ta, tb, f'ttl of key {i}')
             else:
-                self.assertLessEqual(abs(ta - tb), 1000, f'ttl of key {i}: {ta} ms against {tb} ms')
+                self.assertLessEqual(abs(ta - tb), 5000, f'ttl of key {i}: {ta} ms against {tb} ms')
 
 
 class EquivalenceTests(_RedisCase):

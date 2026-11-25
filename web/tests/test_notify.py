@@ -239,6 +239,12 @@ class NotifyTests(TestCase):
 class SenderHelperTests(TestCase):
 	"""The inherited helpers behind the messages: bounded in time, and silent for a channel that is off."""
 
+	def setUp(self):
+		# The hooks here are fixture names that do not resolve in the rig; the send time address rule has its own tests (test_notification_hook_url).
+		dns = mock.patch('cvengine.hook_guard.socket.getaddrinfo', return_value=[(2, 1, 6, '', ('8.8.4.4', 0))])
+		dns.start()
+		self.addCleanup(dns.stop)
+
 	def test_slack_and_lark_posts_have_a_timeout_and_off_channels_send_nothing(self):
 		from cvengine import common_func
 		with mock.patch('requests.post') as post, mock.patch('requests.get') as get:

@@ -164,7 +164,8 @@ class SettingsApiTests(TestCase):
 		self.assertFalse(send(self.c, 'PUT', 'keys', {'chaos': {'clear': True}})[1]['chaos']['has_key'])
 
 	def test_notifications_secrets_write_only(self):
-		status, data = send(self.c, 'PUT', 'notifications', {'send_to_slack': True, 'slack_hook_url': 'https://hooks.slack.com/x/secret'})
+		with mock.patch.object(socket, 'getaddrinfo', return_value=[(2, 1, 6, '', ('3.0.0.1', 0))]):  # the hook check resolves the name; tests have no network
+			status, data = send(self.c, 'PUT', 'notifications', {'send_to_slack': True, 'slack_hook_url': 'https://hooks.slack.com/x/secret'})
 		self.assertTrue(data['send_to_slack'] and data['has_slack_hook_url'])
 		self.assertNotIn('secret', json.dumps(data))
 		send(self.c, 'PUT', 'notifications', {'slack_hook_url': ''})

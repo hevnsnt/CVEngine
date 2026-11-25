@@ -11,6 +11,7 @@ from django.utils import timezone
 from agentapi import sentinel_settings
 from agentapi.models import SentinelDefaults, SentinelEnrollment, SentinelTask
 from cveFeed import discovery, setup_flow
+from cvengine import hook_guard
 from cveFeed.models import OpenvasOrg, OpenvasSettings
 from dashboard.models import Org, Project, SetupWizard, UserProfile
 from scanEngine.models import EngineType, Notification
@@ -622,7 +623,9 @@ class EnrollmentTests(WizardBase):
 class ExtrasTests(WizardBase):
     def test_a_slack_webhook_is_stored_and_never_returned(self):
         url = 'https://hooks.slack.com/services/T000/B000/XXXXXXXX'
-        response = post(self.c, 'notify', {'service': 'slack', 'url': url})
+        # the hook check resolves the name (tests have no network): a public address stands in for hooks.slack.com
+        with mock.patch.object(hook_guard.socket, 'getaddrinfo', return_value=[(2, 1, 6, '', ('3.0.0.1', 0))]):
+            response = post(self.c, 'notify', {'service': 'slack', 'url': url})
         self.assertEqual(response.status_code, 200)
         self.assertTrue(Notification.objects.get().send_to_slack)
         self.assertEqual(Notification.objects.get().slack_hook_url, url)
@@ -775,7 +778,8 @@ class FinishTests(WizardBase):
 
     def test_no_secret_is_ever_in_the_stored_state(self):
         self.seed()
-        post(self.c, 'notify', {'service': 'discord', 'url': 'https://discord.com/api/webhooks/1/SECRETTOKEN'})
+        with mock.patch.object(hook_guard.socket, 'getaddrinfo', return_value=[(2, 1, 6, '', ('3.0.0.1', 0))]):  # no network in tests
+            post(self.c, 'notify', {'service': 'discord', 'url': 'https://discord.com/api/webhooks/1/SECRETTOKEN'})
         post(self.c, 'provision', {})
         self.assertNotIn('SECRETTOKEN', json.dumps(SetupWizard.objects.get().data))
         self.assertNotIn('cvenroll', json.dumps(SetupWizard.objects.get().data).lower())

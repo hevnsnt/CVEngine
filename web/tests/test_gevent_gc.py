@@ -10,10 +10,19 @@ from cvengine import gevent_db, gevent_gc, lane_memory
 
 
 def _fresh_state(case):
-    """The timer's counters start from zero in each test and are put back after it; nothing stays frozen."""
+    """The timer's counters start from zero in each test and are put back after it; nothing stays frozen.
+
+    A frozen count of zero is not a fixed point to assert against: on Python 3.12 the first full collection after ``gc.unfreeze()`` reports a few
+    hundred objects as frozen again (375 on CI and on a plain 3.12.3, none on 3.14), so a test compares the count with its own reading from before
+    the step it checks."""
+    from celery.signals import worker_ready
     saved = dict(gevent_gc._state)
     case.addCleanup(lambda: (gevent_gc._state.clear(), gevent_gc._state.update(saved)))
     case.addCleanup(gc.unfreeze)
+    # install() connects its worker_ready receiver once per dispatch_uid: one left by an earlier test would keep setting that test's event,
+    # and a later install() could not connect its own
+    worker_ready.disconnect(dispatch_uid='gevent-gc-loaded')
+    case.addCleanup(worker_ready.disconnect, dispatch_uid='gevent-gc-loaded')
     gevent_gc._state.update({'ticks': 0, 'frozen': False, 'collections': 0, 'last_s': None, 'last_full_s': None, 'worst_s': 0.0, 'freeze_s': None, 'slow_logged_at': None,
                              'slow_skipped': 0, 'loaded': None})
 
@@ -95,16 +104,20 @@ class FrozenStartupTests(SimpleTestCase):
         self.was_enabled = gc.isenabled()
         self.addCleanup(lambda: gc.enable() if self.was_enabled else gc.disable())
         _fresh_state(self)
+        # an earlier test's Cycle objects are garbage once it unfroze them: collect them now, or the first collection of this test frees
+        # them too and counts 201 where it freed one (a shuffled order runs the 200 object freeze test first)
+        gc.collect()
         gc.disable()
         Cycle.freed = 0
 
     def test_install_waits_for_the_worker_to_have_loaded(self):
         from celery.signals import worker_ready
+        before = gc.get_freeze_count()
         with mock.patch.object(gevent_db, 'gevent_patched', return_value=True), mock.patch('gevent.spawn'):
             self.assertTrue(gevent_gc.install())
         loaded = gevent_gc._state['loaded']
         self.assertFalse(loaded.is_set())
-        self.assertEqual(gc.get_freeze_count(), 0)  # install itself freezes nothing: the task modules are not imported yet
+        self.assertEqual(gc.get_freeze_count(), before)  # install itself freezes nothing: the task modules are not imported yet
         self.addCleanup(worker_ready.disconnect, dispatch_uid='gevent-gc-loaded')
         ours = [r for r in worker_ready.receivers if r[0][0] == 'gevent-gc-loaded']
         self.assertEqual(len(ours), 1)
@@ -159,7 +172,7 @@ class FrozenStartupTests(SimpleTestCase):
         gevent_gc.tick()  # the full one
         self.assertEqual(gc.get_stats()[2]['collections'], full_before + 1)
         self.assertEqual(Cycle.freed, 1)  # a full collection leaves the frozen ones alone too
-        self.assertEqual(gc.get_freeze_count(), frozen_count)  # and never freezes again
+        self.assertLessEqual(gc.get_freeze_count(), frozen_count)  # and never freezes again (a frozen object freed elsewhere only lowers it)
 
     def test_a_cycle_that_outlives_a_young_collection_is_freed_by_the_next_full_one(self):
         gevent_gc.freeze_after_load()
@@ -179,13 +192,14 @@ class FrozenStartupTests(SimpleTestCase):
 
     def test_switching_off_the_timer_restores_the_interpreters_collector_and_freezes_nothing(self):
         gc.enable()
+        before = gc.get_freeze_count()
         with mock.patch.dict('os.environ', {'CVENGINE_GC_MANUAL': '0'}), mock.patch.object(gevent_db, 'gevent_patched', return_value=True), \
                 mock.patch('gevent.spawn') as spawn:
             self.assertFalse(gevent_gc.install())
         spawn.assert_not_called()
         self.assertTrue(gc.isenabled())
         self.assertIsNone(gevent_gc._state['loaded'])
-        self.assertEqual(gc.get_freeze_count(), 0)
+        self.assertEqual(gc.get_freeze_count(), before)
 
     def test_no_collection_starts_inside_a_greenlet_switch(self):
         import gevent

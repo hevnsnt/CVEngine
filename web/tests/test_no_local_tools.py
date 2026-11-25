@@ -428,6 +428,7 @@ LOOKUP_ALLOWED = {
     'cveFeed/openvas_scan.py': "own_addresses: this server's own DOMAIN_NAME, so OpenVAS is never pointed at the server itself",
     'cveFeed/settings_api.py': 'the SSRF check of an outbound URL an App Admin enters (SMTP host, AI base URL), not a scan target',
     'cvengine/ai_providers.py': "the SSRF check of the AI provider's base URL, not a scan target",
+    'cvengine/hook_guard.py': 'the SSRF check of a notification webhook URL (Slack, Discord, Lark), at save and before each send, not a scan target',
 }
 
 

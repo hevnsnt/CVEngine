@@ -168,9 +168,11 @@ def graph_payload(domain_id=None, scan_id=None):
     sub_list = list(listed.select_related('target_domain__project__org').only(*GRAPH_SUB_FIELDS)
                     .order_by(F('score').desc(nulls_last=True), 'name', 'pk')[:GRAPH_NODE_CAP])
     sub_ids = [s.pk for s in sub_list]
-    # each host's addresses, as values (the same join the prefetch made, with no model rows)
+    # each host's addresses, as values, in address id order: a join has no order of its own, so without it a host's addresses (and which of
+    # them fit under the node cap) could come back in a different order on each read
     ips = {}
-    for sub_id, ip_id, address in IpAddress.objects.filter(ip_addresses__id__in=sub_ids).values_list('ip_addresses__id', 'id', 'address'):
+    for sub_id, ip_id, address in (IpAddress.objects.filter(ip_addresses__id__in=sub_ids).order_by('id')
+                                   .values_list('ip_addresses__id', 'id', 'address')):
         ips.setdefault(sub_id, []).append((ip_id, address))
 
     # one host, several names: the evidence of the other names on the same addresses counts for the host drawn

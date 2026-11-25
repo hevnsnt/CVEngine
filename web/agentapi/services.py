@@ -3863,7 +3863,7 @@ def run_hygiene_checks(ctx, slug, target_id=None):
     project, _ = get_project(ctx, slug, write=True)
     qs = Domain.objects.filter(project=project)
     if target_id:
-        qs = qs.filter(id=target_id)
+        qs = qs.filter(id=_int_param(target_id, 'target_id'))  # a body's text or list is the caller's mistake (400), not a crash
     ids = list(qs.values_list('id', flat=True))
     if target_id and not ids:
         raise ApiError(404, 'target not found')
