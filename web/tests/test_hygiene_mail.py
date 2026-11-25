@@ -17,7 +17,8 @@ class ActivityCreditTests(TestCase):
 		project = Project.objects.create(name='Acme', slug='acme', insert_date=now, org=Org.objects.create(name='Acme', slug='acme-org'))
 		domain = Domain.objects.create(name='acme.example', project=project, insert_date=now)
 		credited = [hy.Finding('mx_direct_send', hy.MEDIUM, 'Microsoft 365 mail: check that Direct Send is turned off', 'Read from MX only.',
-		                       'acme.example', {'mx': ['acme-example.mail.protection.outlook.com'], 'credit': mf.CREDIT})]
+		                       'acme.example', {'mx': 'acme-example.mail.protection.outlook.com', 'tested': True, 'reply': '250 2.1.5 Recipient OK',
+		                        'credit': mf.CREDIT})]
 		hygiene_harness.run_hygiene(domain.id, probe=lambda host, port: None, emailer=lambda name: (credited, True), mx=lambda n, t: False)
 		entry = AgentActivity.objects.filter(kind='hygiene', message__contains='MailFail').latest('id')
 		self.assertEqual(entry.status, 'done')
