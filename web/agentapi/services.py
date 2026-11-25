@@ -1639,7 +1639,7 @@ def _merge_group(sub, others, hot_names=None):
                 # behind a version-only one that the cap holds at smoke
                 reasons[seen_reasons[key]] = r
         for m in row.cve_matches.all():
-            if match_is_live(m):
+            if match_is_live(m) and not _dismissed(m):  # a match the triage dismissed is not open work: the Findings list and the Overview leave it out too
                 cves.add(m.cve_entry.cve_id)
         for v in row.vulnerability_set.all():
             if finding_is_live(v) and v.id not in seen_vulns:
@@ -1736,7 +1736,8 @@ def _host(sub, others=(), labels=(), profile=None, excluded=False, root=None, sh
                        'classification': _classification_of(v)} for v in vulns][:15],
             # the list above is capped and includes informational detections; these are the real counts, split the way the Scanner
             # findings page and the dashboard split them: findings (low or worse) and informational detections
-            'vuln_count': sum(1 for v in vulns if v.severity != 0), 'info_count': sum(1 for v in vulns if v.severity == 0),
+            # a finding the triage dismissed (``counts.dismissed_q``) stays in the list above with its classification but is not counted, as on every other surface
+            'vuln_count': sum(1 for v in vulns if v.severity != 0 and not _dismissed(v)), 'info_count': sum(1 for v in vulns if v.severity == 0),
             'cve_matches': cve_count,
             'labels': list(labels),
             'profile': profile or dict(NO_PROFILE), 'excluded': bool(excluded),
@@ -5600,6 +5601,13 @@ def _heat_override(t):
 def _seen(obj, name, fallback):
     t = _triage_of(obj)
     return getattr(t, name, None) or fallback
+
+
+def _dismissed(obj):
+    """Whether the triage dismissed the finding or match (classed a likely false positive or not applicable): the rule ``counts.dismissed_q`` states in SQL,
+    read from the prefetched Triage row."""
+    from cveFeed.counts import TRIAGE_DISMISSED
+    return _classification_of(obj) in TRIAGE_DISMISSED
 
 
 def _classification_of(obj):
