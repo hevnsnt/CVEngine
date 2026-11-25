@@ -31,7 +31,7 @@ def tool(key, name, url, group, version, license, purpose, where='sentinel', opt
 # The Sentinel commit the Sentinel versions below were read from (its Dockerfile and requirements.txt). tests/test_about_page.py holds it equal to
 # the floor commit of scanner.lock.json and to the sha web/requirements.txt pins: raising the floor means reading the Sentinel's pins again, then changing this line.
 # (The built-in scanner image follows the newest published build; the page says what it was read at, not that it runs exactly this.)
-SENTINEL_PINS_COMMIT = 'a918bc89cd7a4c5710e0f2566634556444dfe551'
+SENTINEL_PINS_COMMIT = '6728064ff9391f1485723fecff7d731fbfdb0f35'
 
 GH = 'https://github.com/'
 SENTINEL_DOCKERFILE = 'sentinel:Dockerfile'
@@ -66,8 +66,12 @@ TOOLS = [
          'bbot\'s subdomain-takeover and dangling-record module, installed with bbot', pins=[(SENTINEL_DOCKERFILE, r'ARG BADDNS_VERSION=([0-9.]+)')]),
     tool('badsecrets', 'badsecrets', GH + 'blacklanternsecurity/badsecrets', 'scanners', '1.3.0', 'GPL-3.0 (a separate program, never imported)',
          'bbot\'s known-weak-secret module (web framework signing keys), installed with bbot', pins=[(SENTINEL_DOCKERFILE, r'ARG BADSECRETS_VERSION=([0-9.]+)')]),
-    tool('gowitness', 'gowitness', GH + 'sensepost/gowitness', 'scanners', '', 'GPL-3.0',
-         'Older discovery-time screenshots, installed and run by bbot (the host page falls back to them)'),
+    tool('gowitness', 'gowitness', GH + 'sensepost/gowitness', 'scanners', '3.2.2', 'GPL-3.0',
+         'Older discovery-time screenshots, run by bbot; built from source with current Go dependencies (the host page falls back to them)',
+         pins=[(SENTINEL_DOCKERFILE, r'ARG GOWITNESS_VERSION=([0-9.]+)')]),
+    tool('trajan', 'Trajan', GH + 'praetorian-inc/trajan', 'scanners', '1.0.2', 'Apache-2.0',
+         'Looks for CI/CD pipeline misconfigurations in deep (kitchen-sink) discovery, run by bbot; built from source with current Go dependencies',
+         pins=[(SENTINEL_DOCKERFILE, r'ARG TRAJAN_VERSION=([0-9.]+)')]),
     tool('kingfisher', 'Kingfisher', GH + 'mongodb/kingfisher', 'scanners', '2.19.1', 'Apache-2.0',
          'Finds exposed secrets in pages and scripts, on the Sentinel only (the `secrets_scan` kind)', pins=[(SENTINEL_DOCKERFILE, r'ARG KINGFISHER_VERSION=([0-9.]+)')]),
     tool('sshamble', 'sshamble', GH + 'runZeroInc/sshamble', 'scanners', '0.5.1', 'BSD-2-Clause',
@@ -91,7 +95,8 @@ TOOLS = [
          'The GMP client library behind the OpenVAS add-on, in the Sentinel image (the server image no longer installs it)',
          pins=[(SENTINEL_REQUIREMENTS, r'(?m)^python-gvm==([0-9.]+)')]),
     tool('go', 'Go toolchain', 'https://go.dev', 'scanners', '1.27.4', 'BSD-3-Clause',
-         'Builds nuclei and naabu in the Sentinel image; removed again in the same image layer, so no Go runs in it',
+         'Builds nuclei, naabu, sshamble, gowitness and trajan from source in a build stage of the Sentinel image, every Go module at or above a '
+         'fixed-CVE floor (the ARG GO_DEPENDENCY_FLOOR= list); no Go is in the final image',
          pins=[(SENTINEL_DOCKERFILE, r'ARG GOVERSION=([0-9.]+)')]),
     tool('tailscale', 'Tailscale', GH + 'tailscale/tailscale', 'scanners', '1.104.7', 'BSD-3-Clause',
          'The optional sidecar that joins a tailnet so scans can reach it', where='server', optional='COMPOSE_PROFILES=tailscale',
