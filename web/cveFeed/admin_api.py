@@ -142,6 +142,8 @@ def users_list(request, actor):
 
 
 def _membership_target(actor, scope, scope_id, role):
+    if not isinstance(scope, str) or not isinstance(role, str):
+        raise AdminError(400, 'scope and role must be text, such as "org" and "user"')
     if scope not in roles.ASSIGNABLE or role not in roles.ASSIGNABLE[scope]:
         raise AdminError(400, f'role must be one of {", ".join(roles.ASSIGNABLE.get(scope, ()))} for a {scope}')
     if scope == 'org':

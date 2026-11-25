@@ -238,7 +238,7 @@ def ai_put(request):
     cfg = AIProviderSettings.objects.first() or AIProviderSettings()
     old_connection = (cfg.provider, cfg.model, cfg.base_url, cfg.api_key)
     provider = data.get('provider', cfg.provider)
-    if provider not in DEFAULT_MODELS:
+    if not isinstance(provider, str) or provider not in DEFAULT_MODELS:
         raise SettingsError(400, 'unknown provider')
     cfg.provider = provider
     cfg.model = _text(data, 'model', cfg.model, max_len=200)
@@ -525,7 +525,7 @@ def ai_models(request):
     data = _body(request)
     cfg = AIProviderSettings.objects.first() or AIProviderSettings()
     provider = data.get('provider') or cfg.provider
-    if provider not in DEFAULT_MODELS:
+    if not isinstance(provider, str) or provider not in DEFAULT_MODELS:
         raise SettingsError(400, 'unknown provider')
     base_url = str(data.get('base_url') or '').strip() or (cfg.base_url if provider == cfg.provider else '')
     if base_url and not re.match(r'^https?://', base_url, re.I):
@@ -633,6 +633,8 @@ def keys_put(request):
         if name not in data:
             continue
         entry = data[name] or {}
+        if not isinstance(entry, dict):
+            raise SettingsError(400, f'{name} must be an object such as {{"key": "..."}} or {{"clear": true}}')
         if entry.get('clear'):
             model.objects.all().delete()
             continue
@@ -702,7 +704,7 @@ def email_put(request):
     if not 1 <= port <= 65535:
         raise SettingsError(400, 'the port must be between 1 and 65535')
     security = data.get('security', cfg.security)
-    if security not in dict(cfg.SECURITY_CHOICES):
+    if not isinstance(security, str) or security not in dict(cfg.SECURITY_CHOICES):
         raise SettingsError(400, 'Security must be STARTTLS, SSL/TLS or None')
     username = _text(data, 'username', cfg.username, max_len=255)
     from_address = _text(data, 'from_address', cfg.from_address, max_len=254)
