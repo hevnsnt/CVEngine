@@ -81,12 +81,28 @@ def _token(name):
     return re.sub(r'[^a-z0-9]', '', str(name or '').lower())
 
 
+_TOKENS = (None, {})  # (the LIBRARIES table the map was built from, {token: key}): built once, not on every call
+
+
+def _library_tokens():
+    """``{token: key}`` of every ``LIBRARIES`` key and product name. The table is a constant, so the map is built once per process; it was built
+    again on every ``library_key`` call, which the Findings groups and the open issue count call twice per CVE match (4.9 s of the system
+    status on the 10,000-host scale fixture). Held by the table object itself, so a different table (a test's) gets its own map."""
+    global _TOKENS
+    libraries = _libraries()
+    held, tokens = _TOKENS
+    if held is not libraries:
+        tokens = {_token(n): key for key, (product, _s, _d) in libraries.items() for n in (key, product)}
+        _TOKENS = (libraries, tokens)
+    return tokens
+
+
 def library_key(name):
     """The ``cveFeed.js_libraries.LIBRARIES`` key an advisory's product or package name is, or ''. The name must be the library itself (its
     key or product name, any case or punctuation: ``jQuery``, ``jquery_ui``, ``Vue.js``), or a packaging that keeps the library's own version
     numbers and names it as its last part (``components/jquery`` on Composer, ``org.webjars.npm:jquery``). A plugin or a framework that ships
     the library (``jquery-validation``, ``jquery-rails``) and a different product with a similar name (``@angular/core``) are not it."""
-    tokens = {_token(n): key for key, (product, _s, _d) in _libraries().items() for n in (key, product)}
+    tokens = _library_tokens()
     raw = str(name or '').strip().lower()
     found = tokens.get(_token(raw), '')
     if not found and re.search(r'[/:]', raw):
