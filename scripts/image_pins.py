@@ -14,7 +14,8 @@
 A pin is written ``image:tag@sha256:<64 hex>``: Docker uses the digest and ignores the tag, which stays for the reader and for the next bump. The
 digest is the one of the multi-platform index, so amd64 and arm64 hosts pull the same pinned release. What is pinned here:
 
-  * the ``FROM`` lines of web/Dockerfile and reviewer/Dockerfile (ubuntu, the uv build stage, the reviewer's python base);
+  * the ``FROM`` lines of web/Dockerfile, reviewer/Dockerfile and certs/Dockerfile (ubuntu, the uv build stage, the reviewer's python base,
+    the alpine base of the image ``make certs`` builds to create the certificate authority and the server certificate);
   * the ``image:`` lines of docker-compose.yml and docker-compose.dev.yml for the stock services (postgres, redis, nginx).
 
 The built-in scanner's image is pinned the same way, but in scanner.lock.json, together with the Sentinel library commit web/requirements.txt installs
@@ -31,10 +32,10 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-FILES = ('web/Dockerfile', 'reviewer/Dockerfile', 'docker-compose.yml', 'docker-compose.dev.yml')
+FILES = ('web/Dockerfile', 'reviewer/Dockerfile', 'certs/Dockerfile', 'docker-compose.yml', 'docker-compose.dev.yml')
 # A stock image of a public registry: optional registry host, a path, a tag, then optionally the digest. Our own images (cvengine/web:latest,
 # cvengine-reviewer-local) and references built from variables (the scanner, Tailscale) are not stock images and are never matched.
-STOCK = ('ubuntu', 'ghcr.io/astral-sh/uv', 'python', 'postgres', 'redis', 'nginx')
+STOCK = ('ubuntu', 'ghcr.io/astral-sh/uv', 'python', 'alpine', 'postgres', 'redis', 'nginx')
 REF = re.compile(r'(?P<image>(?:[a-z0-9.-]+(?::[0-9]+)?/)?[a-z0-9._-]+(?:/[a-z0-9._-]+)*):(?P<tag>[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})'
                  r'(?:@(?P<digest>sha256:[0-9a-f]{64}))?')
 LINE = {

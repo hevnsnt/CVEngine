@@ -525,10 +525,18 @@ def _renew_claims(claims):
     if client is None:
         return
     from cvengine import resources
-    try:  # a run can hold tens of thousands of claims: one call per chunk, not one round trip per claim (see claim_refresh_many)
-        resources.claim_refresh_many(client, claims, HOLD_SECONDS)
-    except Exception:  # noqa: BLE001
-        pass
+    # a run can hold tens of thousands of claims: one call per chunk, not one round trip per claim (see claim_refresh_many)
+    try:
+        results = resources.claim_refresh_many(client, claims, HOLD_SECONDS)
+    except Exception:  # noqa: BLE001 - a claim not renewed expires and may be taken; say so instead of hiding it
+        logger.warning('stage runs: %s held claim(s) could not be renewed', len(claims), exc_info=True)
+        return
+    failed = [key for (key, _owner), got in zip(claims, results) if got is None]
+    lost = [key for (key, _owner), got in zip(claims, results) if got == 'lost']
+    if failed:
+        logger.warning('stage runs: %s held claim(s) could not be renewed, first %s', len(failed), failed[0])
+    if lost:
+        logger.warning('stage runs: %s held claim(s) were taken by another job while the run waited, first %s', len(lost), lost[0])
 
 
 # --- waking ------------------------------------------------------------------------------------------------------------------------------

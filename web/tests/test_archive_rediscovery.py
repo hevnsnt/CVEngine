@@ -54,6 +54,17 @@ class ArchivedRediscoveryTests(TestCase):
         self.assertEqual(ArchiveRediscovery.objects.get(pk=first['run_id']).status, 'completed')
         self.assertEqual(run_page(resolver=resolver)['skipped'], 'already completed today')
 
+    def test_a_continuation_the_broker_refuses_is_logged_and_the_run_stops_partial(self):
+        for i in range(27):
+            self.state(f'b{i}.archive.example')
+        with mock.patch('cveFeed.scan_control.pause_requested', return_value=False), \
+             mock.patch('cveFeed.tasks.rediscover_archived_hosts.apply_async', side_effect=RuntimeError('broker gone')), \
+             self.assertLogs('cveFeed.archive_rediscovery', 'WARNING') as logs:
+            out = run_page(resolver=lambda name: ('absent', set()))
+        self.assertEqual((out['status'], out['more']), ('partial', True))
+        self.assertEqual(ArchiveRediscovery.objects.get(pk=out['run_id']).status, 'partial')
+        self.assertIn('broker gone', '\n'.join(logs.output))
+
     def test_dns_reappearance_queues_scoped_assessment_and_keeps_history(self):
         row = self.state('back.archive.example')
         def resolver(name):

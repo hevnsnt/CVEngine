@@ -112,8 +112,8 @@ class ReportingBase(TestCase):
     def csv_rows(self, job):
         with open(os.path.join(self.reports_dir, job.filename), encoding='utf-8') as fh:
             text = fh.read()
-        self.assertTrue(text.startswith('﻿'))
-        return list(csv.reader(io.StringIO(text.lstrip('﻿'))))
+        self.assertTrue(text.startswith('\ufeff'))
+        return list(csv.reader(io.StringIO(text.lstrip('\ufeff'))))
 
 
 class ScopeTests(ReportingBase):

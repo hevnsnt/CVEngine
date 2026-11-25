@@ -99,7 +99,7 @@ _DIR_VERSION_RE = re.compile(r'^v?' + _VERSION + r'$')
 
 # a banner line: the start of a comment or a line inside one. One run of blanks on each side of the comment mark, never two runs that could
 # share the same blanks (a line of 300 KB of spaces is read once, not split every way)
-_LINE = r'(?m)^﻿?[ \t]*(?:(?:/\*+!?|\*|//!?)[ \t]*)?'
+_LINE = r'(?m)^\ufeff?[ \t]*(?:(?:/\*+!?|\*|//!?)[ \t]*)?'
 _BANNERS = (
     ('jquery', re.compile(_LINE + r'jQuery (?:JavaScript Library )?v' + _VERSION + r'(?=[\s|,-]|$)')),
     ('jquery', re.compile(_LINE + r'jQuery ' + _VERSION + r' - New Wave')),

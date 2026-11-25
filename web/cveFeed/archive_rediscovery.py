@@ -256,6 +256,7 @@ def run_page(run_id=None, *, resolver=None, tcp_probe=None):
         try:
             rediscover_archived_hosts.apply_async(args=[run.pk], queue='cve_feed_queue', countdown=1)
         except Exception:
+            logger.warning('archived host rediscovery run %s: the next batch could not be queued; the run stops as partial', run.pk, exc_info=True)
             run.status = 'partial'
             run.save(update_fields=['status'])
         return {'run_id': run.pk, 'status': run.status, 'checked': run.checked, 'more': True}

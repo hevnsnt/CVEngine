@@ -393,8 +393,8 @@ def release_pool_override(ctx, force_text=''):
             scan_concurrency.update({key: None}, SystemActor())  # the saved layer is cleared: the auto-tuner (or .env) decides again
             try:
                 scan_concurrency.apply_discovery()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception:  # noqa: BLE001 - the 30 second check resizes the worker later
+                logger.warning('watchdog: the discovery worker could not be resized after its pool override ended', exc_info=True)
     if not why:
         return None
     state.data = {k: v for k, v in (state.data or {}).items() if k != 'override'}
@@ -1255,8 +1255,8 @@ def _expire_open_problem_notice(rule):
     try:
         from cveFeed.models import AdminAlert
         AdminAlert.objects.filter(code='watchdog_' + rule.code.lower(), resolved_at__isnull=True, severity__in=('warning', 'critical')).update(resolved_at=timezone.now())
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception:  # noqa: BLE001 - the next tick tries again; the notice stays open until then
+        logger.warning('watchdog: the open notice of rule %s could not be closed', rule.code, exc_info=True)
 
 
 def _alarm(signum, frame):

@@ -569,7 +569,7 @@ def generate_org_enrollment(ctx, slug, network='external'):
     no new enrollment needed."""
     from dashboard.models import Org
     org = Org.objects.filter(slug=slug).first()
-    if org is None:
+    if org is None or not svc._visible_org(ctx.user, org):  # one answer for missing and not yours: an outsider cannot probe organization slugs
         raise ApiError(404, 'organization not found')
     if not roles.can_manage_org(ctx.user, org.pk):
         raise ApiError(403, 'generating an organization-wide Sentinel enrollment needs the admin role in this organization')

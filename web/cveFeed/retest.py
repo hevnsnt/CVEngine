@@ -20,7 +20,6 @@ logger = logging.getLogger(__name__)
 RETEST_TASK = 'retest'  # marker in ScanHistory.tasks next to HOST_PIPELINE_TASK
 RETEST_SERVICE = 'retest'  # equal evidence coalesces for CVENGINE_TTL_RETEST hours
 DEFAULT_MAX_HOSTS = 25
-MAX_CHANGE_ROWS = 2000  # change rows read per scan
 TRIGGER_KINDS = ('host_new', 'host_returned', 'port_opened', 'service_changed', 'tech_added', 'tech_version_changed', 'auth_changed',
                  'zombie_host')
 
@@ -41,33 +40,6 @@ def _worth_it(row):
     if row['kind'] == 'auth_changed':
         return after.get('auth_state') == 'open' and before.get('auth_state') != 'open'
     return True
-
-
-def hosts_to_retest(scan):
-    """The host names of ``scan`` to test again, highest score first, at most max_hosts(): those with a change that matters
-    (a service change counts only when the version differs, an auth change only when a route became open), minus hosts
-    already re-tested inside the ledger window."""
-    from cveFeed import ledger
-    from cveFeed.scoring import row_preference, usable_rows
-    from cveFeed.models import AssetChange
-    from startScan.models import Subdomain
-    project = scan.domain.project_id
-    rows = AssetChange.objects.filter(scan=scan, kind__in=TRIGGER_KINDS).values('host', 'kind', 'before', 'after')[:MAX_CHANGE_ROWS]
-    names = list(dict.fromkeys(r['host'] for r in rows if _worth_it(r)))
-    if not names:
-        return []
-    recent = ledger.fresh(RETEST_SERVICE, names, project)
-    names = [n for n in names if n.lower() not in recent]
-    score = {}
-    for start in range(0, len(names), 500):
-        # the score of the source scan's row, else of the newest finished scan's: a failed or queued scan's partial row (score 0)
-        # must not push a fire host to the back of the queue
-        rows = usable_rows(Subdomain.objects.filter(target_domain__project_id=project, name__in=names[start:start + 500])) \
-            .order_by('name', *row_preference(scan.id)).distinct('name')
-        for name, best in rows.values_list('name', 'score'):
-            score[name] = best or 0
-    names.sort(key=lambda n: (-score.get(n, 0), n))  # hottest first, then by name
-    return names[:max_hosts()]
 
 
 def _changed_evidence(scan):

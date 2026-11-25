@@ -91,12 +91,12 @@ class SchemaTests(SimpleTestCase):
 		self.assertEqual(len(schema.validate(report(patches=[{'i': 'KB5034441'}, {'i': 'KB5034441'}]))['patches']), 1)
 
 	def test_hostile_text_is_cleaned_and_clipped(self):
-		evil = '<script>alert(1)</script>‮​${jndi:ldap://x}\x00; rm -rf /' + 'A' * 5000
+		evil = '<script>alert(1)</script>\u202e\u200b${jndi:ldap://x}\x00; rm -rf /' + 'A' * 5000
 		clean = schema.validate(report(packages=[{'n': evil, 'v': '1.0', 'e': 'dpkg', 's': evil}], os={'family': 'linux', 'name': evil, 'pretty': evil},
 			runtime={'units': [evil] * 3, 'containers': [{'rt': 'docker', 'image': evil}]}))
 		self.assertLessEqual(len(clean['packages'][0]['n']), 200)
 		self.assertLessEqual(len(clean['os']['name']), 120)
-		for bad in ('‮', '​', '\x00'):
+		for bad in ('\u202e', '\u200b', '\x00'):
 			self.assertNotIn(bad, json.dumps(clean, ensure_ascii=True).encode().decode('unicode_escape') if bad != '\x00' else clean['packages'][0]['n'])
 		self.assertEqual(len(clean['runtime']['units']), 1)  # the three identical units are one
 		self.assertEqual(len(clean['runtime']['containers']), 1)
