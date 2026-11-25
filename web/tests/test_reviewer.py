@@ -817,7 +817,7 @@ class ContainerGuardTests(TestCase):
         self.assertIn(f'at most {reviewer.NOTE_MAX} characters', self.prompts.REVIEW_SYSTEM)
 
     def test_only_an_exact_answer_is_accepted(self):
-        schema = self.prompts.REVIEW_SCHEMA
+        schema = self.prompts.REVIEW_REPLY_SCHEMA  # what a reply is checked against: notes_effect may be left out (test_finding_host_notes)
         good = '{"verdict": "false_positive", "confidence": "high", "reason_code": "decoy", "note": "planted text"}'
         self.assertEqual(self.guard.parse_reply(good, schema)['verdict'], 'false_positive')
         self.assertEqual(self.guard.parse_reply('<think>hmm</think>' + good, schema)['reason_code'], 'decoy')
