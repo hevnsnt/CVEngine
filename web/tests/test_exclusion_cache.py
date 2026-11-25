@@ -1,7 +1,7 @@
-"""The exclusion lists (an organization's excluded hosts, the hosts moved out of a project, the do-not-scan networks) are cached per project for at most
-30 seconds and read once per batch, and every way of changing them takes effect on the very next lookup: a create, an update, a delete (one row, a
-queryset, a cascade), a bulk insert, a project moving to another organization. A failed read is never cached, and a lookup made while a change is
-still uncommitted is dropped when it commits."""
+"""The exclusion lists (an organization's excluded hosts, the hosts moved out of a project, the do-not-scan networks) are never cached across calls or
+processes: they are read once per batch (``exclusions.memo``) and from the database on every other call, and every way of changing them takes effect on
+the very next lookup: a create, an update, a delete (one row, a queryset, a cascade), a bulk insert, a project moving to another organization. A failed
+read is never kept, and a lookup made while a change is still uncommitted is dropped when it commits."""
 import ipaddress
 
 from django.db import connection
@@ -32,26 +32,49 @@ class Base(TestCase):
 
 
 class CacheTests(Base):
-	def test_the_ttl_is_short(self):
-		self.assertLessEqual(exclusions.CACHE_SECONDS, 30)
-
-	def test_a_second_lookup_reads_nothing_from_the_database(self):
+	def test_every_call_outside_a_batch_reads_the_database(self):
 		HostExclusion.objects.create(org=self.org, host='x.cache.test')
 		self.assertIn('x.cache.test', self.names())
 		with CaptureQueriesContext(connection) as queries:
 			self.assertIn('x.cache.test', self.names())
 			exclusions.address_networks(self.pid)
 			exclusions.address_networks(self.pid)
-		self.assertEqual(len([q for q in queries.captured_queries if 'cvefeed_excludedaddress' in q['sql'].lower()]), 1)
-		self.assertFalse([q for q in queries.captured_queries if 'cvefeed_hostexclusion' in q['sql'].lower() or 'cvefeed_hostmove' in q['sql'].lower()])
+		self.assertEqual(len([q for q in queries.captured_queries if 'cvefeed_excludedaddress' in q['sql'].lower()]), 2)
+		self.assertEqual(len([q for q in queries.captured_queries if 'cvefeed_hostexclusion' in q['sql'].lower()]), 1)
 
-	def test_inside_a_batch_each_list_is_read_once_even_without_the_shared_cache(self):
+	def test_the_shared_cache_is_never_read_or_written(self):
 		from unittest import mock
-		with mock.patch('cveFeed.exclusions._generation', return_value=None), exclusions.memo(), CaptureQueriesContext(connection) as queries:
+		ExcludedAddress.objects.create(org=self.org, cidr='198.51.100.0/24')
+		HostExclusion.objects.create(org=self.org, host='c.cache.test')
+		with mock.patch('django.core.cache.cache') as shared, mock.patch('django.core.cache.caches') as named:
+			self.assertIn('c.cache.test', exclusions.excluded_names(self.pid))
+			self.assertIn('198.51.100.7', exclusions.address_refusals(self.pid, ['198.51.100.7']))
+		self.assertEqual(shared.mock_calls, [])
+		self.assertEqual(named.mock_calls, [])
+
+	def test_inside_a_batch_each_list_is_read_once(self):
+		with exclusions.memo(), CaptureQueriesContext(connection) as queries:
 			for _ in range(3):
 				self.names()
 				exclusions.address_networks(self.pid)
 		self.assertEqual(len(queries.captured_queries), 3)  # host exclusions, moved hosts, networks
+
+	def test_nothing_of_a_batch_outlives_it(self):
+		with exclusions.memo():
+			self.assertEqual(exclusions.address_refusals(self.pid, ['198.51.100.7']), {})
+		ExcludedAddress.objects.bulk_create([ExcludedAddress(org=self.org, cidr='198.51.100.0/24')])
+		with exclusions.memo():
+			self.assertIn('198.51.100.7', exclusions.address_refusals(self.pid, ['198.51.100.7']))
+
+	def test_a_change_whose_reset_could_not_be_written_is_still_seen_by_the_next_lookup(self):
+		"""With a shared cache, a list change whose reset could not be written (the cache refusing writes) left every process scanning the address for
+		up to 30 seconds. Nothing is shared now, so a failed write anywhere changes nothing."""
+		from unittest import mock
+		from django.core.cache import cache
+		self.assertEqual(exclusions.address_refusals(self.pid, ['198.51.100.7']), {})
+		with mock.patch.object(cache, 'set', side_effect=RuntimeError('redis refuses writes')):
+			ExcludedAddress.objects.create(org=self.org, cidr='198.51.100.0/24')
+		self.assertIn('198.51.100.7', exclusions.address_refusals(self.pid, ['198.51.100.7']))
 
 	def test_a_change_made_inside_a_batch_is_seen_by_its_next_lookup(self):
 		with exclusions.memo():
@@ -59,21 +82,22 @@ class CacheTests(Base):
 			HostExclusion.objects.create(org=self.org, host='in.cache.test')
 			self.assertIn('in.cache.test', self.names())
 
-	def test_a_cache_that_is_down_asks_the_database(self):
+	def test_a_cache_that_is_down_changes_nothing(self):
 		from unittest import mock
 		HostExclusion.objects.create(org=self.org, host='down.cache.test')
-		with mock.patch('cveFeed.exclusions._cache', side_effect=RuntimeError('redis down')):
+		with mock.patch('django.core.cache.cache.get', side_effect=RuntimeError('redis down')), \
+				mock.patch('django.core.cache.cache.set', side_effect=RuntimeError('redis down')):
 			self.assertIn('down.cache.test', self.names())
 
-	def test_a_failed_read_is_never_cached(self):
+	def test_a_failed_read_is_never_kept(self):
 		from unittest import mock
 		ExcludedAddress.objects.create(org=self.org, cidr='198.51.100.0/24')
-		exclusions._bump()
-		with mock.patch('cveFeed.models.ExcludedAddress.objects.filter', side_effect=RuntimeError('db')):
-			refusal = exclusions.address_refusals(self.pid, ['203.0.113.7'])['203.0.113.7']
-		self.assertTrue(refusal.unreadable)  # fail closed, as before
-		self.assertEqual(exclusions.address_refusals(self.pid, ['203.0.113.7']), {})  # the next lookup reads the real list
-		self.assertIn('198.51.100.7', exclusions.address_refusals(self.pid, ['198.51.100.7']))
+		with exclusions.memo():
+			with mock.patch('cveFeed.models.ExcludedAddress.objects.filter', side_effect=RuntimeError('db')):
+				refusal = exclusions.address_refusals(self.pid, ['203.0.113.7'])['203.0.113.7']
+			self.assertTrue(refusal.unreadable)  # fail closed, as before
+			self.assertEqual(exclusions.address_refusals(self.pid, ['203.0.113.7']), {})  # the next lookup reads the real list
+			self.assertIn('198.51.100.7', exclusions.address_refusals(self.pid, ['198.51.100.7']))
 
 	def test_the_inventory_side_is_never_cached(self):
 		ExcludedAddress.objects.create(org=self.org, cidr='198.51.100.0/24')
@@ -167,17 +191,16 @@ class EveryWriteTakesEffectTests(Base):
 		self.project.save()
 		self.assertIn('theirs.cache.test', self.names())
 
-	def test_a_change_committed_after_a_lookup_cached_the_old_list(self):
-		self.warm()
-		with self.captureOnCommitCallbacks(execute=False) as callbacks:
-			HostExclusion.objects.create(org=self.org, host='late.cache.test')
-		# a lookup in another process read the list before the commit and cached it under the current generation
-		token = exclusions._generation()
-		exclusions._cache().set(f'cvengine:exclusions:{token}:names:{self.pid}', (), exclusions.CACHE_SECONDS)
-		self.assertNotIn('late.cache.test', self.names())
-		for callback in callbacks:  # the commit
-			callback()
-		self.assertIn('late.cache.test', self.names())
+	def test_a_change_committed_after_a_lookup_in_a_batch_read_the_old_list(self):
+		with exclusions.memo():
+			with self.captureOnCommitCallbacks(execute=False) as callbacks:
+				HostExclusion.objects.create(org=self.org, host='late.cache.test')
+			# the batch read the list before the commit (as another connection would see it) and kept that copy
+			exclusions._memo.get()[('names', self.pid)] = ()
+			self.assertNotIn('late.cache.test', self.names())
+			for callback in callbacks:  # the commit
+				callback()
+			self.assertIn('late.cache.test', self.names())
 
 
 class IngestAndScanTests(Base):
