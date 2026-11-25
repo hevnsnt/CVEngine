@@ -30,6 +30,8 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 
 ### Fixed
 
+- The system status no longer leaves a short database time limit on the connection after a slow project count: the limit now ends with the count, and a count it cuts off rolls back only itself instead of failing every later query of the request.
+
 - The built-in scanner runs Sentinel 6728064: its Go tools (nuclei, naabu, sshamble, gowitness, trajan) are built from source with Go 1.27.4 and current dependencies, clearing about 125 critical and high CVEs in the image, and deep bbot discoveries run one at a time so a 2 GB Sentinel is not killed for memory.
 - **The OpenVAS queue explanation reads its candidate hosts in a fixed number of queries.** The Settings page's per-project OpenVAS queue (`GET /cve/api/settings/openvas/projects/{id}/queue`), the Sentinels page's queue refresh and the OpenVAS sweep read each candidate host's newest row, its addresses, the exclusion and archive lists and a new bug bounty gate once per host (four queries a host, 3,895 queries and 5.2 s for one project of the 10,000-host scale fixture). They now read them once for all candidates (48 queries, 0.7 s, the same answer); the gate is still built fresh on every call.
 - Notification webhooks (Slack, Lark, Discord) must point at a public address: a loopback, link local, cloud metadata (169.254.169.254, fd00:ec2::254), private or unresolvable address is refused when saved, and a value saved earlier is no longer called at send time (the name is resolved and every address checked) and is logged once with its host.
