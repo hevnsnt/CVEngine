@@ -130,7 +130,7 @@ def snapshot(days=7, with_cost=True):
         cache_read_sum=Sum('cache_read_tokens', filter=Q(input_tokens__isnull=False, output_tokens__isnull=False)),
         cache_write_sum=Sum('cache_write_tokens', filter=Q(input_tokens__isnull=False, output_tokens__isnull=False)),
         missing_tokens=Count('id', filter=Q(input_tokens__isnull=True) | Q(output_tokens__isnull=True)),
-        avg_latency_ms=Avg('duration_ms')).order_by('-attempts')[:100]
+        avg_latency_ms=Avg('duration_ms')).order_by('-attempts', 'provider', 'model', 'actual_model')[:100]  # ties in a fixed order
     for group in grouped:
         billed_model = group['actual_model'] or group['model']
         rate = rates.get((group['provider'], billed_model))
@@ -150,7 +150,7 @@ def snapshot(days=7, with_cost=True):
     daily = list(qs.annotate(day=TruncDate('started_at')).values('day').annotate(
         attempts=Count('id'), errors=Count('id', filter=Q(status='failed'))).order_by('day'))
     stages = list(qs.values('stage').annotate(attempts=Count('id'), errors=Count('id', filter=Q(status='failed')))
-                  .order_by('-attempts')[:30])
+                  .order_by('-attempts', 'stage')[:30])
     # which model answered each job: per stage, the models that gave an answer (and the ones that did not), by the model the provider named
     by_stage = {}
     for row in qs.filter(stage__in=[st['stage'] for st in stages]).values('stage', 'model', 'actual_model').annotate(

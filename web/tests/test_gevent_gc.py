@@ -117,9 +117,14 @@ class FrozenStartupTests(SimpleTestCase):
         before = gc.get_freeze_count()
         frozen = gevent_gc.freeze_after_load()
         self.assertGreaterEqual(frozen, before + 200)
-        self.assertEqual(gc.get_freeze_count(), frozen)
-        self.assertEqual(gevent_gc.freeze_after_load(), 0)  # never a second time
-        self.assertEqual(gc.get_freeze_count(), frozen)
+        # The freeze count is live: a frozen object that another thread frees leaves the permanent generation, so the count may drop but never rise.
+        after = gc.get_freeze_count()
+        self.assertLessEqual(after, frozen)
+        self.assertGreaterEqual(after, 200)  # the start-up objects are still alive and still frozen
+        with mock.patch.object(gevent_gc.gc, 'freeze', wraps=gc.freeze) as freeze:
+            self.assertEqual(gevent_gc.freeze_after_load(), 0)  # never a second time
+        freeze.assert_not_called()
+        self.assertLessEqual(gc.get_freeze_count(), after)
         del startup
 
     def test_the_timer_freezes_on_its_first_wake_after_load_and_ticks_after_that(self):
