@@ -318,11 +318,12 @@ def _projects_partial(ctx, deadline=None):
     counted by the ``status_warm_rows`` Celery task (``_warm_rows``) so the next call finds it cached, instead of fifteen rows in
     a row inside one request."""
     from django.core.cache import cache
-    from django.db import connection
+    from django.db import connection, transaction
 
     from agentapi.services import _allowed_ids
     from dashboard.models import Project
 
+    outer_atomic = connection.in_atomic_block  # a SET LOCAL inside a caller's transaction would outlive the count, so none is set there
     seconds, rows, waiting, shared, shared_ids = _cache_seconds(), [], [], False, set()
     projects = list(Project.objects.filter(id__in=list(_allowed_ids(ctx.user))).order_by('name')[:MAX_PROJECTS])
     fingerprint = []  # read at most once per call, and before the first count of it
@@ -347,14 +348,17 @@ def _projects_partial(ctx, deadline=None):
                 waiting.append(project)
                 continue
             try:
-                if left is not None and not connection.in_atomic_block:
-                    from agentapi import status_probes
-                    status_probes._bound_database(left)
-                before = now_fp() if seconds else None  # the inputs as they are before this count starts
-                if shared is False:  # the first project that is not cached: the numbers the projects share are read once, for every one still to count
-                    shared_ids = _uncached_ids(projects[index:], seconds)
-                    shared = _scoped_shared_inputs(shared_ids)
-                row = _project_row(project, shared if project.id in shared_ids else None)
+                # The count runs in a transaction (a savepoint inside a caller's) of its own: a count the time left cuts off rolls back only
+                # itself, so the statements after it still run, and the time limit is SET LOCAL, so it ends with the count instead of staying on
+                # the connection for every later statement of this request and of the next requests a kept connection serves.
+                with transaction.atomic():
+                    if left is not None and not outer_atomic:
+                        _bound_transaction(left)
+                    before = now_fp() if seconds else None  # the inputs as they are before this count starts
+                    if shared is False:  # the first project that is not cached: the numbers the projects share are read once, for every one still to count
+                        shared_ids = _uncached_ids(projects[index:], seconds)
+                        shared = _scoped_shared_inputs(shared_ids)
+                    row = _project_row(project, shared if project.id in shared_ids else None)
             except Exception:  # noqa: BLE001 - a row that does not fit the time left is counted in the background, the rest still answer
                 if deadline is None:
                     raise
@@ -376,6 +380,17 @@ def _projects_partial(ctx, deadline=None):
     if waiting:
         _warm_rows([p.id for p in waiting])
     return rows, [p.slug for p in waiting]
+
+
+def _bound_transaction(limit):
+    """No statement or lock wait longer than ``limit`` seconds until the current transaction ends (``SET LOCAL``, never the session)."""
+    from django.db import connection
+    if connection.vendor != 'postgresql':
+        return
+    ms = max(200, int(limit * 1000))
+    with connection.cursor() as cursor:
+        cursor.execute('SET LOCAL statement_timeout = %s', [ms])
+        cursor.execute('SET LOCAL lock_timeout = %s', [ms])
 
 
 def _projects(ctx):
