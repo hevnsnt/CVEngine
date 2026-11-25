@@ -976,7 +976,10 @@ def _starvation_inputs(now, paused, live):
         if live:
             recent = SentinelTask.objects.filter(claimed_at__gte=now - timedelta(minutes=maintainer_checks.SENTINEL_BUSY_MINUTES)).values_list('kind', flat=True).distinct()
             claimed_lately = set(recent)
-            queued = list(SentinelTask.objects.filter(status='queued').values('kind').annotate(n=Count('id'), oldest=Min('created_at'))[:30])
+            # the 30 kinds that waited longest, oldest first: a GROUP BY has no order of its own, so without one the slice kept 30 arbitrary
+            # kinds and could leave out the one that starves
+            queued = list(SentinelTask.objects.filter(status='queued').values('kind').annotate(n=Count('id'), oldest=Min('created_at'))
+                          .order_by('oldest', 'kind')[:30])
             recent_waits = _recent_waits([row['kind'] for row in queued], now)
             for row in queued:
                 waits = sorted((c - k).total_seconds() for k, c in recent_waits.get(row['kind'], ()))
