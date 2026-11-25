@@ -41,8 +41,9 @@ def old_graph_payload(domain_id=None, scan_id=None):
     # (and what decides whether it is version-only: its source, evidence and Triage validation status, threat.match_heat)
     matches = CVEMatch.objects.only('subdomain_id', 'ai_verdict', 'evidence', 'version_in_range', 'template_result', 'distro_status', 'source', 'cve_entry__cve_id', 'cve_entry__kev',
                                     'cve_entry__epss_reached', 'cve_entry__exploit_db', 'cve_entry__cvss', 'remediation_status', 'triage__validation_status', 'triage__heat_override', 'triage__status', 'triage__classification').select_related('cve_entry', 'triage')
+    # the addresses in id order, as the new form reads them: the prefetch join had no order of its own (the only change to the copy)
     subs = Subdomain.objects.select_related('target_domain__project__org').prefetch_related(
-        'ip_addresses', Prefetch('cve_matches', queryset=matches))
+        Prefetch('ip_addresses', queryset=IpAddress.objects.order_by('id')), Prefetch('cve_matches', queryset=matches))
     if domain_id:
         subs = subs.filter(target_domain_id=domain_id)
     if scan_id:
