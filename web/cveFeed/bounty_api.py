@@ -773,7 +773,8 @@ def stats(request, user):
     project = _project(request, {})
     reports = BountyReport.objects.filter(project=project)
     by_status = {row["status"]: row["n"] for row in reports.values("status").annotate(n=Count("id"))}
-    paid = list(reports.filter(bounty_amount__isnull=False).values("bounty_currency").annotate(total=Sum("bounty_amount"), n=Count("id")))
+    paid = list(reports.filter(bounty_amount__isnull=False).values("bounty_currency").annotate(total=Sum("bounty_amount"), n=Count("id"))
+                .order_by("bounty_currency"))  # one line per currency in a fixed order: a GROUP BY has none of its own
     now = timezone.now()
     stale = []
     # the newest event of each report is read with the reports (one statement), not with one aggregate per report
