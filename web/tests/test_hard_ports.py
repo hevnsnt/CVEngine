@@ -136,6 +136,22 @@ class WhatportisTableTests(SimpleTestCase):
 				mock.patch('cvengine.common_func.socket.getservbyport', return_value='ssh'):
 			self.assertEqual(common_func.get_port_service_description(22), {'service_name': 'ssh', 'description': ''})
 
+	def test_a_bad_port_or_an_unreadable_table_still_gives_no_guess(self):
+		none = {'service_name': '', 'description': ''}
+		self.assertEqual(common_func.get_port_service_description('not a port'), none)
+		self.assertEqual(common_func.get_port_service_description(None), none)
+		with mock.patch('cvengine.common_func._whatportis_table', side_effect=OSError('table gone')):
+			self.assertEqual(common_func.get_port_service_description(80), none)
+		with mock.patch('cvengine.common_func._whatportis_table', return_value={}):
+			self.assertEqual(common_func.get_port_service_description(70000), none)  # getservbyport refuses it with OverflowError
+
+	def test_a_worker_stop_is_not_swallowed(self):
+		class Stop(BaseException):  # what gevent's Timeout and GreenletExit, and SystemExit, are: not an Exception
+			pass
+		with mock.patch('cvengine.common_func._whatportis_table', side_effect=Stop()):
+			with self.assertRaises(Stop):
+				common_func.get_port_service_description(80)
+
 class DeshareMigrationTests(TestCase):
 	def test_a_row_shared_by_two_ips_is_split_and_the_first_ip_keeps_it(self):
 		module = importlib.import_module('startScan.migrations.0007_deshare_ports')
