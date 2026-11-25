@@ -407,6 +407,100 @@ def claim_release(client, key, owner):
     return bool(client.eval(_DELETE_IF_OWNER, 1, key, str(owner)))
 
 
+# The batched forms of the two calls above, for a holder of many claims (a waiting StageRun can hold tens of thousands): one script per
+# chunk of at most CLAIM_BATCH keys instead of one round trip per key. KEYS are the claim keys, ARGV the owner of each key in the same order,
+# then the ttl. Each key gets exactly what the single-key call does to it: refreshed only while its owner holds it, else taken again when
+# nobody has it (the SET NX EX of claim_refresh, done in the same script), else left alone; deleted only while its owner holds it. A key the
+# GET fails on (a key of another type) is skipped and marked -1, so the script never stops half way (Redis does not undo the keys a failed
+# script already changed); the caller asks that key again on its own, which fails as the single-key call does.
+CLAIM_BATCH = 500
+_REFRESH_MANY = (
+    "local ttl = ARGV[#ARGV] local out = {} "
+    "for i, key in ipairs(KEYS) do "
+    "local held = redis.pcall('get', key) "
+    "if type(held) == 'table' and held.err then out[i] = -1 "
+    "elseif held == ARGV[i] then out[i] = redis.call('expire', key, ttl) "
+    "elseif redis.call('set', key, ARGV[i], 'NX', 'EX', ttl) then out[i] = 2 "
+    "else out[i] = 0 end "
+    "end return out")
+_RELEASE_MANY = (
+    "local out = {} "
+    "for i, key in ipairs(KEYS) do "
+    "local held = redis.pcall('get', key) "
+    "if type(held) == 'table' and held.err then out[i] = -1 "
+    "elseif held == ARGV[i] then out[i] = redis.call('del', key) "
+    "else out[i] = 0 end "
+    "end return out")
+_REFRESH_WORDS = {1: 'ok', 2: 'regained', 0: 'lost'}
+_AGAIN = object()  # a key the chunk's script could not read: asked again on its own
+
+
+def _claim_batches(client, pairs, size, batch, single):
+    """Run ``batch(chunk)`` per chunk of ``pairs``, in input order. A key the script marked (``_AGAIN``) is asked again on its own with
+    ``single(key, owner)``, and a chunk whose call fails is retried key by key the same way, so one bad key never costs the other keys their
+    result. A key whose own call fails too gets None. A connection error is not retried key by key: every key would fail the same way, one
+    timeout each."""
+    out = []
+    pairs = [(key, str(owner)) for key, owner in pairs]
+    for start in range(0, len(pairs), max(1, int(size))):
+        chunk = pairs[start:start + max(1, int(size))]
+        try:
+            got = batch(chunk)
+            if len(got) != len(chunk):
+                raise ValueError(f'{len(got)} results for {len(chunk)} claims')
+            for (key, owner), result in zip(chunk, got):
+                if result is _AGAIN:
+                    try:
+                        result = single(key, owner)
+                    except Exception:  # noqa: BLE001 - the key's result is unknown; a claim left behind expires on its own
+                        result = None
+                out.append(result)
+            continue
+        except Exception as exc:  # noqa: BLE001 - retried below, key by key
+            if _connection_error(exc):
+                logger.debug('claim batch of %s keys failed: Redis unreachable (%s)', len(chunk), exc)
+                out.extend([None] * len(chunk))
+                continue
+            logger.debug('claim batch of %s keys failed (%s); retrying them one by one', len(chunk), exc)
+        for key, owner in chunk:
+            try:
+                out.append(single(key, owner))
+            except Exception:  # noqa: BLE001 - the key's result is unknown; a claim left behind expires on its own
+                out.append(None)
+    return out
+
+
+def _connection_error(exc):
+    try:
+        import redis
+    except ImportError:  # pragma: no cover - redis is a dependency of the worker image
+        return False
+    return isinstance(exc, (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError))
+
+
+def claim_refresh_many(client, pairs, ttl, size=CLAIM_BATCH):
+    """``claim_refresh`` for many ``(key, owner)`` pairs: one Redis call per ``size`` keys. Returns one result per pair, in input order, each
+    'ok', 'regained' or 'lost' as ``claim_refresh`` would have returned it, or None when that key could not be refreshed at all (Redis
+    failed for it even on its own)."""
+    ttl = int(ttl)
+
+    def batch(chunk):
+        got = client.eval(_REFRESH_MANY, len(chunk), *[k for k, _o in chunk], *[o for _k, o in chunk], ttl)
+        return [_AGAIN if int(v) < 0 else _REFRESH_WORDS[int(v)] for v in got]
+
+    return _claim_batches(client, pairs, size, batch, lambda key, owner: claim_refresh(client, key, owner, ttl))
+
+
+def claim_release_many(client, pairs, size=CLAIM_BATCH):
+    """``claim_release`` for many ``(key, owner)`` pairs: one Redis call per ``size`` keys. Returns one result per pair, in input order: True
+    when that owner held the key and it was deleted, False when it did not, None when Redis failed for that key even on its own."""
+    def batch(chunk):
+        got = client.eval(_RELEASE_MANY, len(chunk), *[k for k, _o in chunk], *[o for _k, o in chunk])
+        return [_AGAIN if int(v) < 0 else bool(v) for v in got]
+
+    return _claim_batches(client, pairs, size, batch, lambda key, owner: claim_release(client, key, owner))
+
+
 @contextmanager
 def redis_claim(key, owner, ttl, adopt=False, hold=False, keep=None):
     """Hold ``key`` in Redis for ``owner`` (SET NX EX), refreshing it while the block runs. Yields True when this
