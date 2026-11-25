@@ -178,6 +178,8 @@ def _where(one, two):
 def _mask(text):
 	"""An answer with its clocks, durations and generated secrets taken out, for a comparison of two calls made a moment apart."""
 	text = re.sub(r'\d{4}-\d\d-\d\d[T ][\d:.]+(?:[+-]\d\d:\d\d|Z)?', 'T', text)
+	# the graph's change token: it folds in a 5 minute time window (GRAPH_VERSION_WINDOW), so two equal graphs a window apart differ only here
+	text = re.sub(r'"version": ?"[0-9a-f]{16}"', '"version": "V"', text)
 	text = re.sub(r'\d{4}-\d\d-\d\d', 'D', text)  # a date alone (a day that can turn over between two calls)
 	text = re.sub(r'\b\d{1,2}:\d\d(?::\d\d)?\b', 'H', text)  # a clock time written for people
 	text = re.sub(r'\b\d{1,2} (?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\w*(?: \d{4})?', 'D', text)
