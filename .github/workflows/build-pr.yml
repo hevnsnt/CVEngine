@@ -338,7 +338,7 @@ jobs:
         run: |
           docker run --rm --read-only --tmpfs /tmp --user 10002:10002 --cap-drop ALL --security-opt no-new-privileges:true \
             --network none --entrypoint python3 cvengine-reviewer-ci -I -c \
-            "import os, cvengine_reviewer.llm, cvengine_reviewer.jobs, cvengine_reviewer.server, cvengine_reviewer.__main__, anthropic; assert os.getuid() == 10002; print('reviewer image ok', anthropic.__version__)"
+            "import os, importlib.util, cvengine_reviewer.llm, cvengine_reviewer.jobs, cvengine_reviewer.server, cvengine_reviewer.__main__, anthropic; assert os.getuid() == 10002; assert importlib.util.find_spec('pip') is None, 'pip is in the image'; print('reviewer image ok', anthropic.__version__)"
       - name: 🧪 Run the reviewer package's unit tests inside the image
         # reviewer/tests (standard library only): the pipeline's request layer and the job loop, on the image's own Python, no network
         run: |
