@@ -12,6 +12,7 @@ evidence, reads it there.
 """
 import hashlib
 import json
+import logging
 from datetime import timedelta
 
 from django.db import connection, transaction
@@ -21,6 +22,8 @@ from cveFeed import templategen
 from cveFeed.models import TriageCall
 from cvengine import ai_prompts
 from cvengine.ai_providers import clean_text
+
+logger = logging.getLogger(__name__)
 
 PLAN_WAIT = timedelta(minutes=10)    # a request waits this long for its plan, then goes on with the deterministic one
 ANSWER_REUSE = timedelta(hours=24)  # a plan answered for the same evidence this recently is used again, not asked again
@@ -216,6 +219,7 @@ def plan(project_id, row, cve, subject, checks, template, provider=None, observa
                               context={'claim': claim.pk, 'checks': [c['kind'] for c in checks], 'can_generate': can_generate},
                               project=project_id, dedupe=_dedupe(signature), priority=2)
     except Exception:
+        logger.warning('validation plan: the AI planning question could not be queued (claim %s)', claim.pk, exc_info=True)
         TriageCall.objects.filter(pk=claim.pk, status='running').update(status='failed', finished_at=timezone.now())
         return {**fallback, 'reason': 'AI planning could not be queued; generic external checks deferred.'}, True
     return {**fallback, 'source': 'pending', 'job': job.pk, 'reason': 'waiting for the AI reviewer container to choose the checks'}, True
@@ -299,8 +303,7 @@ def _dispatch(pk, priority=3):
     try:
         validate_match_on_demand.apply_async(args=[pk], priority=priority)
     except Exception:  # noqa: BLE001 - the nudge (``nudge_parked``) sends it on later
-        import logging
-        logging.getLogger(__name__).warning('validation request %s: could not be sent on after its plan', pk, exc_info=True)
+        logger.warning('validation request %s: could not be sent on after its plan', pk, exc_info=True)
 
 
 def park(request_id, decision, progress=None, round_number=1):
@@ -360,5 +363,6 @@ def generate_candidate(project_id, cve, provider):
                 'reason': 'the AI reviewer container writes the draft; it is validated when it lands and is never run on this host',
                 'provenance': 'AI-authored draft; static, syntax and benign control gates; automatic fixture test and second-pass review follow'}
     except Exception:
+        logger.warning('validation plan: template generation for %s could not be queued (claim %s)', cve.cve_id, claim.pk, exc_info=True)
         TriageCall.objects.filter(pk=claim.pk, status='running').update(status='failed', finished_at=timezone.now())
         return {'status': 'failed', 'reason': 'template generation could not be queued'}

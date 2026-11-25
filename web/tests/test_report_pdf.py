@@ -926,7 +926,7 @@ class UntrustedTextTests(ReportBase):
         self.assertFalse(os.path.exists(out))
 
     def test_clean_strips_control_characters_and_clips(self):
-        self.assertEqual(report_data.clean('a\x00b\x1b[31mred\x07‮ x'), 'ab[31mredx'.replace('‮', '‮'))
+        self.assertEqual(report_data.clean('a\x00b\x1b[31mred\x07\u202e\u2028x'), 'ab[31mredx'.replace('\u202e', '\u202e'))
         self.assertEqual(report_data.clean('  many   spaces\r\nnext  line  '), 'many spaces\nnext line')
         self.assertEqual(report_data.clean('x' * 50, 10), 'x' * 9 + '…')
         self.assertEqual(report_data.clean(None), '')

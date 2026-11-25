@@ -386,8 +386,8 @@ def get_port_service_description(port):
 					"service_name": "",
 					"description": ""
 				}
-	except:
-		# port is not a valid int or any other exception
+	except Exception:  # noqa: BLE001 - a port that is not a number, out of range, or a table that cannot be read: no guess
+		# a bare except also swallowed a worker's stop (gevent's Timeout and GreenletExit, SystemExit), so the task could not be stopped here
 		return {
 			"service_name": "",
 			"description": ""

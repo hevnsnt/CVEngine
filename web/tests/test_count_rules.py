@@ -8,7 +8,8 @@ open CVE matches and scanner findings (``counts.HEAT_KINDS``), the two kinds tha
 Before this, the email counted a scanner finding the triage dismissed (375 on the live install where the PDF said 370, the five dismissed
 ones), and its heat line counted CVE matches only while the PDF's counted CVE matches and scanner findings.
 """
-from agentapi.services import Ctx, list_findings
+from agentapi import host_export_one
+from agentapi.services import Ctx, list_findings, list_hosts
 from cveFeed import counts, overview, report_data, report_digest
 from cveFeed.models import CVEEntry, CVEMatch, Triage
 from startScan.models import Vulnerability
@@ -109,3 +110,39 @@ class CountConsistencyTests(CountRuleBase):
         Triage.objects.filter(vulnerability__in=self.dismissed).update(classification='needs_validation')
         after = {r['id']: r['heat'] for r in list_findings(Ctx(user=self.org_admin), 'acme-web', {'status': 'all', 'type': 'scanner', 'page_size': 100})['results']}
         self.assertEqual(before, after)
+
+
+class HostSurfaceTests(CountRuleBase):
+    """One host's numbers: the Hosts list row (also the host page's tiles and the MCP list_hosts row), the Findings list narrowed to the host, the host
+    report and the host export agree, and a dismissed finding or match counts on none of them."""
+
+    def numbers(self):
+        ctx = Ctx(user=self.org_admin)
+        name = self.www.name
+        row = next(r for r in list_hosts(ctx, 'acme-web', {'page_size': 100})['results'] if r['host'] == name)
+        listed = list_findings(ctx, 'acme-web', {'page_size': 0, 'host': name})['counts']
+        pdf = report_data.collect(self.web, host=name)['summary']['by_kind']
+        record = host_export_one.build(ctx, 'acme-web', self.www.pk).record['findings']
+        dismissed = set(counts.TRIAGE_DISMISSED)
+
+        def open_rows(kind):
+            return [r for r in record[kind] if r['status'] in ('open', 'in_progress') and ((r.get('triage') or {}).get('classification') or '') not in dismissed]
+        exported = {'cve': len({r['cve_id'] for r in open_rows('cve') if r.get('ai_verdict') != counts.RULED_OUT}),
+                    'scanner': sum(1 for r in open_rows('scanner') if r['severity'] != 'info')}
+        return row, listed, pdf, exported
+
+    def test_the_host_row_counts_what_the_findings_list_and_the_report_count(self):
+        row, listed, pdf, exported = self.numbers()
+        self.assertEqual(row['vuln_count'], listed['scanner'])
+        self.assertEqual(row['vuln_count'], pdf['scanner'])
+        self.assertEqual(row['vuln_count'], exported['scanner'])
+        self.assertEqual(row['cve_matches'], listed['cve'])
+        self.assertEqual(row['cve_matches'], pdf['cve'])
+        self.assertEqual(row['cve_matches'], exported['cve'])
+
+    def test_a_dismissed_finding_is_still_listed_on_the_host_row_with_its_classification(self):
+        row, *_ = self.numbers()
+        shown = {v['id']: v['classification'] for v in row['vulns']}
+        for v in self.dismissed:
+            self.assertIn(v.pk, shown)
+            self.assertIn(shown[v.pk], counts.TRIAGE_DISMISSED)

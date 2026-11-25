@@ -40,8 +40,9 @@ jobs:
     timeout-minutes: 90
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
+          persist-credentials: false  # no later step pushes with git, so the token is not left in .git/config
           fetch-depth: 0
       - name: Resolver fallback (only when the runner cannot find the Ubuntu package servers)
         uses: ./.github/actions/resolver-fallback
@@ -70,8 +71,9 @@ jobs:
     timeout-minutes: 90
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
+          persist-credentials: false  # no later step pushes with git, so the token is not left in .git/config
           fetch-depth: 0
       - name: Resolver fallback (only when the runner cannot find the Ubuntu package servers)
         uses: ./.github/actions/resolver-fallback

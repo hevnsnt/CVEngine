@@ -168,6 +168,25 @@ class PlanJobTests(TestCase):
         self.assertEqual(answer['source'], 'policy_fallback')
         self.assertIn('provider_network', answer['reason'])
 
+    def test_a_question_that_cannot_be_queued_is_logged_and_ends_in_the_policy_plan(self):
+        from cveFeed.models import TriageCall
+        with mock.patch('cveFeed.ai_jobs.enqueue', side_effect=RuntimeError('queue table gone')), \
+                self.assertLogs('cveFeed.validation_plan', 'WARNING') as logs:
+            decision, ai = self.ask()
+        self.assertTrue(ai)
+        self.assertIn('could not be queued', decision['reason'])
+        self.assertEqual(TriageCall.objects.get(kind='validation_plan').status, 'failed')
+        self.assertIn('queue table gone', '\n'.join(logs.output))
+
+    def test_a_template_draft_that_cannot_be_queued_is_logged_and_its_claim_fails(self):
+        from cveFeed import validation_plan
+        with mock.patch('cveFeed.templategen.generate_template', side_effect=RuntimeError('draft queue gone')), \
+                self.assertLogs('cveFeed.validation_plan', 'WARNING') as logs:
+            out = validation_plan.generate_candidate(self.project.id, self.cve, True)
+        self.assertEqual(out['status'], 'failed')
+        self.assertIn('CVE-2099-4242', logs.output[0])
+        self.assertIn('draft queue gone', '\n'.join(logs.output))
+
     def test_with_the_reviewer_off_nothing_is_queued_and_nothing_waits(self):
         from cveFeed.models import AIJob
         with mock.patch.dict(os.environ, {'CVENGINE_REVIEWER': '0'}):
