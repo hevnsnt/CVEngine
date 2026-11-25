@@ -97,8 +97,8 @@ def _rest_table():
 		'POST sentinel/tasks/(?P<task_id>\\d+)/accept': NOT_FOUND, 'POST sentinel/tasks/(?P<task_id>\\d+)/result': NOT_FOUND,
 		'POST sentinel/tasks/(?P<task_id>\\d+)/partial': NOT_FOUND, 'POST sentinel/tasks/(?P<task_id>\\d+)/secret': 403,  # the built-in scanner's only
 		'POST sentinel/tasks/(?P<task_id>\\d+)/release': NOT_FOUND,
-		# the organization admin gate answers 403 for any organization the caller does not administer, existing or not (no existence oracle)
-		'GET orgs/(?P<org>[-\\w]+)/sentinels/enroll': 403, 'POST orgs/(?P<org>[-\\w]+)/sentinels/enroll': 403,
+		# one answer for an organization the caller does not administer, existing or not (no existence oracle): 404 since #886
+		'GET orgs/(?P<org>[-\\w]+)/sentinels/enroll': NOT_FOUND, 'POST orgs/(?P<org>[-\\w]+)/sentinels/enroll': NOT_FOUND,
 		'GET sentinels/live': OWN, 'GET sentinels/enroll': ADMIN_ONLY, 'POST sentinels/enroll': ADMIN_ONLY,
 		'GET tokens': SESSION_ONLY, 'POST tokens': SESSION_ONLY, 'DELETE tokens/(?P<token_id>\\d+)': SESSION_ONLY,
 	})
