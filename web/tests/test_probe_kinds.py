@@ -1142,6 +1142,10 @@ class IdentityCheckStageTests(DispatchBase):
         self.addCleanup(mock.patch.stopall)
         self.guard = assert_ran_nowhere_locally(self, 'identity_check')
         self.asked = []
+        # hosting keeps each CNAME a scanner read for an hour in a process dict: a test that has one read ('www.example.test' is an alias of
+        # Netlify) must not leave it, or every later test in the process sees 192.0.2.10 as a shared hosting address and sends it no probe
+        hosting._canon.clear()
+        self.addCleanup(hosting._canon.clear)
 
     def responder(self, dns=None, certs=None):
         def answer(task):
