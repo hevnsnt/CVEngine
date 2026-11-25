@@ -238,9 +238,18 @@ def claim_many(service, assets):
     owner = run.claim_owner(service) if run is not None else _owner()
     won = []
     try:
-        for a in assets:
-            if client.set(_key(service, a), owner, nx=True, ex=CLAIM_TTL) or (run is not None and client.get(_key(service, a)) == owner):
-                won.append(a)
+        for part in _chunks(assets):  # one round trip per chunk: a stage can claim tens of thousands of assets
+            pipe = client.pipeline(transaction=False)
+            for a in part:
+                pipe.set(_key(service, a), owner, nx=True, ex=CLAIM_TTL)
+                if run is not None:  # a run takes back what it already holds (its earlier pass's claim)
+                    pipe.get(_key(service, a))
+            got = iter(pipe.execute())
+            for a in part:
+                taken = next(got)
+                holder = next(got) if run is not None else None
+                if taken or (run is not None and holder == owner):
+                    won.append(a)
     except Exception:  # noqa: BLE001 - never block scanning because the claim is unavailable
         logger.exception('ledger: Redis claim failed for %s', service)
         yield assets  # unknown state: scan everything; any keys already set expire on their own
@@ -250,8 +259,10 @@ def claim_many(service, assets):
     def keep_alive():
         while not stop.wait(CLAIM_TTL / 6):
             try:
-                for a in list(won):
-                    if resources.claim_refresh(client, _key(service, a), owner, CLAIM_TTL) == 'lost':
+                held = list(won)
+                results = resources.claim_refresh_many(client, [(_key(service, a), owner) for a in held], CLAIM_TTL)
+                for a, result in zip(held, results):
+                    if result == 'lost':
                         logger.warning('ledger: the %s claim on %s was taken over by another job', service, a)
                         won.remove(a)  # not ours any more: neither refreshed nor deleted on exit
             except Exception:  # noqa: BLE001
@@ -267,11 +278,12 @@ def claim_many(service, assets):
     finally:
         stop.set()
         try:
-            for a in list(won):
-                if suspending:  # the run waits: the claim outlives this pass, kept alive by the run's drive
-                    resources.claim_refresh(client, _key(service, a), owner, stage_runs.HOLD_SECONDS)
-                    run.hold_claim(_key(service, a), owner)
-                else:
-                    resources.claim_release(client, _key(service, a), owner)
+            pairs = [(_key(service, a), owner) for a in won]
+            if suspending:  # the run waits: the claims outlive this pass, kept alive by the run's drive
+                resources.claim_refresh_many(client, pairs, stage_runs.HOLD_SECONDS)
+                for key, holder in pairs:
+                    run.hold_claim(key, holder)
+            else:
+                resources.claim_release_many(client, pairs)
         except Exception:  # noqa: BLE001
             pass
