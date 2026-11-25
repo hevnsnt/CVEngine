@@ -25,6 +25,7 @@ MAX_HOSTS = 5000  # the contract's bound
 MAX_EXCLUDED = 5000  # the contract's bound for ``excluded``
 MAX_EXCLUDED_TREES = 1000  # and for ``excluded_trees``
 MAX_SAME_SITE = 1000  # other hosts of one site a page's scripts may be read from, per task
+MAX_BLOCKED = 100  # the contract's bound for ``blocked`` (``$defs/probe_scope``)
 
 
 def _one_read(build):
@@ -46,7 +47,30 @@ def address_rules(project_id):
         authorised = sorted(ip for ip, owner in tailscale_scope.authorised_addresses().items() if owner == project_id)
     except Exception:  # noqa: BLE001 - the safe answer when the table cannot be read: no device is authorised
         authorised = []
-    return {'private': private_targets_allowed(), 'addresses': authorised[:1000], 'blocked': [str(n) for n in _extra_blocked()][:100]}
+    return {'private': private_targets_allowed(), 'addresses': authorised[:1000], 'blocked': blocked_networks(project_id, _extra_blocked())}
+
+
+def blocked_networks(project_id, extra=()):
+    """The ``blocked`` ranges of a probe policy: the server's own (``CVENGINE_BLOCKED_CIDRS``) and the organization's do-not-scan list, merged where they
+    touch. The Sentinel refuses every address in them at every hop, so a listed name that now resolves into the list, or a redirect to one, is never
+    reached even when the inventory has not seen that address yet. Fails closed: a list that cannot be read, or more ranges than a policy can carry
+    (``MAX_BLOCKED``), raises ``AddressExcluded`` and no task is made (the work stays due)."""
+    import ipaddress
+
+    from cveFeed import exclusions
+    from cvengine.resources import AddressExcluded
+    try:
+        listed = exclusions.address_networks(project_id)
+    except Exception:  # noqa: BLE001 - fail closed
+        raise AddressExcluded('probe', exclusions.Refusal(exclusions.UNREADABLE, unreadable=True)) from None
+    merged = []
+    for version in (4, 6):
+        merged += [str(n) for n in ipaddress.collapse_addresses([n for n in (*extra, *listed) if n.version == version])]
+    if len(merged) > MAX_BLOCKED:
+        raise AddressExcluded('probe', exclusions.Refusal(f'the do-not-scan list and the blocked ranges are {len(merged)} separate networks, more than the '
+                                                          f'{MAX_BLOCKED} a probe task can carry to its scanner, so no probe runs for this project until the '
+                                                          'list is shorter (merge neighbouring networks)'))
+    return merged
 
 
 class _Gate:
