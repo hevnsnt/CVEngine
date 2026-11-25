@@ -55,12 +55,13 @@ class ExclusionListEdgeTests(TestCase):
         self.assertFalse(exclusions.covers('edge.test', 'www.edge.test', False))
         self.assertFalse(exclusions.covers('edge.test', 'notedge.test', True))  # a suffix is not a subdomain
 
-    def test_a_cache_that_cannot_be_reset_is_logged_and_the_change_still_counts(self):
-        with mock.patch.object(exclusions, '_cache', side_effect=RuntimeError('redis down')), self.assertLogs('cveFeed.exclusions', logging.WARNING):
-            exclusions._bump()
+    def test_a_change_inside_a_batch_is_seen_by_the_next_lookup(self):
+        # the lists are never cached across calls (PR 892): only the batch memo exists, and a list change drops it
         from cveFeed.models import HostExclusion
-        HostExclusion.objects.create(org=self.org, host='late.edge.test')
-        self.assertIn('late.edge.test', exclusions.excluded_names(self.project.pk, names_only=True))
+        with exclusions.memo():
+            self.assertNotIn('late.edge.test', exclusions.excluded_names(self.project.pk, names_only=True))
+            HostExclusion.objects.create(org=self.org, host='late.edge.test')
+            self.assertIn('late.edge.test', exclusions.excluded_names(self.project.pk, names_only=True))
 
     def test_forget_without_a_transaction_to_wait_for_keeps_the_reset(self):
         with mock.patch('django.db.transaction.on_commit', side_effect=RuntimeError('no connection')), \
@@ -76,11 +77,18 @@ class ExclusionListEdgeTests(TestCase):
             with exclusions.memo(), self.assertNumQueries(0):
                 self.assertIn('one.edge.test', exclusions.excluded_names(self.project.pk, names_only=True))
 
-    def test_a_cache_that_cannot_store_still_answers_from_the_database(self):
-        broken = mock.Mock(get=mock.Mock(return_value=None), set=mock.Mock(side_effect=RuntimeError('full')))
-        with mock.patch.object(exclusions, '_cache', return_value=broken), mock.patch.object(exclusions, '_generation', return_value='n6'):
-            self.assertEqual(exclusions._cached('names', self.project.pk, lambda: ('x.edge.test',)), ('x.edge.test',))
-        broken.set.assert_called_once()
+    def test_a_read_that_fails_is_never_kept(self):
+        calls = []
+        def read():
+            calls.append(1)
+            if len(calls) == 1:
+                raise RuntimeError('database down')
+            return ('x.edge.test',)
+        with exclusions.memo():
+            with self.assertRaises(RuntimeError):
+                exclusions._cached('names', self.project.pk, read)
+            self.assertEqual(exclusions._cached('names', self.project.pk, read), ('x.edge.test',))
+        self.assertEqual(len(calls), 2)
 
 
 class BountyGateEdgeTests(TestCase):
