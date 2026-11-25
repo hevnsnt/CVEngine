@@ -314,7 +314,7 @@ def _purge(project, name, subtree=False, drained=None):
     """Remove everything recorded for the host ``name`` in ``project`` (exact name, any case; with ``subtree`` also every name under
     it). Returns the counts, plus ``drained`` (what ``_drain_host`` already removed for it)."""
     from cveFeed.models import (AssetChange, CVEMatch, DiscoveryEvent, FindingAuditEvent, FindingComment, HostArchive, HostAssessment,
-                                HostInventory, HostLabel, HostProfile, HostScreenshot, HostState, HygieneFinding, JavaRuntime, ProbeObservation, RdpScreenshot,
+                                HostInventory, HostNote, HostLabel, HostProfile, HostScreenshot, HostState, HygieneFinding, JavaRuntime, ProbeObservation, RdpScreenshot,
                                 RouteAuth, ServiceFeature, TlsCertificate, Triage)
     from startScan.models import EndPoint, ScanHistory, Subdomain, Vulnerability
     from targetApp.models import Domain
@@ -356,7 +356,7 @@ def _purge(project, name, subtree=False, drained=None):
             ('probes', ProbeObservation, {'project': project}), ('java_runtimes', JavaRuntime, {'project': project}),
             ('archives', HostArchive, {'project': project}),
             ('screenshots', RdpScreenshot, {'project': project}), ('web_screenshots', HostScreenshot, {'project': project}),
-            ('assessments', HostAssessment, {'project': project}),
+            ('assessments', HostAssessment, {'project': project}), ('host_notes', HostNote, {'project': project}),
             ('certificates', TlsCertificate, {'domain__project': project}),
             ('service_features', ServiceFeature, {'domain__project': project}),
             ('hygiene', HygieneFinding, {'domain__project': project}),
