@@ -70,6 +70,41 @@ class WorkflowTests(SimpleTestCase):
 		self.assertIn('Refusing to delete', cleanup)
 		self.assertIn('not a plain branch name', cleanup)
 
+	def workflow_files(self):
+		folder = os.path.join(REPO, '.github')
+		for root, _dirs, files in os.walk(folder):
+			for name in sorted(files):
+				if name.endswith(('.yml', '.yaml')) and (os.sep + 'workflows' in root or name in ('action.yml', 'action.yaml')):
+					yield os.path.relpath(os.path.join(root, name), REPO)
+
+	def test_every_action_is_pinned_to_a_commit(self):
+		"""A tag can be moved to other code by whoever controls the action's repository; a full commit sha cannot. Each pin keeps its tag in a comment."""
+		uses = re.compile(r'^\s*(?:- )?uses:\s*(\S+)(.*)$')
+		pinned = re.compile(r'^[\w.-]+/[\w.-]+(?:/[\w./-]+)?@[0-9a-f]{40}$')
+		seen = 0
+		for path in self.workflow_files():
+			for number, line in enumerate(read(path).splitlines(), 1):
+				match = uses.match(line)
+				if not match or match.group(1).startswith('./'):
+					continue
+				seen += 1
+				self.assertRegex(match.group(1), pinned, f'{path}:{number} names an action by tag; pin the commit sha and keep the tag in a comment')
+				self.assertRegex(match.group(2), r'#\s*v\d', f'{path}:{number}: say which release the sha is in a comment')
+		self.assertGreater(seen, 10)
+
+	def test_checkout_does_not_leave_the_token_behind_unless_the_job_pushes(self):
+		"""actions/checkout writes the job token into .git/config unless told not to; only the release job pushes (the tag), so only it keeps it."""
+		for path in self.workflow_files():
+			text = read(path)
+			steps = re.split(r'(?m)^\s*- ', text)
+			for step in steps:
+				if 'actions/checkout@' not in step:
+					continue
+				if path.endswith('release.yml'):
+					self.assertNotIn('persist-credentials: false', step)
+					continue
+				self.assertIn('persist-credentials: false', step, f'{path}: a checkout keeps the job token in .git/config')
+
 
 class ReleaseNotesLimitTests(SimpleTestCase):
 	"""GitHub refuses a release body over 125000 characters (v1.4.0: HTTP 422, the section was 202577). The workflow cuts a longer body at a whole bullet."""
