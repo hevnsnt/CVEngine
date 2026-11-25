@@ -79,6 +79,24 @@ def for_review(project_id, finding_kind, finding_ids, host):
     return [r[2] for r in rows[:REVIEW_NOTES]]
 
 
+def for_findings(project_id, pairs, per_finding):
+    """``{(audit kind, finding id): [note, ...]}``, newest first and at most ``per_finding`` each, for many findings of one project in one read
+    (the host review). ``pairs`` is a list of (audit kind, finding id)."""
+    from django.db.models import Q
+    from cveFeed.models import FindingComment
+    if not pairs:
+        return {}
+    q = Q()
+    for kind in {k for k, _ in pairs}:
+        q |= Q(finding_kind=kind, finding_id__in=[i for k, i in pairs if k == kind])
+    out = {}
+    for c in FindingComment.objects.filter(q, project_id=project_id).order_by('-created_at', '-id')[:per_finding * len(pairs)]:
+        got = out.setdefault((c.finding_kind, c.finding_id), [])
+        if len(got) < per_finding:
+            got.append(_shown(c, 'finding'))
+    return out
+
+
 def host_notes(project_id, host, limit=REVIEW_NOTES):
     """The newest notes of one host as a review reads them."""
     from cveFeed.models import HostNote

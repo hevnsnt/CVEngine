@@ -59,9 +59,10 @@ def system_prompts():
 
 # Budgets in characters of the system prompt (about 3.5 characters a token for this English and JSON text): the size at the time of the
 # change plus a little room. A job whose prompt grows past its budget fails here, so a longer prompt is a decision, not an accident.
+# finding_review grew by about 600 characters for the operator notes (OPERATOR_NOTES and rule 7, notes_effect).
 SYSTEM_BUDGET = {
     'finding_triage': 4720, 'local_check_suggestion': 2190, 'validation_plan': 2950, 'cve_detection': 7600,
-    'template_generation': 3400, 'template_validation': 1550, 'autotune_advisor': 1560, 'rdp_screenshot': 680, 'finding_review': 3780, 'operations_check': 2850,
+    'template_generation': 3400, 'template_validation': 1550, 'autotune_advisor': 1560, 'rdp_screenshot': 680, 'finding_review': 4450, 'operations_check': 2850,
 }
 
 
