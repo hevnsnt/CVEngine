@@ -92,7 +92,7 @@ def review_one(server, provider, packet):
     try:
         text, usage, model = measured_call(server, 'finding_review', provider, prompts.REVIEW_SYSTEM, review_message(packet), prompts.REVIEW_SCHEMA,
                                            REVIEW_MAX_TOKENS, effort='medium')
-        answer = guard.parse_reply(text, prompts.REVIEW_SCHEMA)
+        answer = guard.parse_reply(text, prompts.REVIEW_REPLY_SCHEMA)
     except llm.ModelError as exc:
         logger.warning('review of %s: model call failed (%s)', packet.get('ref'), exc.category)
         raise
@@ -102,7 +102,7 @@ def review_one(server, provider, packet):
         return None
     body = {'review_key': packet.get('review_key'), 'verdict': answer['verdict'], 'confidence': answer['confidence'],
             'reason_code': answer['reason_code'], 'note': guard.scrub(answer['note'], NOTE_LIMIT), 'model': str(model)[:100],
-            'notes_effect': answer.get('notes_effect') or 'no_notes', 'usage': usage}
+            **({'notes_effect': answer['notes_effect']} if answer.get('notes_effect') else {}), 'usage': usage}
     return server.verdict(packet.get('ref'), body)
 
 

@@ -69,6 +69,10 @@ REVIEW_SCHEMA = {
     },
 }
 
+# What a reply is checked against: the same, except that a reply without notes_effect is still taken (a model that left it out, or a local
+# model without structured output, answers as before; the server then adds no sentence about notes to the stored reason).
+REVIEW_REPLY_SCHEMA = {**REVIEW_SCHEMA, 'required': [k for k in REVIEW_SCHEMA['required'] if k != 'notes_effect']}
+
 OPS_SYSTEM = PREAMBLE + '\n\n' + OPS_TASK + """
 
 The message holds the server's own health \
