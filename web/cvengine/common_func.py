@@ -10,6 +10,7 @@ import requests
 from time import sleep
 from celery.utils.log import get_task_logger
 from discord_webhook import DiscordEmbed, DiscordWebhook
+from cvengine.hook_guard import hook_allowed
 
 from cvengine.definitions import *
 from cvengine.settings import *
@@ -131,6 +132,8 @@ def send_slack_message(message):
 	if not do_send:
 		return
 	hook_url = notif.slack_hook_url
+	if not hook_allowed(hook_url, 'slack'):
+		return
 	requests.post(url=hook_url, data=json.dumps(message), headers=headers, timeout=30)
 
 @hide_webhook_errors('lark')
@@ -150,6 +153,8 @@ def send_lark_message(message):
 	if not do_send:
 		return
 	hook_url = notif.lark_hook_url
+	if not hook_allowed(hook_url, 'lark'):
+		return
 	requests.post(url=hook_url, data=json.dumps(message), headers=headers, timeout=30)
 
 @hide_webhook_errors('discord')
@@ -182,6 +187,8 @@ def send_discord_message(
 	# Check if do send
 	notif = Notification.objects.first()
 	if not (notif and notif.send_to_discord and notif.discord_hook_url):
+		return False
+	if not hook_allowed(notif.discord_hook_url, 'discord'):
 		return False
 
 	# If fields and title, use an embed
