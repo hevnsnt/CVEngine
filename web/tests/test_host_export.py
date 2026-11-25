@@ -105,7 +105,7 @@ class Base(TestCase):
         response = self.get(who, path, **params)
         self.assertEqual(response.status_code, 200, response.content[:300] if not response.streaming else '')
         text = self.body(response)
-        self.assertTrue(text.startswith('﻿'), 'the file starts with the UTF-8 byte order mark')
+        self.assertTrue(text.startswith('\ufeff'), 'the file starts with the UTF-8 byte order mark')
         return list(csv.DictReader(io.StringIO(text[1:], newline='')))
 
     def hosts(self, who, path, **params):
@@ -253,7 +253,7 @@ class PlainListTests(Base):
 
     def test_the_plain_list_has_one_entry_per_line_and_no_header_or_marks(self):
         text = self.body(self.get('boss', PROJECT, format='txt'))
-        self.assertFalse(text.startswith('﻿'))
+        self.assertFalse(text.startswith('\ufeff'))
         self.assertTrue(text.endswith('\n'))
         self.assertTrue(all(line and ' ' not in line and ',' not in line for line in text.splitlines()))
 

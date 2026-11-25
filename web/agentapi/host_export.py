@@ -26,7 +26,7 @@ FORMATS = ('csv', 'txt')
 SCOPES = ('external', 'all')
 MCP_MAX_BYTES = 3 * 1024 * 1024  # an MCP answer is capped at 4 MiB in all (agentapi.mcp.MAX_RESPONSE_BYTES): a bigger file is downloaded from REST
 COLUMNS = ('Host', 'IP addresses', 'Open TCP ports', 'Open UDP ports', 'Services', 'Web URLs', 'Project', 'Organization', 'Target', 'First seen', 'Last seen')
-BOM = '﻿'  # makes Excel read the file as UTF-8
+BOM = '\ufeff'  # makes Excel read the file as UTF-8
 _FORMULA = re.compile(r'^[=+\-@\t\r]')
 WEB_PORTS_TLS = (443, 8443)
 

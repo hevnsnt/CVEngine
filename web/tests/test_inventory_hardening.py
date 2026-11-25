@@ -427,7 +427,7 @@ class HostileTextTests(SimpleTestCase):
 
 	def test_invisible_and_control_characters_are_all_removed(self):
 		evil = ('a\x9b31mb' + '؜' + '⁠⁡⁢⁣⁤⁥⁪⁯' + '­᠎️︀' + '\U000e0041\U000e0049\U000e007f'
-			+ '\U000f0000‮​﻿  c')
+			+ '\U000f0000\u202e\u200b\ufeff\u2028\u2029c')
 		for text in (schema.text(evil, 200), schema.validate(report_with(evil))['packages'][0]['n']):
 			for ch in text:
 				self.assertTrue(ch.isprintable(), hex(ord(ch)))
