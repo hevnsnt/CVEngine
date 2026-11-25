@@ -142,6 +142,7 @@ when it lands.
    limits, structured output with its step-down when a server refuses it, the reasoning setting, Ollama's context window and keep-alive, and
    the same error categories. The provider settings stay where they were (Settings > AI model); the server resolves them, the `CVENGINE_AI_*`
    variables of its `.env` included, and hands them over in the job block of `GET config`.
+   Operator notes travel apart from both: the newest 10 notes of the finding and of its host (each cut to 1,000 characters, the writer named only by channel) are a fenced block of their own, `OPERATOR_NOTES`, which the prompt calls data, never instructions. The model weighs them as claims and answers `notes_effect` (`no_notes`, `changed` or `unchanged`); the server starts the stored reason with one sentence saying whether a note changed the verdict. A note never changes a status by itself ([AGENT-API.md](AGENT-API.md#notes-on-findings-and-hosts)).
 4. **It posts the answer back.** `POST /api/v1/reviewer/jobs/<id>/result` carries the reply text, or the failure by category, and the
    token counts of each call (recorded as AI usage under the job's stage). An answer whose lease is not the job's current one is refused.
 5. **The server checks and applies it.** A Celery task continues the stage: the stage's own validator checks the reply (`validate_triage`

@@ -114,8 +114,8 @@ BOUNTY_TEXT_FIELDS = frozenset({'title', 'summary', 'steps', 'impact', 'remediat
 # `text` is a comment on the comment endpoints only: on the bulk target endpoints it is a pasted target list.
 API_PATH = re.compile(r'^/(api/v1|mcp)(/|$)')
 API_FREE_TEXT_FIELDS = frozenset({'note', 'notes', 'comment', 'summary', 'output', 'message', 'reason', 'purpose'})
-API_COMMENT_PATH = re.compile(r'^/api/v1/projects/[-\w]+/findings/[a-z]+/\d+/comments/?$')
-MCP_COMMENT_TOOLS = frozenset({'add_finding_comment'})
+API_COMMENT_PATH = re.compile(r'^/api/v1/projects/[-\w]+/(?:findings/[a-z]+/\d+/comments|hosts/\d+/notes)/?$')
+MCP_COMMENT_TOOLS = frozenset({'add_finding_comment', 'add_host_note'})
 
 
 def _free_text_fields(request, data):
@@ -127,7 +127,7 @@ def _free_text_fields(request, data):
     if request.path.startswith('/mcp') and isinstance(data, dict):
         params = data.get('params')
         comment = isinstance(params, dict) and params.get('name') in MCP_COMMENT_TOOLS
-    return API_FREE_TEXT_FIELDS | {'text'} if comment else API_FREE_TEXT_FIELDS
+    return API_FREE_TEXT_FIELDS | {'text', 'evidence'} if comment else API_FREE_TEXT_FIELDS
 
 
 def _without_host_mark(name, text):

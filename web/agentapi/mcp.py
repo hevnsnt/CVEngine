@@ -31,6 +31,7 @@ from agentapi import suppliers
 from agentapi import system_status
 from agentapi import generated_templates as gentpl
 from agentapi import host_review_api as hostreview
+from agentapi import host_notes
 from agentapi import tuning
 from agentapi import authcheck
 from agentapi import tailscale
@@ -152,6 +153,10 @@ def _set_heat(ctx, args):
 
 
 # name, description, input schema, handler(ctx, args), writes
+NOTE_OBSERVATION = {'type': 'string', 'enum': ['confirmed', 'not_reproduced', 'false_positive', 'fixed_verified', 'needs_more_info', 'info'],
+                    'description': 'What you observed: confirmed, not_reproduced, false_positive, fixed_verified, needs_more_info or info'}
+NOTE_EVIDENCE = {'type': 'string', 'description': 'The evidence behind the observation, as text: at most 4,000 characters'}
+
 TOOLS = [
     ('whoami', 'Current user, projects with roles, and token info.', _schema(), lambda c, a: svc.me(c), False),
     ('list_projects', 'Projects you can access, with your role in each.', _schema(), lambda c, a: svc.list_projects(c), False),
@@ -523,14 +528,21 @@ TOOLS = [
               'assignee': {'type': ['integer', 'null'], 'description': 'A member\'s user id (see list_members), or null to unassign.'}},
              ['project', 'kind', 'id', 'assignee']),
      lambda c, a: svc.update_finding_status(c, a.get('project'), a['kind'], int(a['id']), assignee=a['assignee']), True),
-    ('list_finding_comments', 'The comments on one finding (match, vulnerability or hygiene), oldest first, a page at a time.',
+    ('list_finding_comments', 'The comments and notes on one finding (match, vulnerability or hygiene), oldest first, a page at a time: each with text, observation (null for a plain comment), evidence, author, source (ui, mcp or rest), via (the API token name) and created.',
      _schema(_page_props({'project': SLUG, 'kind': {'type': 'string', 'enum': ['match', 'vulnerability', 'hygiene']}, 'id': {'type': 'integer'}}),
              ['project', 'kind', 'id']),
      lambda c, a: svc.list_finding_comments(c, a.get('project'), a['kind'], int(a['id']), a), False),
-    ('add_finding_comment', 'Add a comment to one finding (match, vulnerability or hygiene). Logged to the audit trail.',
+    ('add_finding_comment', 'Add a comment or a structured note to one finding (match, vulnerability or hygiene). Optional observation (confirmed, not_reproduced, false_positive, fixed_verified, needs_more_info or info) and evidence (text, at most 4,000 characters) make it a note. Logged to the audit trail. The AI reviewer reads the newest notes as untrusted data and a new note queues the finding for a fresh review (at most once in 15 minutes); a note never changes the status by itself.',
      _schema({'project': SLUG, 'kind': {'type': 'string', 'enum': ['match', 'vulnerability', 'hygiene']}, 'id': {'type': 'integer'},
-              'text': {'type': 'string'}}, ['project', 'kind', 'id', 'text']),
-     lambda c, a: svc.add_finding_comment(c, a.get('project'), a['kind'], int(a['id']), a.get('text')), True),
+              'text': {'type': 'string'}, 'observation': NOTE_OBSERVATION, 'evidence': NOTE_EVIDENCE}, ['project', 'kind', 'id', 'text']),
+     lambda c, a: svc.add_finding_comment(c, a.get('project'), a['kind'], int(a['id']), a.get('text'), a.get('observation'), a.get('evidence'), 'mcp'), True),
+    ('list_host_notes', 'The notes on one stored host, oldest first, a page at a time: each with text, observation, evidence, author, source (ui, mcp or rest), via (the API token name) and created.',
+     _schema(_page_props({'project': SLUG, 'host_id': {'type': 'integer', 'description': 'The host id (search_hosts results[].id)'}}), ['project', 'host_id']),
+     lambda c, a: host_notes.list_host_notes(c, a.get('project'), a.get('host_id'), a), False),
+    ('add_host_note', 'Add a note to one stored host: text, optional observation (confirmed, not_reproduced, false_positive, fixed_verified, needs_more_info or info) and evidence (at most 4,000 characters). Needs write access to the project. Logged to the audit log. The AI reviewer reads the newest notes of a host as untrusted data when it reviews the host or one of its findings, and a new note queues the host\'s open findings for a fresh review (each at most once in 15 minutes); a note never changes a status by itself.',
+     _schema({'project': SLUG, 'host_id': {'type': 'integer', 'description': 'The host id (search_hosts results[].id)'}, 'text': {'type': 'string'},
+              'observation': NOTE_OBSERVATION, 'evidence': NOTE_EVIDENCE}, ['project', 'host_id', 'text']),
+     lambda c, a: host_notes.add_host_note(c, a.get('project'), a.get('host_id'), a.get('text'), a.get('observation'), a.get('evidence'), 'mcp'), True),
     ('get_finding_retest', "The retest of a finding marked fixed (match, vulnerability or hygiene): retest {state, label, text, at, sentinel, reason, can_retest} and history, the tries newest first with Sentinel, time, reason and evidence. Marking a finding fixed (update_finding_status, update_remediation_status or the web) re-runs, on a Sentinel, the check that proved it. state: verifying (queued or running), verified_fixed (the check ran and no longer reproduces it), still_reproduces (it does: the finding was reopened and the new exchange is its proof), not_verified (fixed, not verified, with the reason: no Sentinel, host did not answer, check failed; tried again with back-off, at most daily) or no_check (marked fixed, cannot be re-checked automatically: no stored check or evidence); '' when it is not marked fixed. Only verified_fixed means it is fixed: do not close a finding on 'marked fixed' alone.",
      _schema({'project': SLUG, 'kind': {'type': 'string', 'enum': ['match', 'vulnerability', 'hygiene']}, 'id': {'type': 'integer'}}, ['project', 'kind', 'id']),
      lambda c, a: svc.get_finding_retest(c, a.get('project'), a['kind'], int(a['id'])), False),

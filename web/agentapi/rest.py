@@ -17,6 +17,7 @@ from agentapi import host_manage as hosts
 from agentapi import host_export
 from agentapi import host_export_one
 from agentapi import host_review_api as hostreview
+from agentapi import host_notes
 from agentapi import report_subscriptions as subscriptions
 from agentapi import saved_search as saved
 from agentapi import inventory
@@ -42,6 +43,11 @@ from tenancy import audit
 from agentapi.services import ApiError, Ctx
 
 logger = logging.getLogger(__name__)
+
+
+def _source(ctx):
+    """Where a note written through this API came from: 'rest' with an API token, 'ui' for the signed-in web interface (cveFeed.notes)."""
+    return 'rest' if ctx.token is not None else 'ui'
 
 
 def _body(request):
@@ -287,6 +293,11 @@ ROUTES = [
      lambda r, c, slug, assessment_id, **k: svc.get_host_assessment(c, slug, int(assessment_id))),
     ('POST', r'projects/(?P<slug>[-\w]+)/host-assessments/(?P<assessment_id>\d+)/stop', 'Stop a queued or running host assessment',
      lambda r, c, slug, assessment_id, **k: svc.stop_host_assessment(c, slug, int(assessment_id))),
+    ('GET', r'projects/(?P<slug>[-\w]+)/hosts/(?P<host_id>\d+)/notes', 'The notes on one stored host, oldest first, a page at a time',
+     lambda r, c, slug, host_id, **k: host_notes.list_host_notes(c, slug, host_id, r.GET)),
+    ('POST', r'projects/(?P<slug>[-\w]+)/hosts/(?P<host_id>\d+)/notes', 'Add a note to one stored host; body {text, observation (optional), evidence (optional)}',
+     lambda r, c, slug, host_id, **k: (host_notes.add_host_note(c, slug, host_id, _body(r).get('text'), _body(r).get('observation'),
+                                                                _body(r).get('evidence'), _source(c)), 201)),
     ('GET', r'projects/(?P<slug>[-\w]+)/hosts/(?P<host_id>\d+)/review', 'The newest AI review of one host: a verdict for each finding, the next step and its state, why a review failed or a step was held',
      lambda r, c, slug, host_id, **k: hostreview.get_host_review(c, slug, host_id)),
     ('POST', r'projects/(?P<slug>[-\w]+)/hosts/(?P<host_id>\d+)/review', 'Review now: queue the AI review of one host (409 while one is open, 429 at the daily limit, 503 with no AI provider)',
@@ -502,10 +513,12 @@ ROUTES = [
      'Every comment on one finding, oldest first',
      lambda r, c, slug, kind, finding_id, **k: svc.list_finding_comments(c, slug, kind, int(finding_id), r.GET)),
     ('POST', r'projects/(?P<slug>[-\w]+)/findings/(?P<kind>match|vulnerability|hygiene)/(?P<finding_id>\d+)/comments',
-     'Add a comment to one finding; body {text}',
+     'Add a comment or a note to one finding; body {text, observation (optional: confirmed, not_reproduced, false_positive, fixed_verified, '
+     'needs_more_info or info), evidence (optional text, at most 4,000 characters)}',
      # text's own validation happens inside add_finding_comment, after its project gate: a body-shaped _need() here would
      # run before that gate and 400 on a missing field before an _all/unknown-project caller ever gets its own real error.
-     lambda r, c, slug, kind, finding_id, **k: (svc.add_finding_comment(c, slug, kind, int(finding_id), _body(r).get('text')), 201)),
+     lambda r, c, slug, kind, finding_id, **k: (svc.add_finding_comment(c, slug, kind, int(finding_id), _body(r).get('text'), _body(r).get('observation'),
+                                                                         _body(r).get('evidence'), _source(c)), 201)),
     ('GET', r'projects/(?P<slug>[-\w]+)/findings/(?P<kind>match|vulnerability|hygiene)/(?P<finding_id>\d+)/audit',
      "One finding's audit trail (status, assignee and comment events, newest first), each with who, when, and before/after",
      lambda r, c, slug, kind, finding_id, **k: svc.finding_audit(c, slug, kind, int(finding_id), r.GET)),

@@ -97,6 +97,7 @@ REST = {
     'projects/(?P<slug>[-\\w]+)/scans/(?P<scan_id>\\d+)/vulnerabilities': (200, 15),
     'projects/(?P<slug>[-\\w]+)/scans/(?P<scan_id>\\d+)/activity': (200, 11), 'projects/(?P<slug>[-\\w]+)/hosts': (200, 70),
     'projects/(?P<slug>[-\\w]+)/host-assessments': (400, 8), 'projects/(?P<slug>[-\\w]+)/hosts/(?P<host_id>\\d+)/review': (200, 17),
+    'projects/(?P<slug>[-\\w]+)/hosts/(?P<host_id>\\d+)/notes': (200, 12),
     'projects/(?P<slug>[-\\w]+)/hosts/(?P<host_id>\\d+)/screenshots': (200, 12),
     'projects/(?P<slug>[-\\w]+)/hosts/(?P<host_id>\\d+)/export': (200, 110), 'projects/(?P<slug>[-\\w]+)/exclusions': (200, 10),
     'projects/(?P<slug>[-\\w]+)/excluded-addresses': (200, 10), 'projects/(?P<slug>[-\\w]+)/inventory': (200, 11),
@@ -192,7 +193,7 @@ MCP = {
     'get_tuning_status': (200, 18), 'list_tuning_decisions': (200, 10), 'get_maintainer_report': (200, 28), 'technology_coverage': (200, 14),
     'list_settings': (200, 9), 'get_setting': (200, 19), 'get_sentinel_defaults': (200, 12), 'get_sentinel_dispatch': (200, 9),
     'get_agent': (200, 32), 'get_sentinel_task': (200, 10), 'list_sentinel_tasks': (200, 16), 'list_sentinels': (200, 17),
-    'get_sentinel': (200, 32),
+    'get_sentinel': (200, 32), 'list_host_notes': (200, 12),
 }
 
 # routes and tools that are not measured here, each with the reason

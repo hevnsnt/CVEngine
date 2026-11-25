@@ -43,6 +43,7 @@ import { versionGroupsCard } from "/staticfiles/cve/version-groups.js";
 import * as CL from "/staticfiles/cve/closure-logic.js";
 import { changeDetail, authLabel, pathOf } from "/staticfiles/cve/change-text.js";
 import * as RT from "/staticfiles/cve/retest-logic.js";
+import { notesList, notesSummary } from "/staticfiles/cve/notes-logic.js";
 import { askClosureNote } from "/staticfiles/cve/closure-note.js";
 import { explainCard, validatePlanCard } from "/staticfiles/cve/match-explain.js";
 import { OS_LABEL, confirmBox } from "/staticfiles/cve/confirm-guide.js";
@@ -1702,6 +1703,10 @@ function renderFinding(d, cfg, row) {
     seen.append(line);
   });
 
+  // Comments and operator notes (newest first): what people and agents observed, with the observation badge
+  const notesFold = (d.notes || []).length ? fold("Notes", notesSummary(d.notes)) : null;
+  if (notesFold) notesFold.body.append(notesList(d.notes, el, badge, shortDate));
+
   // The verdict, the model's own words, the severity view and the reason are in the AI card at the top; what is left is the detail behind them.
   const aiFold = fold("AI details", `${d.ai.model ? `Assessed by ${d.ai.model}${d.ai.triaged ? ` on ${shortDate(d.ai.triaged)}` : ""}` : "How the AI reached its view"}`);
   const ai = aiFold.body;
@@ -1876,7 +1881,7 @@ function renderFinding(d, cfg, row) {
     ...glance(d, { row, aiBadge: aiBadge(d.ai, { project, kind: d.kind, id: d.id }), note: noAssessment[waitingForNobody(d.ai) ? "not_triaged" : d.ai.status] }),
     ...(explainNode ? [explainNode] : []),
     fix,
-    ...[checkFold, advisoryFold, seenFold, aiHasDetail ? aiFold : null, requestFold, jobFold].filter(Boolean).map((x) => x.root),
+    ...[checkFold, advisoryFold, seenFold, notesFold, aiHasDetail ? aiFold : null, requestFold, jobFold].filter(Boolean).map((x) => x.root),
   );
   return out;
 }

@@ -201,6 +201,9 @@ def _fingerprints(pairs):
 
 def review_key(triage, fingerprint):
     basis = f'{triage.kind}|{triage.evidence_key or triage.signature}|{fingerprint or ""}'
+    mark = getattr(triage, 'notes_mark', 0)
+    if mark:  # a new operator note queued it again (cveFeed.notes.queue_rereview); a finding with no note keeps the key it always had
+        basis += f'|n{mark}'
     return hashlib.sha1(basis.encode()).hexdigest()
 
 
@@ -272,7 +275,7 @@ def _due_in(project_id, limit, now):
     from cveFeed.models import Triage
     rank = Case(*[When(kind=k, then=Value(v)) for k, v in KIND_ORDER.items()], default=Value(9), output_field=IntegerField())
     base = (Triage.objects.filter(open_q(), project_id=project_id).exclude(kind='route_auth')
-            .only('id', 'kind', 'project_id', 'host', 'evidence_key', 'signature'))
+            .only('id', 'kind', 'project_id', 'host', 'evidence_key', 'signature', 'notes_mark'))
     qs = base.annotate(heat_rank=heat_rank_expr(), kind_rank=rank).order_by('-heat_rank', 'kind_rank', '-last_seen', '-id')
     picked = []
     rows = list(qs[:WINDOW])  # the first page
@@ -482,7 +485,11 @@ def build_packet(triage, key):
     prior = prior_line(*same_evidence_prior(triage))  # cvENGINE's own count of earlier verdicts: numbers, no host names, nothing the host wrote
     steps = [{'check': str(s.get('label') or s.get('kind') or '')[:80], 'result': str(s.get('result') or '')[:40]}
              for s in (triage.validation_steps or [])[:10] if isinstance(s, dict)]
+    from cveFeed import notes as notes_lib
     from cveFeed.ai_jobs import _redact
+    # what operators wrote about this finding (and its earlier copies) and its host, newest first and capped: data the model weighs, never
+    # instructions, so it travels apart from TRUSTED and the container fences it on its own (OPERATOR_NOTES)
+    operator_notes = notes_lib.for_review(triage.project_id, AUDIT_KIND.get(kind, kind), [finding.pk] + _copies(kind, finding), triage.host)
     # the same secret masking every queued AI job gets (ai_jobs._clean_parts): this packet goes to the reviewer container without the queue
     return _redact({
         'ref': f't{triage.pk}', 'review_key': key, 'kind': kind,
@@ -498,11 +505,13 @@ def build_packet(triage, key):
             'server_may_close': not blocked, 'server_will_not_close_because': why,
             'instructions_aimed_at_ai_found_in_evidence': injection,
             **({'same_evidence_on_other_hosts': prior} if prior else {}),
+            'operator_notes_count': len(operator_notes),
         },
         'untrusted': {
             'facts': d.get('payload'), 'host_context': d.get('host_context'),
             'earlier_triage_reason_written_by_a_model': triage_lib.strip_instructions((triage.reason or '')[:800]),
         },
+        'operator_notes': operator_notes,
     })
 
 
@@ -556,6 +565,17 @@ def usable_note(text, min_words=2):
     return note if len(note.split()) >= min_words and not is_placeholder(note) else ''
 
 
+NOTES_EFFECTS = ('no_notes', 'changed', 'unchanged')  # what the reviewer says the operator notes did to its verdict (the container's schema)
+NOTES_EFFECT_WORDS = {'changed': 'An operator note changed this verdict.', 'unchanged': 'Operator notes were weighed and did not change this verdict.'}
+
+
+def with_notes_effect(note, effect):
+    """The stored reason: the reviewer's note, led by one sentence of cvENGINE's own words saying whether an operator note changed the verdict
+    (nothing when there were no notes, or an older container did not say)."""
+    lead = NOTES_EFFECT_WORDS.get(effect or '')
+    return f'{lead} {note}'.strip()[:NOTE_MAX] if lead else note
+
+
 def _parse_verdict(body):
     if not isinstance(body, dict):
         raise VerdictError('body must be a JSON object')
@@ -576,7 +596,10 @@ def _parse_verdict(body):
             return max(0, min(int((body.get('usage') or {}).get(name) or 0), 10_000_000))
         except (TypeError, ValueError):
             return 0
-    return {'verdict': verdict, 'confidence': confidence, 'reason_code': reason_code, 'review_key': key,
+    notes_effect = body.get('notes_effect') or ''
+    if notes_effect not in ('',) + NOTES_EFFECTS:
+        raise VerdictError('notes_effect must be one of ' + ', '.join(NOTES_EFFECTS))
+    return {'verdict': verdict, 'confidence': confidence, 'reason_code': reason_code, 'review_key': key, 'notes_effect': notes_effect,
             'note': body.get('note'), 'model': str(body.get('model') or '')[:100],
             'input_tokens': count('input_tokens'), 'output_tokens': count('output_tokens')}
 
@@ -652,6 +675,7 @@ def apply_finding_verdict(triage, parsed, key, host_review=None, extra_injection
             injection = sorted(set(injection) | {'echo_marker'})
             note = 'The reviewer\'s note repeated an identifier planted in the evidence and was discarded.'
             parsed['verdict'], parsed['confidence'] = 'uncertain', 'low'
+        note = with_notes_effect(note, parsed.get('notes_effect'))
         outcome, held = 'recorded', ''
         if parsed['verdict'] == 'false_positive':
             blocked, held = close_gate(triage.kind, triage, finding, injection, d.get('facts'))
