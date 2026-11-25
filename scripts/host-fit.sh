@@ -14,7 +14,8 @@
 #   cvengine_fit_review COMPOSE...     (called by cvengine_fit_run) scripts/host-review.py --apply: settings that do not fit this host (a leftover
 #                                      DISCOVERY_CONCURRENCY pin, a container ceiling below what its service needs, Postgres memory settings still at
 #                                      the small shipped defaults) are put right, backed up and logged; a compose file that leaves the database's lock
-#                                      wait log and WAL timing off (log_lock_waits, track_wal_io_timing) is a warning, never changed
+#                                      wait log and WAL timing off (log_lock_waits, track_wal_io_timing) is a warning, never changed; whether a commit
+#                                      waits for its WAL flush (synchronous_commit, POSTGRES_SYNCHRONOUS_COMMIT) is said with who set it, never changed
 #   cvengine_fit_budget COMPOSE...     after the containers started: do the memory limits add up to more than 90 percent of the host?
 #
 # CVENGINE_HOST_MEM_MB overrides the host's memory (the tests and rehearsals fake a small host with it; nothing else sets it).

@@ -276,6 +276,11 @@ deploy_steps() {
   # the same for Redis: recreated only when a newer image was pulled above (dispatch is paused and the queues drained by now), else a no-op
   "${compose[@]}" up -d --no-deps redis || return 1
   for _ in $(seq 1 60); do "${compose[@]}" exec -T db pg_isready -q >/dev/null 2>&1 && break; sleep 1; done
+  # One source for the database's settings: an ALTER SYSTEM value of a setting the compose files now pass (synchronous_commit, set by hand on a
+  # host before POSTGRES_SYNCHRONOUS_COMMIT existed) is removed (scripts/db-settings.sh; idempotent, never fails the update)
+  if [ -f scripts/db-settings.sh ] && . scripts/db-settings.sh; then
+    while IFS= read -r line; do [ -z "$line" ] || log "$line"; done < <(cvengine_db_settings_one_source "${compose[@]}")
+  fi
   phase applying backup
   cv_status step backup
   backup_database || return 1

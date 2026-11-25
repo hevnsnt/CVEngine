@@ -31,7 +31,7 @@ class RepositoryPinTests(unittest.TestCase):
         refs = pins.references()
         self.assertEqual(pins.check(refs), [])
         found = {(r['file'], r['image']) for r in refs}
-        for expected in (('web/Dockerfile', 'ubuntu'), ('web/Dockerfile', 'ghcr.io/astral-sh/uv'), ('reviewer/Dockerfile', 'python'),
+        for expected in (('web/Dockerfile', 'ubuntu'), ('web/Dockerfile', 'ghcr.io/astral-sh/uv'), ('reviewer/Dockerfile', 'python'), ('certs/Dockerfile', 'alpine'),
                          ('docker-compose.yml', 'postgres'), ('docker-compose.yml', 'redis'), ('docker-compose.yml', 'nginx'),
                          ('docker-compose.dev.yml', 'postgres'), ('docker-compose.dev.yml', 'redis')):
             self.assertIn(expected, found)
@@ -45,7 +45,7 @@ class RepositoryPinTests(unittest.TestCase):
         for name in pins.FILES:
             for line in (ROOT / name).read_text().splitlines():
                 stripped = line.strip()
-                if stripped.startswith(('image:', 'FROM ')) and any(f'{image}:' in stripped for image in ('ubuntu', 'astral-sh/uv', 'postgres', 'redis', 'nginx')):
+                if stripped.startswith(('image:', 'FROM ')) and any(f'{image}:' in stripped for image in ('ubuntu', 'astral-sh/uv', 'alpine', 'postgres', 'redis', 'nginx')):
                     self.assertIn('@sha256:', stripped, f'{name}: {stripped}')
 
     def test_the_web_image_stages_share_one_ubuntu_pin(self):

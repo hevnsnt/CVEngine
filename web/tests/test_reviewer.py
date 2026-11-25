@@ -827,7 +827,7 @@ class ContainerGuardTests(TestCase):
                 self.guard.parse_reply(bad, schema)
 
     def test_scrub_removes_links_and_markup(self):
-        self.assertEqual(self.guard.scrub('see https://x.example/a <b>now</b>‮', 100), 'see [link removed] bnow/b')
+        self.assertEqual(self.guard.scrub('see https://x.example/a <b>now</b>\u202e', 100), 'see [link removed] bnow/b')
 
     def test_the_provider_schema_drops_the_length_limits(self):
         sent = self.guard.for_provider(self.prompts.REVIEW_SCHEMA)

@@ -222,3 +222,49 @@ class LinkTests(SimpleTestCase):
                 elif anchor and dest.suffix == '.md' and anchor not in anchors_of(str(dest)):
                     broken.append(f'{os.path.basename(name)}: {target} (no such heading)')
         self.assertEqual(broken, [])
+
+
+class RouteAndToolNameTests(SimpleTestCase):
+    """A REST path the docs give with its /api/v1/ prefix is a real route of agentapi.rest.ROUTES for that method (N1 found a Sentinel template
+    route the server never had), and the stale lines the same review found stay gone."""
+
+    @staticmethod
+    def shape(path):
+        """A route or a documented path with every variable part (a named group, {id}, <name>) made one marker, so the two compare as text."""
+        path = re.sub(r'\(\?P<\w+>(?:[^()]|\([^()]*\))*\)', 'X', path)
+        path = re.sub(r'\{[^}]*\}|<[^>]*>', 'X', path)
+        return path.replace('\\', '').strip('/')
+
+    def test_every_api_v1_path_the_docs_name_is_a_route(self):
+        from agentapi import rest
+        routes = {(method, self.shape(pattern)) for method, pattern, *_ in rest.ROUTES}
+        missing = []
+        for name in glob.glob(str(ROOT / 'docs' / '*.md')) + [str(ROOT / 'README.md')]:
+            if os.path.basename(name) in HISTORICAL:
+                continue
+            text = re.sub(r'<[^>]*>', '{x}', Path(name).read_text(encoding='utf-8'))  # a placeholder may hold spaces (<its project>)
+            for method, path in re.findall(r'\b(GET|POST|PUT|PATCH|DELETE) `?/api/v1/([^`\s?)]+)', text):
+                path = path.rstrip('.,;:')
+                if (method, self.shape(path)) not in routes:
+                    missing.append(f'{os.path.basename(name)}: {method} /api/v1/{path}')
+        self.assertEqual(sorted(set(missing)), [], 'named in the docs but not a REST route')
+
+    def test_the_stale_lines_n1_found_stay_gone(self):
+        stale = ('Heavy jobs wait in a queue that hands out memory', '`<KIND>` is the kind in capitals', '`get_target`', 'falls back to running that stage locally')
+        for name in glob.glob(str(ROOT / 'docs' / '*.md')) + [str(ROOT / 'README.md')]:
+            if os.path.basename(name) in HISTORICAL:
+                continue
+            text = Path(name).read_text(encoding='utf-8')
+            for phrase in stale:
+                self.assertFalse(phrase in text, f'{os.path.basename(name)} still says "{phrase}"')
+
+    def test_the_worker_health_check_knobs_are_documented(self):
+        code = (WEB / 'celery_healthcheck.py').read_text(encoding='utf-8')
+        names = set(re.findall(r"os\.environ\.get\('(CELERY_HEALTH_[A-Z_]+)'", code))
+        self.assertTrue(names)
+        self.assertEqual(sorted(n for n in names if n not in all_docs()), [])
+
+    def test_the_docs_say_rest_ignores_an_unknown_argument_and_mcp_refuses_it(self):
+        text = doc_text('docs/AGENT-API.md')
+        self.assertTrue('A REST route ignores a query parameter or body field it does not read' in text)
+        self.assertTrue('An MCP tool refuses an argument its input schema does not list' in text)
