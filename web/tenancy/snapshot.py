@@ -155,8 +155,15 @@ def activate(user):
         return
     snap = Snapshot(user, parent=current)
     token = _active.set(snap)
+    wrappers = connection.execute_wrappers
+    wrappers.append(_watch_writes)
     try:
-        with connection.execute_wrapper(_watch_writes):
-            yield snap
+        yield snap
     finally:
         _active.reset(token)
+        # this block's own hook, found by identity: ``connection.execute_wrapper`` would ``pop()`` the last one, which is another hook whenever
+        # code inside the block added one, and this one would then stay on the connection (a web thread's connection lives across requests)
+        for i in range(len(wrappers) - 1, -1, -1):
+            if wrappers[i] is _watch_writes:
+                del wrappers[i]
+                break

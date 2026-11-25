@@ -132,7 +132,10 @@ def sets_for_statement(connection):
     if key[0] is not None and memo is not None and memo[0][0] is key[0] and memo[0][1] == key[1]:
         return memo[1]
     if _forget_sets not in connection.execute_wrappers:
-        connection.execute_wrappers.append(_forget_sets)
+        # at the bottom of the list, never at the top: ``connection.execute_wrapper`` blocks (tenancy.snapshot, a test's counter) remove theirs with
+        # ``pop()``, which takes the last one. Appended inside such a block, this hook was taken off in its place and the block's own hook stayed on the
+        # connection for good: one more on every request of a web thread, each run around every later statement.
+        connection.execute_wrappers.insert(0, _forget_sets)
     sets = current_scan_sets(connection)
     setattr(connection, _MEMO, (key, sets))
     return sets
