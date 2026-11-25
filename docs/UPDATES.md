@@ -294,6 +294,7 @@ and for the next bump):
 | --- | --- |
 | `ubuntu:26.04`, `ghcr.io/astral-sh/uv:0.13.9` | `web/Dockerfile` (`FROM` lines) |
 | `python:3.13-slim-bookworm` | `reviewer/Dockerfile` |
+| `alpine:3.24` | `certs/Dockerfile` (the image `make certs` builds to create the certificate authority and the server certificate) |
 | `postgres:18-alpine`, `redis:alpine`, `nginx:alpine` | `docker-compose.yml` (and the first two in `docker-compose.dev.yml`) |
 | the built-in scanner | `scanner.lock.json`, the default of `docker-compose.yml` (above) |
 
