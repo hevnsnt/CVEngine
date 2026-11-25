@@ -5987,6 +5987,7 @@ def finding_detail(ctx, slug, kind, finding_id):
         'status_changed_by': _user_brief(obj.remediation_by) if kind in STATUS_KINDS else None,
         'assignee': _user_brief(obj.assignee) if kind in STATUS_KINDS else None,
         'comment_count': obj.comment_count if kind in STATUS_KINDS else 0,
+        'notes': _finding_notes(project, kind, obj),  # the newest comments and notes, newest first (list_finding_comments has them all)
         'closure_note': closed.get('closure_note'), 'closed_by': closed.get('closed_by'), 'closed_at': closed.get('closed_at'),
         'closed_automatically': closed.get('closed_automatically', False),
         'agent_task': _agent_task_of(obj) if kind == 'match' else None,
@@ -6075,11 +6076,14 @@ MAX_COMMENT_LENGTH = 4000
 
 
 def _comment(c):
-    return {'id': c.id, 'text': c.text, 'author': _user_brief(c.author), 'created': _iso(c.created_at)}
+    """One comment or note as the API shows it: a note is a comment with an ``observation`` (and often ``evidence``); ``source`` is where it was
+    written (ui, mcp or rest) and ``via`` the API token's name when it came through one."""
+    return {'id': c.id, 'text': c.text, 'observation': c.observation or None, 'evidence': c.evidence or '', 'author': _user_brief(c.author),
+            'source': c.source, 'via': c.via or None, 'created': _iso(c.created_at)}
 
 
 def list_finding_comments(ctx, slug, kind, finding_id, params=None):
-    """The comments on one finding, oldest first, a page at a time."""
+    """The comments and notes on one finding, oldest first, a page at a time."""
     from cveFeed.models import FindingComment
     project, _ = get_one_project(ctx, slug)
     if kind not in STATUS_KINDS:
@@ -6089,21 +6093,45 @@ def list_finding_comments(ctx, slug, kind, finding_id, params=None):
     return paginate(rows, params or {}, _comment)
 
 
-def add_finding_comment(ctx, slug, kind, finding_id, text):
+FINDING_NOTES_SHOWN = 20  # the newest notes get_finding carries; list_finding_comments pages through all of them
+
+
+def _finding_notes(project, kind, obj):
+    """The newest FINDING_NOTES_SHOWN comments and notes of one finding, newest first, for get_finding."""
+    from cveFeed.models import FindingComment
+    if kind not in STATUS_KINDS:
+        return []
+    rows = (FindingComment.objects.filter(project=project, finding_kind=kind, finding_id=obj.pk).select_related('author')
+            .order_by('-created_at', '-id')[:FINDING_NOTES_SHOWN])
+    return [_comment(c) for c in rows]
+
+
+def add_finding_comment(ctx, slug, kind, finding_id, text, observation=None, evidence=None, source='rest'):
     """Add one comment, logged to the finding's audit trail. A write like any other (read-only tokens and the audit
     role cannot comment; ``_all`` is never writable), even though it does not touch the finding's own remediation
-    fields, since it creates a row."""
+    fields, since it creates a row. With an ``observation`` (and optional ``evidence``) it is a structured note: the AI
+    reviewer reads the newest notes of a finding as data and a new one queues the finding for a fresh review (cveFeed.notes).
+    A note never changes the finding's status by itself."""
+    from cveFeed import notes
     from cveFeed.models import FindingAuditEvent, FindingComment
     project, _ = get_one_project(ctx, slug, write=True)
     if kind not in STATUS_KINDS:
         raise ApiError(400, f'kind must be one of {", ".join(STATUS_KINDS)}')
-    if not isinstance(text, str) or not text.strip():
-        raise ApiError(400, 'text must not be empty')
+    try:
+        text, observation, evidence = notes.clean_fields(text, observation, evidence)
+    except notes.NoteError as exc:
+        raise ApiError(400, str(exc)) from exc
     obj = _finding_obj(project, kind, finding_id)
-    comment = FindingComment.objects.create(project=project, finding_kind=kind, finding_id=obj.pk, author=ctx.user, text=text[:MAX_COMMENT_LENGTH])
+    source = source if source in notes.SOURCES else 'rest'
+    comment = FindingComment.objects.create(project=project, finding_kind=kind, finding_id=obj.pk, author=ctx.user, text=text[:MAX_COMMENT_LENGTH],
+                                            observation=observation, evidence=evidence, source=source, via=notes.via_of(ctx.token))
     FindingAuditEvent.objects.create(project=project, finding_kind=kind, finding_id=obj.pk, event='comment', actor=ctx.user,
-                                      before={}, after={'comment_id': comment.id, 'text': comment.text[:200]})
-    return _comment(comment)
+                                      before={}, after={'comment_id': comment.id, 'text': comment.text[:200],
+                                                        **({'observation': observation} if observation else {}),
+                                                        **({'evidence': evidence[:200]} if evidence else {}),
+                                                        'source': source, **({'via': comment.via} if comment.via else {})})
+    queued = notes.queue_finding(kind, obj.pk, comment.pk)
+    return {**_comment(comment), 'review_queued': bool(queued)}
 
 
 def _audit_event(e):

@@ -1518,6 +1518,9 @@ class Triage(models.Model):
     retest_at = models.DateTimeField(null=True, blank=True)
     retest_reason = models.CharField(max_length=300, blank=True, default="", db_default="")
     retest_sentinel = models.CharField(max_length=120, blank=True, default="", db_default="")
+    # The id of the newest operator note (a FindingComment with an observation, or a HostNote of its host) that queued this finding for a
+    # fresh AI review (cveFeed.notes.queue_rereview): part of the review key when set, so a new note is reviewed again. 0 = none.
+    notes_mark = models.PositiveIntegerField(default=0, db_default=0)
     first_seen = models.DateTimeField(default=timezone.now)
     last_seen = models.DateTimeField(default=timezone.now)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -1861,6 +1864,10 @@ class StatsSnapshot(models.Model):
 FINDING_KINDS = ("match", "vulnerability", "hygiene")  # a finding kind with a remediation workflow; same set as agentapi.services.STATUS_KINDS
 
 
+NOTE_OBSERVATIONS = ("confirmed", "not_reproduced", "false_positive", "fixed_verified", "needs_more_info", "info")  # what a note says it saw
+NOTE_SOURCES = ("ui", "mcp", "rest")  # where a note was written: the web interface, an MCP tool call or the REST API
+
+
 class FindingComment(models.Model):
     """A free-text note on one finding (a CVEMatch, Vulnerability or HygieneFinding), named generically by
     ``(finding_kind, finding_id)`` rather than three parallel FKs, the same way cveFeed.models.Triage and the activity
@@ -1871,12 +1878,40 @@ class FindingComment(models.Model):
     finding_id = models.PositiveIntegerField()
     author = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
     text = models.TextField(max_length=4000)
+    # A structured note: what the writer observed (NOTE_OBSERVATIONS, '' for a plain comment), the evidence behind it, where it came from
+    # (NOTE_SOURCES) and, for a call made with an API token, that token's name. The AI reviewer reads the newest notes as data (cveFeed.notes).
+    observation = models.CharField(max_length=20, blank=True, default="", db_default="", choices=[(o, o) for o in NOTE_OBSERVATIONS])
+    evidence = models.TextField(max_length=4000, blank=True, default="", db_default="")
+    source = models.CharField(max_length=8, default="ui", db_default="ui", choices=[(s, s) for s in NOTE_SOURCES])
+    via = models.CharField(max_length=100, blank=True, default="", db_default="")
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         indexes = [models.Index(fields=["project", "finding_kind", "finding_id", "created_at"], name="findingcomment_target_idx"),
                    # the comment count of a findings page names (kind, id) with no project (agentapi.services._comment_count_annotation)
                    models.Index(fields=["finding_kind", "finding_id"], name="findingcomment_kind_id_idx")]
+        ordering = ["created_at", "id"]
+
+
+class HostNote(models.Model):
+    """An operator's note on one stored host: what they observed (``observation``), in their words (``text``), with the evidence behind it,
+    who wrote it and through what (``source``, and ``via``: the API token's name). ``subdomain`` is the inventory row the note was written
+    on; ``host`` is its name, which is what the note is read by, so a rescan that replaces the row keeps the note with its host. A note is
+    data: it never changes a finding's status by itself (the AI reviewer weighs it, cveFeed.notes)."""
+
+    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
+    subdomain = models.ForeignKey("startScan.Subdomain", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    host = models.CharField(max_length=500)
+    author = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    observation = models.CharField(max_length=20, blank=True, default="", db_default="", choices=[(o, o) for o in NOTE_OBSERVATIONS])
+    text = models.TextField(max_length=4000)
+    evidence = models.TextField(max_length=4000, blank=True, default="", db_default="")
+    source = models.CharField(max_length=8, default="ui", db_default="ui", choices=[(s, s) for s in NOTE_SOURCES])
+    via = models.CharField(max_length=100, blank=True, default="", db_default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["project", "host", "-created_at"], name="hostnote_host_idx")]
         ordering = ["created_at", "id"]
 
 

@@ -476,7 +476,8 @@ def build(ctx, slug, host_id):
     """Check access and gather the whole record (every read happens here): a ``HostExport``. Raises ApiError (404 for a host the caller cannot read)."""
     from django.conf import settings
 
-    from agentapi import host_review_api
+    from agentapi import host_notes, host_review_api
+    from cveFeed import web_shot
     project, sub = _host_row(ctx, slug, host_id)
     row = svc.host_group(project, sub)
     svc._mark_zombies(project, {'results': [row]})
@@ -518,6 +519,7 @@ def build(ctx, slug, host_id):
         'scans': _scans(project, names),
         'assessment': _optional(svc.latest_host_assessment, ctx, slug, sub.pk),
         'ai_review': _optional(host_review_api.get_host_review, ctx, slug, sub.pk),
+        'notes': host_notes.for_names(project, {*names, web_shot.host_of(sub)}, MAX_ROWS),  # operator notes on the host, newest first
         'screenshots': manifest,
         'truncated': {**{f'findings.{k}': v for k, v in findings_cut.items()}, 'history': history_cut, 'certificates': certs_cut, 'routes': routes_cut,
                       'probes': probes_cut, 'inventory.packages': packages.get('count', 0) > len(packages.get('results') or []),

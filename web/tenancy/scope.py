@@ -67,6 +67,7 @@ SCOPES = {
     'agentapi.SentinelPartial': 'task__project_id',  # a streamed task's batches waiting to be stored, read only by the stage that dispatched it
     'cveFeed.AuthCredential': 'project_id',
     'cveFeed.FindingComment': 'project_id',
+    'cveFeed.HostNote': 'project_id',  # an operator's note on one host (agentapi.notes)
     'cveFeed.FindingAuditEvent': 'project_id',
     'cveFeed.HostArchive': 'project_id',
     'cveFeed.HostMove': 'project_id',

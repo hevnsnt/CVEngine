@@ -211,9 +211,11 @@ def get_host_review(ctx, slug, host_id):
     project, sub, host = _host_row(ctx, slug, host_id)
     row = _newest(project, host)
     facts = _HostFacts(project, host)  # the mode, open rows and unchanged review are read once for the whole answer
+    from agentapi import host_notes
     return {'host_id': sub.pk, 'host': host, 'mode': facts.mode, 'readiness': readiness(project, host, facts), 'waiting_until': _waiting_until(project, host, row, facts),
             'auto_close': reviewer_settings().host_review_auto_close,
-            'status': row.status if row else 'none', 'review': describe(row, project) if row else None}
+            'status': row.status if row else 'none', 'review': describe(row, project) if row else None,
+            'notes': host_notes.newest(project, host)}  # the newest operator notes on the host, newest first (list_host_notes has them all)
 
 
 def request_host_review(ctx, slug, host_id):

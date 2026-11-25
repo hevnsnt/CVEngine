@@ -69,7 +69,7 @@ REVIEW = [
         'PATCH P/saved-searches/{search_id}', 'set_secret_status', 'POST P/secrets/{secret_id}/status', 'POST P/secrets/{secret_id}/assign', 'update_remediation_status',
         'PATCH P/matches/{match_id}', 'update_finding_status', 'PATCH P/findings/{kind}/{finding_id}', 'bulk_update_finding_status', 'POST P/findings/status',
         'set_finding_assignee', 'set_finding_heat', 'POST P/findings/{kind}/{finding_id}/heat', 'POST P/findings/heat', 'add_finding_comment',
-        'POST P/findings/{kind}/{finding_id}/comments', 'add_supplier', 'POST P/suppliers', 'set_supplier_finding_status', 'PATCH P/suppliers/findings/{finding_id}',
+        'POST P/findings/{kind}/{finding_id}/comments', 'add_host_note', 'POST P/hosts/{host_id}/notes', 'add_supplier', 'POST P/suppliers', 'set_supplier_finding_status', 'PATCH P/suppliers/findings/{finding_id}',
         'update_cve_detection', 'PUT cves/{cve_id}/detection', 'PUT secrets/rules',
     ]),
     ('allow', 'email reports: a summary of what the token\'s owner can already read, sent by email through the server an App Admin set up. It widens no scan, spends nothing, '
