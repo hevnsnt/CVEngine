@@ -7,6 +7,8 @@ import { api, badge, button, dialog, el, field, selectOf, shortDate, text, toast
 const EXPIRY_CHOICES = [["30", "30 days"], ["90", "90 days"], ["120", "120 days"], ["never", "Never (I chose this on purpose)"]];
 const UNTRUSTED_WARNING =
   "Warning: with this on, the sign-in may be sent when the server certificate is invalid. Nuclei does not verify TLS on its signed-in request, even after a separate check succeeds. Anyone in the network path may read the sign-in. Leave this off unless you accept that risk.";
+const EXTERNAL_WARNING =
+  "With this on, an external Sentinel may also read this sign-in for a signed-in check, once per task, so the value leaves this server for a machine it does not run. Only a Sentinel enrolled by an App Admin or this organization's admin, running a version that says it handles sign-ins safely, is ever sent it. Leave this off unless you trust every such Sentinel.";
 const ORIGIN_HELP = "Where the values may be sent, as scheme:port, comma separated. Default https:443. Plain http only if you name it.";
 
 // The stored sign-ins of the project, or null when the viewer may not see them (not an App Admin or the organization's admin).
@@ -93,6 +95,9 @@ function openSignIn(state, target, changed) {
       if (r.allow_untrusted_certificate) {
         box.append(el("p", "note", "Trusts an unverified certificate: the sign-in is sent even when the server's certificate does not verify, so it can be read by anyone in the network path.", { style: "margin:4px 0;color:var(--warn, #b45309)" }));
       }
+      if (r.allow_external_sentinels) {
+        box.append(el("p", "note", "Also sent to external Sentinels: an external Sentinel your admins enrolled may read it for a signed-in check.", { style: "margin:4px 0;color:var(--warn, #b45309)" }));
+      }
       if (r.expired) box.append(el("p", "note", "Expired: the scanners no longer send it. Replace it with a fresh session.", { style: "margin:4px 0" }));
       const actions = el("div", "actions", null, { style: "justify-content:flex-start" });
       const replace = el("button", "btn ghost sm", "Replace", { type: "button" });
@@ -154,6 +159,13 @@ function openSignIn(state, target, changed) {
       const syncUntrusted = () => (untrustedWarn.hidden = !untrusted.checked);
       untrusted.onchange = syncUntrusted;
       syncUntrusted();
+      const external = el("input", "", null, { type: "checkbox" });
+      const externalWrap = el("label", "", null, { style: "display:block;margin:4px 0" });
+      externalWrap.append(external, document.createTextNode(" Also send it to my external Sentinels"));
+      const externalWarn = el("p", "note", EXTERNAL_WARNING, { style: "font-size:13px;margin:4px 0;color:var(--warn, #b45309)" });
+      const syncExternal = () => (externalWarn.hidden = !external.checked);
+      external.onchange = syncExternal;
+      syncExternal();
       const names = [];
       const addHeader = (name = "", stored = false) => {
         const row = el("div", "scope-cell", null, { style: "display:flex;gap:8px;margin:6px 0" });
@@ -185,6 +197,9 @@ function openSignIn(state, target, changed) {
         el("p", "note", "The web route check verifies TLS on its own connection. Nuclei cannot verify TLS on the request carrying the sign-in, so its signed-in HTTPS pass stays off unless you enable the switch below. Anonymous Nuclei checks still run.", { style: "margin:10px 0 0;font-size:13px" }),
         untrustedWrap,
         untrustedWarn,
+        el("p", "note", "By default only the built-in scanner, which runs next to this server, reads a stored sign-in.", { style: "margin:10px 0 0;font-size:13px" }),
+        externalWrap,
+        externalWarn,
         el("p", "note", "Headers (for example Authorization or X-Api-Key). A blank value for a stored name keeps it.", { style: "margin:10px 0 0" }),
         headerRows,
         more,
@@ -199,6 +214,7 @@ function openSignIn(state, target, changed) {
         if (cookie.value) body.cookie_secret = cookie.value;
         if (clearCookie.checked) body.clear_cookie = true;
         body.allow_untrusted_certificate = untrusted.checked;
+        body.allow_external_sentinels = external.checked;
         body.expires = expires.value === "never" ? "never" : Number(expires.value);
         await api("PUT", `${state.base}/targets/${target.id}/auth-credential`, body);
         cookie.value = ""; // a saved value is never kept on the page
@@ -208,7 +224,7 @@ function openSignIn(state, target, changed) {
       });
       box.append(el("div", "actions", null, { style: "justify-content:flex-start" }));
       box.lastChild.append(save);
-      current = { label, host, origins, expires, untrusted, syncUntrusted, scopeHost, scopeTarget, sync, addHeader, headerRows, names };
+      current = { label, host, origins, expires, untrusted, syncUntrusted, external, syncExternal, scopeHost, scopeTarget, sync, addHeader, headerRows, names };
       return box;
     };
     const fillForm = (r) => {
@@ -220,6 +236,8 @@ function openSignIn(state, target, changed) {
       current.sync();
       current.untrusted.checked = Boolean(r.allow_untrusted_certificate); // shown, so a replace never flips it unseen
       current.syncUntrusted();
+      current.external.checked = Boolean(r.allow_external_sentinels); // shown, so a replace never flips it unseen
+      current.syncExternal();
       current.expires.value = "30"; // a replacement starts a new term; the choice is shown, never inherited
       current.headerRows.textContent = "";
       current.names.length = 0;

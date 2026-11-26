@@ -125,7 +125,9 @@ class GateTests(SignedRouteStageBase):
         task = SentinelTask.objects.create(project=self.project, scan=self.scan, kind=KIND, host='app.example.test', target={'hosts': [], 'scope': {}},
                                            secret_ref=sentinel_broker.secret_ref_for(self.cred.pk))
         task = SentinelTask.objects.select_related('project').get(pk=task.pk)
-        self.assertEqual(sentinel_broker.effective(agent).refusal(task), ('capability', sentinel_broker.BUILTIN))
+        # refused by the stored sign-in gate (agentapi.signin_delivery): it reports secret_read (the built-in image's word), not secret_read_external,
+        # and the owner never allowed external Sentinels for this sign-in
+        self.assertEqual(sentinel_broker.effective(agent).refusal(task), ('capability', sentinel_broker.SIGNED_IN))
         self.assertEqual(sentinel_broker.queued_for(agent), {})
 
     def test_the_stage_waits_with_only_an_external_sentinel(self):

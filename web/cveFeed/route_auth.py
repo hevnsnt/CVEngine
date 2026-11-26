@@ -405,7 +405,7 @@ def _legacy_root_urls(project, urls):
 
 def run_route_auth(scan_id, force=False):
     """``_run_route_auth``, then, when the scan's target has a stored sign-in, the routes it covers once more signed in (cveFeed.auth_routes: on the
-    built-in scanner only, never from this server), recorded beside the anonymous answer in each route's evidence. A target with none runs exactly as before."""
+    built-in scanner, or an external Sentinel the owner allowed, never from this server), recorded beside the anonymous answer in each route's evidence. A target with none runs exactly as before."""
     from cveFeed import auth_routes
     out = _run_route_auth(scan_id, force)
     signed = auth_routes.run_signed_in(scan_id, force)

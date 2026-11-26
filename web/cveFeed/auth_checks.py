@@ -251,6 +251,7 @@ def summary(cred, now=None):
             'header_names': header_names(cred), 'cookie_names': cookie_names(cred),
             'expires_at': cred.expires_at.isoformat() if cred.expires_at else None, 'never_expires': cred.expires_at is None,
             'days_left': days_left, 'allow_untrusted_certificate': bool(cred.allow_untrusted_certificate),
+            'allow_external_sentinels': bool(cred.allow_external_sentinels),
             'state': 'expired' if expired else 'active', 'expired': expired,
             'updated_at': cred.updated_at.isoformat() if cred.updated_at else None,
             'updated_by': cred.updated_by.username if cred.updated_by_id else None,
@@ -275,7 +276,7 @@ def origin_of(scheme, port):
 class AuthScope:
     """The credentials of one target, and the rule for when one may be sent. Build it with ``for_domain``; ask ``credential(host, scheme,
     port)`` for the credential that applies to a destination (None when none does). This server puts a credential on no request: the signed-in
-    route check is the built-in scanner's (``cveFeed.auth_routes``)."""
+    route check runs on a Sentinel that may read the sign-in (``cveFeed.auth_routes``)."""
 
     def __init__(self, creds, now=None):
         self.now = now

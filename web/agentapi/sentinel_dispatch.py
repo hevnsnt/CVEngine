@@ -89,7 +89,7 @@ NEVER_LOCAL = (
     'web_screenshot',
     'page_read',  # a validation re-test's HEAD of a URL and re-read of a host's pages and scripts (cveFeed.validation): a Sentinel's, this server fetches nothing
     'openvas',  # the Greenbone scan: a Sentinel's own GVM stack, this server opens no GMP session (cveFeed.openvas_scan)
-    'route_probe_signed',  # the web route check with a stored sign-in (cveFeed.auth_routes): built-in scanner only, this server sends no stored sign-in anywhere
+    'route_probe_signed',  # the web route check with a stored sign-in (cveFeed.auth_routes): the built-in scanner, or an external Sentinel the owner allowed
     'http_probe',  # the version and identity probes (cveFeed.probes): a Sentinel's requests, this server fetches no target page for them
     'route_probe',  # the anonymous web route check (cveFeed.route_auth): a Sentinel's requests
     'vhost_probe',  # the virtual host sweep (cveFeed.vhost_scan): a Sentinel's requests
@@ -273,9 +273,13 @@ def _refuse(project, kind, target, host, ips, scan=None):
 
 
 def capacity_flags(secret_ref):
-    """The ``capacity_state`` arguments that count the right slots for a task with ``secret_ref``: a stored sign-in is the built-in scanner's alone (``builtin_only``), a\n    discovery's keys (``bbotkeys:``) go to the built-in scanner or a Sentinel that may be sent them (``bbot_keys``, the one gate ``sentinel_stream.key_delivery_decision``)."""
+    """The ``capacity_state`` arguments that count the right slots for a task with ``secret_ref``: a\n    discovery's keys (``bbotkeys:``) go to the built-in scanner or a Sentinel that may be sent them (``bbot_keys``, the one gate ``sentinel_stream.key_delivery_decision``),\n    and a stored sign-in (``authcred:``) to the built-in scanner or an external Sentinel its owner allowed (``signin``, the one gate ``signin_delivery.decision``).
+    Any other reference is the built-in scanner's alone."""
     if isinstance(secret_ref, str) and secret_ref.startswith('bbotkeys:'):
         return {'bbot_keys': True}
+    from agentapi import signin_delivery
+    if signin_delivery.is_ref(secret_ref):  # a stored sign-in: the built-in scanner, or an external Sentinel the owner allowed (``signin_delivery.decision``)
+        return {'signin': secret_ref}
     return {'builtin_only': bool(secret_ref), 'secret': bool(secret_ref)}
 
 
@@ -306,7 +310,7 @@ class _Dispatch:
         self.timeout = _dispatch_timeout(kind, targets) if timeout is None else timeout
         self.task = SentinelTask.objects.create(project=project, scan=scan, kind=kind, target=target, host=(host or '')[:500],
                                                 ips=list(ips or [])[:MAX_ADDRESSES], priority=priority, created_by=created_by,
-                                                secret_ref=secret_ref)  # set at creation: a task that names a secret is never offered to another Sentinel
+                                                secret_ref=secret_ref)  # set at creation: a task that names a secret is offered only to a Sentinel that may read it
         self.label = label or _label(host, ips)
         self.busy = capacity['state'] == 'busy'
         self.entry = activity.log('run_check', (f'Queued {kind} work for {self.label}: all {capacity["slots"]} Sentinel slot(s) are in use, waiting for one'
@@ -541,8 +545,8 @@ def dispatch_or_none(project, kind, target, host='', ips=None, scan=None, timeou
     if run is not None:  # inside a StageRun: the task is created and the worker given back, or the task made on an earlier pass is read
         return _dispatch_async(run, project, kind, target, host, ips, scan, timeout, created_by, priority, redact_target, internal, outcome,
                                secret_ref=secret_ref)
-    builtin_only = bool(secret_ref)
-    capacity = sentinel_broker.capacity_state(project, kind, internal, why=True, builtin_only=builtin_only, secret=builtin_only)  # why: a ``none`` carries the reason, for the message below
+    flags = capacity_flags(secret_ref)  # signed-in work: only the slots of the Sentinels that may read its secret count
+    capacity = sentinel_broker.capacity_state(project, kind, internal, why=True, **flags)  # why: a ``none`` carries the reason, for the message below
     if capacity['state'] == 'none':
         if outcome is not None:
             outcome['no_scanner'] = True
@@ -560,8 +564,7 @@ def dispatch_or_none(project, kind, target, host='', ips=None, scan=None, timeou
         if now - last_reap >= REAP_EVERY:  # a Sentinel that stopped heartbeating loses its lease here, not only when something else asks
             sentinel_broker.reap_expired()
             last_reap = now
-            none_left = work.task.status == 'queued' and sentinel_broker.capacity_state(project, kind, internal,
-                                                                                        builtin_only=builtin_only, secret=builtin_only)['state'] == 'none'
+            none_left = work.task.status == 'queued' and sentinel_broker.capacity_state(project, kind, internal, **flags)['state'] == 'none'
         if work.step(now, none_left):
             break
         _wait([work.task.pk], min(work.pause(now, _poll_interval()), max(0.0, last_reap + REAP_EVERY - now) or REAP_EVERY))
@@ -760,8 +763,8 @@ def _dispatch_async(run, project, kind, target, host, ips, scan, timeout, create
     key = stage_runs.task_key(kind, target, host, ips, internal, secret_ref=secret_ref)
     work = run.work(key)
     if work is None:
-        builtin_only = bool(secret_ref)  # signed-in work: only the built-in scanner's slots count, as in the blocking path
-        capacity = sentinel_broker.capacity_state(project, kind, internal, why=True, builtin_only=builtin_only, secret=builtin_only)
+        flags = capacity_flags(secret_ref)  # signed-in work: only the slots of the Sentinels that may read its secret count, as in the blocking path
+        capacity = sentinel_broker.capacity_state(project, kind, internal, why=True, **flags)
         if capacity['state'] == 'none':
             if outcome is not None:
                 outcome['no_scanner'] = True
@@ -1372,9 +1375,9 @@ def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
 def signed_in_stream(scan, kind, timeout=None):
     """``run(items, **kwargs) -> iterable of result-line dicts``: a signed-in pass (``cveFeed.auth_nuclei``) over ``items`` (``auth_checks.PlanItem``:
     an origin URL and the stored credential that covers it) through the built-in scanner. One task per credential and chunk of origins, carrying
-    ``secret_ref`` (a reference to the credential, never its value): only the built-in scanner takes it, and reads the credential once through
-    ``POST sentinel/tasks/<id>/secret``. An external Sentinel is never offered it (``sentinel_broker.SentinelEff.refusal``). With no built-in
-    scanner that reads stored sign-ins live, the pass waits (``ScannerUnavailable``): nothing is recorded and the targets stay due. The lines are
+    ``secret_ref`` (a reference to the credential, never its value): the built-in scanner takes it, or an external Sentinel the credential's owner allowed
+    (``signin_delivery.decision``), and reads the credential once through ``POST sentinel/tasks/<id>/secret``. Any other Sentinel is never offered it
+    (``sentinel_broker.SentinelEff.refusal``). With no Sentinel live that may read the stored sign-in, the pass waits (``ScannerUnavailable``): nothing is recorded and the targets stay due. The lines are
     redacted by the caller."""
     project = scan.domain.project
 

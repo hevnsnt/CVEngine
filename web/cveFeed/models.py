@@ -2196,6 +2196,9 @@ class AuthCredential(models.Model):
     # The owner's choice, per target: send the values over a TLS connection whose certificate does not verify (self-signed, expired, wrong name).
     # Off by default: then a sign-in goes only to a server that proves its name, and anyone in the network path could read it otherwise.
     allow_untrusted_certificate = models.BooleanField(default=False, db_default=False)
+    # The owner's choice, per stored sign-in: an external Sentinel may also read it for a signed-in task (agentapi.signin_delivery). Off by default:
+    # then only the built-in scanner, which runs next to this server, ever receives it.
+    allow_external_sentinels = models.BooleanField(default=False, db_default=False)
     updated_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
     last_used_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)

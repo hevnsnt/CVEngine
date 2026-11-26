@@ -127,7 +127,9 @@ def task_queued(task):
             row = SentinelTask._base_manager.select_related('project__org').filter(pk=task_id, status='queued').first()
             if row is None:
                 return
-            eligible = sentinel_broker.eligible_sentinels(row.project, row.kind, live_only=True, builtin_only=bool(row.secret_ref))
+            from agentapi import signin_delivery
+            signin = row.secret_ref if signin_delivery.is_ref(row.secret_ref) else None  # a stored sign-in: also the external Sentinels its owner allowed
+            eligible = sentinel_broker.eligible_sentinels(row.project, row.kind, live_only=True, builtin_only=bool(row.secret_ref) and not signin, signin=signin)
             _push([agent_key(e.agent.pk) for e in eligible])
         except Exception as exc:  # noqa: BLE001
             _warn('queued', exc)
