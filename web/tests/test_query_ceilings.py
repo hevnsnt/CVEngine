@@ -72,7 +72,7 @@ DISPATCH = {
     'settings/autotune/decisions': (200, 9), 'settings/updates': (200, 22), 'settings/scanner_plan': (200, 17),
     'settings/keys': (200, 9), 'settings/notifications': (200, 9), 'settings/email': (200, 9),
     'settings/proxy': (200, 9), 'settings/reports': (200, 9), 'settings/tailscale': (200, 10),
-    'settings/openvas': (200, 44), 'settings/openvas/projects/(?P<project_id>\\d+)/queue': (200, 288), 'settings/ip_allowlist': (200, 10),
+    'settings/openvas': (200, 44), 'settings/openvas/projects/(?P<project_id>\\d+)/queue': (200, 288), 'settings/ip_allowlist': (200, 10), 'settings/ip_bans': (200, 10),
     'admin/users': (200, 14), 'admin/orgs': (200, 16), 'admin/orgs/(?P<org_id>\\d+)/api-keys': (200, 10),
     'admin/orgs/(?P<org_id>\\d+)/excluded-addresses': (200, 10), 'admin/projects': (200, 10), 'admin/timings': (200, 14),
     'admin/audit': (200, 9), 'admin/activity': (200, 10), 'admin/health': (200, 25),

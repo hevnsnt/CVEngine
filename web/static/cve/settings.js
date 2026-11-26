@@ -1438,6 +1438,39 @@ const sections = {
           }),
         ),
       );
+      // The input guard's address bans in force, each with a one-click Lift ban (cveFeed/settings_api.py ip_bans)
+      const b = await api("GET", "ip_bans");
+      const bans = el("div", "grid");
+      if (!b.bans.length) bans.append(el("p", "empty", "No address is banned."));
+      b.bans.forEach((ban) => {
+        const row = el("div", "access-row");
+        const until = ban.expires_at ? `until ${new Date(ban.expires_at).toLocaleString()}` : "until lifted";
+        row.append(
+          el("code", "", ban.ip),
+          el("span", "note", `${ban.reason} (${until})${ban.ip === b.your_ip ? ", your current address" : ""}`),
+          button(
+            "Lift ban",
+            async () => {
+              await api("POST", `ip_bans/${ban.id}/lift`);
+              toast(`Ban of ${ban.ip} lifted`);
+              await draw();
+            },
+            "btn ghost sm",
+          ),
+        );
+        bans.append(row);
+      });
+      wrap.append(
+        card(
+          "Address bans",
+          el(
+            "p",
+            "note",
+            "Addresses the input guard banned for sending attack input. Your own address and a live Sentinel's are never banned: you get a notice instead.",
+          ),
+          bans,
+        ),
+      );
     };
     await draw();
   },

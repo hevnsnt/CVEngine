@@ -22,7 +22,12 @@ signed-in session that sent the request is ended (the person signs in again) and
 signed-in person by a link they click, so the most a payload may cost an account is one sign-in, and every action is
 written to the audit log (``abuse.session_ended``, ``abuse.user_flagged``, ``abuse.ip_banned``) for an App Admin to judge.
 Private and proxy addresses are never IP-banned (that would block a whole site), and superusers are only logged
-(``abuse.superuser_flagged``). An admin lifts an address ban in Django admin (AbuseBan.lifted).
+(``abuse.superuser_flagged``). An App Admin lifts an address ban in Settings, IP allowlist and bans (or Django admin, AbuseBan.lifted).
+
+The owner is never locked out silently: an address that in the last 24 hours was the source of a signed-in App Admin session or of a live Sentinel's
+calls (``cvengine.guard_sources``) is not banned at the threshold. Its strikes are kept, the audit log says ``abuse.ban_withheld``, and an App Admin
+alert names the address, the path and the reason. A 403 that refuses an address carries ``X-CVEngine-Refusal`` (``banned``, ``not_allowlisted``), so a
+Sentinel can tell it from a refusal of its token.
 
 Which hits count (review r3 S1). A browser labels every request with ``Sec-Fetch-Site``. ``cross-site`` and ``same-site``
 come from another site's page; ``none`` is a navigation the person started outside any page (a link in a mail or chat
@@ -41,6 +46,7 @@ from datetime import timedelta
 
 from django.http import JsonResponse
 from django.utils import timezone
+from cvengine import guard_sources
 from cvengine.usage_stamps import durable_commit
 
 logger = logging.getLogger(__name__)
@@ -331,6 +337,11 @@ def record_and_maybe_ban(request, hits, ip, user, counted=True):
         ended = _end_session(request, user)
         _audit(user, 'abuse.session_ended' if ended else 'abuse.user_flagged', user.username, reason=reason, ip=ip)
     if ban_ip and _ip_is_banable(ip) and not AbuseBan.objects.filter(ip=ip, lifted=False, expires_at__gt=timezone.now()).exists():
+        sources = guard_sources.protected(ip)
+        if sources:  # the owner's own address or a live Sentinel's: never banned silently, an App Admin is told instead
+            withhold_ban(ip, request.path, reason, sources, user)
+            logger.warning('input guard: ban of %s withheld (%s): %s', ip, ', '.join(guard_sources.KINDS[k] for k, _ in sources), reason)
+            return ended
         with durable_commit():  # a ban a crash could undo would let the address straight back in
             AbuseBan.objects.create(ip=ip, username=getattr(user, 'username', '') if user else '', reason=reason,
                                     expires_at=timezone.now() + IP_BAN)
@@ -339,6 +350,58 @@ def record_and_maybe_ban(request, hits, ip, user, counted=True):
         banned = True
     logger.warning('input guard: user=%s ip=%s session ended=%s address banned=%s: %s', getattr(user, 'username', None), ip, ended, banned, reason)
     return ended or banned
+
+
+REFUSAL_HEADER = 'X-CVEngine-Refusal'  # on every 403 that refuses an ADDRESS (a ban, the IP allowlist), never on a refusal of a token or a right
+ALERT_CODE = 'ban_withheld'
+ALERT_REFRESH = 60  # seconds: the alert of one address is written again at most this often (a scan sends many requests)
+
+
+def refused(response, why='banned'):
+    """``response`` marked as a refusal of the client's address (``banned`` or ``not_allowlisted``): a Sentinel then knows its token is fine and backs
+    off instead of asking its operator to re-enroll it."""
+    response[REFUSAL_HEADER] = why
+    return response
+
+
+def withhold_ban(ip, path, reason, sources, user=None):
+    """The guard would ban ``ip``, but it is the owner's own address or a live Sentinel's (``guard_sources``): keep the strikes (already stored), write
+    the audit row and open or refresh one App Admin alert per address (the status strip and the alerts list show it) naming the address, the path and
+    the reason. Never raises."""
+    try:
+        from django.core.cache import cache
+        if not cache.add(f'ban-withheld:{ip}', 1, ALERT_REFRESH):
+            return None
+    except Exception:  # noqa: BLE001 - no cache: write it every time rather than never
+        pass
+    who = '; '.join(f'{guard_sources.KINDS[k]}{f" ({n})" if n else ""}' for k, n in sources)
+    try:
+        _audit(user, 'abuse.ban_withheld', ip, reason=reason, path=_stored(path, 200), protected=who)
+    except Exception:  # noqa: BLE001
+        logger.warning('input guard: could not write the audit row of a withheld ban', exc_info=True)
+    try:
+        import hashlib
+        from cveFeed import reviewer
+        from cveFeed.models import AdminAlert
+        now = timezone.now()
+        code = f'{ALERT_CODE}_{hashlib.sha1(ip.encode()).hexdigest()[:12]}'  # one open alert per address
+        title = _stored(f'Requests from {ip} would have been banned, but it is {who}', 200)
+        detail = (f'The input guard counted enough strike points against {ip} to ban it for {int(IP_BAN.total_seconds() // 3600)} hours, but in the last 24 hours '
+                  f'that address was used by {who}. A ban would lock you or that Sentinel out, so it was not banned; the strikes are kept (Django admin, Abuse '
+                  f'strikes).\nLast path: {_stored(path, 200)}\nReason: {reason}\nIf the requests are a Sentinel scanning this server, check the target '
+                  f'scope; if they are not yours, add a ban by hand in Django admin.')
+        facts = {'ip': ip, 'path': _stored(path, 200), 'reason': reason, 'protected': [k for k, _ in sources]}
+        digest = hashlib.sha1(f'{code}|{ip}'.encode()).hexdigest()[:20]
+        alert = AdminAlert.objects.filter(code=code, resolved_at__isnull=True).first()
+        if alert is None:
+            return AdminAlert.objects.create(code=code, severity='warning', title=title, detail=detail, facts=facts, digest=digest, first_seen=now, last_seen=now,
+                                             **reviewer.carried_dismissal(code, digest, 'warning', now))
+        alert.title, alert.detail, alert.facts, alert.last_seen = title, detail, facts, now
+        alert.save(update_fields=['title', 'detail', 'facts', 'last_seen'])
+        return alert
+    except Exception:  # noqa: BLE001
+        logger.warning('input guard: could not raise the alert of a withheld ban', exc_info=True)
+        return None
 
 
 def _oversize_api_json(request):
@@ -361,6 +424,7 @@ class InputGuardMiddleware:
         self.get_response = get_response
 
     def __call__(self, request):
+        guard_sources.note_request(request)  # the owner's and the live Sentinels' addresses are never banned silently (record_and_maybe_ban)
         if EXEMPT_PATH.match(request.path):
             return self.get_response(request)
         if _oversize_api_json(request):
@@ -385,5 +449,5 @@ class InputGuardMiddleware:
         except Exception:  # noqa: BLE001
             logger.exception('input guard could not record a strike')
         if banned:
-            return JsonResponse({'error': 'This session or address has been blocked for sending malicious input.'}, status=403)
+            return refused(JsonResponse({'error': 'This session or address has been blocked for sending malicious input.'}, status=403))
         return JsonResponse({'error': 'Request rejected: it contains characters or patterns that are not valid input.'}, status=400)

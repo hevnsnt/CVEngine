@@ -7,6 +7,7 @@ from django.utils import timezone
 
 from agentapi.auth import create_token
 from dashboard.models import AbuseBan, AbuseStrike, ApiToken, AuditLog, Org, OrgMembership, Project
+from cvengine import guard_sources
 from cvengine import input_guard as guard
 from cvengine.client_ip import client_ip
 from targetApp import target_types as tt
@@ -103,6 +104,9 @@ class GuardMiddlewareTests(TestCase):
 	def setUp(self):
 		self.addCleanup(guard.invalidate_cache)
 		guard.invalidate_cache()
+		for ip in ('8.8.4.4', '8.8.8.8'):  # an address another test noted as an App Admin's or a Sentinel's is not banned (cvengine.guard_sources)
+			guard_sources.forget(ip)
+			self.addCleanup(guard_sources.forget, ip)
 
 	def test_internal_address_targets_are_refused(self):
 		_, tok = create_token(self.user, 't')
@@ -244,6 +248,9 @@ class SentinelMachineDataTests(TestCase):
 	def setUp(self):
 		self.addCleanup(guard.invalidate_cache)
 		guard.invalidate_cache()
+		for ip in ('8.8.4.4', '8.8.8.8'):  # an address another test noted as an App Admin's or a Sentinel's is not banned (cvengine.guard_sources)
+			guard_sources.forget(ip)
+			self.addCleanup(guard_sources.forget, ip)
 		from datetime import timedelta
 
 		from agentapi.models import Agent, SentinelTask
@@ -286,14 +293,18 @@ class SentinelMachineDataTests(TestCase):
 	def test_the_address_and_query_string_of_those_routes_are_still_checked(self):
 		response = Client().post(f'/api/v1/sentinel/tasks/{self.task.pk}/result?x=$(id);cat%20/etc/passwd', json.dumps({'outcome': 'error', 'error': 'x'}),
 								 content_type='application/json', HTTP_AUTHORIZATION=f'Bearer {self.token}', REMOTE_ADDR='8.8.4.4')
-		self.assertEqual(response.status_code, 403)
+		# this is a live Sentinel's own address: struck and alerted, never banned silently (cvengine.guard_sources); a stranger's would be banned
+		self.assertEqual(response.status_code, 400)
 		self.assertTrue(AbuseStrike.objects.exists())
+		self.assertFalse(AbuseBan.objects.filter(ip='8.8.4.4').exists())
+		self.assertTrue(AuditLog.objects.filter(action='abuse.ban_withheld', target='8.8.4.4').exists())
 
 	def test_what_a_person_types_on_every_other_sentinel_route_is_still_inspected(self):
 		response = Client().put('/api/v1/sentinel', json.dumps({'name': 'x; cat /etc/passwd', 'scope': {'projects': ['s-g-p']}}), content_type='application/json',
 								HTTP_AUTHORIZATION=f'Bearer {self.token}', REMOTE_ADDR='8.8.4.4')
-		self.assertEqual(response.status_code, 403)
+		self.assertEqual(response.status_code, 400)  # a live Sentinel's own address: struck and alerted, not banned
 		self.assertTrue(AbuseStrike.objects.filter(category='command_injection').exists())
+		self.assertFalse(AbuseBan.objects.filter(ip='8.8.4.4').exists())
 
 	def test_the_same_text_anywhere_else_is_still_an_attack(self):
 		_, tok = create_token(self.user, 'other')

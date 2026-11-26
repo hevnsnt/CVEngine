@@ -49,6 +49,8 @@ ENTRIES = {
     'ip_allowlist': ('settings', 'ip_allowlist', 'The allowed source addresses for the whole web interface and whether the allowlist is enforced.', None),
     'ip_allowlist_entry_add': ('settings', 'ip_allowlist/entries', 'Add an address or range to the allowlist. Action.', None),
     'ip_allowlist_entry': ('settings', 'ip_allowlist/entries/(?P<entry_id>\\d+)', 'One allowlist entry. The id is the entry id.', 'entry_id'),
+    'ip_bans': ('settings', 'ip_bans', 'The address bans the input guard has in force (address, reason, until when).', None),
+    'ip_ban_lift': ('settings', 'ip_bans/(?P<ban_id>\\d{1,12})/lift', 'Lift one address ban. The id is the ban id. Action.', 'ban_id'),
     'tailscale': ('settings', 'tailscale', 'Tailscale sync per project: which are connected (never the key).', None),
     'tailscale_project': ('settings', 'tailscale/(?P<project_id>\\d+)', 'Tailscale sync for one project. The id is the project id.', 'project_id'),
     'tailscale_test': ('settings', 'tailscale/(?P<project_id>\\d+)/test', 'Test the Tailscale connection of one project. Action.', 'project_id'),
@@ -94,6 +96,8 @@ READ_ONLY_FOR_AGENTS = {
     'ip_allowlist': 'the allowed addresses are the perimeter of the instance; an agent can read the list, a person changes it in the web interface.',
     'ip_allowlist_entry_add': 'the allowed addresses are the perimeter of the instance; a person changes them in the web interface.',
     'ip_allowlist_entry': 'the allowed addresses are the perimeter of the instance; a person changes them in the web interface.',
+    'ip_bans': 'the bans are the perimeter of the instance; an agent can read them, a person lifts one in the web interface.',
+    'ip_ban_lift': 'lifting a ban lets an address that sent attack input back in; a person decides that, in the web interface.',
     'updates_approve': 'approving an update restarts the whole instance; an agent may check for one and read its state, a person presses the button.',
     'setup_questions': 'an answer can switch on a feature the AI provider or the host bills for, or change what is scanned; only a person decides that, in the web interface. An agent can read the questions.',
     'config_maxxing_reset': 'it puts auto-tuning back on Auto with the AI advisor on, puts every spend cap back to its default (raising any a person lowered) and removes every pin; an agent lowers one number at a time with change_setting, a person resets in the web interface.',
@@ -524,7 +528,7 @@ def _who(ctx):
     return info.get('agent_name') or info.get('name') or 'an agent'
 
 
-_READABLE = ('ip_allowlist', 'ip_allowlist_entry_add', 'ip_allowlist_entry')
+_READABLE = ('ip_allowlist', 'ip_allowlist_entry_add', 'ip_allowlist_entry', 'ip_bans')
 
 
 def list_settings(ctx):

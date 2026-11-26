@@ -932,6 +932,33 @@ def ip_allowlist_entry_delete(request, entry_id):
     return {'deleted': True}
 
 
+# --- address bans (the input guard's AbuseBan) ------------------------------------------
+
+def ip_bans_get(request):
+    """The address bans in force now (not lifted, not expired), newest first, with the address the caller is using."""
+    from django.db.models import Q
+    from django.utils import timezone
+    from dashboard.models import AbuseBan
+    rows = (AbuseBan.objects.filter(lifted=False).exclude(ip='').filter(Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now()))
+            .order_by('-created_at', '-id')[:200])
+    return {'your_ip': _client_ip(request),
+            'bans': [{'id': b.id, 'ip': b.ip, 'reason': b.reason, 'username': b.username, 'created_at': b.created_at, 'expires_at': b.expires_at} for b in rows]}
+
+
+def ip_ban_lift(request, ban_id):
+    """Lift one ban at once (the address is let in again within seconds: the ban cache is reset). Audit logged."""
+    from dashboard.models import AbuseBan, AuditLog
+    from cvengine import input_guard
+    ban = AbuseBan.objects.filter(id=ban_id, lifted=False).first()
+    if ban is None:
+        raise SettingsError(404, 'no ban in force with that id')
+    AbuseBan.objects.filter(ip=ban.ip, lifted=False).update(lifted=True)  # every open ban of the address: lifting one must let it in
+    input_guard.invalidate_cache()
+    AuditLog.objects.create(actor=request.user if request.user.is_authenticated else None, actor_name=getattr(request.user, 'username', '') or '',
+                            action='abuse.ban_lifted', target=ban.ip[:300], detail={'ban_id': ban.id, 'reason': ban.reason[:300]})
+    return {'lifted': True, 'ip': ban.ip}
+
+
 # --- resources -----------------------------------------------------------------------
 
 def resources_get(request):
@@ -1427,6 +1454,8 @@ ROUTES = [
     ('GET', r'ip_allowlist', lambda r, **k: ip_allowlist_get(r)), ('PUT', r'ip_allowlist', lambda r, **k: ip_allowlist_put(r)),
     ('POST', r'ip_allowlist/entries', lambda r, **k: ip_allowlist_entry_create(r)),
     ('DELETE', r'ip_allowlist/entries/(?P<entry_id>\d+)', lambda r, entry_id, **k: ip_allowlist_entry_delete(r, int(entry_id))),
+    ('GET', r'ip_bans', lambda r, **k: ip_bans_get(r)),
+    ('POST', r'ip_bans/(?P<ban_id>\d{1,12})/lift', lambda r, ban_id, **k: ip_ban_lift(r, int(ban_id))),
 ]
 COMPILED = [(m, re.compile(f'^{p}/?$'), fn) for m, p, fn in ROUTES]
 
