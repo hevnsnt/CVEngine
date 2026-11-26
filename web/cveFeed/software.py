@@ -31,7 +31,7 @@ def tool(key, name, url, group, version, license, purpose, where='sentinel', opt
 # The Sentinel commit the Sentinel versions below were read from (its Dockerfile and requirements.txt). tests/test_about_page.py holds it equal to
 # the floor commit of scanner.lock.json and to the sha web/requirements.txt pins: raising the floor means reading the Sentinel's pins again, then changing this line.
 # (The built-in scanner image follows the newest published build; the page says what it was read at, not that it runs exactly this.)
-SENTINEL_PINS_COMMIT = '227795e414284ccd78c723191b09f0acca80bcb0'
+SENTINEL_PINS_COMMIT = '59fab01459be14fb17010c64a2a9bd70db61bd48'
 
 GH = 'https://github.com/'
 # NPSL section 6: a system that runs Nmap for its users says so, with a link to nmap.org (the About page, the How it works page, THIRD-PARTY.md, README.md)
