@@ -253,7 +253,6 @@ DATA_SOURCES = [
     source('runZero Export API', 'https://www.runzero.com', 'Asset inventory (OS, hardware, tags, CVE reports); no runZero code is bundled', 'your own Export API token', used_by='cveFeed/runzero.py'),
     source('Tailscale API', 'https://tailscale.com/api', 'Read-only access to your own tailnet, and the fixed versions from Tailscale\'s security bulletins', 'the Tailscale add-on and your own credentials', used_by='cveFeed/tailscale_api.py'),
     source('Slack, Discord, Telegram and Lark', 'https://slack.com', 'Notifications, to the webhook or bot you configure', 'a webhook you configure', used_by='cvengine/common_func.py'),
-    source('Google Fonts', 'https://fonts.google.com', 'Inter, loaded by the HTML report only when you open one (the app itself serves its own fonts)', used_by='templates/report/'),
 ]
 
 AI_PROVIDERS = [
