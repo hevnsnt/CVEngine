@@ -668,7 +668,9 @@ class StatusSignalsTests(TestCase):
             ms.collect(depths, client, NOW)
         # cold: database (size and longest query, one transaction), the three oldest-queued reads, the AI counters (about ten counts, and about eight for
         # the reviewer, host review, guidance, planning and per-project triage caps), the triage backlog (one aggregate), the claim names none
-        self.assertLessEqual(len([q for q in cold.captured_queries if 'SAVEPOINT' not in q['sql'] and not q['sql'].startswith(('SET', 'RELEASE'))]), 30)
+        # the time limit of each bounded block is set (and the caller's put back) with SET or set_config: neither is a read
+        self.assertLessEqual(len([q for q in cold.captured_queries if 'SAVEPOINT' not in q['sql'] and not q['sql'].startswith(('SET', 'RELEASE'))
+                                  and 'set_config(' not in q['sql']]), 30)
         self.assertEqual(len([q for q in warm.captured_queries if 'SAVEPOINT' not in q['sql']]), 0)  # everything database-backed is reused for a minute
         cache.clear()
         with CaptureQueriesContext(connection) as whole:

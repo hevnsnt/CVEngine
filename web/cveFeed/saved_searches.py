@@ -21,7 +21,7 @@ import logging
 import time
 from datetime import timedelta
 
-from django.db import DatabaseError, connection, transaction
+from django.db import DatabaseError
 from django.utils import timezone
 
 from agentapi.services import ApiError, check_search, search_host_rows
@@ -52,9 +52,8 @@ def current_matches(project, terms):
     """``({digest: host name} highest score first, too_broad)`` for the hosts that match now: one row per host, found with the
     interactive search's own query. Reads at most MAX_MATCHES + 1 rows; the extra one is how "too broad" is known."""
     limit = SavedSearch.MAX_MATCHES + 1
-    with transaction.atomic():
-        with connection.cursor() as cursor:
-            cursor.execute('SET LOCAL statement_timeout = %s', [STATEMENT_TIMEOUT_MS])
+    from agentapi import db_timeout
+    with db_timeout.bounded(STATEMENT_TIMEOUT_MS):  # the caller's own limit is back when the block ends
         rows = list(with_host_key(search_host_rows(project, terms)).order_by('-score', 'name').values_list('host_key', 'name')[:limit])
     found = {host_digest(key): name for key, name in rows[:SavedSearch.MAX_MATCHES]}
     return found, len(rows) > SavedSearch.MAX_MATCHES
