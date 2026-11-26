@@ -75,7 +75,8 @@ class StatusAndTileTests(Base):
         self.assertGreaterEqual(digest['headline']['new_worth_a_look'], 1)
         _, text, html = report_digest.render(digest, None, 'a@example.org', 'https://x/u/')
         for body in (text, html):
-            self.assertIn('Externally facing hosts', body)
+            self.assertIn('Hosts with open findings', body)
+            self.assertNotIn('Externally facing', body)
             self.assertNotIn('Exposed hosts', body)
         self.assertIn('1 Fire (needs action now). No Smoke. No Ice', text)
 
@@ -83,11 +84,11 @@ class StatusAndTileTests(Base):
         digest = self.digest()
         digest['headline'].update({'exposed_hosts': 24, 'exposed_hosts_prev': 16, 'needs': 3, 'needs_prev': 1})
         tiles = {t['label']: t for t in report_digest._tiles(digest)}
-        self.assertEqual((tiles['Externally facing hosts']['delta'], tiles['Externally facing hosts']['tone']), ('▲ 8 since last week', 'neutral'))
+        self.assertEqual((tiles['Hosts with open findings']['delta'], tiles['Hosts with open findings']['tone']), ('▲ 8 since last week', 'neutral'))
         self.assertEqual(tiles['Needs attention']['tone'], 'bad')
         digest['headline'].update({'exposed_hosts': 8, 'needs_prev': 5})
         tiles = {t['label']: t for t in report_digest._tiles(digest)}
-        self.assertEqual((tiles['Externally facing hosts']['tone'], tiles['Needs attention']['tone']), ('neutral', 'good'))
+        self.assertEqual((tiles['Hosts with open findings']['tone'], tiles['Needs attention']['tone']), ('neutral', 'good'))
         _, _, html = report_digest.render(digest, None, 'a@example.org', 'https://x/u/')
         cell = re.search(r'<div class="(\w+)"[^>]*>(▼ 8 since last week)</div>', html)
         self.assertEqual(cell.group(1), 'soft')  # grey, not the red or green class

@@ -206,7 +206,7 @@ def _revise_generated(request, ctx, generated_id):
 
 ROUTES = [
     ('GET', r'me', 'Who am I: user, projects and roles, token info', lambda r, c, **k: svc.me(c)),
-    ('GET', r'system/status', 'Instance status: overall health with problems and notes, scanning pause, update phase, inventory counts per project (targets, hosts, exposed hosts, scans running/queued, open findings), and for an App Admin the database and broker, queue depths, workers, schedules, memory, disk, CVE feed, AI budget and auto-tuning (mode, last run, last decisions, why each setting was not raised)',
+    ('GET', r'system/status', 'Instance status: overall health with problems and notes, scanning pause, update phase, inventory counts per project (targets, hosts, hosts with open findings, scans running/queued, open findings), and for an App Admin the database and broker, queue depths, workers, schedules, memory, disk, CVE feed, AI budget and auto-tuning (mode, last run, last decisions, why each setting was not raised)',
      lambda r, c, **k: system_status.system_status(c)),
     ('GET', r'projects', 'Projects visible to the caller', lambda r, c, **k: svc.list_projects(c)),
     ('GET', r'engines', 'Scan engines (legacy labels: every scan runs the same fixed pipeline)', lambda r, c, **k: svc.list_engines(c)),
@@ -384,7 +384,7 @@ ROUTES = [
      lambda r, c, slug, **k: svc.list_changes(c, slug, r.GET)),
     ('GET', r'projects/(?P<slug>[-\w]+)/activity-days', 'Exact per-day counts for the dashboard Activity card: new findings (status=all rules of the findings list) by heat tier and type, and inventory changes, for the last days (default 90, at most 366) in tz (IANA name, default UTC); series=findings,changes,scans picks which (scans: started per day, for the Scans page); totals are the sum of the days shown',
      lambda r, c, slug, **k: svc.activity_days(c, slug, r.GET)),
-    ('GET', r'projects/(?P<slug>[-\w]+)/stats/history', 'Daily snapshots of hosts, exposed hosts, open findings by severity, CVE matches by heat, fixed count and mean days to fix, oldest first (?days=90, capped at 365)',
+    ('GET', r'projects/(?P<slug>[-\w]+)/stats/history', 'Daily snapshots of hosts, hosts with open findings, open findings by severity, CVE matches by heat, fixed count and mean days to fix, oldest first (?days=90, capped at 365)',
      lambda r, c, slug, **k: svc.stats_history(c, slug, r.GET)),
     ('GET', r'projects/(?P<slug>[-\w]+)/activity', 'What the AI engine did, newest first: this project, plus the system-wide entries (no project) for an App Admin only (?kind=). Each entry has a status: running, done, failed, waiting (back-pressure), notice (said once, nothing wrong), skipped (refused on purpose) or deferred (put off and retried); only failed is a failure',
      lambda r, c, slug, **k: svc.list_activity(c, slug, r.GET)),
