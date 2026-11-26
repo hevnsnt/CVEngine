@@ -1,51 +1,45 @@
+"""Root URL configuration for the project."""
+
 from django.conf import settings
 from django.conf.urls.static import static
 from django.contrib import admin
-from cveFeed import report_digest_views
-from tenancy.views import MFALoginView, SignOutView, admin_login_redirect, invite_view
-from cvengine.admin_masking import mask_secret_fields
 from django.urls import include, path
 
-from cvengine.client_probe import probe as client_address_probe
-from cvengine.views import serve_protected_media
+from cvengine import views as cvengine_views
+from cvengine.admin_masking import mask_secret_fields
+from cvengine.client_probe import probe
+from cveFeed.report_digest_views import unsubscribe
+from tenancy import views as tenancy_views
 
-mask_secret_fields()  # the admin never shows a stored secret
+# Hide stored secrets in the admin before the routes are built.
+mask_secret_fields()
 
 urlpatterns = [
     path('', include('agentapi.urls')),
-    # before admin/: the stock admin login would sign a staff user in with the password alone and skip the second step
-    path('admin/login/', admin_login_redirect, name='admin_login_redirect'),
-    path(
-        'admin/',
-        admin.site.urls),
-    path(
-        '',
-        include('dashboard.urls')),
-    path(
-        'mfa/',
-        include('tenancy.urls')),
-    path(
-        'cve/',
-        include('cveFeed.urls')),
-    path(
-        'scan/',
-        include('startScan.urls')),
-    path('invite/<str:token>/', invite_view, name='invite'),
-    path('unsubscribe/<str:token>/', report_digest_views.unsubscribe, name='report_unsubscribe'),
-    path('client-address-probe/<str:token>/', client_address_probe, name='client_address_probe'),  # open; scripts/client-address-check.sh
+    # Must come before the stock admin: its login page would sign a staff
+    # user in with the password alone and skip the second sign-in step.
+    path('admin/login/', tenancy_views.admin_login_redirect, name='admin_login_redirect'),
+    path('admin/', admin.site.urls),
+    path('', include('dashboard.urls')),
+    path('mfa/', include('tenancy.urls')),
+    path('cve/', include('cveFeed.urls')),
+    path('scan/', include('startScan.urls')),
+    path('invite/<str:token>/', tenancy_views.invite_view, name='invite'),
+    path('unsubscribe/<str:token>/', unsubscribe, name='report_unsubscribe'),
+    # Deliberately open: used by scripts/client-address-check.sh.
+    path('client-address-probe/<str:token>/', probe, name='client_address_probe'),
     path(
         'login/',
-        MFALoginView.as_view(template_name='tenancy/login.html'),
-        name='login'),
+        tenancy_views.MFALoginView.as_view(template_name='tenancy/login.html'),
+        name='login',
+    ),
     path(
         'logout/',
-        SignOutView.as_view(template_name='base/logout.html'),
-        name='logout'),
-    path(
-        'media/<path:path>', 
-        serve_protected_media, 
-        name='serve_protected_media'
+        tenancy_views.SignOutView.as_view(template_name='base/logout.html'),
+        name='logout',
     ),
-] + static(settings.STATIC_URL, document_root=settings.STATIC_ROOT)
-# ] + static(settings.MEDIA_URL, document_root=settings.CVENGINE_RESULTS) + \
-    
+    path('media/<path:path>', cvengine_views.serve_protected_media, name='serve_protected_media'),
+]
+
+# Adds a static files route only in debug mode.
+urlpatterns += static(settings.STATIC_URL, document_root=settings.STATIC_ROOT)

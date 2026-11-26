@@ -63,8 +63,10 @@ ct_health.install()
 
 
 @setup_logging.connect()
-def config_loggers(*args, **kwargs):
+def use_django_logging(*args, **kwargs):
+    """Use the Django logging configuration instead of Celery's own."""
     from logging.config import dictConfig
+
     dictConfig(app.conf['LOGGING'])
 
 

@@ -50,7 +50,7 @@ def _num(value):
 
 
 def span(seconds):
-    """``seconds`` as a plain span (no clock time: the server does not know the reader's time zone)."""
+    """Return a short English phrase for a number of seconds."""
     seconds = int(seconds or 0)
     if seconds < 90:
         return f'{seconds} seconds'
@@ -58,7 +58,10 @@ def span(seconds):
     if minutes < 120:
         return f'{minutes} minutes'
     hours, rest = divmod(minutes, 60)
-    return f'{hours} hours' + (f' {rest} minutes' if rest and hours < 10 else '')
+    phrase = f'{hours} hours'
+    if rest and hours < 10:
+        phrase += f' {rest} minutes'
+    return phrase
 
 
 def _utc(epoch):
