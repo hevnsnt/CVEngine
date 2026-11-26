@@ -76,7 +76,7 @@ function findingBlocks(f) {
       },
     },
     { label: "Type", render: (r) => r.kind },
-    { label: "Host", cls: "mono", render: (r) => r.host || "" },
+    { label: "Host", cls: "mono", render: (r) => r.host_label || r.host || "" },
     { label: "Heat", render: (r) => r.heat || "" },
     ...(slug === "_all" ? [{ label: "Project", render: (r) => r.project_name || r.project || "" }] : []),
   ];
@@ -89,7 +89,7 @@ function activityBlocks(a, now) {
   document.getElementById("in-scans").textContent = `${scans.running} internal scan${scans.running === 1 ? "" : "s"} running, ${scans.queued} queued`;
   const cols = [
     { label: "Task", render: (r) => L.taskName(r.kind) },
-    { label: "Host or range", cls: "mono", render: (r) => r.host },
+    { label: "Host or range", cls: "mono", render: (r) => r.host_label || r.host },
     { label: "Status", render: (r) => badge(r.status, L.STATUS_BADGE[r.status] || "") },
     { label: "Sentinel", render: (r) => r.sentinel || "Not claimed yet" },
     { label: "When", render: (r) => (r.finished_at ? `finished ${L.ago(r.finished_at, now)}` : r.claimed_at ? `started ${L.ago(r.claimed_at, now)}` : `queued ${L.ago(r.created_at, now)}`) },

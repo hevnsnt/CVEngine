@@ -107,7 +107,7 @@ def _findings(ctx, slug):
     """The hottest open findings on internal hosts: the Findings list's own answer (``list_findings`` with ``internal=1``), first rows only."""
     from agentapi.services import list_findings
     out = list_findings(ctx, slug, {'internal': '1', 'page_size': str(FINDING_ROWS)})
-    keep = ('type', 'kind', 'id', 'title', 'host', 'heat', 'severity', 'status', 'project', 'project_name')
+    keep = ('type', 'kind', 'id', 'title', 'host', 'host_label', 'heat', 'severity', 'status', 'project', 'project_name')
     return {'total': out['total'], 'counts': out['counts'], 'results': [{k: r.get(k) for k in keep if k in r} for r in out['results']]}
 
 
@@ -127,10 +127,11 @@ def _activity(ids, now):
     ranges = Q(project_id__in=[pid for pid in ids if pid in tbl])
     internal = Q(scan__tasks__contains=[internal_scan.TASK_TAG]) | (ranges & Q(kind='discover')) | hosts
     base = SentinelTask.objects.filter(project_id__in=list(ids)).filter(internal)
-    fields = ('id', 'kind', 'host', 'status', 'agent__name', 'created_at', 'claimed_at', 'finished_at', 'error', 'project__slug')
+    fields = ('id', 'kind', 'host', 'status', 'agent__name', 'created_at', 'claimed_at', 'finished_at', 'error', 'project__slug', 'project_id')
 
     def rows(qs):
-        return [{'id': r['id'], 'kind': r['kind'], 'host': r['host'], 'status': r['status'], 'sentinel': r['agent__name'] or '',
+        return [{'id': r['id'], 'kind': r['kind'], 'host': r['host'], 'host_label': internal_view.host_label(r['project_id'], r['host']),
+                 'status': r['status'], 'sentinel': r['agent__name'] or '',
                  'created_at': r['created_at'].isoformat() if r['created_at'] else None,
                  'claimed_at': r['claimed_at'].isoformat() if r['claimed_at'] else None,
                  'finished_at': r['finished_at'].isoformat() if r['finished_at'] else None,

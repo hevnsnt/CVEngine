@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import tempfile
+from urllib.parse import urlparse
 
 from cvengine_scanner.flags import NUCLEI_DEFAULT_PORTS, host_of
 
@@ -592,17 +593,43 @@ def reuse_technologies(scan, project, hosts):
     return len(tech_carry.carry(scan, project, assets, LIGHT_SERVICE))
 
 
-def run_light_nuclei(scan_id, stream, force=False):
+def printer_targets(targets, ports):
+    """The targets of a printer's gentle pass (``cveFeed.internal_scan``): the bare host (nuclei's web templates on 80 and 443) and an http(s) URL
+    for each of ``ports`` the scan found, never a ``host:port`` of another port, so no target is ever a raw tcp one."""
+    from cvengine_scanner import printers
+    out = []
+    for target in targets:
+        if '://' in target:
+            port = urlparse(target).port
+            if port is None or (port in ports and not printers.is_print_port(port)):
+                out.append(target)
+        elif target.count(':') == 1:
+            host, _, port = target.partition(':')
+            if port.isdigit() and int(port) in ports and int(port) not in (80, 443) and not printers.is_print_port(port):
+                out.append(f'http://{host}:{port}')
+        else:
+            out.append(target)
+    return list(dict.fromkeys(out))
+
+
+def run_light_nuclei(scan_id, stream, force=False, printer_ports=None):
     """The light pass: the HTTP and technology templates over every discovered host, quick and low on memory. Each
     technology it detects is stored on the host, with the same Technology rows discovery fills, so search, the CVE correlation
     and the AI see them. Hosts this project's light pass covered inside the TTL are not scanned again: they take the
-    technologies recorded then. Returns ``{'targets', 'technologies', 'hosts', 'techs': {host: [names]}}``."""
+    technologies recorded then. Returns ``{'targets', 'technologies', 'hosts', 'techs': {host: [names]}}``.
+
+    ``printer_ports`` (a printer's gentle profile) keeps only web targets on those ports (``printer_targets``) and asks the Sentinel for the
+    read-only template set with no service label (``printer=True`` on the stream)."""
     from cveFeed import activity, ledger
     from cvengine.resources import ScannerUnavailable
     from startScan.models import ScanHistory, Subdomain
     scan = ScanHistory.objects.select_related('domain').get(pk=scan_id)
     domain, project = scan.domain, scan.domain.project_id
     targets = build_targets(*scan_targets(scan))
+    stream_kwargs = {}
+    if printer_ports is not None:
+        targets = printer_targets(targets, tuple(printer_ports))
+        stream_kwargs['printer'] = True
     if not targets:
         activity.log('run_check', f'Nuclei technology pass skipped for {domain.name}: discovery found nothing to scan',
                      project=project, scan_id=scan.id)
@@ -640,7 +667,7 @@ def run_light_nuclei(scan_id, stream, force=False):
                     f.write('\n'.join(chunk) + '\n')
                     path = f.name
                 try:
-                    for line in stream(path):
+                    for line in stream(path, **stream_kwargs):
                         links.offer(line, by_name.get(host_of(line)) or by_ip.get(host_of(line)))
                 finally:
                     os.unlink(path)

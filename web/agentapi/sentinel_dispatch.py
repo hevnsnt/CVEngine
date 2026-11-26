@@ -1182,9 +1182,13 @@ def _nuclei_target(kind, targets, kwargs, scan=None, labels=None, internal=False
     if kind == 'nuclei_light':
         tags, severities = ([] if detection else ['tech']), ['info']
     etags = list(scan_flags.NUCLEI_EXCLUDED_TAGS)
-    if not validation.credential_checks_allowed():  # the Sentinel leaves these out of its own runs too (``flags.NUCLEI_CREDENTIAL_TAGS``): the task says so
+    # a printer (``printer=True``, cveFeed.internal_scan's gentle profile) gets the read-only template set and no credential check, whatever the
+    # administrator allowed elsewhere, and its targets carry no service label, so every one is a web target (no raw tcp template)
+    printer = kwargs.get('printer') is True
+    credentials = validation.credential_checks_allowed() and not printer
+    if not credentials:  # the Sentinel leaves these out of its own runs too (``flags.NUCLEI_CREDENTIAL_TAGS``): the task says so
         etags += list(scan_flags.NUCLEI_CREDENTIAL_TAGS)
-    rev = nuclei_scan.policy_rev()
+    rev = nuclei_scan.TEMPLATE_POLICY_REV if printer else nuclei_scan.policy_rev()
     target = {'targets': targets, 'tags': tags, 'severities': severities, 'etags': etags,
               'template_policy': {'rev': rev, 'read_only': rev == nuclei_scan.TEMPLATE_POLICY_REV, 'source': scan_flags.TEMPLATE_INDEX_SOURCE},
               'budget': dict(scan_flags.NUCLEI_DETECTION_BUDGET if detection else scan_flags.NUCLEI_SERVICE_BUDGET)}
@@ -1192,8 +1196,10 @@ def _nuclei_target(kind, targets, kwargs, scan=None, labels=None, internal=False
         target['network_detection'] = True
     if not internal:  # contract 11: outside work is judged as on a Sentinel that is not internal, so a name that now points inside is refused there (this server looks none up)
         target['external'] = True
-    if validation.credential_checks_allowed():  # only when an App Admin turned it on: absent means off, and a Sentinel that does not know the field never runs them
+    if credentials:  # only when an App Admin turned it on: absent means off, and a Sentinel that does not know the field never runs them
         target['allow_credential_checks'] = True
+    if printer:
+        return target
     if labels is None:
         labels = nuclei_services.labels_for(scan, targets) if scan is not None else {}
     services = {t: labels[t] for t in targets if t in labels}

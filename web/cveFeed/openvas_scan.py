@@ -318,7 +318,7 @@ def assess(project_id, candidates, forced=(), gate=True, resolve=None, blocked=N
     reasons, then the longest-waiting; a forced host with no heat comes last. ``resolve=None`` reads the stored address: the explanation
     shown to people. The real selection passes ``_address`` (the stored address a scanner may touch; no name is looked up). ``internal`` selects the project's declared internal networks, whose names are their
     own address and which only a Sentinel inside can reach."""
-    from cveFeed import exclusions, ledger
+    from cveFeed import exclusions, internal_view, ledger
     from targetApp.target_types import internal_networks, scannable_hosts, sentinel_only_target
     names = sorted(_names(candidates))
     forced = _names(forced)
@@ -351,6 +351,8 @@ def assess(project_id, candidates, forced=(), gate=True, resolve=None, blocked=N
         sub = latest.get(host) if host in heats else None
         if host in narrowed:
             refuse(host, heat, 'its target is set to this host only: a name under it is not scanned')
+        elif internal and (printed := internal_view.printer_of(project_id, host)):  # forced or not: OpenVAS's service detection writes to every port
+            refuse(host, heat, f'a printer ({printed}): OpenVAS is not run on printers, which print what reaches their print ports')
         elif sub is None:
             refuse(host, heat, 'not a host of this project')
         elif host not in kept:
