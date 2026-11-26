@@ -319,6 +319,17 @@ The AI reviewer is its own container, the `reviewer` compose service, which revi
 | `CVENGINE_REVIEWER_UID` | `10002` | The user the token file is handed to: the user the reviewer image runs as. Read by the server containers. |
 | `REVIEWER_MEM_LIMIT` | `256m` | Memory limit of the `reviewer` container, read by compose. |
 
+## AI budget
+
+A money limit on AI calls. When it is spent, the AI job queue hands out nothing and the finding reviewer and the operations check stop, until the next UTC day (daily budget) or the first of the next UTC month (monthly budget); the queued work waits and is not lost. An App Admin sets both on **Settings, AI model**, under **Confirmation and limits** (`monthly_budget_usd` and `daily_budget_usd` in `GET`/`PUT /cve/api/settings/ai`). **The setting wins over the variable**: an empty box follows the variable, and with neither there is no limit.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `CVENGINE_AI_MONTHLY_BUDGET_USD` | unset (no limit) | US dollars of AI calls in a UTC calendar month, 0 to 1000000. |
+| `CVENGINE_AI_DAILY_BUDGET_USD` | unset (no limit) | US dollars of AI calls in a UTC day, 0 to 1000000. |
+
+Spend is the AI usage ledger priced at the rates entered on the AI usage page, cache reads and cache writes included, failed calls that used tokens included. A model with no rate counts at the highest rate entered for any model; with no rate entered at all every call counts at a top-tier list price (15 USD per million input tokens, 75 per million output tokens), so enter your provider's rates to see the real figure. Self-hosted servers (Ollama, vLLM, LM Studio) cost nothing here. At 80 percent of a budget, and when it is reached, an App Admin sees a line in the status strip ("AI budget reached: $X of $Y this month, resumes 2026-12-01 (UTC).") and the same on the Settings page.
+
 ## AI limits
 
 | Variable | Default | Purpose |

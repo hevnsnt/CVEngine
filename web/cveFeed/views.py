@@ -1083,13 +1083,29 @@ def api_alive(request):
     return response
 
 
+def ai_budget_notice():
+    """The AI money budget's line for the page's strip (an App Admin's only: it names amounts): ``ai_budget_message`` and ``ai_budget_level``
+    ('reached' or 'warn'), or nothing when no budget is set or less than 80 percent of it is spent (``cveFeed.ai_budget.state``)."""
+    from cveFeed import ai_budget
+    try:
+        current = ai_budget.state()
+    except Exception:  # noqa: BLE001 - the strip never breaks a page; the queue holds the work when the ledger cannot be read
+        return {}
+    if not current['message']:
+        return {}
+    return {'ai_budget_message': current['message'], 'ai_budget_level': 'reached' if current['reached'] else 'warn'}
+
+
 @require_GET
 def api_scanner(request):
     """The derived "scanner offline" state for the page's strip (static/cve/scannerbar.js): which kinds are waiting for a scanner and the sentence to
     show, from ``agentapi.scanner_state`` (cached for 15 seconds, no query at all until the built-in scanner has enrolled). Read only. The sentence
     about a scanner that never registered names a server setting, so only an App Admin gets it."""
     from agentapi import scanner_state
-    response = JsonResponse(scanner_state.status(admin=request.user.is_superuser))
+    body = scanner_state.status(admin=request.user.is_superuser)
+    if request.user.is_superuser:
+        body = {**body, **ai_budget_notice()}
+    response = JsonResponse(body)
     response['Cache-Control'] = 'no-store'
     return response
 

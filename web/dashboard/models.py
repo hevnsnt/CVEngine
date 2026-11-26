@@ -78,6 +78,12 @@ class AIProviderSettings(models.Model):
 	# The model for the nuclei tag choice (stages nuclei_tag_selection and nuclei_targeting). '' = the default, resolved when it is read: the
 	# cheapest haiku the provider lists as available, else the model above (cvengine/ai_nuclei_model.py). Never written by a migration.
 	nuclei_model = models.CharField(max_length=200, blank=True, default='', db_default='')
+	# The bulk model of the high-volume stages (cvengine/ai_routing.py STAGE_MODEL). '' = the provider's cheapest current model.
+	bulk_model = models.CharField(max_length=200, blank=True, default='', db_default='')
+	use_bulk_model = models.BooleanField(default=True, db_default=True)  # off: every stage uses the model above, as before
+	# The AI money budget in USD (cveFeed/ai_budget.py). NULL = not set here: CVENGINE_AI_MONTHLY_BUDGET_USD / _DAILY_ then apply, else no limit.
+	monthly_budget_usd = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+	daily_budget_usd = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
 	verified_at = models.DateTimeField(null=True, blank=True)
 	verified_provider = models.CharField(max_length=32, blank=True, default='')
 	verified_model = models.CharField(max_length=200, blank=True, default='')
