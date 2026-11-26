@@ -1,5 +1,5 @@
 """Freezes the behaviour of the URL configuration, the protected media view and the small app glue rewritten from a specification
-(reNgine removal, helpers part 2): route order, paths and names, the media access rules and headers, the WSGI entry point, the template
+(upstream code removal, helpers part 2): route order, paths and names, the media access rules and headers, the WSGI entry point, the template
 context, Celery's logging hook, the duration phrase and the ChaosAPIKey admin. Every assertion here also held before the rewrite."""
 import importlib
 import os
