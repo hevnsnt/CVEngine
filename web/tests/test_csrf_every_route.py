@@ -39,7 +39,7 @@ VIEWS = {
 	'cveFeed.views.sentinels_page': 'get', 'cveFeed.views.onboarding': 'get', 'cveFeed.views.cve_explorer_page': 'get', 'cveFeed.views.scan_page': 'get',
 	'cveFeed.views.host_screenshot': 'get', 'cveFeed.views.host_rdp_screenshot': 'get', 'cveFeed.views.project_page': 'get',
 	'cveFeed.views.api_feed': 'get', 'cveFeed.views.api_cves': 'get', 'cveFeed.views.api_cve_detail': 'get', 'cveFeed.views.api_alive': 'get',
-	'cveFeed.views.api_stats': 'get', 'cveFeed.views.api_overview': 'get', 'cveFeed.views.api_scanner': 'get', 'cveFeed.views.api_graph': 'get',
+	'cveFeed.views.api_stats': 'get', 'cveFeed.views.api_overview': 'get', 'cveFeed.views.api_internal': 'get', 'cveFeed.views.api_scanner': 'get', 'cveFeed.views.api_graph': 'get',
 	'cveFeed.views.api_graph_live': 'get', 'cveFeed.views.api_node': 'get', 'cveFeed.views.api_activity': 'get', 'cveFeed.views.api_discovery': 'get',
 	'cveFeed.views.api_detect': 'csrf', 'cveFeed.views.api_onboarding_save': 'csrf',
 	'startScan.views.create_report': 'get', 'startScan.views.export_subdomains': 'get', 'startScan.views.export_endpoints': 'get',

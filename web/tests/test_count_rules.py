@@ -7,6 +7,10 @@ open CVE matches and scanner findings (``counts.HEAT_KINDS``), the two kinds tha
 
 Before this, the email counted a scanner finding the triage dismissed (375 on the live install where the PDF said 370, the five dismissed
 ones), and its heat line counted CVE matches only while the PDF's counted CVE matches and scanner findings.
+
+The Internal network page (``cveFeed.internal_page``) counts the internal share with these same functions; its fixture needs hosts named by
+addresses inside a declared range, so its agreement with the Overview is tested in tests/test_internal_page.py
+(``test_internal_numbers_agree_with_the_overview_rules``).
 """
 from agentapi import host_export_one
 from agentapi.services import Ctx, list_findings, list_hosts

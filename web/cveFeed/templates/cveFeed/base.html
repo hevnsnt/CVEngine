@@ -40,6 +40,7 @@
     <symbol id="i-logout" viewBox="0 0 24 24"><path d="M9 4H6a2 2 0 00-2 2v12a2 2 0 002 2h3M16 8l4 4-4 4M20 12H9"/></symbol>
     <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5h.01"/></symbol>
     <symbol id="i-plug" viewBox="0 0 24 24"><path d="M9 3v5M15 3v5M7 8h10v3a5 5 0 01-10 0V8zM12 16v5"/></symbol>
+    <symbol id="i-lan" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="5" rx="1"/><rect x="3" y="16" width="6" height="5" rx="1"/><rect x="15" y="16" width="6" height="5" rx="1"/><path d="M12 8v4M6 16v-4h12v4"/></symbol>
     <symbol id="i-building" viewBox="0 0 24 24"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 7h2M13 7h2M9 11h2M13 11h2M10 21v-4h4v4"/></symbol>
   </defs>
 </svg>
@@ -110,7 +111,7 @@
 <div class="sheet" id="sheet" role="dialog" aria-label="More" hidden>
   <div class="sheet-grip" aria-hidden="true"></div>
   <div class="sheet-grid">
-    {% for e in nav.rail %}{% if e.key == 'hygiene' or e.key == 'suppliers' or e.key == 'reporting' or e.key == 'scanners' or e.key == 'mcp' or e.key == 'bounty' %}<a href="{{ e.href }}" {% if e.current %}aria-current="page"{% endif %}><svg width="20" height="20" viewBox="0 0 24 24"><use href="#i-{{ e.icon }}"/></svg>{{ e.label }}</a>{% endif %}{% endfor %}
+    {% for e in nav.rail %}{% if e.key == 'hygiene' or e.key == 'internal' or e.key == 'suppliers' or e.key == 'reporting' or e.key == 'scanners' or e.key == 'mcp' or e.key == 'bounty' %}<a href="{{ e.href }}" {% if e.current %}aria-current="page"{% endif %}><svg width="20" height="20" viewBox="0 0 24 24"><use href="#i-{{ e.icon }}"/></svg>{{ e.label }}</a>{% endif %}{% endfor %}
     {% for e in nav.more %}<a href="{{ e.href }}"><svg width="20" height="20" viewBox="0 0 24 24"><use href="#i-chevron"/></svg>{{ e.label }}</a>{% endfor %}
   </div>
 </div>

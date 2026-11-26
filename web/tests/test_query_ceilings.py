@@ -50,6 +50,7 @@ PAGES = {
     '/cve/{slug}/activity/': (200, 13), '/cve/{slug}/vulns/': (200, 13), '/cve/{slug}/matches/': (200, 13),
     '/cve/{slug}/hygiene/': (200, 13), '/cve/{slug}/secrets/': (200, 13), '/cve/{slug}/suppliers/': (200, 13),
     '/cve/{slug}/situations/': (200, 13), '/cve/{slug}/keys/': (302, 9), '/cve/{slug}/sentinels/': (200, 13),
+    '/cve/{slug}/internal/': (200, 13),
 }
 
 # the plain /cve/api views (cveFeed.urls), as the dashboard asks them
@@ -60,6 +61,7 @@ CVE_API = {
     'graph?project={slug}': (200, 10), 'graph?project=_all': (200, 9), 'graph-live?project={slug}': (200, 10),
     'node?id=sub-{host_id}&project={slug}': (404, 9), 'activity?project={slug}': (200, 19), 'activity?project=_all': (200, 17),
     'discovery?project={slug}&after=0': (200, 15), 'discovery?project=_all&after=0': (200, 14),
+    'internal?project={slug}': (200, 31), 'internal?project=_all': (200, 31),
 }
 
 # GET routes of the dispatchers under /cve/api/<prefix>/, keyed by (prefix, route pattern)
