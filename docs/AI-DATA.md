@@ -50,7 +50,9 @@ Triage of CVE matches, validation plans, host reviews and finding reviews send `
 - up to 30 kept response headers (never cookies);
 - hosting, CDN or WAF provider, labels, OS guesses and runZero facts;
 - inventory OS, kernel and package count;
-- earlier check results, other CVE matches, WordPress plugins.
+- earlier check results (not in triage: see below), other CVE matches, WordPress plugins.
+
+Triage leaves the earlier check results out. They are the last steps of the host's most recently validated findings, so every validation of any finding on a host changed them, and with them the evidence signature of every other match on that host: each was asked again and validated again. The validation planner still reads them.
 
 The host's own name, domain and CNAME are replaced with `[host]`. Tailscale names, addresses and owners are left out. **Other names and IP addresses inside banners, headers, titles and certificates are not removed.**
 
