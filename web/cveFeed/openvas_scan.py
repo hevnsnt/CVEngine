@@ -165,6 +165,17 @@ def _compressed(address):
         return str(address).strip()
 
 
+def _excluded_reason(project_id, host):
+    """Why an excluded host is not scanned: "this cvENGINE server" when it is the server itself (its name, or an address it resolves to), else the
+    organization's exclusion."""
+    from cveFeed import exclusions
+    try:
+        refusal = exclusions.address_excluded(project_id, host)
+    except Exception:  # noqa: BLE001 - the host stays refused either way; only the wording is at stake
+        refusal = None
+    return 'this cvENGINE server, never scanned' if refusal and 'this cvENGINE server' in refusal else 'excluded from scanning'
+
+
 def refuse_reason(ip):
     """Why OpenVAS must not be given this address even though a scanner could reach it, or ``None``. The GVM stack has
     no tailscale interface, so a tailnet address would leave by the host's default route: never. A documentation range (RFC 5737,
@@ -339,7 +350,7 @@ def assess(project_id, candidates, forced=(), gate=True, resolve=None, blocked=N
         elif sub is None:
             refuse(host, heat, 'not a host of this project')
         elif host not in kept:
-            refuse(host, heat, 'excluded from scanning')
+            refuse(host, heat, _excluded_reason(project_id, host))
         elif (barred := bounty.refusal(project_id, host)):
             refuse(host, heat, 'bug bounty: ' + barred)
         elif sub.target_domain.discovery_mode == 'manual' and host not in forced:  # "just add them, do not scan yet": only a person who names the host reaches it
@@ -459,7 +470,7 @@ QUEUE_REASONS = (
     ('scanned_this_week', lambda r: r.startswith('scanned ') and 'due again after a week' in r, 'scanned this week'),
     ('shared_platform', lambda r: r.startswith(SHARED_MARKERS), 'on shared platforms'),
     ('failed_lately', lambda r: r.startswith((INCONCLUSIVE, 'could not be scanned', 'OpenVAS was interrupted')), 'failed or interrupted lately'),
-    ('excluded', lambda r: r == 'excluded from scanning', 'excluded from scanning'),
+    ('excluded', lambda r: r in ('excluded from scanning', 'this cvENGINE server, never scanned'), 'excluded from scanning'),
     ('bug_bounty', lambda r: r.startswith('bug bounty:'), 'held back by bug bounty scope'),
     ('manual_only', lambda r: r.startswith('the target is set to manual only'), 'on manual only targets'),
     ('single_host_target', lambda r: r.startswith('its target is set to this host only'), 'under a single host target'),

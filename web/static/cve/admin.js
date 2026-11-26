@@ -561,6 +561,13 @@ function openOrgExcludedAddresses(o) {
     async function draw() {
       list.textContent = "";
       const data = await api("GET", `${A}/orgs/${o.id}/excluded-addresses`);
+      const own = data.this_server;
+      if (own && (own.names.length || own.addresses.length)) {
+        // this cvENGINE server is never scanned, for every organization: shown here, never removable
+        const row = el("div", "access-row");
+        row.append(el("code", "", [...own.names, ...own.addresses].join(", ")), el("span", "note", own.label));
+        list.append(row);
+      }
       if (!data.results.length) list.append(el("p", "empty", "No addresses listed."));
       data.results.forEach((r) => {
         const row = el("div", "access-row");
