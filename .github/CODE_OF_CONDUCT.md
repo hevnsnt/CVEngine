@@ -32,7 +32,7 @@ This code applies to everyone who takes part in the project:
 
 ## How to report a problem
 
-Send an email to the maintainer at hevnsnt@gmail.com. Please include:
+Send an email to the maintainer at support@cvengine.live. Please include:
 
 - What happened, and where. Links to the issue, pull request or comment help a lot.
 - When it happened.
