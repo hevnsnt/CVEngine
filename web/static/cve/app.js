@@ -3196,9 +3196,9 @@ const pages = {
     // heat filter: the server narrows the whole inventory (?heat=), and its facet counts keep every chip's real total while one is selected
     const HEAT_CHIPS = [["all", "All"], ["fire", "Fire", "fire"], ["smoke", "Smoke", "smoke"], ["ice", "Ice", "ice"], ["clean", "Clean", "clean"], ["unscanned", "Not scanned"]];
     let heatFilter = readParam("heat", "all", HEAT_CHIPS.map((c) => c[0]));
-    // ?exposed=1: only the hosts the dashboard's Exposed hosts tile counts (an open CVE match the AI has not ruled out, or an open medium-or-worse finding)
+    // ?exposed=1: only the hosts the dashboard's Hosts with open findings tile counts (an open CVE match the AI has not ruled out, or an open finding of medium severity or higher)
     let exposedFilter = readParam("exposed", "0", ["0", "1"]) === "1";
-    const exposedBtn = el("button", "", "Exposed only", { type: "button", "data-flag": "1", "aria-pressed": String(exposedFilter), title: "The hosts the Exposed hosts tile on the Overview counts" });
+    const exposedBtn = el("button", "", "Open findings only", { type: "button", "data-flag": "1", "aria-pressed": String(exposedFilter), title: "The hosts the Hosts with open findings tile on the Overview counts: an open CVE match or an open finding of medium severity or higher" });
     exposedBtn.onclick = () => {
       exposedFilter = !exposedFilter;
       exposedBtn.setAttribute("aria-pressed", String(exposedFilter));
