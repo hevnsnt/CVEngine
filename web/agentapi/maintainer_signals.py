@@ -83,12 +83,11 @@ def _redis():
 
 @contextmanager
 def _bounded():
-    """A transaction in which no statement may run longer than ``DB_STATEMENT_MS`` (``SET LOCAL`` ends with it). PostgreSQL only."""
+    """A transaction (a savepoint inside a caller's) in which no statement may run longer than ``DB_STATEMENT_MS``. PostgreSQL only."""
+    from agentapi import db_timeout
     if connection.vendor != 'postgresql':
         raise RuntimeError('not PostgreSQL')
-    with transaction.atomic():
-        with connection.cursor() as cur:
-            cur.execute('SET LOCAL statement_timeout = %s', [DB_STATEMENT_MS])
+    with db_timeout.bounded(DB_STATEMENT_MS):  # the caller's own limit is back when the block ends
         yield
 
 
