@@ -564,10 +564,23 @@ function openOrgExcludedAddresses(o) {
       const own = data.this_server;
       if (own && (own.names.length || own.addresses.length)) {
         // this cvENGINE server is never scanned, for every organization: shown here, never removable
-        const row = el("div", "access-row");
-        row.append(el("code", "", [...own.names, ...own.addresses].join(", ")), el("span", "note", own.label));
-        list.append(row);
+        if (own.names.length) {
+          const row = el("div", "access-row");
+          row.append(el("code", "", own.names.join(", ")), el("span", "note", `${own.label} (its names)`));
+          list.append(row);
+        }
+        (own.address_reasons || own.addresses.map((a) => ({ address: a, reason: "" }))).forEach((r) => {
+          const row = el("div", "access-row");
+          row.append(el("code", "", r.address), el("span", "note", r.reason ? `${own.label}: ${r.reason}` : own.label));
+          list.append(row);
+        });
       }
+      (own && own.not_denied || []).forEach((r) => {
+        // the server's name resolves here, but the address is shared (a CDN edge), so other sites on it stay scannable
+        const row = el("div", "access-row");
+        row.append(el("code", "", r.address), el("span", "note", `Not excluded: ${r.reason}`));
+        list.append(row);
+      });
       if (!data.results.length) list.append(el("p", "empty", "No addresses listed."));
       data.results.forEach((r) => {
         const row = el("div", "access-row");

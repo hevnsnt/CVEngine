@@ -134,22 +134,26 @@ _own = {'at': 0.0, 'addresses': frozenset()}
 
 
 def own_addresses():
-    """The addresses this cvENGINE instance answers on: ``CVENGINE_OWN_ADDRESSES`` (comma separated; for an instance behind NAT or a load balancer)
-    and what ``DOMAIN_NAME`` resolves to, cached for an hour. A scan of any of them would be this instance scanning itself."""
+    """The addresses this cvENGINE instance answers on: ``CVENGINE_SELF_ADDRESSES`` and ``CVENGINE_OWN_ADDRESSES`` (comma separated; for an instance
+    behind a CDN, NAT or a load balancer) and what ``DOMAIN_NAME`` resolves to, cached for an hour. A scan of any of them would be this instance
+    scanning itself. A resolved address inside a CDN's shared edge range (a name behind Cloudflare) is not the instance: it fronts many other sites."""
+    from cveFeed import hosting
     import socket
     from django.conf import settings
     now = time.monotonic()
     if _own['at'] and now - _own['at'] < OWN_TTL:
         return _own['addresses']
     found, looked_up = set(), True
-    for part in os.environ.get('CVENGINE_OWN_ADDRESSES', '').split(','):
-        part = part.strip()
-        if part:
-            found.add(_compressed(part))
+    for env in ('CVENGINE_SELF_ADDRESSES', 'CVENGINE_OWN_ADDRESSES'):
+        for part in os.environ.get(env, '').split(','):
+            part = part.strip()
+            if part:
+                found.add(_compressed(part))
     name = str(getattr(settings, 'DOMAIN_NAME', '') or '').strip()
     if name:
         try:
-            found.update(_compressed(item[4][0]) for item in socket.getaddrinfo(name, None, type=socket.SOCK_STREAM))
+            found.update(_compressed(item[4][0]) for item in socket.getaddrinfo(name, None, type=socket.SOCK_STREAM)
+                         if not hosting.provider_range(_compressed(item[4][0])))
         except (OSError, UnicodeError):
             looked_up = False
     # A failed lookup is asked again within a minute, not an hour: until it works this server's own address is not refused.
