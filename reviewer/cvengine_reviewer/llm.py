@@ -51,6 +51,22 @@ class ModelError(RuntimeError):
         self.hint = hint
 
 
+USAGE_LIMIT = re.compile(r'usage limit|regain access')  # the provider's refusal body is lower-cased in ``hint``
+USAGE_LIMIT_CATEGORY = 'provider_usage_limit'  # what the loop sees for it (the server is sent the call's own category, plus the message)
+
+
+def usage_limit_message(error):
+    """The provider's refusal text (cut to 300 characters) when ``error`` is the usage limit reached (an organisation's API requests paused until a
+    date or the limit raised), else ''. Only this refusal's text is ever passed on."""
+    hint = getattr(error, 'hint', '') or ''
+    return hint[:300] if USAGE_LIMIT.search(hint) else ''
+
+
+def failure_category(error):
+    """``error.category``, or ``provider_usage_limit`` for the usage limit refusal: the loop waits hours for it, not fifteen minutes."""
+    return USAGE_LIMIT_CATEGORY if usage_limit_message(error) else error.category
+
+
 PINNED = {'temperature': 0, 'seed': 20260101}  # the reviewer's own jobs on a self-hosted server: the same packet gives the same answer (the pipeline's jobs pin the same, ``complete``)
 
 

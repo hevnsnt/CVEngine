@@ -111,6 +111,66 @@ class OpsFillerTests(unittest.TestCase):
         self.assertEqual([a['code'] for a in server.sent['alerts']], ['sentinel_errors'])
 
 
+USAGE = ('{"type":"error","error":{"type":"invalid_request_error","message":"You have reached your specified API usage limits. '
+         'You will regain access on 2026-11-30 at 18:00 UTC."}}').lower()
+
+
+class UsageLimitTests(unittest.TestCase):
+    PROVIDER = RunJobTests.PROVIDER
+    CONFIG = {'enabled': False, 'jobs_enabled': True, 'jobs': {'provider': 'vllm'}, 'job_workers': 2}
+
+    def refused(self, hint):
+        return llm.ModelError('anthropic HTTP request failed (status 400)', 'provider_http', http_status=400, hint=hint)
+
+    def test_the_usage_limit_goes_to_the_server_with_its_message(self):
+        server = FakeServer()
+        with mock.patch.object(llm, 'complete', side_effect=self.refused(USAGE)):
+            _, category = jobs.run_job(server, self.PROVIDER, job())
+        body = server.posted[0][1]
+        self.assertEqual((category, body['error']), ('provider_usage_limit', 'provider_http'))
+        self.assertIn('regain access on 2026-11-30', body['provider_message'])
+
+    def test_another_refusal_sends_no_message(self):
+        server = FakeServer()
+        with mock.patch.object(llm, 'complete', side_effect=self.refused('{"error":{"message":"overloaded"}}')):
+            _, category = jobs.run_job(server, self.PROVIDER, job())
+        self.assertEqual(category, 'provider_http')
+        self.assertNotIn('provider_message', server.posted[0][1])
+
+    def test_the_usage_limit_pauses_for_hours_at_the_first_refusal(self):
+        server = FakeServer(self.CONFIG, queued=[job()])
+        state = loop.new_state()
+        with mock.patch.object(jobs, 'run_job', return_value=({}, 'provider_usage_limit')):
+            loop.cycle(server, state)
+        self.assertEqual(state['failures'], 0)
+        self.assertGreaterEqual(state['pause_until'] - loop.time.monotonic(), 2.9 * 3600)
+        server.queued = [[job(id=9)]]
+        with mock.patch.object(jobs, 'run_job') as run:
+            loop.cycle(server, state)
+        run.assert_not_called()
+
+    def test_another_provider_failure_keeps_the_fifteen_minute_pause_after_three(self):
+        server = FakeServer(self.CONFIG, queued=[job(id=i) for i in range(2)])
+        state = loop.new_state()
+        with mock.patch.object(jobs, 'run_job', return_value=({}, 'provider_http')):
+            loop.cycle(server, state)
+        self.assertEqual((state['failures'], state['pause_until']), (2, 0.0))  # two: no pause yet
+        server.queued = [[job(id=5)]]
+        with mock.patch.object(jobs, 'run_job', return_value=({}, 'provider_http')):
+            loop.cycle(server, state)
+        self.assertEqual(state['failures'], 3)
+        self.assertLessEqual(state['pause_until'] - loop.time.monotonic(), loop.BACKOFF_SLEEP)
+
+    def test_a_refused_review_pauses_for_hours_too(self):
+        server = FakeServer({'enabled': True, 'review': {'provider': 'anthropic', 'model': 'm'}, 'reviews_left_today': 5})
+        server.packets = [{'ref': 'f1'}]
+        state = loop.new_state()
+        with mock.patch.object(jobs, 'review_one', side_effect=self.refused(USAGE)):
+            loop.run_reviews(server, server._config, state)
+        self.assertGreaterEqual(state['pause_until'] - loop.time.monotonic(), 2.9 * 3600)
+        self.assertEqual(server.refusals, [])  # an outage, not an unanswered packet
+
+
 class LoopTests(unittest.TestCase):
     CONFIG = {'enabled': False, 'jobs_enabled': True, 'jobs': {'provider': 'vllm'}, 'job_workers': 2}
 
