@@ -332,8 +332,10 @@ def _cache():
 
 def fallback_enabled():
     """Whether a lookup crt.sh could not answer may ask Cert Spotter: ``CVENGINE_CT_FALLBACK`` off (``0``, ``false``, ``no``, ``off``) turns it off
-    whatever the page says; else Settings, Timings (on by default)."""
-    if os.environ.get('CVENGINE_CT_FALLBACK', '').strip().lower() in ('0', 'false', 'no', 'off'):
+    whatever the page says, and so does a hosted license-safe install (``cveFeed.license_safe``: Cert Spotter's API without a key is for personal
+    or evaluation use); else Settings, Timings (on by default)."""
+    from cveFeed import license_safe
+    if license_safe.enabled() or os.environ.get('CVENGINE_CT_FALLBACK', '').strip().lower() in ('0', 'false', 'no', 'off'):
         return False
     try:
         from dashboard.models import SystemTimings
