@@ -27,7 +27,12 @@ class OrgAdmin(admin.ModelAdmin):
 class UserProfileAdmin(admin.ModelAdmin):
     list_display = ('user', 'bugbounty_enabled', 'mfa_enabled')
     exclude = ('mfa_secret', 'recovery_codes')
-admin.site.register(ChaosAPIKey)
+
+
+@admin.register(ChaosAPIKey)
+class ChaosAPIKeyAdmin(admin.ModelAdmin):
+    """Default admin for ChaosAPIKey."""
+
 
 @admin.register(AbuseBan)
 class AbuseBanAdmin(admin.ModelAdmin):
