@@ -1,0 +1,40 @@
+{% extends 'cveFeed/base.html' %}
+{% load static assets %}
+{% block title %}CVEngine · Internal network{% if all_projects %} · All projects{% if scope_org_name %} · {{ scope_org_name }}{% endif %}{% endif %}{% endblock %}
+{% block content %}
+{# The status of only the internal hosts of this scope (cveFeed.internal_page; static/cve/internal.js fills it from /cve/api/internal) #}
+<div class="page-head">
+  <div>
+    <h1>Internal network</h1>
+    <p class="sub" title="{{ purpose }} {% if all_projects %}All projects{% if scope_org_name %} in {{ scope_org_name }}{% endif %}{% else %}Project: {{ project.name }}{% endif %}">{{ purpose }}</p>
+  </div>
+</div>
+<div id="internal" data-slug="{{ project.slug }}" aria-busy="true">
+  <section class="ov-sec" aria-label="Internal hosts in numbers">
+    <div class="ov-kpis" id="in-kpis">
+      <a class="ov-kpi" data-kpi="hosts" href="{% url 'cve_section' project.slug 'hosts' %}?internal=1" title="Hosts whose address is inside a network a project declared internal. Alias names of one host count once; archived hosts are left out."><span class="ov-kpi-label">Internal hosts</span><span class="ov-kpi-row"><span class="ov-kpi-value">-</span></span><span class="ov-kpi-line"><span class="ov-foot"></span></span></a>
+      <a class="ov-kpi" data-kpi="exposed" href="{% url 'cve_section' project.slug 'hosts' %}?internal=1&amp;exposed=1" title="Internal hosts with a CVE match the AI has not ruled out, or an open finding of medium severity or worse. The Overview counts the same way."><span class="ov-kpi-label">Hosts with open findings</span><span class="ov-kpi-row"><span class="ov-kpi-value">-</span></span><span class="ov-kpi-line"><span class="ov-foot"></span></span></a>
+      <a class="ov-kpi" data-kpi="critical" href="{% url 'cve_section' project.slug 'vulns' %}?severity=critical&amp;internal=1" title="Open findings of critical severity on internal hosts: CVE matches, scanner and hygiene findings."><span class="ov-kpi-label">Critical findings open</span><span class="ov-kpi-row"><span class="ov-kpi-value">-</span></span><span class="ov-kpi-line"><span class="ov-foot"></span></span></a>
+      <a class="ov-kpi" data-kpi="needs" href="{% url 'cve_section' project.slug 'situations' %}" title="Internal hosts with a proven or likely vulnerability, or a high hygiene issue. Situations lists every host and marks the internal ones."><span class="ov-kpi-label">Needs attention</span><span class="ov-kpi-row"><span class="ov-kpi-value">-</span></span><span class="ov-kpi-line"><span class="ov-foot"></span></span></a>
+    </div>
+  </section>
+
+  <section class="ov-sec" aria-labelledby="in-nets-h">
+    <div class="ov-sec-head"><h2 id="in-nets-h">Internal networks</h2><span class="ov-note" id="in-updated"></span></div>
+    <div id="in-nets-body"><p class="empty">Reading the internal networks.</p></div>
+  </section>
+
+  <section class="ov-sec" aria-labelledby="in-find-h">
+    <div class="ov-sec-head"><h2 id="in-find-h">Open findings on internal hosts</h2><a class="ov-link" id="in-find-all" href="{% url 'cve_section' project.slug 'vulns' %}?internal=1">All internal findings →</a></div>
+    <div id="in-find-body"><p class="empty">Reading the findings.</p></div>
+  </section>
+
+  <section class="ov-sec" aria-labelledby="in-act-h">
+    <div class="ov-sec-head"><h2 id="in-act-h">Internal scan activity</h2><span class="ov-note" id="in-scans"></span></div>
+    <div id="in-act-body" aria-live="polite"><p class="empty">Reading what is running.</p></div>
+  </section>
+</div>
+{% endblock %}
+{% block scripts %}
+<script type="module" src="{% asset 'cve/internal.js' %}"></script>
+{% endblock %}
