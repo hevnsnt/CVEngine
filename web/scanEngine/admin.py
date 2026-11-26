@@ -1,7 +1,12 @@
-from django.contrib import admin
-from scanEngine.models import *
+"""Admin registrations for the scanEngine app."""
 
-# Register your models here.
-admin.site.register(EngineType)
-admin.site.register(Notification)
-admin.site.register(VulnerabilityReportSetting)
+from django.contrib import admin
+
+from scanEngine.models import EngineType, Notification, VulnerabilityReportSetting
+
+for _model in (
+    EngineType,
+    Notification,
+    VulnerabilityReportSetting,
+):
+    admin.site.register(_model)
