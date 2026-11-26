@@ -32,6 +32,7 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 ### Fixed
 - **Direct Send on Microsoft 365 is shown only when a test found it open.** `mx_direct_send` ("Microsoft 365 mail: check that Direct Send is turned off") was raised for every domain and supplier whose MX is Microsoft 365, read from DNS alone, so tenants that already reject Direct Send were told to check it. The Sentinel now tests the tenant over SMTP and stops before DATA (cvENGINE-sentinel #129); the server keeps an `mx_direct_send` only with that test's evidence and a 25x reply (`agentapi.probe_results.direct_send_tested`), never takes one for a supplier (a supplier is never tested), and migration `cveFeed` 0195 resolves the untested ones already stored.
 
+- The built-in scanner and the scanner library move to Sentinel `bb51c6c`, which reports "Direct Send is on" for a Microsoft 365 domain only after a live SMTP test showed the tenant accepts it, never from the MX record alone.
 - The system status no longer leaves a short database time limit on the connection after a slow project count: the limit now ends with the count, and a count it cuts off rolls back only itself instead of failing every later query of the request.
 
 - The built-in scanner runs Sentinel 6728064: its Go tools (nuclei, naabu, sshamble, gowitness, trajan) are built from source with Go 1.27.4 and current dependencies, clearing about 125 critical and high CVEs in the image, and deep bbot discoveries run one at a time so a 2 GB Sentinel is not killed for memory.

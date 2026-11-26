@@ -459,7 +459,7 @@ services:
   # else of the stack (not PostgreSQL, not Redis). The Tailscale sidecar joins this container's namespace, and the host network and macvlan overlays
   # (docker-compose.hostnet.yml, docker-compose.macvlan.yml) move this container, not celery. Nothing connects to it.
   scanner:
-    image: "${CVENGINE_SCANNER_IMAGE:-${CVENGINE_SCANNER_ROLLBACK_IMAGE:-ghcr.io/hevnsnt/cvengine-sentinel@sha256:90352e819e06456fe86c711b16ec8d6d03e879bd17bdb63bc38ef7fc9970e00b}}"
+    image: "${CVENGINE_SCANNER_IMAGE:-${CVENGINE_SCANNER_ROLLBACK_IMAGE:-ghcr.io/hevnsnt/cvengine-sentinel@sha256:9909a975546658c4259d9edcd6048bdaf62c8113af1aaf8fffb93af5bb69a612}}"
     pull_policy: "${CVENGINE_SCANNER_PULL_POLICY:-missing}"
     restart: unless-stopped
     init: true
