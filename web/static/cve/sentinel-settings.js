@@ -620,7 +620,7 @@ const ROWS = [
   [
     "network",
     "Where it runs",
-    "Choose the server grant. Internal Sentinels scan declared private networks only when their machine setting allows it.",
+    "Choose the server grant. An internal Sentinel scans only hosts inside the declared internal ranges, and only when its machine setting allows it; it never takes external work.",
   ],
   ["profile", "Size", "Light never runs OpenVAS."],
   [
