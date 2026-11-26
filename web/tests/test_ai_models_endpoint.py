@@ -190,7 +190,8 @@ class ModelsEndpointTests(TestCase):
         real = cache.set
 
         def spy(key, value, *args, **kwargs):
-            stored.append((key, value))
+            if not str(key).startswith('guard-source:'):  # the input guard notes a signed-in App Admin's address (cvengine.guard_sources)
+                stored.append((key, value))
             return real(key, value, *args, **kwargs)
         with mock.patch('requests.get', return_value=openai_list('gpt-a')), mock.patch('django.core.cache.cache.set', side_effect=spy):
             self.models(provider='openai')
@@ -208,7 +209,11 @@ class ModelsEndpointTests(TestCase):
         self.assertLess(settings_api.MODELS_FAIL_SECONDS, settings_api.MODELS_CACHE_SECONDS)
         self.save_connection()
         ttls = []
-        with mock.patch('django.core.cache.cache.set', side_effect=lambda k, v, ttl=None, *a, **kw: ttls.append(ttl)), \
+
+        def spy(key, value, ttl=None, *args, **kwargs):
+            if not str(key).startswith('guard-source:'):  # the input guard notes a signed-in App Admin's address (cvengine.guard_sources)
+                ttls.append(ttl)
+        with mock.patch('django.core.cache.cache.set', side_effect=spy), \
                 mock.patch('requests.get', side_effect=[openai_list('a'), requests.ConnectionError('x')]):
             self.models(provider='openai')
             self.models(provider='openai', refresh=True)
