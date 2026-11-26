@@ -20,7 +20,7 @@ export function sparkPoints(values, { w = 120, h = 32, pad = 3 } = {}) {
 
 const num = (x) => Number(x).toLocaleString("en-US", { maximumFractionDigits: 1 });
 
-// What a screen reader hears for a sparkline: the figure's name, how many days and where it went ("Externally facing hosts over 14 days, rising from 41 to 55").
+// What a screen reader hears for a sparkline: the figure's name, how many days and where it went ("Hosts with open findings over 14 days, rising from 41 to 55").
 export function sparkLabel(label, values) {
   const v = (values || []).map(Number).filter(Number.isFinite);
   if (v.length < 2) return `${label}: not enough days to draw a trend yet`;
