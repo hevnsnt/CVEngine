@@ -308,6 +308,11 @@ function threatsCard(env) {
     box.append(row, status);
     api("GET", "/api/v1/reporting/zero-wire").then((z) => {
       on.checked = z.enabled;
+      if (z.hosted_off) {
+        on.disabled = true;
+        status.textContent = "Off on this hosted server (CVENGINE_HOSTED_LICENSE_SAFE): the feed is CC BY-NC 4.0, for non-commercial use only.";
+        return;
+      }
       status.textContent = z.error ? `The last read failed: ${z.error}` : z.synced_at ? `Last read ${when(z.synced_at)}, ${z.briefings} briefing${z.briefings === 1 ? "" : "s"} kept.` : "Not read yet.";
     }).catch(() => {});
     on.addEventListener("change", async () => {

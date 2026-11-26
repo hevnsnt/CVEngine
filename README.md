@@ -117,6 +117,8 @@ cvENGINE runs the best open-source security tools. The scanner image pins each t
 | **AI (bring your own, off until you choose)** | [Anthropic](https://www.anthropic.com), [OpenAI](https://openai.com), [OpenRouter](https://openrouter.ai), [Ollama](https://github.com/ollama/ollama), [LM Studio](https://lmstudio.ai), [vLLM](https://github.com/vllm-project/vllm) | Finding triage, Nuclei targeting and the [AI reviewer](docs/AI-REVIEWER.md) in its own container. Without a model cvENGINE still discovers, scans and matches |
 | | [Model Context Protocol](https://modelcontextprotocol.io) | An MCP server and a REST API for your own agents ([Agent API](docs/AGENT-API.md)) |
 
+cvENGINE uses the Nmap Security Scanner to perform its tasks ([nmap.org](https://nmap.org)). WPScan, Shodan InternetDB, the Internet Archive lookups, Cloudflare Radar Zero Wire and Cert Spotter without a key are free only for testing your own systems or for non-commercial use; a hosted service that sells cvENGINE sets `CVENGINE_HOSTED_LICENSE_SAFE=1` to turn them off ([Configuration](docs/CONFIGURATION.md#hosted-license-safe-mode)).
+
 ## Install in minutes
 
 You need a Linux server (Debian or Ubuntu is easiest) with at least 4 GB of RAM (8 GB for comfort) and 20 GB of free disk.

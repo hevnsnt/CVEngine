@@ -54,7 +54,7 @@ An email report sends a weekly or monthly summary of one project or one whole or
 **At a glance is calm on purpose.** It opens with the same sentence the top of the Overview says (`cveFeed.overview.status_block`, one implementation: "Nothing needs you right now.", "3 hosts likely have vulnerabilities and need review."), then four tiles:
 
 - **Needs attention**: hosts with a proven, likely or high-priority hygiene situation (the Overview's own count, see [Situations](FRONTEND.md)). Its change since the last report is red only when it rises and green when it falls; the daily snapshot keeps the figure (`StatsSnapshot.needs_hosts`), so the first report after an upgrade, and any period with no snapshot behind it, shows no comparison.
-- **Externally facing hosts**: hosts reachable from the internet. More discovered hosts is not bad news, so its change is grey whichever way it goes.
+- **Hosts with open findings**: hosts with an open CVE match the AI has not ruled out or an open finding of medium severity or higher, out of every host; names that point at the same machine count once. It is the Overview tile's number. Its change is grey whichever way it goes, because more discovered hosts is not bad news.
 - **New issues worth a look**: items first seen in the period that are Fire or Smoke, or in the proven, likely or high-hygiene tiers; not every new low-level item.
 - **Fixed** in the period.
 

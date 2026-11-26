@@ -13,7 +13,7 @@ Definitions (also shown to the user as the tooltip of each dashboard tile):
   host with two names; names behind a CDN stay separate). The same name in two projects is two hosts. An archived host is not counted
   (``archived_host_q``; archiving closed its findings, ``cveFeed.archive_closure``). This is the Hosts page's count.
 * **Live hosts**: hosts that resolved to an IP address or answered over HTTP. These are the tiles of the attack-surface map.
-* **Exposed hosts**: hosts with a CVE match the AI has not ruled out, or an open finding of medium severity or worse.
+* **Hosts with open findings** (``exposed`` in code and the API): hosts with a CVE match the AI has not ruled out, or an open finding of medium severity or worse.
 * **Open** (every count below): not closed by a person (fixed, accepted risk, false positive) and not dismissed by triage (``dismissed_q``: the
   triage classed it a likely false positive or not applicable). The PDF report never counted a dismissed finding; the dashboard, the Findings
   list and the weekly email now leave it out too, so the four agree. It stays in the list under ``status=all`` and keeps its own heat.
