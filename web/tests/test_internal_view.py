@@ -205,6 +205,26 @@ class CacheInvalidationTests(World):
         with mock.patch('time.monotonic', return_value=12.0):
             self.assertTrue(internal_view.is_internal(self.pa.id, '10.20.0.5'))
 
+    def test_a_table_first_built_inside_one_callers_scope_still_holds_every_project(self):
+        """The table is kept per process and shared: built first by a request of one organization, it must still answer for the other."""
+        from tenancy import scope
+        self.declare()
+        self.declare(project=self.pb)
+        Domain.objects.create(name='10.20.0.5', project=self.pa, insert_date=timezone.now())
+        Domain.objects.create(name='10.20.0.6', project=self.pb, insert_date=timezone.now())
+        internal_view.invalidate()
+        tokens = scope.set_scope({self.pa.id}, self.admin)
+        try:
+            self.assertTrue(internal_view.is_internal(self.pa.id, '10.20.0.5'))
+        finally:
+            scope.reset_scope(tokens)
+        tokens = scope.set_scope({self.pb.id}, self.other)
+        try:
+            self.assertTrue(internal_view.is_internal(self.pb.id, '10.20.0.6'))
+            self.assertEqual(scope.current_allowed(), {self.pb.id})  # the caller's own scope is back once the table is built
+        finally:
+            scope.reset_scope(tokens)
+
     def test_the_table_is_not_rebuilt_by_the_clock_inside_a_few_minutes(self):
         internal_view.table()
         built = internal_view._cache['at']

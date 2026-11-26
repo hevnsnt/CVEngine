@@ -1,74 +1,60 @@
-# Contributor Covenant Code of Conduct
+# Code of Conduct
 
-## Our Pledge
+cvENGINE is a small project run in the open. We want it to be a place where people can ask questions, report problems and send fixes without being treated badly. This document says what we expect.
 
-In the interest of fostering an open and welcoming environment, we as
-contributors and maintainers pledge to making participation in our project and
-our community a harassment-free experience for everyone, regardless of age, body
-size, disability, ethnicity, gender identity and expression, level of experience,
-nationality, personal appearance, race, religion, or sexual identity and
-orientation.
+## Who this applies to
 
-## Our Standards
+This code applies to everyone who takes part in the project:
 
-Examples of behavior that contributes to creating a positive environment
-include:
+- Issues and issue comments.
+- Pull requests and code review.
+- Discussions.
+- Any other space run by the project.
+- Anyone who is representing the project in public, for example by speaking for it at an event or on social media.
 
-* Using welcoming and inclusive language
-* Being respectful of differing viewpoints and experiences
-* Gracefully accepting constructive criticism
-* Focusing on what is best for the community
-* Showing empathy towards other community members
+## What we expect
 
-Examples of unacceptable behavior by participants include:
+- Be respectful and patient. Many people here are volunteers, and many are new.
+- Assume good faith. If a message reads as rude, ask what was meant before you reply in kind.
+- Criticize the work, not the person. Say what is wrong with the code, the design or the idea, and say why.
+- Accept criticism of your own work calmly. A review is about the change, not about you.
+- Keep discussion on topic. Take unrelated debates somewhere else.
 
-* The use of sexualized language or imagery and unwelcome sexual attention or
-advances
-* Trolling, insulting/derogatory comments, and personal or political attacks
-* Public or private harassment
-* Publishing others' private information, such as a physical or electronic
-  address, without explicit permission
-* Other conduct which could reasonably be considered inappropriate in a
-  professional setting
+## What is not acceptable
 
-## Our Responsibilities
+- Harassment of any kind.
+- Personal attacks and insults.
+- Slurs and demeaning language about who someone is.
+- Sexual content, and unwanted sexual attention.
+- Threats of violence or other harm.
+- Publishing someone's private information, such as a home address or private messages, without their consent.
+- Sustained disruption, such as repeated off topic posts, flooding a thread or ignoring requests to stop.
 
-Project maintainers are responsible for clarifying the standards of acceptable
-behavior and are expected to take appropriate and fair corrective action in
-response to any instances of unacceptable behavior.
+## How to report a problem
 
-Project maintainers have the right and responsibility to remove, edit, or
-reject comments, commits, code, wiki edits, issues, and other contributions
-that are not aligned to this Code of Conduct, or to ban temporarily or
-permanently any contributor for other behaviors that they deem inappropriate,
-threatening, offensive, or harmful.
+Send an email to the maintainer at support@cvengine.live. Please include:
 
-## Scope
+- What happened, and where. Links to the issue, pull request or comment help a lot.
+- When it happened.
+- Who was involved, as far as you know.
+- Any context that would help, such as earlier messages in the thread.
 
-This Code of Conduct applies both within project spaces and in public spaces
-when an individual is representing the project or its community. Examples of
-representing a project or community include using an official project e-mail
-address, posting via an official social media account, or acting as an appointed
-representative at an online or offline event. Representation of a project may be
-further defined and clarified by project maintainers.
+Reports are kept confidential as far as possible. We may need to share some details to deal with the problem, and we will share only what is needed.
 
-## Enforcement
+Security problems are a different matter. Do not report them by email or in a public issue. Use GitHub's private vulnerability reporting on hevnsnt/CVEngine instead (Security tab, "Report a vulnerability").
 
-Instances of abusive, harassing, or otherwise unacceptable behavior may be
-reported privately through the Security tab of this repository. All
-complaints will be reviewed and investigated and will result in a response that
-is deemed necessary and appropriate to the circumstances. The project team is
-obligated to maintain confidentiality with regard to the reporter of an incident.
-Further details of specific enforcement policies may be posted separately.
+## What the maintainer may do
 
-Project maintainers who do not follow or enforce the Code of Conduct in good
-faith may face temporary or permanent repercussions as determined by other
-members of the project's leadership.
+The maintainer, Bill Swearingen (GitHub user hevnsnt), decides how to respond to a report. Depending on the case, he may:
 
-## Attribution
+- Ask someone to change their behaviour or edit a comment.
+- Remove or hide content.
+- Lock a thread.
+- Block a person from the project for a set time.
+- Block a person from the project permanently.
 
-This Code of Conduct is adapted from the [Contributor Covenant][homepage], version 1.4,
-available at [https://contributor-covenant.org/version/1/4][version]
+For serious cases, the maintainer may act at once and without a warning. The maintainer's decision is final.
 
-[homepage]: https://contributor-covenant.org
-[version]: https://contributor-covenant.org/version/1/4/
+## Changes
+
+This document may change over time. The current version in the main branch is the one that applies.

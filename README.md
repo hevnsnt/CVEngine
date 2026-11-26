@@ -9,10 +9,6 @@
 <p align="center">Assess each host with industry-standard scanners and fix what matters first.</p>
 
 <p align="center">
-  <sub>English | <a href="README.zh-CN.md">简体中文</a> | <a href="README.zh-TW.md">繁體中文</a> | <a href="README.ja.md">日本語</a> | <a href="README.ko.md">한국어</a> | <a href="README.es.md">Español</a> | <a href="README.fr.md">Français</a> | <a href="README.de.md">Deutsch</a> | <a href="README.pt-BR.md">Português (BR)</a> | <a href="README.ru.md">Русский</a> | <a href="README.ar.md">العربية</a> | <a href="README.hi.md">हिन्दी</a> | <a href="README.it.md">Italiano</a></sub>
-</p>
-
-<p align="center">
   <a href="CHANGELOG.md"><img alt="Release 1.4.2" src="https://img.shields.io/badge/release-1.4.2-2ea44f"></a>
   <a href="LICENSE"><img alt="License GPL-3.0" src="https://img.shields.io/badge/license-GPL--3.0-blue"></a>
   <img alt="Self-hosted with Docker Compose" src="https://img.shields.io/badge/self--hosted-Docker%20Compose-blue">
@@ -120,6 +116,8 @@ cvENGINE runs the best open-source security tools. The scanner image pins each t
 | | bbot's keyed sources | Optional: Shodan, Censys, VirusTotal, SecurityTrails, GitHub, Chaos and more, with your own API keys ([Configuration](docs/CONFIGURATION.md#api-keys)) |
 | **AI (bring your own, off until you choose)** | [Anthropic](https://www.anthropic.com), [OpenAI](https://openai.com), [OpenRouter](https://openrouter.ai), [Ollama](https://github.com/ollama/ollama), [LM Studio](https://lmstudio.ai), [vLLM](https://github.com/vllm-project/vllm) | Finding triage, Nuclei targeting and the [AI reviewer](docs/AI-REVIEWER.md) in its own container. Without a model cvENGINE still discovers, scans and matches |
 | | [Model Context Protocol](https://modelcontextprotocol.io) | An MCP server and a REST API for your own agents ([Agent API](docs/AGENT-API.md)) |
+
+cvENGINE uses the Nmap Security Scanner to perform its tasks ([nmap.org](https://nmap.org)). WPScan, Shodan InternetDB, the Internet Archive lookups, Cloudflare Radar Zero Wire and Cert Spotter without a key are free only for testing your own systems or for non-commercial use; a hosted service that sells cvENGINE sets `CVENGINE_HOSTED_LICENSE_SAFE=1` to turn them off ([Configuration](docs/CONFIGURATION.md#hosted-license-safe-mode)).
 
 ## Install in minutes
 

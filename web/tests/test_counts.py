@@ -131,7 +131,7 @@ class ExposureCountTests(CountFixture):
 		self.assertEqual(self.stats()['exposed_hosts'], 3)
 
 	def test_the_hosts_search_lists_exactly_the_hosts_the_exposed_tile_counts(self):
-		# ?exposed=1 is where the dashboard's Exposed hosts tile now links: same rule, so the list and the number cannot disagree
+		# ?exposed=1 is where the dashboard's Hosts with open findings tile now links: same rule, so the list and the number cannot disagree
 		for slug in ('ca', 'cb', '_all'):
 			listed = self.api(f'projects/{slug}/search', exposed=1, page_size=50)
 			self.assertEqual(len(listed['results']), self.stats(None if slug == '_all' else slug)['exposed_hosts'], slug)

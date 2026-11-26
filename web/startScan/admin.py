@@ -1,24 +1,52 @@
-from django.contrib import admin
-from startScan.models import *
+"""Admin registrations for the startScan app."""
 
-admin.site.register(ScanHistory)
-admin.site.register(SubScan)
-admin.site.register(Subdomain)
-admin.site.register(ScanActivity)
-admin.site.register(EndPoint)
-admin.site.register(Vulnerability)
-admin.site.register(CweId)
-admin.site.register(CveId)
-admin.site.register(VulnerabilityReference)
-admin.site.register(VulnerabilityTags)
-admin.site.register(Port)
-admin.site.register(IpAddress)
-admin.site.register(DirectoryFile)
-admin.site.register(DirectoryScan)
-admin.site.register(Technology)
-admin.site.register(MetaFinderDocument)
-admin.site.register(Email)
-admin.site.register(Employee)
-admin.site.register(Dork)
-admin.site.register(Waf)
-admin.site.register(CountryISO)
+from django.contrib import admin
+
+from startScan.models import (
+    CountryISO,
+    CveId,
+    CweId,
+    DirectoryFile,
+    DirectoryScan,
+    Dork,
+    Email,
+    Employee,
+    EndPoint,
+    IpAddress,
+    MetaFinderDocument,
+    Port,
+    ScanActivity,
+    ScanHistory,
+    SubScan,
+    Subdomain,
+    Technology,
+    Vulnerability,
+    VulnerabilityReference,
+    VulnerabilityTags,
+    Waf,
+)
+
+for _model in (
+    ScanHistory,
+    SubScan,
+    Subdomain,
+    ScanActivity,
+    EndPoint,
+    Vulnerability,
+    CweId,
+    CveId,
+    VulnerabilityReference,
+    VulnerabilityTags,
+    Port,
+    IpAddress,
+    DirectoryFile,
+    DirectoryScan,
+    Technology,
+    MetaFinderDocument,
+    Email,
+    Employee,
+    Dork,
+    Waf,
+    CountryISO,
+):
+    admin.site.register(_model)
