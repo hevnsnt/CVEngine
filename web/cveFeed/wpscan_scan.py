@@ -46,6 +46,9 @@ THOROUGH_PROBE = 'wpscan-thorough'
 THOROUGH_SERVICE = 'wpscan-thorough'
 THOROUGH_QUEUE = QUEUE
 THOROUGH_KIND = 'wpscan_thorough'
+LICENSED_KINDS = (SERVICE, THOROUGH_KIND)  # the task kinds a hosted license-safe install denies (cveFeed.license_safe): the license asks for a commercial one for hosted use
+WPSCAN_OFF = ('WPScan is off on this hosted install (CVENGINE_HOSTED_LICENSE_SAFE): it needs a commercial license for hosted use. '
+              'WordPress detection and the WordPress templates of the template scan still run')
 DEFAULT_THOROUGH_TIMEOUT = 12 * 60 * 60
 MIN_THOROUGH_TIMEOUT = 600
 MAX_THOROUGH_TIMEOUT = 24 * 60 * 60  # what the contract and the Sentinel accept: a longer budget is held to this
@@ -141,8 +144,12 @@ def max_probe_hosts():
 
 
 def api_token(project):
-    """The project's (or its organization's) WordPress vulnerability API token, or ''."""
+    """The project's (or its organization's) WordPress vulnerability API token, or ''. Always '' on a hosted license-safe install
+    (``cveFeed.license_safe``): the WPScan vulnerability database needs an Enterprise plan for use in a service."""
+    from cveFeed import license_safe
     from cveFeed.api_credentials import resolve_for_project
+    if license_safe.enabled():
+        return ''
     return (resolve_for_project(project).get('wpscan') or {}).get('api_key') or ''
 
 
@@ -754,6 +761,9 @@ def run_wpscan(scan_id, runner=None, force=False, internal=False, only=None, att
     if probe_waiting is not None:  # the sites with a sign of WordPress are still scanned below; the ones only the probe could name wait for it
         summary['probe_waiting'] = probe_waiting.kind
     wp_correlation.carry_forward(scan)
+    from cveFeed import license_safe
+    if real_runner and license_safe.enabled():  # a hosted install sends no WPScan task: detection above ran, the sites are not marked waiting
+        return {**summary, 'skipped': WPSCAN_OFF, 'license_safe': True}
     if not wanted:
         if probe_waiting is not None:  # nothing could be asked: not 'no WordPress here', and every site stays due
             return {**summary, 'skipped': f'no scanner could take this work ({probe_waiting.kind}); the sites stay due until one can'}
@@ -1032,9 +1042,11 @@ def run_thorough(project_id, runner=None):
     one that did not finish it in time, the host stays ``pending`` and nothing is recorded as done, so a later pass asks again. The report is
     classified by ``_classify`` and stored exactly like the quick pass's, nothing in it is trusted or executed. ``runner`` is the seam the tests use
     (``runner(url, token, timeout) -> report``)."""
-    from cveFeed import activity, exclusions, ledger, wp_correlation
+    from cveFeed import activity, exclusions, ledger, license_safe, wp_correlation
     from cvengine import resources
     summary = {'done': 0, 'partial': 0, 'blocked': 0, 'failed': 0}
+    if runner is None and license_safe.enabled():  # a hosted install sends no WPScan task
+        return {**summary, 'skipped': WPSCAN_OFF}
     owner = f'thorough-{os.getpid()}'
     with resources.redis_claim(f'cvengine:wpscan:thorough:{project_id}', owner, 300) as holder:
         if holder is not True:

@@ -249,7 +249,7 @@ async function pollStats() {
     }
     const certNote = $("s-certs_total_note");
     if (certNote) {
-      // beside the count, like "of 299 hosts" on the Exposed hosts tile: short enough to fit the narrow tile
+      // beside the count, like "out of 299 hosts" on the Hosts with open findings tile: short enough to fit the narrow tile
       certNote.textContent = s.certs_total ? `of ${s.certs_total}` : "";
       certNote.title = s.certs_total ? `${s.certs_total} certificates tracked` : "";
     }
@@ -437,7 +437,7 @@ function fitDetails(map) {
   });
 }
 new ResizeObserver(() => requestAnimationFrame(layoutMap)).observe($("map"));
-// The header of the attack-surface map reads the same numbers as the Exposed hosts tile, so the two cannot disagree: the map
+// The header of the attack-surface map reads the same numbers as the Hosts with open findings tile, so the two cannot disagree: the map
 // draws live hosts (they resolved, or answered over HTTP), the tile counts every host the Hosts page lists.
 let statsNow = null;
 let mapDrawn = null; // squares on the map right now

@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{{ report_name }}{% if scan_object.domain.name %}: {{ scan_object.domain.name }}{% endif %}</title>
+<style>
+@page {
+  size: A4;
+  margin: 22mm 18mm 24mm 18mm;
+  @bottom-left {
+    content: element(footer);
+    font-family: Helvetica, Arial, sans-serif;
+    font-size: 8pt;
+    color: #555555;
+    vertical-align: top;
+    padding-top: 4mm;
+  }
+  @bottom-right {
+    content: counter(page);
+    font-family: Helvetica, Arial, sans-serif;
+    font-size: 9pt;
+    color: #555555;
+    vertical-align: top;
+    padding-top: 4mm;
+  }
+}
+@page cover {
+  @bottom-left { content: none; }
+  @bottom-right { content: none; }
+}
+.running-footer { position: running(footer); }
+
+html { font-family: Helvetica, Arial, sans-serif; font-size: 10pt; line-height: 1.45; color: #111111; }
+body { margin: 0; }
+h1, h2, h3, h4 { font-family: Helvetica, Arial, sans-serif; margin: 0 0 4mm 0; break-after: avoid; }
+h1 { font-size: 20pt; color: {{ primary_color }}; }
+h2 { font-size: 14pt; color: {{ primary_color }}; margin-top: 8mm; }
+h3 { font-size: 11pt; }
+p { margin: 0 0 3mm 0; }
+a { color: inherit; text-decoration: none; }
+code, .mono { font-family: "Courier New", Courier, monospace; font-size: 8.5pt; }
+
+.cover { page: cover; break-after: page; }
+.cover .report-name { font-size: 30pt; font-weight: bold; margin: 0 0 6mm 0; }
+.cover .target { font-size: 18pt; margin: 0 0 4mm 0; }
+.cover .date { font-size: 11pt; margin: 0 0 14mm 0; }
+.cover .prepared p { margin: 0 0 1.5mm 0; }
+.cover .banner { margin-top: 14mm; font-size: 9pt; }
+
+.section { break-before: page; }
+.section.flow { break-before: auto; }
+.toc { list-style: none; margin: 0; padding: 0; }
+.toc li { padding: 2mm 0; font-size: 11pt; border-bottom: 0.3mm solid #dddddd; }
+.toc a::after { content: leader('.') target-counter(attr(href url), page); }
+
+.summary-text { margin-bottom: 4mm; }
+.target-line { font-size: 12pt; margin-bottom: 4mm; }
+.figures { display: flex; flex-wrap: wrap; margin: 0 0 4mm 0; }
+.figure { width: 30%; box-sizing: border-box; margin: 0 3% 3mm 0; padding: 3mm; text-align: center; }
+.figure .num { font-size: 20pt; font-weight: bold; }
+.figure .lbl { font-size: 9pt; }
+
+.timeline { width: 100%; border-collapse: collapse; }
+.timeline th { text-align: left; width: 35%; padding: 2mm 2mm 2mm 0; vertical-align: top; }
+.timeline td { padding: 2mm 0; }
+
+.chart { text-align: center; margin: 3mm 0 6mm 0; }
+.chart img { width: 150mm; max-width: 100%; }
+
+table.grid { width: 100%; border-collapse: collapse; margin: 3mm 0 6mm 0; font-size: 9pt; }
+table.grid th { text-align: left; padding: 1.5mm 2mm; }
+table.grid td { padding: 1.5mm 2mm; vertical-align: top; word-break: break-word; }
+table.grid tr { break-inside: avoid; }
+table.grid thead { display: table-header-group; }
+td.num-col, th.num-col { width: 9mm; }
+td.center, th.center { text-align: center; }
+
+.sev-4 { color: #b71c1c; border-left-color: #b71c1c; }
+.sev-3 { color: #e65100; border-left-color: #e65100; }
+.sev-2 { color: #b26a00; border-left-color: #f9a825; }
+.sev-1 { color: #1565c0; border-left-color: #1976d2; }
+.sev-0 { color: #455a64; border-left-color: #78909c; }
+.sev-u { color: #616161; border-left-color: #9e9e9e; }
+.badge { display: inline-block; padding: 0.5mm 2.5mm; border-radius: 2mm; font-size: 8pt; font-weight: bold; color: #ffffff; }
+.badge.sev-4 { background: #b71c1c; color: #ffffff; }
+.badge.sev-3 { background: #e65100; color: #ffffff; }
+.badge.sev-2 { background: #f9a825; color: #212121; }
+.badge.sev-1 { background: #1976d2; color: #ffffff; }
+.badge.sev-0 { background: #78909c; color: #ffffff; }
+.badge.sev-u { background: #9e9e9e; color: #ffffff; }
+.card.sev-4, .card.sev-3, .card.sev-2, .card.sev-1, .card.sev-0, .card.sev-u,
+tr.row-sev.sev-4, tr.row-sev.sev-3, tr.row-sev.sev-2, tr.row-sev.sev-1, tr.row-sev.sev-0, tr.row-sev.sev-u { color: #111111; }
+tr.row-sev td:first-child { border-left-width: 1.2mm; border-left-style: solid; }
+
+.st { font-weight: bold; }
+.st-2 { color: #2e7d32; }
+.st-3 { color: #1565c0; }
+.st-4 { color: #e65100; }
+.st-5 { color: #b71c1c; }
+.st-o { color: #616161; }
+
+.card { break-inside: avoid; margin: 0 0 5mm 0; padding: 3mm 4mm; border: 0.3mm solid #cccccc; border-left-width: 1.2mm; border-left-style: solid; }
+.card.finding { break-inside: auto; }
+.card h3 { margin: 0 0 2mm 0; font-size: 11pt; word-break: break-word; }
+.card .path { font-weight: normal; font-family: "Courier New", Courier, monospace; font-size: 9pt; }
+.card .meta { margin: 0 0 2mm 0; }
+.card h4 { font-size: 9.5pt; margin: 3mm 0 1mm 0; }
+.card ul { margin: 1mm 0 2mm 0; padding-left: 5mm; }
+.card li { margin: 0 0 1mm 0; word-break: break-word; }
+.tag { display: inline-block; margin: 0 1.5mm 1mm 0; padding: 0.3mm 2mm; border: 0.2mm solid #999999; border-radius: 1.5mm; font-size: 7.5pt; color: #333333; }
+.sev-label { font-weight: bold; margin-right: 2mm; }
+.urlbox { font-family: "Courier New", Courier, monospace; font-size: 8.5pt; word-break: break-all; }
+.metrics { font-family: "Courier New", Courier, monospace; font-size: 8pt; word-break: break-all; }
+.text-block p { margin: 0 0 2mm 0; }
+.ipline { margin: 0 0 1mm 0; }
+.cutnote { font-style: italic; margin-bottom: 4mm; }
+.end { text-align: center; padding-top: 80mm; font-size: 18pt; }
+
+{% block look_css %}{% endblock %}
+</style>
+</head>
+<body>
+{% if show_footer %}<div class="running-footer">{{ footer_text }}</div>{% endif %}
+{% now "F j, Y" as rendered_date %}
+
+<div class="cover">
+  <div class="cover-inner">
+    <div class="report-name">{{ report_name }}</div>
+    <div class="target">{{ scan_object.domain.name }}</div>
+    <div class="date">{{ rendered_date }}</div>
+    {% if company_name or company_address or company_email or company_website %}
+    <div class="prepared">
+      {% if company_name %}<p class="company-name"><strong>{{ company_name }}</strong></p>{% endif %}
+      {% if company_address %}<p>{{ company_address }}</p>{% endif %}
+      {% if company_email %}<p>{{ company_email }}</p>{% endif %}
+      {% if company_website %}<p>{{ company_website }}</p>{% endif %}
+    </div>
+    {% endif %}
+    {% if show_cvengine_banner %}
+    <div class="banner">
+      <div>Generated by cvENGINE</div>
+      <div>https://github.com/hevnsnt/CVEngine</div>
+    </div>
+    {% endif %}
+  </div>
+</div>
+
+<div class="section flow" id="contents" style="break-before: auto;">
+  <h1>Contents</h1>
+  <ol class="toc">
+    {% if show_executive_summary %}<li><a href="#sec-summary">Executive Summary</a></li>{% endif %}
+    <li><a href="#sec-overview">Overview</a></li>
+    <li><a href="#sec-timeline">Timeline</a></li>
+    <li><a href="#sec-charts">Charts</a></li>
+    {% if show_vuln %}<li><a href="#sec-findings-summary">Findings summary</a></li>{% endif %}
+    {% if show_recon %}<li><a href="#sec-assets">Discovered assets</a></li>{% endif %}
+    {% if show_recon %}<li><a href="#sec-hosts">Host details</a></li>{% endif %}
+    {% if show_vuln %}<li><a href="#sec-findings">Findings</a></li>{% endif %}
+    <li><a href="#sec-end">End of report</a></li>
+  </ol>
+</div>
+
+{% if show_executive_summary %}
+<div class="section" id="sec-summary">
+  <h1>Executive Summary</h1>
+  <div class="summary-text">{{ executive_summary_description|safe }}</div>
+</div>
+{% endif %}
+
+<div class="section" id="sec-overview">
+  <h1>Overview</h1>
+  <p class="target-line">Target: <strong>{{ scan_object.domain.name }}</strong></p>
+  {% if show_recon %}
+  <h2>Reconnaissance</h2>
+  <div class="figures">
+    <div class="figure"><div class="num">{{ scan_object.get_subdomain_count }}</div><div class="lbl">Hosts found</div></div>
+    <div class="figure"><div class="num">{{ scan_object.get_endpoint_count }}</div><div class="lbl">Endpoints</div></div>
+    <div class="figure"><div class="num">{{ scan_object.get_vulnerability_count }}</div><div class="lbl">Findings total</div></div>
+  </div>
+  {% endif %}
+  {% if show_vuln %}
+  <h2>Findings by severity</h2>
+  <div class="figures">
+    <div class="figure sev-box-4"><div class="num sev-4">{{ scan_object.get_critical_vulnerability_count }}</div><div class="lbl">Critical</div></div>
+    <div class="figure sev-box-3"><div class="num sev-3">{{ scan_object.get_high_vulnerability_count }}</div><div class="lbl">High</div></div>
+    <div class="figure sev-box-2"><div class="num sev-2">{{ scan_object.get_medium_vulnerability_count }}</div><div class="lbl">Medium</div></div>
+    <div class="figure sev-box-1"><div class="num sev-1">{{ scan_object.get_low_vulnerability_count }}</div><div class="lbl">Low</div></div>
+    <div class="figure sev-box-0"><div class="num sev-0">{% if is_ignore_info_vuln %}0{% else %}{{ scan_object.get_info_vulnerability_count }}{% endif %}</div><div class="lbl">Info</div></div>
+    <div class="figure sev-box-u"><div class="num sev-u">{{ scan_object.get_unknown_vulnerability_count }}</div><div class="lbl">Unknown</div></div>
+  </div>
+  {% endif %}
+</div>
+
+<div class="section flow" id="sec-timeline">
+  <h1>Timeline</h1>
+  <table class="timeline">
+    <tr>
+      <th>Scan started</th>
+      <td>{{ scan_object.start_scan_date|date:"F j, Y, H:i" }}</td>
+    </tr>
+    <tr>
+      <th>{% if scan_object.scan_status == 1 %}Elapsed time{% elif scan_object.scan_status == 0 %}Result{% elif scan_object.scan_status == 3 %}Result{% elif scan_object.scan_status == -1 %}Status{% else %}Duration{% endif %}</th>
+      <td>
+        {% if scan_object.scan_status == 1 %}
+          Running, elapsed time {{ scan_object.get_elapsed_time }}
+        {% elif scan_object.scan_status == 2 %}
+          {% if scan_object.get_total_scan_time_in_sec < 60 %}Completed in under a minute{% else %}{{ scan_object.start_scan_date|timesince:scan_object.stop_scan_date }}{% endif %}
+        {% elif scan_object.scan_status == 0 %}
+          Scan failed{% if scan_object.stop_scan_date %} after {{ scan_object.start_scan_date|timesince:scan_object.stop_scan_date }}{% endif %}
+        {% elif scan_object.scan_status == 3 %}
+          Scan aborted{% if scan_object.stop_scan_date %} after {{ scan_object.start_scan_date|timesince:scan_object.stop_scan_date }}{% endif %}
+        {% elif scan_object.scan_status == -1 %}
+          Queued
+        {% else %}
+          Unknown
+        {% endif %}
+      </td>
+    </tr>
+    <tr>
+      <th>Report rendered</th>
+      <td>{{ rendered_date }}</td>
+    </tr>
+  </table>
+</div>
+
+<div class="section flow" id="sec-charts">
+  <h1>Charts</h1>
+  {% if show_recon or subdomain_http_status_chart %}
+  <h2>Hosts by HTTP status</h2>
+  <div class="chart">
+    {% if subdomain_http_status_chart %}<img src="data:image/svg+xml;base64,{{ subdomain_http_status_chart }}">{% else %}<p>No chart data available.</p>{% endif %}
+  </div>
+  {% endif %}
+  {% if show_vuln %}
+    {% if all_vulnerabilities_count or unique_vulnerabilities %}
+    <h2>Findings by severity</h2>
+    <div class="chart">
+      {% if vulns_severity_chart %}<img src="data:image/svg+xml;base64,{{ vulns_severity_chart }}">{% else %}<p>No chart data available.</p>{% endif %}
+    </div>
+    {% endif %}
+  {% endif %}
+</div>
+
+{% if show_vuln %}
+<div class="section" id="sec-findings-summary">
+  <h1>Findings summary</h1>
+  {% if unique_vulnerabilities %}
+  <table class="grid">
+    <thead>
+      <tr><th class="num-col">#</th><th>Finding</th><th class="center">Instances</th><th>Severity</th></tr>
+    </thead>
+    <tbody>
+    {% for v in unique_vulnerabilities %}
+      <tr class="row-sev {% if v.severity == 4 %}sev-4{% elif v.severity == 3 %}sev-3{% elif v.severity == 2 %}sev-2{% elif v.severity == 1 %}sev-1{% elif v.severity == 0 %}sev-0{% else %}sev-u{% endif %}">
+        <td class="num-col" style="color: #111111;">{{ forloop.counter }}</td>
+        <td style="color: #111111;"><a href="#vuln-{{ v.name|slugify }}">{{ v.name }}</a></td>
+        <td class="center" style="color: #111111;">{{ v.count }}</td>
+        <td><span class="badge {% if v.severity == 4 %}sev-4{% elif v.severity == 3 %}sev-3{% elif v.severity == 2 %}sev-2{% elif v.severity == 1 %}sev-1{% elif v.severity == 0 %}sev-0{% else %}sev-u{% endif %}">{% if v.severity == 4 %}Critical{% elif v.severity == 3 %}High{% elif v.severity == 2 %}Medium{% elif v.severity == 1 %}Low{% elif v.severity == 0 %}Info{% else %}Unknown{% endif %}</span></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p>No findings were identified on the target.</p>
+  {% endif %}
+</div>
+{% endif %}
+
+{% if show_recon %}
+<div class="section" id="sec-assets">
+  <h1>Discovered assets</h1>
+  <h2>Hosts</h2>
+  <p>Total hosts: <strong>{{ scan_object.get_subdomain_count }}</strong>. Hosts answering HTTP 200: <strong>{{ subdomain_alive_count|default:0 }}</strong>.</p>
+  <table class="grid">
+    <thead>
+      <tr>
+        <th class="num-col">#</th><th>Host</th><th>Page title</th><th>HTTP status</th>{% if show_vuln %}<th class="center">Findings</th>{% endif %}
+      </tr>
+    </thead>
+    <tbody>
+    {% for h in subdomains %}
+      <tr>
+        <td class="num-col">{{ forloop.counter }}</td>
+        <td><a href="#host-{{ h.name|slugify }}">{{ h.name }}</a>{% if h.report_alias %} ({{ h.report_alias }}){% endif %}</td>
+        <td>{{ h.page_title|default:"" }}</td>
+        <td class="st {% if h.http_status >= 200 and h.http_status < 300 %}st-2{% elif h.http_status >= 300 and h.http_status < 400 %}st-3{% elif h.http_status >= 400 and h.http_status < 500 %}st-4{% elif h.http_status >= 500 and h.http_status < 600 %}st-5{% else %}st-o{% endif %}">{{ h.http_status|default_if_none:"-" }}</td>
+        {% if show_vuln %}<td class="center">{{ h.report_vulnerability_count|default:0 }}</td>{% endif %}
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+
+  {% if ip_addresses_count > 0 %}
+  <h2>Addresses</h2>
+  <p>Total addresses: <strong>{{ ip_addresses_count }}</strong>.</p>
+  <table class="grid">
+    <thead>
+      <tr><th class="num-col">#</th><th>Address</th><th>Open ports</th><th>Country</th><th>CDN</th></tr>
+    </thead>
+    <tbody>
+    {% for ip in ip_addresses %}
+      <tr>
+        <td class="num-col">{{ forloop.counter }}</td>
+        <td class="mono">{{ ip.address }}</td>
+        <td>{% for p in ip.ports.all %}{{ p.number }}/{{ p.service_name }}{% if not forloop.last %}, {% endif %}{% endfor %}</td>
+        <td>{% if ip.geo_iso %}{{ ip.geo_iso }}{% endif %}</td>
+        <td>{% if ip.is_cdn %}CDN{% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</div>
+
+<div class="section" id="sec-hosts">
+  <h1>Host details</h1>
+  {% if hosts_cut %}<p class="cutnote">To keep the report a usable size this section lists the {{ hosts_cut }}.</p>{% endif %}
+  {% for h in subdomains %}
+  <div class="card host edge-card" id="host-{{ h.name|slugify }}">
+    <h3>{{ h.name }}{% if h.report_alias %} ({{ h.report_alias }}){% endif %}</h3>
+    <p class="meta">HTTP status: <span class="st {% if h.http_status >= 200 and h.http_status < 300 %}st-2{% elif h.http_status >= 300 and h.http_status < 400 %}st-3{% elif h.http_status >= 400 and h.http_status < 500 %}st-4{% elif h.http_status >= 500 and h.http_status < 600 %}st-5{% else %}st-o{% endif %}">{{ h.http_status|default_if_none:"-" }}</span></p>
+    {% if h.page_title %}<p class="meta">Page title: {{ h.page_title }}</p>{% endif %}
+    {% for ip in h.ip_addresses.all %}
+    <p class="ipline"><span class="mono">{{ ip.address }}</span>{% if ip.ports.all %}: {% for p in ip.ports.all %}{{ p.number }}/{{ p.service_name }}{% if not forloop.last %}, {% endif %}{% endfor %}{% endif %}</p>
+    {% endfor %}
+    {% if show_vuln and h.report_vulnerability_names %}
+    <h4>Findings</h4>
+    <ul>
+      {% for n in h.report_vulnerability_names %}<li><a href="#vuln-{{ n|slugify }}">{{ n }}</a></li>{% endfor %}
+    </ul>
+    {% endif %}
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+{% if show_vuln %}
+<div class="section" id="sec-findings">
+  <h1>Findings</h1>
+  {% if findings_cut %}<p class="cutnote">To keep the report a usable size this section lists the {{ findings_cut }}.</p>{% endif %}
+  {% for f in all_vulnerabilities %}
+  <div class="card finding edge-card {% if f.severity == 4 %}sev-4{% elif f.severity == 3 %}sev-3{% elif f.severity == 2 %}sev-2{% elif f.severity == 1 %}sev-1{% elif f.severity == 0 %}sev-0{% else %}sev-u{% endif %}" id="vuln-{{ f.name|slugify }}">
+    <h3 style="color: #111111;">{{ f.name }}{% with p=f.get_path %}{% if p %} in <span class="path">{{ p }}</span>{% endif %}{% endwith %}</h3>
+    <p class="meta">
+      <span class="sev-label {% if f.severity == 4 %}sev-4{% elif f.severity == 3 %}sev-3{% elif f.severity == 2 %}sev-2{% elif f.severity == 1 %}sev-1{% elif f.severity == 0 %}sev-0{% else %}sev-u{% endif %}">{% if f.severity == 4 %}Critical{% elif f.severity == 3 %}High{% elif f.severity == 2 %}Medium{% elif f.severity == 1 %}Low{% elif f.severity == 0 %}Info{% else %}Unknown{% endif %}</span>
+      {% if f.source %}<span class="tag">{{ f.source|upper }}</span>{% endif %}
+      {% if f.cvss_score is not None %}<span class="tag">CVSS {{ f.cvss_score }}</span>{% endif %}
+      {% for c in f.cve_ids.all %}<span class="tag">{{ c }}</span>{% endfor %}
+      {% for c in f.cwe_ids.all %}<span class="tag">{{ c }}</span>{% endfor %}
+    </p>
+    {% if f.cvss_metrics %}<h4>CVSS metrics</h4><div class="metrics">{{ f.cvss_metrics }}</div>{% endif %}
+    {% if f.description %}<h4>Description</h4><div class="text-block">{{ f.description|linebreaks }}</div>{% endif %}
+    {% if f.impact %}<h4>Impact</h4><div class="text-block">{{ f.impact|linebreaks }}</div>{% endif %}
+    {% if f.remediation %}<h4>Remediation</h4><div class="text-block">{{ f.remediation|linebreaks }}</div>{% endif %}
+    <h4>Affected URL</h4>
+    <div class="urlbox">{{ f.http_url }}</div>
+    {% if f.references.all %}
+    <h4>References</h4>
+    <ul>
+      {% for r in f.references.all %}<li><a href="{{ r }}" rel="noopener noreferrer">{{ r }}</a></li>{% endfor %}
+    </ul>
+    {% endif %}
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+<div class="section end" id="sec-end">
+  <p>End of report</p>
+</div>
+</body>
+</html>

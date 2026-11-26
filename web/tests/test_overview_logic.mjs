@@ -21,10 +21,10 @@ test('a flat series is a flat line, one value is a point in the middle and nothi
 });
 
 test('the sparkline says in words where the figure went', () => {
-  assert.equal(sparkLabel('Exposed hosts', [41, 30, 55]), 'Exposed hosts over 3 days, rising from 41 to 55');
-  assert.equal(sparkLabel('Exposed hosts', [9, 4]), 'Exposed hosts over 2 days, falling from 9 to 4');
+  assert.equal(sparkLabel('Hosts with open findings', [41, 30, 55]), 'Hosts with open findings over 3 days, rising from 41 to 55');
+  assert.equal(sparkLabel('Hosts with open findings', [9, 4]), 'Hosts with open findings over 2 days, falling from 9 to 4');
   assert.equal(sparkLabel('Mean time to fix', [3.3, 3.3]), 'Mean time to fix over 2 days, flat at 3.3');
-  assert.match(sparkLabel('Exposed hosts', [1]), /not enough days/);
+  assert.match(sparkLabel('Hosts with open findings', [1]), /not enough days/);
 });
 
 test('worse is fire and better is ok; anything else is not coloured', () => {

@@ -6,8 +6,8 @@
 - ``status``: a pill (Needs you now, Watch, All clear), one headline sentence and one short paragraph under it. Both are **templates filled from counts**,
   never written by a model: the number of hosts with a proven finding, with likely findings and with high-hygiene items (``situations``), the top threat of the week
   that reaches a host (``report_threats``) and how many hosts were exposed a week ago and now (``stats_history`` snapshots, the live count for today);
-- ``kpis``: four tiles (externally facing hosts, needs attention, critical findings open, mean time to fix) with a 7-day change and a 14-day series. Externally
-  facing hosts and needs attention are live when the caller passes them (``live``; ``build`` always passes the needs figure, the hosts of the ranking that need a
+- ``kpis``: four tiles (hosts with open findings, needs attention, critical findings open, mean time to fix) with a 7-day change and a 14-day series. Hosts
+  with open findings and needs attention are live when the caller passes them (``live``; ``build`` always passes the needs figure, the hosts of the ranking that need a
   person soon, the email report's own number); the others are the daily snapshots' (``StatsSnapshot``: counting them live is the walk over every finding that
   once overloaded the server), each saying which day it is as of;
 - ``threats``: this week's digest, grouped by product, with the hosts counted over the whole group (the same hosts in four CVEs are four hosts, not sixteen), and
@@ -191,7 +191,7 @@ def kpis(ids, live=None, now=None):
         if live.get('hosts') is not None:
             hosts[today] = live['hosts']
     ref = max(exposed, default=None)
-    tiles = [_tile('exposed', 'Externally facing hosts', exposed, ref, f'of {hosts[ref]:,} hosts' if ref in hosts and hosts[ref] else '')]
+    tiles = [_tile('exposed', 'Hosts with open findings', exposed, ref, f'out of {hosts[ref]:,} hosts' if ref in hosts and hosts[ref] else '')]
     needs = _metric(days, 'needs')
     if live.get('needs') is not None:
         needs[today] = live['needs']
@@ -222,13 +222,13 @@ def threat_sentence(group):
 
 
 def exposure_sentence(tile):
-    """"Externally facing hosts went from 26 to 55 since last Saturday.", or '' when there is nothing to compare or nothing moved."""
+    """"Hosts with open findings went from 26 to 55 since last Saturday.", or '' when there is nothing to compare or nothing moved."""
     if not tile or tile['delta'] in (None, 0) or tile['since'] is None:
         return ''
     base_day = date.fromisoformat(tile['since'])
     ref = date.fromisoformat(tile['as_of']) if tile.get('as_of') else timezone.localdate()
     was = tile['value'] - tile['delta']
-    return f"Externally facing hosts went from {was:,} to {tile['value']:,} since {since_words(base_day, ref)}."
+    return f"Hosts with open findings went from {was:,} to {tile['value']:,} since {since_words(base_day, ref)}."
 
 
 def host_counts(groups):

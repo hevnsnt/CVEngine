@@ -1753,7 +1753,9 @@ def kind_report(agent, now=None, eff=None):
         row = {'declared': kind in declared, 'effective': kind in eff.caps, 'mode': p['mode'], 'source': p['source'], 'cap': p['cap'],
                'held': held.get(kind, 0), 'by': p['by'], 'at': p['at'], 'retry_at': None}
         if p['mode'] == 'deny':
-            state, note = ('machine_off', 'turned off on the machine; only a change there lifts it') if p['source'] == 'machine' else ('denied', '')
+            state, note = (('machine_off', 'turned off on the machine; only a change there lifts it') if p['source'] == 'machine'
+                           else ('denied', 'off on this hosted install (CVENGINE_HOSTED_LICENSE_SAFE): WPScan needs a commercial license for hosted use')
+                           if p['source'] == 'hosted license' else ('denied', ''))
         elif kind not in declared:
             state, note = 'unavailable', 'not available on this Sentinel (tool missing or off on the machine)'
         elif kind in eff.withheld:
