@@ -580,8 +580,8 @@ def _route_answers(result, by_host, chunk):
 
 def try_signed_routes(project, scan, credential, by_host):
     """``{url: result or error}`` for the routes of ``by_host`` (``{host: [urls]}``, all covered by the one stored sign-in ``credential``) asked signed in by
-    the built-in scanner (kind ``route_probe_signed``): one task per 25 hosts, carrying ``secret_ref`` (a reference to the credential, never a value), which
-    only a built-in scanner that reads stored sign-ins is ever offered; it reads the credential once through ``sentinel/tasks/<id>/secret``. The answers
+    a Sentinel (kind ``route_probe_signed``): one task per 25 hosts, carrying ``secret_ref`` (a reference to the credential, never a value), which only a
+    built-in scanner that reads stored sign-ins, or an external Sentinel the credential's owner allowed (``signin_delivery.decision``), is ever offered; it reads the credential once through ``sentinel/tasks/<id>/secret``. The answers
     have the shape ``route_auth.analyse`` gives, and a route the scanner reports with an error, or not at all, is in the answer as an ``Exception``
     (asked again later, never a state). The kind is in ``NEVER_LOCAL`` and has no local path: when no scanner can take the work, or a task ended
     without a result, this raises ``ScannerUnavailable`` (nothing recorded, the routes stay due)."""
@@ -597,7 +597,7 @@ def try_signed_routes(project, scan, credential, by_host):
         result = sentinel_dispatch.dispatch_or_none(project, 'route_probe_signed', target, host=_hosts_label(chunk), scan=scan,
                                                     secret_ref=sentinel_broker.secret_ref_for(credential.pk))
         if result is None:  # dispatch_or_none raised ScannerUnavailable when no scanner took it: this is a task that ended without a result
-            raise ScannerUnavailable('route_probe_signed', 'the built-in scanner returned no result for a signed-in route check')
+            raise ScannerUnavailable('route_probe_signed', 'the scanner returned no result for a signed-in route check')
         answered.update(_route_answers(result, by_host, chunk))
     return answered
 

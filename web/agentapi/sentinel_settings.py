@@ -418,7 +418,10 @@ UPDATE_STATUSES = ('idle', 'waiting', 'draining', 'updating', 'done', 'failed')
 # them in a private file for the run and masks them. A Sentinel that does not say so (every older client) is never sent them; the field is optional.
 # ``credential_filter`` (any Sentinel): it leaves default-login and bruteforce templates and every installed template that sends a fixed credential out of a nuclei web
 # run whose task does not say a person allowed credential checks. While they are off a Sentinel that does not say so is not given nuclei web work.
-FEATURES = ('secret_read', 'vantage', 'bbot_keys', 'credential_filter')
+# ``secret_read_external`` (a Sentinel that is not the built-in scanner): it reads a stored sign-in through the same single-use read, writes it only to a 0600
+# file in a 0700 temporary directory for the run (deleted afterwards) and masks it in everything it reports. Only such a client is ever sent a sign-in, and
+# only one whose owner allowed external Sentinels for it (``signin_delivery``).
+FEATURES = ('secret_read', 'vantage', 'bbot_keys', 'credential_filter', 'secret_read_external')
 
 
 def clean_info(raw):

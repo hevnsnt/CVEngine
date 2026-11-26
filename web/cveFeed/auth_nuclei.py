@@ -1,9 +1,10 @@
 """A template pass with a stored sign-in (cveFeed.auth_checks): the authenticated pass that ``nuclei_scan.run_nuclei`` runs for the hosts a credential
 covers.
 
-Where it runs: on the built-in scanner only, through the stream's ``signed_in`` runner (``sentinel_dispatch.wrap_nuclei_stream``): one task per
-credential and chunk, carrying only ``secret_ref`` (a reference to the credential); the built-in scanner reads the credential once through
-``POST sentinel/tasks/<id>/secret`` and no other Sentinel is ever offered the task. Without a built-in scanner that reads stored sign-ins the pass
+Where it runs: on the built-in scanner, or on an external Sentinel the credential's owner allowed (``agentapi.signin_delivery``), through the stream's
+``signed_in`` runner (``sentinel_dispatch.wrap_nuclei_stream``): one task per credential and chunk, carrying only ``secret_ref`` (a reference to the
+credential); the scanner reads the credential once through ``POST sentinel/tasks/<id>/secret`` and no other Sentinel is ever offered the task. Without
+a Sentinel that may read the stored sign-in the pass
 waits for one (nothing is recorded, the targets stay due): it never runs on this server, and the server never writes the values to a file. The
 scanner keeps them in a 0600 file on a memory file system for the run and wipes it afterwards, never on a command line, in the environment or in a
 log; it sends each only to the host it was stored for and follows no redirect. The targets are explicit ``scheme://host[:port]`` URLs for exactly
@@ -110,7 +111,7 @@ def run_authenticated(scan, scope, targets, stream, tags=None, severities=None, 
             ledger.record(REFUSED_SERVICE, [_asset(item.url, item.credential) for item in planned if id(item) not in kept], project, scan, 'refused')
         if not plan:
             return {**summary, 'skipped': 'Nuclei TLS is not verified'}
-        dispatched = getattr(stream, 'signed_in', None)  # the built-in scanner's secure read (sentinel_dispatch.signed_in_stream)
+        dispatched = getattr(stream, 'signed_in', None)  # the scanner's secure read (sentinel_dispatch.signed_in_stream)
         if dispatched is None:  # a stream with no secure read (an internal one): a stored sign-in is sent nowhere else
             return {**summary, 'skipped': 'a signed-in pass runs only on the built-in scanner'}
         ledger_name = ledger_service(service)
@@ -167,7 +168,7 @@ def run_authenticated(scan, scope, targets, stream, tags=None, severities=None, 
                                              f'{auth_checks.SEEN_LABEL}', project=project, severity=sev)
                     ledger.record(ledger_name, chunk, project, scan)
                     scanned += chunk
-            except ScannerUnavailable as exc:  # no built-in scanner can take it and nuclei may not run here: not a failure, the targets stay due
+            except ScannerUnavailable as exc:  # no Sentinel that may read the sign-in can take it and nuclei may not run here: not a failure, the targets stay due
                 message = auth_checks.safe_error(exc, values)
                 left = len([a for a in won_assets if a not in set(scanned)])
                 activity.settle(running, 'done', message=f'Authenticated nuclei for {domain.name} is waiting: no scanner could take this work '

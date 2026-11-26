@@ -37,7 +37,7 @@ Forty kinds of work (`contract_version` 9), each a capability the Sentinel decla
 | `node2shell`                                     | The read-only check for CVE-2026-111497 (vendored node2shell detector) |
 | `db_probe`                                       | One credential-less connection to a database port, to read its greeting |
 | `http_probe`, `route_probe`                      | The version and identity probes, and the anonymous web route check (Python, in the client) |
-| `route_probe_signed`                             | The web route check signed in: reads a stored sign-in once and sends it only where it was stored for (built-in scanner only) |
+| `route_probe_signed`                             | The web route check signed in: reads a stored sign-in once and sends it only where it was stored for (built-in scanner, or an external Sentinel the owner allowed) |
 | `vhost_probe`, `subdir_probe`                    | Other sites on an address, and applications under a path |
 | `page_read`                                      | A validation re-test's HEAD of a URL or re-read of a host's front pages and scripts, the control GET of the result screen and the readme titles of a WordPress site's plugins |
 | `bucket_check`                                   | The anonymous checks of cloud storage |
@@ -49,7 +49,7 @@ Forty kinds of work (`contract_version` 9), each a capability the Sentinel decla
 | `openvas`                                        | A Greenbone scan, only when the [OpenVAS add-on](OPENVAS.md) is on           |
 | `discover`                                       | A live-host sweep of a declared internal network                             |
 
-Three kinds stay with the built-in scanner while the install has one (`sentinel_broker.BUILTIN_KINDS`): `path_probe`, `nuclei_validate` and `route_probe_signed`. `route_probe_signed` never leaves it (it reads a stored sign-in); with no built-in scanner, `path_probe` and `nuclei_validate` go to the project's own Sentinels whose contract version is at least the kind's `external_since` (`path_probe` 3, `nuclei_validate` 4). The server itself keeps the plans, the schedules, the budgets and the storing and judging of what comes back.
+Three kinds stay with the built-in scanner while the install has one (`sentinel_broker.BUILTIN_KINDS`): `path_probe`, `nuclei_validate` and `route_probe_signed`. `route_probe_signed` leaves it only for an external Sentinel that may read that task's stored sign-in ([Stored sign-ins on external Sentinels](#stored-sign-ins-on-external-sentinels)); with no built-in scanner, `path_probe` and `nuclei_validate` go to the project's own Sentinels whose contract version is at least the kind's `external_since` (`path_probe` 3, `nuclei_validate` 4). The server itself keeps the plans, the schedules, the budgets and the storing and judging of what comes back.
 
 ## External or internal, full or light
 
@@ -173,7 +173,7 @@ normal back-pressure, and red only past 20 minutes. Details: [SCANNER-ARCHITECTU
 A Sentinel is exactly as untrusted as any other agent ([TENANCY.md](TENANCY.md)).
 
 - **Results are typed and clipped.** Each kind has one fixed shape. Strings are clipped, lists capped, and anything unexpected is a `400`. Nothing it reports is run or used to build a command.
-- **It sees little.** A task carries only its own target. An external Sentinel never receives stored sign-ins (only the built-in scanner reads one, through the secure read below), another project's data or database access. The one thing it may be sent besides its target is a project's discovery API keys, for that project's `bbot_discovery` tasks only and only as described in [Discovery API keys on your Sentinels](#discovery-api-keys-on-your-sentinels). WPScan's API token travels in its task and is scrubbed once the task ends.
+- **It sees little.** A task carries only its own target. An external Sentinel never receives another project's data or database access. The two things it may be sent besides its target are a project's discovery API keys, for that project's `bbot_discovery` tasks only and only as described in [Discovery API keys on your Sentinels](#discovery-api-keys-on-your-sentinels), and a stored sign-in, only when its owner allowed external Sentinels for it, as described in [Stored sign-ins on external Sentinels](#stored-sign-ins-on-external-sentinels). WPScan's API token travels in its task and is scrubbed once the task ends.
 - **Its own token.** A Sentinel's token has the scope `sentinel`: it reaches the Sentinel routes and nothing else (not the rest of the API, not MCP), so it is not its administrator's token. It lasts 90 days, and a heartbeat renews the same token in place when under 60 days are left. A Sentinel that was off for longer must be enrolled again.
 - **Scope and leases.** It can only claim work in its enrolled scope and capabilities. A claimed task must be accepted within two minutes. A running task is kept by the heartbeat (which can also list the task ids it is running, so a task it dropped ends early) and lost after five minutes without one.
 - **Results are bound to the task.** Ports and findings for an address that was not dispatched are dropped. A result body can be up to 24 MB; every other route takes 4 MB.
@@ -195,16 +195,38 @@ A held address is confirmed, and added to the host, when:
 
 A safety decision never waits for the confirmation: a held answer that places a single-host discovery target on the do-not-scan list still refuses that run, and every scan task carries the list's ranges to the scanner's own scope floor.
 
-### Secure read of a stored sign-in (built-in scanner only)
+### Secure read of a stored sign-in
 
 A task that needs a stored sign-in carries only a reference to it (`secret_ref`, such as `authcred:12`), never its value. `POST /api/v1/sentinel/tasks/<id>/secret` returns the decrypted credential (`{credential: {headers, cookie, target, host, origins, allow_untrusted_certificate, expires_at, revision}, task_id}`, `Cache-Control: no-store`) with these rules:
 
-- Only the built-in scanner may call it, with its own token, for a task assigned to it that is `claimed` or `running` and names a credential. An external Sentinel, a person's token (full or read only) or a Sentinel's token for another agent's task is refused: `403` for a caller that is not the built-in scanner, `404` for a task that is not its own or not signed in.
+- Only the built-in scanner, or an external Sentinel the gate below allows, may call it, with its own token, for a task assigned to it that is `claimed` or `running` and names a credential. Any other external Sentinel, a person's token (full or read only) or a Sentinel's token for another agent's task is refused: `403` for a caller that is not the built-in scanner, `404` for a task that is not its own or not signed in.
 - It works once per task. The server wins an atomic update of `secret_read_at` before it decrypts anything, so a second or concurrent read is a `409` and returns nothing.
 - Every call, granted or refused, is written to the audit log as `sentinel.secret.read` with the task, the Sentinel, the credential reference and the outcome. The value is never in the audit log, a task row, an activity line or a log. It is limited to 6 calls a minute per token.
-- A task with a `secret_ref` is never offered to any Sentinel but the built-in one, and only to a built-in scanner image that reads stored sign-ins (its heartbeat's `info.features` has `secret_read`): next task, queue counts and capacity all leave it out for the others. The task a Sentinel receives says `signed_in: true` and nothing more.
+- A task with a `secret_ref` is offered only to a built-in scanner image that reads stored sign-ins (its heartbeat's `info.features` has `secret_read`) and to the external Sentinels the gate below allows: next task, queue counts and capacity all leave it out for the others. The task a Sentinel receives says `signed_in: true` and nothing more.
 
-The signed-in Nuclei pass of a target with a stored sign-in sets it: one `nuclei_*` task per credential and chunk of up to 64 origins (`agentapi.sentinel_dispatch.signed_in_stream`). The built-in scanner reads the credential once for the task, runs Nuclei with it from a 0600 file on a memory file system, and wipes it afterwards. Without a built-in scanner that can, the pass waits for one: it never runs on the server.
+The signed-in Nuclei pass of a target with a stored sign-in sets it: one `nuclei_*` task per credential and chunk of up to 64 origins (`agentapi.sentinel_dispatch.signed_in_stream`). The scanner that takes it reads the credential once for the task, runs Nuclei with it from a 0600 file in a 0700 temporary directory (on a memory file system when there is one) with `-sf` and `-dr`, and wipes and removes both afterwards. Without a Sentinel that may read it, the pass waits for one: it never runs on the server.
+
+### Stored sign-ins on external Sentinels
+
+A stored sign-in (Targets, **Sign-in**) goes to the built-in scanner only, unless its owner opts in. This matters where the built-in scanner is off (Hosted, for example): there a stored sign-in does nothing until an external Sentinel may read it.
+
+**Opt-in, per sign-in.** The sign-in form has **Also send it to my external Sentinels** (`allow_external_sentinels`, off by default, also on `PUT /api/v1/projects/{slug}/targets/{id}/auth-credential`; the MCP list shows it but cannot set it). Turning it on or off is audited as `target.auth_credential.external_sentinels`. Every sign-in stored before this switch existed keeps it off.
+
+**One gate.** `agentapi.signin_delivery.decision` decides, and the claim, the refusal, the secure read, the capacity answer and the explanations all use it. The built-in scanner is allowed as before. Any other Sentinel needs all of:
+
+- its client reports `secret_read_external` in `info.features` (an older client never does, and is never sent a sign-in; `secret_read`, the built-in image's word, does not count);
+- an active, unrevoked Sentinel token that is not read only;
+- the task is a signed-in Nuclei pass (`nuclei_light`, `nuclei_targeted`, `nuclei_deep`) or the signed-in route check (`route_probe_signed`);
+- the credential exists, belongs to the task's project and has not expired;
+- its owner switched **Also send it to my external Sentinels** on;
+- the Sentinel was enrolled by someone who may manage that sign-in: an App Admin, or an admin of the project's organization (the people who may store it). A Sentinel a project member enrolled is never sent one, the same rule that keeps discovery keys from a Sentinel whose enrolling user could not set them. An instance wide fleet Sentinel an App Admin enrolled qualifies; the owner's switch still decides;
+- and the project and target are in the Sentinel's scope.
+
+**The read.** The same single-use read as for the built-in scanner: only for a task the Sentinel holds (`claimed` or `running`), once (`409` after), decrypted only after the compare-and-set on `secret_read_at` was won, with the owner's switch read again in the query that decrypts. Every call is audited as `sentinel.secret.read`, and a granted one to an external Sentinel also as `sentinel.signin.delivered` (the Sentinel, the task and the credential id, never a value). A refused one names the gate's reason in the audit row (`signin_external_off`, `signin_not_owner`, `signin_client_outdated`, `signin_expired`, `signin_gone`, `signin_wrong_project`).
+
+**On the Sentinel.** The client writes the sign-in for a Nuclei run to a 0600 file in a 0700 temporary directory (a memory file system when there is one), passes it with `-sf` and `-dr`, and wipes and deletes it when the run ends; the route check keeps it in memory only. Every value is masked in the result and in every error. An operator who does not want a Sentinel to hold sign-ins sets `CVENGINE_SENTINEL_SIGNED_IN=0` on it: it then reports neither the feature nor `route_probe_signed`.
+
+**When signed-in work cannot run.** With no Sentinel that may read the sign-in live, the pass waits and says why: the sign-in is not allowed on external Sentinels, the Sentinel's enrolling user may not manage it, or the client is too old.
 
 ### Discovery API keys on your Sentinels
 
