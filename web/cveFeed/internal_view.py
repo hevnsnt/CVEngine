@@ -59,9 +59,18 @@ def _load():
 
 
 def table():
+    """The table of every project, whoever asks first. It is built with the request's tenancy scope lifted: the table is kept per process and
+    shared by every caller, so a table built inside one caller's scope would hold only that caller's projects, and every other caller would
+    find no internal host until it was rebuilt. Lifting the scope leaks nothing: a caller only ever looks up a name of its own rows in it."""
     now = time.monotonic()
     if _cache['at'] is None or now - _cache['at'] > CACHE_SECONDS:
-        _cache.update(at=now, table=_load())
+        from tenancy import scope
+        tokens = scope.set_scope(None, None)
+        try:
+            built = _load()
+        finally:
+            scope.reset_scope(tokens)
+        _cache.update(at=now, table=built)
     return _cache['table']
 
 
