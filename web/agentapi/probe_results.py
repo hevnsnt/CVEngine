@@ -231,8 +231,19 @@ def _certificate(raw):
     return out
 
 
+# Direct Send on Microsoft 365 is a finding only when a Sentinel asked the tenant over SMTP and it accepted (``evidence.tested`` with a 25x
+# reply, cvengine_scanner.probes.direct_send). An older Sentinel raised it for every Microsoft 365 MX read from DNS alone: that guess is dropped.
+DIRECT_SEND_CHECK = 'mx_direct_send'
+
+
+def direct_send_tested(evidence):
+    """True when the evidence of an ``mx_direct_send`` finding records a live test the tenant accepted."""
+    return isinstance(evidence, dict) and evidence.get('tested') is True and str(evidence.get('reply') or '').startswith('25')
+
+
 def _finding(raw):
-    """One mail finding clipped to the HygieneFinding columns, or None: an unknown check family, a severity out of range or a host that is no name."""
+    """One mail finding clipped to the HygieneFinding columns, or None: an unknown check family, a severity out of range or a host that is no name.
+    An ``mx_direct_send`` that was not tested is None (``direct_send_tested``)."""
     if not isinstance(raw, dict):
         return None
     check, severity, host = raw.get('check'), raw.get('severity'), raw.get('host')
@@ -242,8 +253,11 @@ def _finding(raw):
         return None
     if not isinstance(host, str) or not _HOST_NAME.fullmatch(host):
         return None
+    evidence = _evidence(raw.get('evidence'))
+    if check == DIRECT_SEND_CHECK and not direct_send_tested(evidence):
+        return None
     return {'check': check, 'severity': severity, 'title': _text(raw.get('title'), 300), 'detail': _text(raw.get('detail'), 2000), 'host': host,
-            'evidence': _evidence(raw.get('evidence'))}
+            'evidence': evidence}
 
 
 def clean_hygiene_check(body):
@@ -326,6 +340,8 @@ def _supplier_posture(item):
         return None
     check, severity = item.get('check'), item.get('severity')
     if not isinstance(check, str) or not CHECK_NAME_RE.match(check) or isinstance(severity, bool) or not isinstance(severity, int) or not 0 <= severity <= 4:
+        return None
+    if check == DIRECT_SEND_CHECK:  # a supplier is never tested, so Direct Send can never be known for one
         return None
     return {'check': check, 'severity': severity, 'title': _text(item.get('title'), 300), 'detail': _text(item.get('detail'), 4000),
             'category': item['category'], 'evidence': _evidence(item.get('evidence'))}
