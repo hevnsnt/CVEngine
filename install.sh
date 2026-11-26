@@ -231,6 +231,8 @@ CVENGINE_INSTALL_SENTINELS=$sentinels ./scripts/init-env.sh ${domain:+"$domain"}
 # the updater applies too.
 log() { ok "$*"; }
 cvengine_fit_memory .env
+# This server's own public addresses, which the self exclusion never scans (CVENGINE_SELF_ADDRESSES; the updater keeps them current)
+if [ -f scripts/self-addresses.sh ] && . scripts/self-addresses.sh; then cvengine_ensure_self_addresses || true; fi
 # A host port chosen for this run (CVENGINE_HTTPS_PORT, CVENGINE_HTTP_PORT in the environment, for a machine where something else holds 443) is
 # written to .env: make, docker compose and the update watcher run later without this environment and would otherwise publish the defaults, move the
 # proxy back to 443 (or fail on it) and leave the address printed above wrong. Without a value given here, what .env already says stays.

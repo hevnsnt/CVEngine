@@ -858,6 +858,11 @@ fi
 if [[ -f scripts/client-address.sh ]] && . scripts/client-address.sh && cvengine_ensure_upstream_secret "$compose_env_file"; then
     echo 'Generated the upstream secret (CVENGINE_UPSTREAM_SECRET in .env). A host nginx in front of the proxy needs it: scripts/client-address-check.sh --snippet'
 fi
+# This server's own public addresses for the self exclusion (scripts/self-addresses.sh): written to .env as a managed line when nobody set them, and
+# replaced when a managed value is stale; an operator's own value is kept. web, celery and celery-beat, recreated below, read .env. Never fails.
+if [[ -f scripts/self-addresses.sh ]] && . scripts/self-addresses.sh; then
+    cvengine_ensure_self_addresses || true
+fi
 # The database's own settings are in the compose file (max_connections). `up -d --no-deps db` recreates the db container only when its
 # definition changed since it was created (once, on the update that brings the change: a restart of a few seconds), and is a no-op otherwise.
 "${compose[@]}" up -d --no-deps db

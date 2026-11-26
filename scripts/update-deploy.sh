@@ -268,6 +268,11 @@ deploy_steps() {
   if [ -f scripts/client-address.sh ] && . scripts/client-address.sh && cvengine_ensure_upstream_secret "$(cvengine_compose_env_file "${compose[@]}")"; then
     log "generated the upstream secret (CVENGINE_UPSTREAM_SECRET in .env); a host nginx in front of the proxy needs it to pass on the client address: scripts/client-address-check.sh --snippet"
   fi
+  # This server's own public addresses for the self exclusion (scripts/self-addresses.sh): written to .env as a managed line when nobody set them, and
+  # replaced when a managed value is stale; an operator's own value is kept. web, celery and celery-beat, recreated below, read .env. Never fails.
+  if [ -f scripts/self-addresses.sh ] && . scripts/self-addresses.sh; then
+    cvengine_ensure_self_addresses || true
+  fi
   # nginx must accept the proxy configuration it will start with (the new files, the secret just written) before anything is changed for good
   proxy_preflight || return 1
   # The database's own settings are in the compose file (max_connections). `up -d --no-deps db` recreates the db container only when its
