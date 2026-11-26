@@ -246,7 +246,9 @@ def run_job(server, provider, job):
         for key in ('http_status', 'stop_reason'):
             if getattr(exc, key, None) is not None:
                 body[key] = getattr(exc, key)
-        return server.job_result(ref, body), exc.category
+        if llm.usage_limit_message(exc):
+            body['provider_message'] = llm.usage_limit_message(exc)  # the server's alert names the pause (and its resume date) from this
+        return server.job_result(ref, body), llm.failure_category(exc)
     body = {'lease': lease, 'text': text[:JOB_REPLY_LIMIT], 'calls': calls[:8], 'provider': provider.get('provider'),
             'model': str(model)[:200]}
     return server.job_result(ref, body), ''

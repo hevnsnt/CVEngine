@@ -29,6 +29,7 @@ from importlib import import_module
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
+from cveFeed import ai_pause
 from cvengine.state_machines import AI_ANSWERED, AI_APPLIED, AI_APPLYING, AI_EXPIRED, AI_FAILED, AI_JOB, AI_LEASED, AI_QUEUED
 
 logger = logging.getLogger(__name__)
@@ -367,7 +368,9 @@ def submit(job_id, body, now=None):
         if has_text:
             job.result = {'text': body['text']}
         else:
-            job.result = {'error': error, **({'http_status': body['http_status']} if _count(body.get('http_status'), 999) else {}),
+            message = str(body.get('provider_message') or '')[:300]
+            usage_limit = bool(message) and ai_pause.is_usage_limit(message)
+            job.result = {'error': error, **({'provider_message': message} if usage_limit else {}), **({'http_status': body['http_status']} if _count(body.get('http_status'), 999) else {}),
                           **({'stop_reason': str(body['stop_reason'])[:40]} if isinstance(body.get('stop_reason'), str) else {})}
             job.error_category = error
         job.status, job.lease, job.lease_until, job.answered_at = 'answered', '', None, now
@@ -377,6 +380,10 @@ def submit(job_id, body, now=None):
         job.save()
         pk = job.pk
         transaction.on_commit(lambda: _schedule(pk))
+    if has_text:
+        ai_pause.resolve_alert(now)
+    elif usage_limit:
+        ai_pause.raise_alert(message, now)
     return {'accepted': True}
 
 
