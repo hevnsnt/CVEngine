@@ -118,7 +118,11 @@ function card(s, reload, detail, group) {
   head.append(orbFor(s, group));
   const title = el("span", "sl-title");
   const state = el("span", "sl-state", stateLine(s));
-  if (s.capabilities.includes(INTERNAL)) state.append(" ", badge("Internal network", "internal"));
+  if (s.capabilities.includes(INTERNAL)) {
+    const tag = badge("Internal network", "internal");
+    tag.title = "Scans only hosts inside the declared internal ranges";
+    state.append(" ", tag);
+  }
   healthFlags(s).forEach((f) => {
     const chip = badge(f.text, f.kind);
     if (f.title) chip.title = f.title;
