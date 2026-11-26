@@ -160,7 +160,7 @@ ACCOUNT_TABLE = {f'{m} {p}': OWN for (m, p) in account_api.ROUTES}
 BOUNTY_TABLE = {f'{m} {p}': (NOT_FOUND if '(?P<engagement_id>' in p or '(?P<report_id>' in p else OWN) for m, p, _fn in bounty_api.ROUTES}
 # the web pages' own JSON views: each takes ?project= (or nothing) and answers for the caller's scope
 VIEW_GETS = ('/cve/api/feed', '/cve/api/cves', '/cve/api/stats', '/cve/api/overview', '/cve/api/scanner', '/cve/api/graph', '/cve/api/graph-live',
-             '/cve/api/activity', '/cve/api/discovery', '/cve/api/alive')
+             '/cve/api/activity', '/cve/api/discovery', '/cve/api/alive', '/cve/api/internal')
 
 
 def _text(response):
@@ -627,7 +627,7 @@ class EveryRouteTenancyTests(TestCase):
 		r = client.get(f'/cve/{A_SLUG}/scans/{v["scan_id"]}/')  # the scan page is a shell the script fills from /api/v1: nothing of the scan is in it
 		if r.status_code == 500 or self._leaks(_text(r)):
 			problems.append(f'GET own scan page with the victim scan id: {r.status_code} {self._leaks(_text(r))}')
-		for page in (f'/cve/{V_SLUG}/hosts/', f'/cve/{V_SLUG}/scans/{v["scan_id"]}/', f'/cve/{V_SLUG}/hosts/{v["host_id"]}/screenshot/',
+		for page in (f'/cve/{V_SLUG}/hosts/', f'/cve/{V_SLUG}/internal/', f'/cve/{V_SLUG}/scans/{v["scan_id"]}/', f'/cve/{V_SLUG}/hosts/{v["host_id"]}/screenshot/',
 		             f'/cve/{A_SLUG}/hosts/{v["host_id"]}/screenshot/',
 		             f'/cve/api/node?id=sub:{v["host_id"]}', f'/cve/api/node?id=dom:{v["target_id"]}', f'/scan/export/subdomains/{v["scan_id"]}',
 		             f'/scan/export/endpoints/{v["scan_id"]}', f'/scan/export/urls/{v["scan_id"]}', f'/scan/create_report/{v["scan_id"]}'):
