@@ -154,6 +154,36 @@ def _nuclei_in_force(cfg):
         return ''
 
 
+def _bulk_and_budget(cfg):
+    """The bulk model and the AI money budget as the AI section shows them: what is saved, what is in force and where it comes from, and the
+    spend of this month and today (``cveFeed.ai_budget.state``)."""
+    from cveFeed import ai_budget
+    from cvengine import ai_routing
+    try:
+        budget = ai_budget.state(row=cfg)
+    except Exception:  # noqa: BLE001 - the page still loads when the ledger cannot be read; the queue holds the work meanwhile
+        budget = {'message': 'the AI spend could not be read'}
+    return {'bulk_model': cfg.bulk_model or '', 'use_bulk_model': bool(cfg.use_bulk_model),
+            'bulk_model_in_force': ai_routing.bulk_model(cfg) if cfg.provider else '',
+            'bulk_stages': sorted(stage for stage, kind in ai_routing.STAGE_MODEL.items() if kind == ai_routing.BULK),
+            'main_stages': sorted(stage for stage, kind in ai_routing.STAGE_MODEL.items() if kind == ai_routing.MAIN),
+            'monthly_budget_usd': str(cfg.monthly_budget_usd) if cfg.monthly_budget_usd is not None else None,
+            'daily_budget_usd': str(cfg.daily_budget_usd) if cfg.daily_budget_usd is not None else None,
+            'budget': budget}
+
+
+def _budget_value(data, key):
+    """A dollar budget from the page: None (empty: follow the environment, else no limit) or 0 to 1,000,000."""
+    from cveFeed import ai_budget
+    raw = data.get(key)
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return None
+    value = ai_budget.clean_limit(raw)
+    if value is None or isinstance(raw, bool):
+        raise SettingsError(400, f'{key} must be an amount in US dollars from 0 to 1000000, or empty for none')
+    return value
+
+
 def ai_get(request):
     cfg = AIProviderSettings.objects.first() or AIProviderSettings()
     from cvengine.ai_providers import DEFAULT_MODELS, KEYLESS, SELECTABLE, SERVER_URL_PROVIDERS, effective_settings, provider_defaults
@@ -166,6 +196,7 @@ def ai_get(request):
            'cve_guidance': _guidance_progress(), 'default_models': DEFAULT_MODELS, 'nuclei_model': cfg.nuclei_model,
            'nuclei_model_in_force': _nuclei_in_force(cfg),
            'providers': [p for p, _ in AIProviderSettings.PROVIDER_CHOICES]}
+    out.update(_bulk_and_budget(cfg))
     # How a request is made. null / '' is "not set here": the request follows the environment, then the provider's default (see `env`,
     # `provider_defaults` and `effective`, which says where each value in force comes from).
     out.update({name: getattr(cfg, name) if name in NUMBER_SETTINGS else getattr(cfg, name) or '' for name in AI_RUNTIME_FIELDS})
@@ -272,6 +303,19 @@ def ai_put(request):
             cfg.auto_fire_max_scans = max(1, min(int(data['auto_fire_max_scans']), 5000))
         except (TypeError, ValueError):
             raise SettingsError(400, 'auto_fire_max_scans must be a number')
+    old_bulk = (cfg.bulk_model, cfg.use_bulk_model, cfg.monthly_budget_usd, cfg.daily_budget_usd)
+    if 'bulk_model' in data:
+        raw = '' if data['bulk_model'] is None else data['bulk_model']
+        if not isinstance(raw, str) or (raw.strip() and not MODEL_NAME.match(raw.strip())):
+            raise SettingsError(400, 'bulk_model must be a model name, or empty for the provider\'s cheapest current model')
+        cfg.bulk_model = raw.strip()
+    elif (cfg.provider, cfg.base_url) != (old_connection[0], old_connection[2]):
+        cfg.bulk_model = ''  # a model belongs to the provider it was chosen from
+    if 'use_bulk_model' in data:
+        cfg.use_bulk_model = bool(data['use_bulk_model'])
+    for key in ('monthly_budget_usd', 'daily_budget_usd'):
+        if key in data:
+            setattr(cfg, key, _budget_value(data, key))
     for key in ('plan_daily_total', 'plan_daily_per_project', 'cve_guidance_daily'):
         if key in data:
             try:
@@ -287,6 +331,13 @@ def ai_put(request):
     connection = [label for label, was, now in (('provider', old_connection[0], cfg.provider), ('model', old_connection[1], cfg.model),
                   ('base_url', old_connection[2], cfg.base_url), ('api_key', old_connection[3], cfg.api_key)) if was != now]
     nuclei = ['nuclei_model'] if cfg.nuclei_model != old_nuclei else []
+    new_bulk = (cfg.bulk_model, cfg.use_bulk_model, cfg.monthly_budget_usd, cfg.daily_budget_usd)
+    if new_bulk != old_bulk:
+        from cveFeed import ai_budget
+        ai_budget.clear_cache()
+        audit(request.user, 'ai.budget', cfg.provider, bulk_model=cfg.bulk_model or 'default', use_bulk_model=cfg.use_bulk_model,
+              monthly_budget_usd=str(cfg.monthly_budget_usd) if cfg.monthly_budget_usd is not None else 'none',
+              daily_budget_usd=str(cfg.daily_budget_usd) if cfg.daily_budget_usd is not None else 'none')
     if nuclei:
         audit(request.user, 'ai.nuclei_model', cfg.provider, changed=nuclei, nuclei_model=cfg.nuclei_model or 'default')  # a model name, never a key
     if changed or connection:  # names of what changed, and the new value of a setting that is a number or a word; never a key or an address
@@ -495,6 +546,9 @@ def _models_hit(provider, base_url, key, refresh=False):
             recommended = '' if provider in SELECTABLE else (pick_cheapest_newest(raw) or '')
             from cvengine import ai_nuclei_model
             haiku = ai_nuclei_model.remember(provider, base_url, raw)
+            if provider not in SELECTABLE:  # the bulk model's default is the same cheapest current model (cvengine.ai_routing)
+                from cvengine import ai_routing
+                ai_routing.remember(provider, base_url, raw)
             hit = {'models': listed, 'recommended': recommended if any(m['id'] == recommended for m in listed) else '',
                    'nuclei_default': haiku if any(m['id'] == haiku for m in listed) else ''}
             ttl = MODELS_CACHE_SECONDS
@@ -1217,6 +1271,10 @@ def reviewer_get(request):
            'container': builtin_reviewer.status(), 'working': reviewer.enabled(row, provider)}
     jobs = ai_jobs.waiting()
     out['ai_jobs'] = {**jobs, 'message': ai_jobs.waiting_message(jobs)}
+    from cvengine import ai_routing
+    if provider is not None and provider.provider == 'anthropic' and ai_routing.routed(provider) and ai_routing.bulk_model(provider):
+        # an empty review model is the bulk model while it is switched on (cvengine.ai_routing), so the picker's "Built-in" names that one
+        out['default_models'] = {**reviewer.DEFAULT_MODELS, 'review': ai_routing.bulk_model(provider)}
     if provider is not None:
         out['models_in_force'] = {'review': reviewer.model_for('review', row, provider), 'ops': reviewer.model_for('ops', row, provider)}
     return out

@@ -355,16 +355,35 @@ The page has one **Connection** block (provider, API key, address, and a status 
 
 | Row | Setting | Used for | What it costs in practice |
 | --- | --- | --- | --- |
-| **Everything else** | `model` (AI model settings) | Triage of every finding, CVE match confirmation, validation and Nuclei planning, CVE guidance, template drafts. The pipeline's AI jobs run in the reviewer container but use this model. | Many small requests on every scan: most of the spend, so a cheap model. Empty: the newest cheapest model of the provider (a provider you host yourself must have one chosen). |
+| **High-volume stages (bulk model)** | `bulk_model` and `use_bulk_model` (AI model settings) | Triage of every finding, validation plans, CVE guidance (detection records), Nuclei targeting and the finding review ([which model each stage uses](#which-model-each-stage-uses)). | Thousands of small requests a day: most of the spend. Empty: the provider's cheapest current model. |
+| **Everything else** | `model` (AI model settings) | Host reviews, AI-written templates, local check suggestions, and every stage when the bulk model is switched off. The pipeline's AI jobs run in the reviewer container but use this model. | Fewer, larger requests. Empty: the newest cheapest model of the provider (a provider you host yourself must have one chosen). |
 | **Nuclei targeting and tag selection** | `nuclei_model` (AI model settings, `GET`/`PUT /cve/api/settings/ai`) | Which Nuclei templates apply to the software found (the stages `nuclei_targeting` and `nuclei_tag_selection`). The reviewer container makes these calls: the job carries this choice (`model`) and asks for the haiku default (`haiku`). | A few small requests per scan. A smaller, faster model works well and avoids refusals. |
 | **Finding review** | `review_model` | The finding review job. | One larger request per finding, up to the daily cap: a stronger model costs the most here. |
 | **Operations check** | `ops_model` | The operations check job. | A few small requests a day. |
+
+### Which model each stage uses
+
+The high-volume stages run on the **bulk model** (`bulk_model` in `GET`/`PUT /cve/api/settings/ai`, the row **High-volume stages (bulk model)**): empty means the provider's cheapest current model, the newest of the cheapest tier of the provider's own model list (`claude-haiku-5-5` on Anthropic, `gpt-5.4-nano` on OpenAI when the list has not been read). A self-hosted server keeps its configured model unless you choose one. The switch **Use the bulk model for high-volume stages** (`use_bulk_model`, default on) sends every stage to the main model when it is off. A model chosen for one job (the Nuclei model, the finding review model) wins over the bulk model. The table is `STAGE_MODEL` in `web/cvengine/ai_routing.py`; a stage it does not name uses the main model.
+
+| Stage | Model |
+| --- | --- |
+| `finding_triage`, `finding_triage_repair` | bulk |
+| `validation_plan` | bulk |
+| `cve_detection` | bulk |
+| `nuclei_targeting` | bulk (unless a Nuclei model is chosen) |
+| `finding_review` | bulk (unless a finding review model is chosen) |
+| `host_review`, `host_review_repair` | main |
+| `assessment_review` | main |
+| `template_generation` | main |
+| `local_check_suggestion` | main |
+
+The model is chosen when the job is handed to the reviewer container, so a change on the page applies to work already queued. The [AI budget](CONFIGURATION.md#ai-budget) stops every stage alike.
 
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | Enabled | **off** | The reviewer works only when an AI provider is configured (enabled, with its key, or with its server address for a self-hosted one) and this is on. It ships off: the review and the operations check are billed by the provider, so an App Admin answers "Do you want AI validation?" (see [UPGRADE.md](UPGRADE.md#questions-after-an-update)) or switches it on here. |
-| Review model | empty: `claude-sonnet-5-5` on Anthropic, else the default model | The model for finding review. The page offers it as "Same as the default model" (on Anthropic: "Built-in: claude-sonnet-5-5", because that is what empty means there). |
+| Review model | empty: the bulk model while **Use the bulk model for high-volume stages** is on (`claude-haiku-5-5` on Anthropic), else `claude-sonnet-5-5` on Anthropic, else the default model | The model for finding review. The page offers it as "Same as the default model" (on Anthropic "Built-in:" and the model empty means there). |
 | Operations model | empty: `claude-haiku-5-5` on Anthropic, else the default model | The model for the operations check. |
 | Close false positives | **off** | On: the reviewer may close a finding as a false positive when it is sure and the evidence is not hard proof. Off: it records its verdicts and closes nothing ("Recommend only"). |
 | Reviews per day | 300 | The most findings reviewed in one UTC day. |

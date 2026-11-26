@@ -22,6 +22,9 @@ function paint(s) {
   if (s && s.disabled_message) lines.push({ kind: "disabled", text: s.disabled_message, rank: 1 }); // turned off by a setting, not a scanner that is gone
   if (s && s.never_seen_message) lines.push({ kind: "never", text: s.never_seen_message, rank: 1, dismissible: true }); // an optional scanner: dismiss it for the session
   setNotices("scanner", lines);
+  // the AI money budget (an App Admin's only): reached, AI work waits for the next UTC day or month; or 80 percent of it spent
+  const budget = s && s.ai_budget_message ? [{ kind: "aibudget", text: s.ai_budget_message, rank: s.ai_budget_level === "reached" ? 0 : 1 }] : [];
+  setNotices("aibudget", budget);
 }
 
 async function tick() {

@@ -470,6 +470,8 @@ def stable_view(context):
     - probe ``observed``, host inventory ``reported_at`` and ``packages``, Tailscale ``online``: removed;
     - the AI's ``verdict`` on the host's other matches (this match's own among them): blanked (a rescan's new row of the match starts with
       none; the verdict of another CVE flipping does not re-ask this one);
+    - ``earlier_checks`` (the last steps of the host's most recently validated findings): blanked, because a validation of any finding on the
+      host rewrote them and so re-asked every other match on it;
     - per-request and cache-state response headers (and Imperva's ``x-iinfo``): the header stays, its value is ``*``;
     - Content-Security-Policy nonces, the CloudFront edge node in ``via``, whole timestamps and times of day in banners and check summaries
       (a certificate's expiry date in a port record is kept): masked;
@@ -495,6 +497,13 @@ def stable_view(context):
         out['other_cve_matches'] = [{**m, 'verdict': ''} if isinstance(m, dict) and 'verdict' in m else m for m in out['other_cve_matches']]
     if isinstance(out.get('tailscale'), dict):
         out['tailscale'] = {k: v for k, v in out['tailscale'].items() if k != 'online'}
+    if out.get('earlier_checks'):
+        # the last steps of the host's most recently validated findings: every validation of ANY finding on the host rewrote them, so the key of
+        # every other match on the host without a floor moved, each was asked again and validated again, and that validation moved the key once
+        # more. On a host with hundreds of matches it re-asked the same evidence many times a day (40 percent of all triage calls on the
+        # production install, November 2026). Blanked, not removed, so a host with no checks keeps the key it had. The validation planner,
+        # which chooses the next check, still reads them from the full context.
+        out['earlier_checks'] = []
     if isinstance(out.get('ports'), list):
         out['ports'] = sorted(out['ports'], key=lambda p: (p.get('number', 0) if isinstance(p, dict) else 0,
                                                            json.dumps(p, sort_keys=True, default=str)))

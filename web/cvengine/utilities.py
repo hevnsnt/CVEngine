@@ -1,3 +1,5 @@
+"""Small helpers: duration text, Celery log formatting, NUL stripping and scope checks."""
+
 import re
 
 from celery._state import get_current_task
@@ -5,95 +7,61 @@ from celery.utils.log import ColorFormatter
 
 
 def get_time_taken(latest, earlier):
-	duration = latest - earlier
-	days, seconds = duration.days, duration.seconds
-	hours = days * 24 + seconds // 3600
-	minutes = (seconds % 3600) // 60
-	seconds = seconds % 60
-	if not hours and not minutes:
-		return f'{seconds} seconds'
-	elif not hours:
-		return f'{minutes} minutes'
-	elif not minutes:
-		return f'{hours} hours'
-	return f'{hours} hours {minutes} minutes'
+    """Return a human readable duration between two datetimes, truncated to whole units."""
+    total = int((latest - earlier).total_seconds())
+    if total < 60:
+        return f'{total} seconds'
+    minutes_total = total // 60
+    if minutes_total < 60:
+        return f'{minutes_total} minutes'
+    hours, minutes = divmod(minutes_total, 60)
+    if minutes == 0:
+        return f'{hours} hours'
+    return f'{hours} hours {minutes} minutes'
 
-
-# Logging formatters
 
 class CVEngineTaskFormatter(ColorFormatter):
+    """Celery log formatter that adds task_id and task_name to each record."""
 
-	def __init__(self, *args, **kwargs):
-		super().__init__(*args, **kwargs)
-		try:
-			self.get_current_task = get_current_task
-		except ImportError:
-			self.get_current_task = lambda: None
-
-	def format(self, record):
-		task = self.get_current_task()
-		if task and task.request:
-			task_name = '/'.join(task.name.replace('tasks.', '').split('.'))
-			record.__dict__.update(task_id=task.request.id,
-								   task_name=task_name)
-		else:
-			record.__dict__.setdefault('task_name', f'{record.module}.{record.funcName}')
-			record.__dict__.setdefault('task_id', '')
-		return super().format(record)
+    def format(self, record):
+        task = get_current_task()
+        if task is not None and getattr(task, 'request', None) is not None:
+            record.__dict__['task_id'] = task.request.id
+            record.__dict__['task_name'] = task.name.replace('tasks.', '').replace('.', '/')
+        else:
+            record.__dict__.setdefault('task_name', f'{record.module}.{record.funcName}')
+            record.__dict__.setdefault('task_id', '')
+        return super().format(record)
 
 
 def replace_nulls(obj):
-	if isinstance(obj, str):
-		return obj.replace("\x00", "")
-	elif isinstance(obj, list):
-		return [replace_nulls(item) for item in obj]
-	elif isinstance(obj, dict):
-		return {key: replace_nulls(value) for key, value in obj.items()}
-	else:
-		return obj
+    """Return a copy of obj with NUL characters removed from all strings, recursing into lists and dict values."""
+    if isinstance(obj, str):
+        return obj.replace('\x00', '')
+    if isinstance(obj, list):
+        return [replace_nulls(item) for item in obj]
+    if isinstance(obj, dict):
+        return {key: replace_nulls(value) for key, value in obj.items()}
+    return obj
 
 
 class SubdomainScopeChecker:
-	"""
-		SubdomainScopeChecker is a utility class to check if a subdomain is in scope or not.
-		it supports both regex and string matching.
-	"""
+    """Decide whether a host name is out of scope given regex or plain patterns."""
 
-	def __init__(self, patterns):
-		self.regex_patterns = set()
-		self.plain_patterns = set()
-		self.load_patterns(patterns)
+    def __init__(self, patterns):
+        self.regex_patterns = set()
+        self.plain_patterns = set()
+        for pattern in patterns or ():
+            if not pattern:
+                continue
+            try:
+                self.regex_patterns.add(re.compile(pattern, re.IGNORECASE))
+            except re.error:
+                self.plain_patterns.add(pattern.lower())
 
-	def load_patterns(self, patterns):
-		"""
-			Load patterns into the checker.
-
-			Args:
-				patterns (list): List of patterns to load.
-			Returns: 
-				None
-		"""
-		for pattern in patterns:
-			# skip empty patterns
-			if not pattern:
-				continue
-			try:
-				self.regex_patterns.add(re.compile(pattern, re.IGNORECASE))
-			except re.error:
-				self.plain_patterns.add(pattern.lower())
-
-	def is_out_of_scope(self, subdomain):
-		"""
-			Check if a subdomain is out of scope.
-
-			Args:
-				subdomain (str): The subdomain to check.
-			Returns:
-				bool: True if the subdomain is out of scope, False otherwise.
-		"""
-		subdomain = subdomain.lower() # though we wont encounter this, but just in case
-		if subdomain in self.plain_patterns:
-			return True
-		return any(pattern.search(subdomain) for pattern in self.regex_patterns)
-
-
+    def is_out_of_scope(self, subdomain):
+        """Return True if the host name matches a plain pattern or any regex."""
+        host = subdomain.lower()
+        if host in self.plain_patterns:
+            return True
+        return any(regex.search(host) for regex in self.regex_patterns)
