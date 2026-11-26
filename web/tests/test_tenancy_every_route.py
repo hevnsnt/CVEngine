@@ -575,7 +575,7 @@ class EveryRouteTenancyTests(TestCase):
 		v = self.v
 		return {'user_id': v['user_id'], 'membership_id': v['membership_id'], 'org_id': v['org_id'], 'project_id': v['project_id'],
 		        'entry_id': v['excluded_entry'], 'service': 'shodan', 'scope': 'org', 'engagement_id': v['engagement_id'],
-		        'report_id': v['report_id'], 'program_id': v['program_id'], 'platform': 'hackerone', 'alert_id': 1, 'decision_id': 1,
+		        'report_id': v['report_id'], 'program_id': v['program_id'], 'platform': 'hackerone', 'alert_id': 1, 'decision_id': 1, 'ban_id': 1,
 		        'which': 'seed'}[name]
 
 	def test_web_dispatchers_refuse_another_organizations_rows(self):
@@ -642,7 +642,7 @@ class EveryRouteTenancyTests(TestCase):
 		ids, answers 403 (an App Admin setting) or 404 (another organization's row), and an entry with no id answers for the caller alone."""
 		from agentapi import settings_bridge
 		v = self.v
-		ids = {'org_id': v['org_id'], 'project_id': v['project_id'], 'entry_id': v['excluded_entry'], 'service': 'shodan', 'alert_id': 1}
+		ids = {'org_id': v['org_id'], 'project_id': v['project_id'], 'entry_id': v['excluded_entry'], 'service': 'shodan', 'alert_id': 1, 'ban_id': 1}
 		problems = []
 		for name, (api, pattern, _what, ident_names) in settings_bridge.ENTRIES.items():
 			ident = '/'.join(str(ids[n]) for n in re.findall(r'\(\?P<(\w+)>', pattern)) or None

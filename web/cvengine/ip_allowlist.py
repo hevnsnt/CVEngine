@@ -59,12 +59,12 @@ class IpAllowlistMiddleware:
     def __call__(self, request):
         from cvengine.client_ip import client_ip
         from cvengine.input_guard import is_banned
+        from cvengine.input_guard import refused
+        from django.http import HttpResponseForbidden
         remote = client_ip(request)
         if is_banned(remote):
-            from django.http import HttpResponseForbidden
-            return HttpResponseForbidden('Access denied.')
+            return refused(HttpResponseForbidden('Access denied: this address is banned.'), 'banned')
         if not is_allowed(remote):
             logger.warning('blocked request from %s (not on IP allowlist): %s %s', remote, request.method, request.path)
-            from django.http import HttpResponseForbidden
-            return HttpResponseForbidden('Access denied.')
+            return refused(HttpResponseForbidden('Access denied: this address is not on the IP allowlist.'), 'not_allowlisted')
         return self.get_response(request)
