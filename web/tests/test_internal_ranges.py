@@ -213,7 +213,7 @@ class InternalClaimTests(World):
         self.inside = sentinel('inside', ['nmap', 'network:internal'])
 
     def queue(self, ips):
-        return self.SentinelTask.objects.create(project=self.pa, kind='nmap', host='h', target={'addresses': ips}, ips=ips, status='queued')
+        return self.SentinelTask.objects.create(project=self.pa, kind='nmap', host=ips[0], target={'addresses': ips}, ips=ips, status='queued')
 
     def claim(self, who):
         status, out = call(who[0], 'POST', '/api/v1/sentinel/tasks/next', {})

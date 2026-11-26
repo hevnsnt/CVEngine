@@ -27,7 +27,7 @@ from datetime import timedelta
 
 from django.core.cache import cache
 from django.db import connection, transaction
-from django.db.models import Avg, CharField, Count, DurationField, Exists, F, Q, Value
+from django.db.models import Avg, CharField, Count, DurationField, Exists, F, OuterRef, Q, Value
 from django.db.models.functions import Cast, Coalesce, Concat, Greatest
 from django.http import JsonResponse
 from django.utils import timezone
@@ -66,6 +66,9 @@ RUN_LEASE = broker.RUN_LEASE
 MAX_WAIT = broker.MAX_WAIT
 CANDIDATES = broker.CANDIDATES
 INTERNAL_CAPABILITY = 'network:internal'  # declared by a Sentinel deployed inside a private network; the only kind that may claim work for an address of a declared internal range
+# A Sentinel inside a private network takes internal work only (``internal_work_refusal``): never a public address, a name that resolves outside the
+# declared ranges, or a domain discovery. It sits in someone's office or home, and external work sent from there scans the internet from that network.
+INTERNAL_ONLY = 'internal only'  # the refusal code of external work offered to such a Sentinel (``SentinelEff.refusal``)
 RATES = {'claim': broker.RATES['claim'], 'report': broker.RATES['report'], 'release': broker.RATES['release'],
          'heartbeat': broker.RATES['heartbeat'], 'register': broker.RATES['register'],
          'secret': (6, 60),  # a stored credential is read once per signed-in task; more than a few a minute is a caller gone wrong, or guessing ids
@@ -936,6 +939,8 @@ class SentinelEff:
         if tuned:  # auto-tuning's number for this Sentinel holds from the next claim, before the client registers it (never above its own setting, never over a pin)
             self.max_concurrent = min(self.max_concurrent, tuned)
         self._internal_nets = {}
+        # inside a private network (the server's grant, ``sentinel_settings.effective_network``): it is handed internal work only, whatever it declares
+        self.internal_only = agent.kind == 'scanner' and sentinel_settings.effective_network(agent) == 'internal'
 
     @property
     def builtin(self):
@@ -1009,6 +1014,9 @@ class SentinelEff:
             return 'capability', VALIDATING  # opt-in secret validation is the built-in scanner's alone (cveFeed.secrets_validation)
         if INTERNAL_CAPABILITY not in self.caps and self._internal(task):
             return 'capability', INTERNAL_CAPABILITY  # a Sentinel outside the network cannot reach it and would report an empty result as clean
+        why = self.external_refusal(task)
+        if why:
+            return INTERNAL_ONLY, why  # a Sentinel inside a private network scans only hosts inside the declared internal ranges
         if credential_work(task.kind) and not self.credential_filter:
             return 'capability', CREDENTIAL_FILTER  # an older client would run default-login and brute-force templates while credential checks are off
         if network_detection_task(task) and not self.network_detection:
@@ -1024,6 +1032,13 @@ class SentinelEff:
         names, ips = task_hosts(task)
         return not (names or ips) or self.hosts.matches(names, ips)
 
+    def external_refusal(self, task):
+        """``None`` when this Sentinel may be given ``task`` as far as its network goes: always for one outside a private network, and for one inside
+        only internal work (``internal_work_refusal``). Else why not."""
+        if not self.internal_only:
+            return None
+        return internal_work_refusal(task, self._internal_nets)
+
     def _internal(self, task):
         """Whether any address of ``task`` (its ``ips`` or those inside its ``target``) is inside a network its project declared internal."""
         from targetApp.target_types import in_internal_range, internal_networks
@@ -1038,6 +1053,61 @@ class SentinelEff:
 
 def effective(agent, now=None):
     return SentinelEff(agent, now or timezone.now())
+
+
+def internal_work_refusal(task, nets_cache=None):
+    """``None`` when ``task`` is internal work, else why not: the rule for what a Sentinel inside a private network may be handed, taken from the task's
+    own addresses and names (``address_guard.task_values``, the same reading as the do-not-scan list), never from its kind or from who queued it.
+    Internal work names at least one host, and every one of them lies inside a range its project declared internal (``InternalRange``): an address
+    inside one, a network (a ``discover`` sweep) wholly inside one, a name whose addresses on record (``exclusions.stored_addresses``, what the
+    inventory resolved it to) are all inside one. A public address, a name with no address on record or with one outside every range, and a task
+    that names no host at all are not. Fails closed: a range list or inventory that cannot be read refuses. ``nets_cache`` is ``{project_id: networks}``."""
+    import ipaddress
+    from agentapi import address_guard
+    from cveFeed.exclusions import as_address, normalize, stored_addresses
+    from targetApp.target_types import in_internal_range, internal_networks
+    nets_cache = {} if nets_cache is None else nets_cache
+    nets = nets_cache.get(task.project_id)
+    if nets is None:
+        nets = nets_cache[task.project_id] = internal_networks(task.project_id)
+    if not nets:
+        return 'its project declares no internal range'
+    values = address_guard.task_values(task.kind, task.target, task.host, task.ips)
+    if not values:
+        return 'it names no host inside a declared internal range'
+    names = {}
+    for value in values:
+        if '/' in value and '://' not in value:
+            try:
+                wanted = ipaddress.ip_network(value.strip(), strict=False)
+            except ValueError:
+                wanted = None
+            if wanted is not None:
+                if not any(n.version == wanted.version and wanted.subnet_of(n) for n in nets) or not in_internal_range(wanted.network_address, nets):
+                    return f'{wanted} is not inside a declared internal range'
+                continue
+        ip = as_address(value)
+        if ip is not None:
+            if not in_internal_range(ip, nets):
+                return f'{ip} is outside the declared internal ranges'
+            continue
+        name = normalize(value)
+        if not name:
+            return f'{value[:80]} is not a host inside a declared internal range'
+        names[name] = value
+    if names:
+        try:
+            known = stored_addresses(task.project_id, names)
+        except Exception:  # noqa: BLE001 - fail closed: nothing tells where the names point
+            return 'the addresses of its hosts could not be read'
+        for name in names:
+            addresses = known.get(name) or []
+            if not addresses:
+                return f'{name[:80]} has no address on record inside a declared internal range'
+            outside = next((a for a in addresses if not in_internal_range(a, nets)), None)
+            if outside is not None:
+                return f'{name[:80]} resolves to {outside}, outside the declared internal ranges'
+    return None
 
 
 NETWORK_DETECTION = 'too old to run the network detection pass (contract 10)'  # the refusal reason of such a task offered to an older Sentinel
@@ -1083,7 +1153,8 @@ def network_detection_task(task):
 
 def network_detection_scanner(project, internal=False, now=None):
     """Whether a live, eligible Sentinel that covers ``project`` and takes ``nuclei_light`` runs the network detection pass: the stage sends nothing otherwise."""
-    return any(e.network_detection and e.live for e in eligible_sentinels(project, 'nuclei_light', now=now, internal=internal, live_only=True))
+    return any(e.network_detection and e.live and (internal or not e.internal_only)
+               for e in eligible_sentinels(project, 'nuclei_light', now=now, internal=internal, live_only=True))
 
 
 CREDENTIAL_FEATURE = 'credential_filter'  # ``info.features`` entry of a client that leaves checks that send credentials out of a nuclei web run (sentinel_settings.FEATURES)
@@ -1277,7 +1348,7 @@ def capacity_state(project, kind, internal=False, now=None, exclude=None, builti
         builtin_only = False  # the gate below decides who may take signed-in work, the built-in scanner included
     else:
         builtin_only = builtin_only or builtin_only_kind(kind)  # a kind only the built-in scanner takes has no other slots
-    live = [e for e in (_live_for(project, now) if kind else []) if kind in e.caps and (not internal or INTERNAL_CAPABILITY in e.caps)]
+    live = [e for e in (_live_for(project, now) if kind else []) if kind in e.caps and (INTERNAL_CAPABILITY in e.caps if internal else not e.internal_only)]
     if live and credential_work(kind):
         live = [e for e in live if e.credential_filter]  # an older client is not given nuclei web work while credential checks are off: it stays due for one that is not
     if builtin_only:
@@ -1369,8 +1440,8 @@ def _explain(kind, agents, live, internal=False, only=None, load=None, builtin_o
         veto = kind in sentinel_policy.machine_denied(a)
         if kind not in (a.capabilities or []) and not veto:
             continue  # it does not have it: nothing to say about it here
-        if internal and sentinel_settings.effective_network(a) != 'internal':
-            continue
+        if (sentinel_settings.effective_network(a) == 'internal') != internal:
+            continue  # internal work is for a Sentinel inside the network, and every other work for one outside it
         e = live.get(a.pk)
         if a.status != 'active':
             reasons.add('inactive')
@@ -2021,8 +2092,47 @@ def release_agent_tasks(agent, reason, actor=None):
 
 def release_ineligible(agent):
     eff = effective(agent)
+    handed = hand_back_external(eff) if eff.internal_only and not eff.problem else 0
     held = SentinelTask._base_manager.filter(agent=agent, status__in=SENTINEL_ACTIVE_STATUSES).select_related('project')
-    return sum(bool(expire(t, 'the agent no longer covers this work')) for t in list(held) if eff.problem or eff.refusal(t))
+    return handed + sum(bool(expire(t, 'the agent no longer covers this work')) for t in list(held) if eff.problem or eff.refusal(t))
+
+
+INTERNAL_HANDED_BACK = 'handed back: a Sentinel inside a private network scans only hosts inside the declared internal ranges'
+
+
+def take_back_external(task, why, actor=None):
+    """Take ``task`` (claimed or running) from a Sentinel inside a private network that may not run it (``internal_work_refusal``: ``why``). Back to the
+    queue for an external Sentinel, so the stage that waits for it is not left waiting; a streamed task that is already running (its batches are on
+    record) is ended instead, as any task taken back is, and its stage goes on without it. Returns whether the task moved."""
+    agent_id = task.agent_id
+    reason = f'{INTERNAL_HANDED_BACK} ({why})'[:300]
+    if task.status == 'running' and task.kind in sentinel_contract.STREAMED:
+        if not _end_as_expired(task, reason, timezone.now()):
+            return False
+        audit.record(actor, 'sentinel.task.expire', _target(task), org=task.project.org_id, task_id=task.pk, agent_id=agent_id, trace_id=task.trace_id, reason=reason)
+        return True
+    moved = _move_task(SentinelTask._base_manager.filter(pk=task.pk, agent_id=agent_id), 'queued', only_from=('claimed', 'running'), agent=None,
+                       lease_expires_at=None, claimed_at=None, accepted_at=None, error=reason)
+    if not moved:
+        return False
+    audit.record(actor, 'sentinel.task.requeue', _target(task), org=task.project.org_id, task_id=task.pk, agent_id=agent_id, trace_id=task.trace_id, reason=reason)
+    from agentapi import sentinel_notify
+    task.refresh_from_db()
+    sentinel_notify.task_changed(task, agent_id)  # its stage, and the slot it held
+    sentinel_notify.task_queued(task)  # the external Sentinels that may take it now
+    return True
+
+
+def hand_back_external(eff):
+    """Every task the Sentinel ``eff`` (inside a private network) holds that is not internal work goes back (``take_back_external``): work it was
+    handed before the rule held, or that stopped being internal since. Returns how many moved."""
+    held = SentinelTask._base_manager.filter(agent=eff.agent, status__in=('claimed', 'running')).select_related('project__org')
+    moved = 0
+    for task in list(held):
+        why = eff.external_refusal(task)
+        if why and take_back_external(task, why):
+            moved += 1
+    return moved
 
 
 def max_runtime(task):
@@ -2100,6 +2210,9 @@ def _claimable(eff, kinds, now):
     if not eff.builtin:
         queued = queued.exclude(VALIDATING_Q)  # a task that validates found secrets is never offered to any Sentinel but the built-in one
     queued = queued.exclude(avoid_agent=eff.agent.pk)  # a confirming lookup is never offered to the Sentinel whose answer it checks (agentapi.dns_crosscheck)
+    if eff.internal_only:  # inside a private network: only a project that declared an internal range can have work for it (``internal_work_refusal`` checks each task)
+        from cveFeed.models import InternalRange
+        queued = queued.filter(Exists(InternalRange.objects.filter(project_id=OuterRef('project_id'))))
     return queued.select_related('project__org').order_by('-priority', 'created_at', 'id')
 
 
@@ -2264,6 +2377,8 @@ def _claim(agent, kinds, now):
         status = Agent.objects.select_for_update().values_list('status', flat=True).get(pk=agent.pk)
         if status != 'active':  # suspended or revoked after the check above: re-read under the lock, so the check holds for this claim
             raise broker.blocked(f'the agent is {status}')
+        if eff.internal_only:
+            hand_back_external(eff)  # external work it was handed before the rule held goes back to the queue for an external Sentinel
         held_by_kind = _holders([agent.pk])[1]
         held = sum(n for (_, _kind), n in held_by_kind.items())
         if held >= eff.max_concurrent:
@@ -2276,6 +2391,8 @@ def _claim(agent, kinds, now):
         for task in list(_claimable(eff, kinds, now)[:CANDIDATES]):
             if not eff._in_hosts(task):
                 continue
+            if eff.external_refusal(task):
+                continue  # a Sentinel inside a private network takes internal work only: left for an external Sentinel
             if INTERNAL_CAPABILITY not in eff.caps and eff._internal(task):
                 continue  # only a Sentinel inside the private network can reach it
             if eff.secret_refusal(task) or (validating(task) and not eff.builtin):
@@ -2422,6 +2539,10 @@ def _ensure_eligible(agent, task):
     if task.status not in ('claimed', 'running'):
         return
     eff = effective(agent)
+    why = None if eff.problem else eff.external_refusal(task)
+    if why:
+        take_back_external(task, why)
+        raise ApiError(409, f'the task was taken back: this Sentinel is inside a private network and scans only hosts inside the declared internal ranges ({why})')
     if eff.problem or eff.refusal(task):
         expire(task, 'the Sentinel no longer covers this work')
         raise ApiError(409, 'the task was taken back: this Sentinel no longer covers it')
@@ -3460,6 +3581,22 @@ def _record_late(ctx, agent, task):
                  f'stopped waiting ({reason[:150]})', project=task.project, status='expired', scan_id=task.scan_id, sentinel_task_id=task.pk)
 
 
+def _refuse_external_report(ctx, agent, task_id):
+    """A Sentinel inside a private network never files a result for work that is not internal (``internal_work_refusal``), even one it held before the
+    rule held and reports late: 409, audited, and nothing is stored."""
+    eff = effective(agent)
+    if not eff.internal_only:
+        return
+    task = SentinelTask._base_manager.select_related('project').filter(pk=task_id).first()
+    if task is None or (task.agent_id != agent.pk and task.last_holder != agent.pk):
+        return  # not its task: the usual 404 follows
+    why = eff.external_refusal(task)
+    if why:
+        audit.record(ctx.user, 'sentinel.task.complete', _target(task), org=task.project.org_id, task_id=task.pk, trace_id=task.trace_id,
+                     agent_id=agent.pk, agent=agent.name, outcome='refused', reason=f'{INTERNAL_HANDED_BACK} ({why})'[:300])
+        raise ApiError(409, f'this Sentinel is inside a private network and scans only hosts inside the declared internal ranges; the result is not filed ({why})')
+
+
 def report_result(ctx, task_id, body):
     agent = _sentinel_agent(ctx)
     broker._limit(agent.token, 'report')
@@ -3469,6 +3606,7 @@ def report_result(ctx, task_id, body):
     held = SentinelTask.objects.select_related('project').filter(pk=_int(task_id), agent=agent).first()
     if held is not None:
         _ensure_eligible(agent, held)
+    _refuse_external_report(ctx, agent, _int(task_id))
     rejected = None
     adopted = None
     with transaction.atomic():

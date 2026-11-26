@@ -99,6 +99,8 @@ AGENT = register(Machine(
 # filed only from claimed or running, so a task that expired between the report's check and its write stays expired. Expired becomes done or failed
 # only through the late-result path (sentinel_broker._adopt_late): a result the Sentinel held across an update, for a task that expired because it
 # was lost or timed out (LATE_SERVABLE_ERRORS), never one a person cancelled or one taken back from a Sentinel suspended or narrowed since.
+# Claimed or running goes back to queued only when a Sentinel inside a private network held work that is not internal (sentinel_broker.take_back_external):
+# the task waits for an external Sentinel instead of ending.
 TASK_QUEUED, TASK_CLAIMED, TASK_RUNNING, TASK_DONE, TASK_FAILED, TASK_EXPIRED = 'queued', 'claimed', 'running', 'done', 'failed', 'expired'
 SENTINEL_TASK = register(Machine(
     'sentinel_task', 'status', label='The Sentinel task',
@@ -114,8 +116,8 @@ SENTINEL_TASK = register(Machine(
     },
     moves={
         TASK_QUEUED: (TASK_CLAIMED, TASK_EXPIRED),
-        TASK_CLAIMED: (TASK_RUNNING, TASK_DONE, TASK_FAILED, TASK_EXPIRED),
-        TASK_RUNNING: (TASK_DONE, TASK_FAILED, TASK_EXPIRED),
+        TASK_CLAIMED: (TASK_RUNNING, TASK_DONE, TASK_FAILED, TASK_EXPIRED, TASK_QUEUED),  # queued: taken back from an internal Sentinel (see above)
+        TASK_RUNNING: (TASK_DONE, TASK_FAILED, TASK_EXPIRED, TASK_QUEUED),
         TASK_EXPIRED: (TASK_DONE, TASK_FAILED),  # the late-result adoption path only (see above)
         TASK_DONE: (),
         TASK_FAILED: (),

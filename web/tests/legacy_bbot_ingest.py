@@ -49,12 +49,9 @@ def legacy_persist_bbot_result(result, ctx):
 			ip = subdomain.ip_addresses.first()
 		if not ip:
 			continue
-		res = get_port_service_description(port_number)
-		port, _ = update_or_create_port(
-			port_number=port_number,
-			service_name=res.get('service_name', ''),
-			description=res.get('description', ''),
-			ip=ip)
+		known = get_port_service_description(port_number)  # the port's usual service name and description, when it has one
+		port, _ = update_or_create_port(port_number=port_number, ip=ip, service_name=known.get('service_name', ''),
+										  description=known.get('description', ''))
 		port.last_seen = timezone.now()
 		fields = ['last_seen']
 		if not port.source:  # a port another detector recorded keeps its source: bbot only names the source of a port nobody else recorded

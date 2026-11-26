@@ -340,5 +340,10 @@ class ReviewerModelsStillSaveThroughTheReviewerApiTests(TestCase):
     def test_on_anthropic_an_empty_model_is_the_built_in_one_which_the_page_says_so(self):
         AIProviderSettings.objects.all().update(provider='anthropic')
         data = send(self.c, 'GET', 'reviewer')[1]
+        # the finding review is a high-volume stage: while the bulk model is on, empty is the bulk model (cvengine.ai_routing)
+        self.assertEqual(data['default_models'], {'review': 'claude-haiku-5-5', 'ops': 'claude-haiku-5-5'})
+        self.assertEqual(data['models_in_force'], {'review': 'claude-haiku-5-5', 'ops': 'claude-haiku-5-5'})
+        AIProviderSettings.objects.all().update(use_bulk_model=False)
+        data = send(self.c, 'GET', 'reviewer')[1]
         self.assertEqual(data['default_models'], {'review': 'claude-sonnet-5-5', 'ops': 'claude-haiku-5-5'})
         self.assertEqual(data['models_in_force'], {'review': 'claude-sonnet-5-5', 'ops': 'claude-haiku-5-5'})

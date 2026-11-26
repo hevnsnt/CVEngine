@@ -90,7 +90,14 @@ def enabled(row=None, provider=None):
     pause stops every paid AI call, like the rest of the AI work)."""
     row = row or settings_row()
     provider = provider if provider is not None else provider_row()
-    return bool(env_enabled() and row.enabled and provider and not paused())
+    return bool(env_enabled() and row.enabled and provider and not paused() and not budget_spent(provider)[0])
+
+
+def budget_spent(provider=None):
+    """``(True, why)`` while the AI money budget is spent (``cveFeed.ai_budget``): the review and the operations check wait for the next UTC
+    day or month like the queued jobs."""
+    from cveFeed import ai_budget
+    return ai_budget.blocked(row=provider)
 
 
 def model_for(job, row, provider):
@@ -98,6 +105,10 @@ def model_for(job, row, provider):
     named = (row.review_model if job == 'review' else row.ops_model).strip()
     if named:
         return named
+    if job == 'review':  # finding_review is a high-volume stage: the bulk model, unless the switch is off (cvengine.ai_routing)
+        from cvengine import ai_routing
+        if ai_routing.routed(provider) and ai_routing.stage_kind('finding_review') == ai_routing.BULK and ai_routing.bulk_model(provider):
+            return ai_routing.bulk_model(provider)
     if provider.provider == 'anthropic':
         return DEFAULT_MODELS[job]
     return provider.model or ''
@@ -169,7 +180,7 @@ def config(now=None):
     if not on:
         out['why'] = ('turned off in .env (CVENGINE_REVIEWER=0)' if not env_enabled() else
                       'turned off in Settings' if not row.enabled else ('no AI provider is configured' if not _any_provider() else 'the AI provider has no key or server address') if not provider else
-                      'scanning is paused')
+                      (budget_spent(provider)[1] or 'scanning is paused') if not paused() else 'scanning is paused')
         return out
     base = {'provider': provider.provider, 'base_url': reachable_url(provider.base_url) if provider.base_url else '',
             'api_key': provider.api_key or '', 'timeout': int(getattr(provider, 'request_timeout', 0) or 120)}

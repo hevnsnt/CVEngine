@@ -167,6 +167,34 @@ def _containing(networks, ip):
     return next((net for net in networks if ip.version == net.version and ip in net), None)
 
 
+def own_server():
+    """``(names, networks)`` of this cvENGINE server (``cveFeed.self_exclusion``): refused for every project, whatever its lists say. Never raises: the
+    names come from settings, and an address lookup that fails keeps the last good answer (it only ever adds refusals)."""
+    from cveFeed import self_exclusion
+    try:
+        own_names = self_exclusion.names()
+    except Exception:  # noqa: BLE001 - settings that cannot be read add no name; the project's own lists still apply
+        logger.warning("could not read this server's own names", exc_info=True)
+        own_names = frozenset()
+    try:
+        own_networks = self_exclusion.networks()
+    except Exception:  # noqa: BLE001
+        logger.warning("could not read this server's own addresses", exc_info=True)
+        own_networks = ()
+    return own_names, own_networks
+
+
+def own_refusal(value, own=None):
+    """A ``Refusal`` when ``value`` (an address, a name, ``host:port`` or a URL) is this cvENGINE server itself, else None."""
+    own_names, own_networks = own_server() if own is None else own
+    ip = as_address(value) if isinstance(value, str) else None
+    if ip is not None:
+        net = _containing(own_networks, ip)
+        return Refusal(f'{ip} is this cvENGINE server (never scanned)', entry=str(net)) if net else None
+    name = normalize(value) if isinstance(value, str) else ''
+    return Refusal(f'{name} is this cvENGINE server (never scanned)', entry=name) if name and name in own_names else None
+
+
 class ExclusionSet(frozenset):
     """The names an organization excluded: ``name in excluded`` is true for an excluded name and for any name under an excluded
     domain (one made with ``include_subdomains``). A frozenset of the exact names, so every existing ``in`` check keeps working;
@@ -251,25 +279,32 @@ def _names_resolving_into(project_id, networks):
     return {n.strip().lower().rstrip('.') for n in names}
 
 
-def address_refusals(project_id, values, resolved=None, networks=None, unknown=()):
+def address_refusals(project_id, values, resolved=None, networks=None, unknown=(), own=True):
     """``{value: Refusal}`` for each of ``values`` (addresses, ``host:port``, URLs, host names) that must not be worked on for this project: THE rule of the
     do-not-scan list, for one value or a whole task (the lookups are batched, not per name). A value inside a listed network is refused, and so is a name
     with a stored address inside one, or one that ``resolved`` (``{name: [addresses]}``, what a task resolved the name to itself) places inside one.
     ``unknown``: the names (of ``values``) that work is about to connect to: one with no known address at all (nothing stored, nothing resolved) cannot be checked
     against the list, so it is refused until a lookup has told where it points. Fails closed: a list that cannot be read refuses EVERY value, with a ``Refusal``
-    whose ``unreadable`` is set. A project without an org has no list."""
+    whose ``unreadable`` is set. A project without an org has no list. This cvENGINE server itself (``own_server``: its own names, and the addresses they
+    resolve to) is refused for every project; ``own=False`` leaves that out, for the addresses a sweep's result names (a range sweep may answer from the
+    server's address without the result being about the server's work)."""
     values = [v for v in values if isinstance(v, str) and v.strip()]
     if not project_id or not values:
         return {}
+    own_names, own_networks = own_server() if own else (frozenset(), ())
     try:
         networks = address_networks(project_id) if networks is None else networks  # ``networks``: a caller that already read the list for this project
     except Exception:  # noqa: BLE001 - fail closed: never let work through on a list that was not read
         logger.warning('could not read the do-not-scan address list for project %s', project_id, exc_info=True)
         return {v: Refusal(UNREADABLE, unreadable=True) for v in values}
-    if not networks:
+    if not networks and not own_names and not own_networks:
         return {}
     out, names = {}, {}
     for value in values:
+        mine = own_refusal(value, (own_names, own_networks))  # this cvENGINE server itself: refused for every project
+        if mine:
+            out[value] = mine
+            continue
         ip = as_address(value)
         if ip is not None:
             net = _containing(networks, ip)
@@ -277,6 +312,8 @@ def address_refusals(project_id, values, resolved=None, networks=None, unknown=(
                 out[value] = Refusal(f"{ip} is on the organization's do-not-scan list ({net})", entry=str(net))
         elif normalize(value):
             names[value] = normalize(value)
+    if names and not networks and not own_networks:
+        return out  # only the server's names to compare, done above: no address to look up
     if names:
         try:
             known = stored_addresses(project_id, names.values())
@@ -290,8 +327,13 @@ def address_refusals(project_id, values, resolved=None, networks=None, unknown=(
                 if net:
                     out[value] = Refusal(f"{name} resolves to {ip}, which is on the organization's do-not-scan list ({net})", entry=str(net))
                     break
+                net = _containing(own_networks, ip)
+                if net:
+                    out[value] = Refusal(f'{name} resolves to {ip}, which is this cvENGINE server (never scanned)', entry=str(net))
+                    break
             else:
-                if value in unknown and not told and not known.get(name):
+                # the wait for a lookup belongs to the organization's list: the server's own addresses alone never hold back a name nothing resolved yet
+                if networks and value in unknown and not told and not known.get(name):
                     out[value] = Refusal(f"{name} has no known address yet, so it cannot be checked against the organization's do-not-scan list; it is scanned once a lookup has resolved it",
                                          entry='')
     return out
@@ -312,6 +354,7 @@ def excluded_names(project_id, strict=False, names_only=False):
     if not project_id:
         return ExclusionSet()
     from cveFeed.models import HostExclusion, HostMove
+    own_names, own_networks = own_server() if not names_only else (frozenset(), ())  # this cvENGINE server: never scanned, for every project
     def read():
         found = tuple(HostExclusion.objects.filter(org__projects__id=project_id).values_list('host', 'include_subdomains'))
         # a host moved out of this project into another stays out of this one (exact name), whatever its org's list says
@@ -331,11 +374,17 @@ def excluded_names(project_id, strict=False, names_only=False):
     if not names_only:
         try:
             networks = address_networks(project_id)
-            by_address = _names_resolving_into(project_id, networks) if networks else ()
         except Exception:  # noqa: BLE001 - fail closed
             logger.warning('could not read the do-not-scan address list for project %s', project_id, exc_info=True)
             unreadable = True
-    return ExclusionSet((host for host, _ in rows), (host for host, subtree in rows if subtree), networks, by_address, unreadable)
+        networks = tuple(networks) + tuple(n for n in own_networks if n not in networks)  # the server's own addresses, whatever the list read gave
+        if networks and not unreadable:
+            try:
+                by_address = _names_resolving_into(project_id, networks)
+            except Exception:  # noqa: BLE001 - fail closed
+                logger.warning('could not read the stored addresses of the hosts of project %s', project_id, exc_info=True)
+                unreadable = True
+    return ExclusionSet([host for host, _ in rows] + sorted(own_names), (host for host, subtree in rows if subtree), networks, by_address, unreadable)
 
 
 def covers(pattern, name, subtree):

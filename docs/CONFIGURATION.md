@@ -8,6 +8,7 @@ Every value in `.env` reaches the `web`, `celery`, and `celery-beat` containers.
 | --- | --- |
 | `DOMAIN_NAME` | A hostname such as `scanner.example.com`, or an IPv4 address. It is the certificate name and the host in notification links. The installer sets it to this machine's detected address (or `--domain`); change it in `.env` and run `make certs up` to use a name. The certificate also covers `localhost` and `127.0.0.1`, and any names in `CERT_EXTRA_SANS` (comma separated). |
 | `CVENGINE_ALLOWED_HOSTS` | Extra hostnames Django accepts, comma separated. Any other name or IP gets 400 ([UPGRADE.md](UPGRADE.md#accepted-host-names)). Never use `*` on an Internet-facing install. |
+| `CVENGINE_OWN_ADDRESSES` | Addresses of this server that its names do not resolve to (behind NAT or a load balancer), comma separated. With the public addresses `DOMAIN_NAME`, `CVENGINE_ALLOWED_HOSTS` and the CSRF trusted origins resolve to, they are never scanned by any Sentinel (`cveFeed/self_exclusion.py`). |
 | `CVENGINE_SETUP_DWELL_SECONDS` | `60` | The most the setup wizard's last screen ("Getting everything ready") stays up while no host has been found yet. With a host already found it is not shown at all, and it ends the moment the first host appears (0 to 900; `0` turns the screen off). |
 | `CVENGINE_HSTS_SECONDS` | HTTPS policy lifetime in seconds (3600 in production, 0 in development). Raise it only once every public route reliably uses HTTPS. |
 | `POSTGRES_PASSWORD` | Database password. Set it before the first start, because changing it later does not update the existing database. |
@@ -318,6 +319,17 @@ The AI reviewer is its own container, the `reviewer` compose service, which revi
 | `CVENGINE_REVIEWER_BOOTSTRAP_DIR` | `/var/lib/cvengine-reviewer` | Where the server writes the reviewer's token, inside the `reviewer_bootstrap` volume. Read by the server containers. |
 | `CVENGINE_REVIEWER_UID` | `10002` | The user the token file is handed to: the user the reviewer image runs as. Read by the server containers. |
 | `REVIEWER_MEM_LIMIT` | `256m` | Memory limit of the `reviewer` container, read by compose. |
+
+## AI budget
+
+A money limit on AI calls. When it is spent, the AI job queue hands out nothing and the finding reviewer and the operations check stop, until the next UTC day (daily budget) or the first of the next UTC month (monthly budget); the queued work waits and is not lost. An App Admin sets both on **Settings, AI model**, under **Confirmation and limits** (`monthly_budget_usd` and `daily_budget_usd` in `GET`/`PUT /cve/api/settings/ai`). **The setting wins over the variable**: an empty box follows the variable, and with neither there is no limit.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `CVENGINE_AI_MONTHLY_BUDGET_USD` | unset (no limit) | US dollars of AI calls in a UTC calendar month, 0 to 1000000. |
+| `CVENGINE_AI_DAILY_BUDGET_USD` | unset (no limit) | US dollars of AI calls in a UTC day, 0 to 1000000. |
+
+Spend is the AI usage ledger priced at the rates entered on the AI usage page, cache reads and cache writes included, failed calls that used tokens included. A model with no rate counts at the highest rate entered for any model; with no rate entered at all every call counts at a top-tier list price (15 USD per million input tokens, 75 per million output tokens), so enter your provider's rates to see the real figure. Self-hosted servers (Ollama, vLLM, LM Studio) cost nothing here. At 80 percent of a budget, and when it is reached, an App Admin sees a line in the status strip ("AI budget reached: $X of $Y this month, resumes 2026-12-01 (UTC).") and the same on the Settings page.
 
 ## AI limits
 

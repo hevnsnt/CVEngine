@@ -469,6 +469,7 @@ SECTIONS = {
     'situations': 'Situations',
     'keys': 'API keys',
     'sentinels': 'Sentinels',
+    'internal': 'Internal network',
 }
 
 # The one plain sentence under each page title: what the page is for, in words a person who has never opened it can use.
@@ -484,6 +485,7 @@ SECTION_PURPOSE = {
     'secrets': 'API keys, tokens and private keys your websites and scripts give away, and where each one was seen.',
     'suppliers': 'Outside companies your hosts depend on and what each one shows to the internet; these are never your own hosts.',
     'situations': 'What needs you, one host at a time: what is proven, likely or exposed on each, with the first thing to do, most urgent first.',
+    'internal': 'The hosts inside your internal networks, which only a Sentinel inside the network scans: what was found on them and what runs now.',
 }
 # The same sentences for the all-projects view, which has no single project to point at.
 ALL_PROJECTS_PURPOSE = {
@@ -498,6 +500,7 @@ ALL_PROJECTS_PURPOSE = {
     'secrets': 'API keys, tokens and private keys your websites and scripts give away, and where each one was seen.',
     'suppliers': 'Outside companies your hosts depend on and what each one shows to the internet; these are never your own hosts.',
     'situations': 'What needs you across your projects, one host at a time, with the first thing to do, most urgent first.',
+    'internal': 'The hosts inside the internal networks of your projects, which only a Sentinel inside each network scans: what was found and what runs now.',
 }
 SCAN_PURPOSE = 'What this one scan did and what it found.'
 
@@ -559,7 +562,11 @@ def ui_context(request, active, slug=None, remember=True):
     from cveFeed import nav as navmod
     bounty_on = _bounty_allowed(request.user)
     sentinels_on = bool(here and has_sentinels(here['slug'], here['org_slug']))
-    nav = navmod.build(active, current, bounty_enabled=bounty_on, sentinels_enabled=sentinels_on, all_projects=slug == ALL_PROJECTS)
+    from cveFeed import internal_page
+    # the Internal network entry: the selected project, or every project of All projects (one organization when the switcher narrowed it)
+    internal_on = internal_page.nav_visible([here] if here else (in_scope if slug == ALL_PROJECTS else []))
+    nav = navmod.build(active, current, bounty_enabled=bounty_on, sentinels_enabled=sentinels_on, all_projects=slug == ALL_PROJECTS,
+                       internal_enabled=internal_on)
     is_admin = is_admin_anywhere(request.user)
     from tenancy import mfa_nag
     return {'nav': nav, 'active': active, 'slug': current, 'projects': projects, 'orgs': orgs if len(orgs) >= 2 else [], 'current_org': current_org, 'sections': SECTIONS, 'is_admin': is_admin,
@@ -567,6 +574,7 @@ def ui_context(request, active, slug=None, remember=True):
             'mfa_nag': mfa_nag.for_request(request, is_admin, active),  # an administrator without two-step sign-in is reminded on every page
             'bounty_enabled': bounty_on,
             'sentinels_enabled': sentinels_on,
+            'internal_enabled': internal_on,
             'ai_usage_connected': ai_connected,
             'ai_usage_provider': ai_cfg.provider if ai_connected else '',
             'ai_usage_model': ai_cfg.model if ai_connected else '',
@@ -682,6 +690,10 @@ def project_page(request, slug, section):
         project = Project.objects.filter(slug=slug).first()
     if not project:
         raise Http404
+    if section == 'internal':
+        shell = ui_context(request, 'internal', slug)
+        purpose = (ALL_PROJECTS_PURPOSE if slug == ALL_PROJECTS else SECTION_PURPOSE)[section]
+        return render(request, 'cveFeed/internal.html', {'title': SECTIONS[section], 'project': project, 'purpose': purpose, **shell})
     if section == 'sentinels':
         if slug == ALL_PROJECTS:
             raise Http404  # a Sentinel's scope is per project; there is no combined view
@@ -1071,13 +1083,29 @@ def api_alive(request):
     return response
 
 
+def ai_budget_notice():
+    """The AI money budget's line for the page's strip (an App Admin's only: it names amounts): ``ai_budget_message`` and ``ai_budget_level``
+    ('reached' or 'warn'), or nothing when no budget is set or less than 80 percent of it is spent (``cveFeed.ai_budget.state``)."""
+    from cveFeed import ai_budget
+    try:
+        current = ai_budget.state()
+    except Exception:  # noqa: BLE001 - the strip never breaks a page; the queue holds the work when the ledger cannot be read
+        return {}
+    if not current['message']:
+        return {}
+    return {'ai_budget_message': current['message'], 'ai_budget_level': 'reached' if current['reached'] else 'warn'}
+
+
 @require_GET
 def api_scanner(request):
     """The derived "scanner offline" state for the page's strip (static/cve/scannerbar.js): which kinds are waiting for a scanner and the sentence to
     show, from ``agentapi.scanner_state`` (cached for 15 seconds, no query at all until the built-in scanner has enrolled). Read only. The sentence
     about a scanner that never registered names a server setting, so only an App Admin gets it."""
     from agentapi import scanner_state
-    response = JsonResponse(scanner_state.status(admin=request.user.is_superuser))
+    body = scanner_state.status(admin=request.user.is_superuser)
+    if request.user.is_superuser:
+        body = {**body, **ai_budget_notice()}
+    response = JsonResponse(body)
     response['Cache-Control'] = 'no-store'
     return response
 
@@ -1104,6 +1132,25 @@ def api_overview(request):
     payload = overview.summary(ids, live={'hosts': stats.get('hosts'), 'exposed_hosts': stats.get('exposed_hosts')}, sentinels_too=request.user.is_superuser)
     # the ETag leaves out the build time: a summary that says the same again is a 304
     return snapshot_cache.respond_payload(request, payload, etag=snapshot_cache.token_of({k: v for k, v in payload.items() if k != 'updated_at'}))
+
+
+@require_GET
+@project_scoped
+def api_internal(request):
+    """The Internal network page's answer (``cveFeed.internal_page``): the four tiles, the internal networks, the open findings on internal hosts and the
+    internal scan work, for ``?project=<slug>`` or ``_all`` (narrowed to the caller's projects by ``project_scoped``, and to one organization when the
+    switcher chose one). Read only."""
+    from agentapi.services import ApiError, Ctx
+    from cveFeed import internal_page
+    from tenancy.roles import scope_org
+    slug = request.GET.get('project') or ALL_PROJECTS
+    try:
+        data = internal_page.payload(Ctx(user=request.user, org=scope_org(request) if slug == ALL_PROJECTS else ''), slug)
+    except ApiError as e:
+        return JsonResponse({'error': e.message}, status=e.status)
+    response = JsonResponse(data)
+    response['Cache-Control'] = 'no-store'
+    return response
 
 
 GRAPH_CACHE_SECONDS = 30

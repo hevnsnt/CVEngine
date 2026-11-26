@@ -231,7 +231,7 @@ const sections = {
       anthropic: "optional, empty uses Anthropic (https://api.anthropic.com); set it for a gateway or proxy, which then gets the key you type here",
     };
     // What is stored now, per job, so that a change of provider can be undone by choosing the old one again and a save can say what changed.
-    const savedModels = { default: s.model || "", review: r.review_model || "", ops: r.ops_model || "", nuclei: s.nuclei_model || "" };
+    const savedModels = { default: s.model || "", review: r.review_model || "", ops: r.ops_model || "", nuclei: s.nuclei_model || "", bulk: s.bulk_model || "" };
     let dirty = false;
     let refreshHints = () => {}; // set below, once the request settings exist
     let drawInForce = () => {};
@@ -261,6 +261,13 @@ const sections = {
       sameLabel: () => (source.state.nucleiDefault ? `Default: ${source.state.nucleiDefault}` : "Default: same as Everything else"),
       recommendFor: (st) => st.nucleiDefault || "",
     });
+    // The bulk model of the high-volume stages (cvengine/ai_routing.py): empty is the provider's cheapest current model.
+    const bulkPick = modelPicker({
+      source, context, job: "reviewer", saved: savedModels.bulk, onChange: () => markDirty(),
+      sameLabel: () => `Default: ${source.state.recommended || s.bulk_model_in_force || "the cheapest current model"}`,
+      recommendFor: (st) => st.recommended || "",
+    });
+    const useBulk = check("Use the bulk model for high-volume stages", s.use_bulk_model !== false);
     const advancedAddress = el("details", "ai-adv");
     advancedAddress.open = !!s.base_url;
     advancedAddress.append(el("summary", "", "Advanced: use a gateway or proxy address"), baseField);
@@ -369,6 +376,15 @@ const sections = {
       max: "100000",
     });
     const guideDaily = text(s.cve_guidance_daily, { type: "number", min: "0", max: "100000" });
+    const monthlyBudget = text(s.monthly_budget_usd ?? "", { type: "number", min: "0", max: "1000000", step: "0.01", placeholder: s.budget && s.budget.monthly_source === "env" ? `${s.budget.monthly_usd} (from .env)` : "no limit" });
+    const dailyBudget = text(s.daily_budget_usd ?? "", { type: "number", min: "0", max: "1000000", step: "0.01", placeholder: s.budget && s.budget.daily_source === "env" ? `${s.budget.daily_usd} (from .env)` : "no limit" });
+    const budgetNote = el("p", "note ai-budget", "", { role: "status", "aria-live": "polite" });
+    const drawBudget = () => {
+      const b = s.budget || {};
+      const spent = b.month_spent_usd != null ? `Spent this month: $${b.month_spent_usd}; today: $${b.day_spent_usd}. ` : "";
+      budgetNote.textContent = `${b.message || ""} ${spent}When a budget is reached, AI work waits in the queue until the next UTC day or month. Spend is priced at the rates on the AI usage page; a model with no rate counts at the highest one.`.trim();
+    };
+    drawBudget();
     const gp = s.cve_guidance;
     const guideNote = el("p", "note", gp
       ? `${gp.cves.toLocaleString()} CVEs: guidance written by rules for ${gp.rules.toLocaleString()}, by the model for ${gp.ai.toLocaleString()}, by a person for ${gp.manual.toLocaleString()}. ${gp.local_only.toLocaleString()} are only usable from the host itself and never matched. ${gp.ai_pending.toLocaleString()} still wait for the model${gp.days_left ? `: about ${gp.days_left.toLocaleString()} day${gp.days_left === 1 ? "" : "s"} at ${gp.daily_budget.toLocaleString()} a day` : ""}. The model handled ${gp.ai_last_day.toLocaleString()} in the last day.`
@@ -410,7 +426,7 @@ const sections = {
         say(message, false); // beside the toast, which goes after 3.5 seconds
         throw new Error(message);
       }
-      for (const [pick, name] of [[defaultPick, "the default model"], [reviewPick, "the finding review model"], [opsPick, "the operations check model"], [nucleiPick, "the Nuclei targeting model"]]) {
+      for (const [pick, name] of [[bulkPick, "the bulk model"], [defaultPick, "the default model"], [reviewPick, "the finding review model"], [opsPick, "the operations check model"], [nucleiPick, "the Nuclei targeting model"]]) {
         if (pick.error) {
           pick.focus();
           say(`Fix ${name}: ${pick.error}`, false);
@@ -431,6 +447,10 @@ const sections = {
         provider: provider.value,
         model: defaultPick.value,
         nuclei_model: nucleiPick.value,
+        bulk_model: bulkPick.value,
+        use_bulk_model: useBulk.box.checked,
+        monthly_budget_usd: monthlyBudget.value,
+        daily_budget_usd: dailyBudget.value,
         api_key: key.value,
         base_url: base.value,
         enabled: enabled.box.checked,
@@ -440,6 +460,8 @@ const sections = {
       Object.assign(s, saved); // the stored provider, address and settings, so a later change of provider restores the right address
       savedModels.default = s.model || "";
       savedModels.nuclei = s.nuclei_model || "";
+      savedModels.bulk = s.bulk_model || "";
+      drawBudget();
       key.value = "";
       key.placeholder = s.has_key ? "saved (leave blank to keep)" : "API key";
       let after;
@@ -455,6 +477,7 @@ const sections = {
       reviewPick.set(savedModels.review, { stored: true });
       opsPick.set(savedModels.ops, { stored: true });
       nucleiPick.set(savedModels.nuclei, { stored: true });
+      bulkPick.set(savedModels.bulk, { stored: true });
       reviewerP.draw(r);
       showVerified();
       refreshHints();
@@ -486,7 +509,8 @@ const sections = {
     const jobs = el("table", "ai-jobs", null, { "aria-label": "Which model does which job" });
     const jobsBody = el("tbody");
     jobsBody.append(
-      jobRow("Everything else", "The default model. Triages every finding, confirms CVE matches, plans validation checks and Nuclei scans, and writes CVE guidance. It runs on every scan in many small requests, so this is where most of the spend goes: a cheap model is the right choice. The daily caps are under AI spend.", defaultPick),
+      jobRow("High-volume stages (bulk model)", "Triage of each finding, validation plans, CVE guidance (detection records), Nuclei targeting and the finding review. These run thousands of times a day, so they use the provider's cheapest current model unless you choose one. Turn the switch below off to run them on the default model.", bulkPick),
+      jobRow("Everything else", "The default model. Host reviews, AI-written templates and local check suggestions, and every stage when the bulk model is off. A model chosen for one job below wins over both.", defaultPick),
       jobRow("Nuclei targeting and tag selection", "Chooses which detection templates apply to the software found. A smaller, faster model works well here and avoids refusals.", nucleiPick),
       jobRow("Finding review", "The AI reviewer. Reads each open finding once, and again only when its host or evidence changes, up to the daily limit below. One larger request per finding, so a stronger model costs the most here.", reviewPick),
       jobRow("Operations check", "The AI reviewer. Looks over the work queue, the scanners and the errors a few times a day (four by default) and writes an alert for each problem. A handful of small requests a day, so the cost hardly matters.", opsPick),
@@ -520,6 +544,7 @@ const sections = {
       "Which model does which job",
       el("p", "note", "Each job can use its own model. The lists are the models your provider offers right now. A model you choose here is used from the next request; nothing already running is changed."),
       jobs,
+      useBulk.wrap,
       inForce,
       (() => {
         const row = el("div", "ai-actions");
@@ -546,6 +571,9 @@ const sections = {
     const limitsCard = card(
       "Confirmation and limits",
       enabled.wrap,
+      field("AI budget per month, US dollars (empty: no limit, or the .env value)", monthlyBudget),
+      field("AI budget per day, US dollars (optional)", dailyBudget),
+      budgetNote,
       field("Validation planning requests per day, all projects", planTotal),
       field("Validation planning requests per day, one project", planProject),
       (() => {
