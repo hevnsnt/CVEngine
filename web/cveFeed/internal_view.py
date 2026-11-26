@@ -59,9 +59,18 @@ def _load():
 
 
 def table():
+    """The table of every project, whoever asks first. It is built with the request's tenancy scope lifted: the table is kept per process and
+    shared by every caller, so a table built inside one caller's scope would hold only that caller's projects, and every other caller would
+    find no internal host until it was rebuilt. Lifting the scope leaks nothing: a caller only ever looks up a name of its own rows in it."""
     now = time.monotonic()
     if _cache['at'] is None or now - _cache['at'] > CACHE_SECONDS:
-        _cache.update(at=now, table=_load())
+        from tenancy import scope
+        tokens = scope.set_scope(None, None)
+        try:
+            built = _load()
+        finally:
+            scope.reset_scope(tokens)
+        _cache.update(at=now, table=built)
     return _cache['table']
 
 
@@ -87,10 +96,11 @@ def internal_q(prefix='', name_field='name', project_field='target_domain__proje
     return q
 
 
-def _sentinel_state(project):
+def _sentinel_state(project, names=False):
     """``{'state', 'online', 'total', 'last_seen'}`` of the Sentinels inside the project's internal networks: those covering the project
     that declare ``network:internal``. ``online`` (one is live), ``offline`` (some are registered, none live: the network is not being
-    scanned, a quiet page there is not a clean one) or ``none``."""
+    scanned, a quiet page there is not a clean one) or ``none``. ``names`` adds ``sentinels``: the name and state of each one whose own scope
+    names the project or its organization (an instance-wide Sentinel is counted but not named, as it belongs to no organization)."""
     from django.utils import timezone
 
     from agentapi import sentinel_broker
@@ -101,11 +111,15 @@ def _sentinel_state(project):
               if sentinel_broker.INTERNAL_CAPABILITY in sentinel_broker.effective_capabilities(a)]
     live = [a for a in agents if a.status == 'active' and a.last_seen and now - a.last_seen <= sentinel_broker.LIVE_WINDOW]
     seen = max((a.last_seen for a in agents if a.last_seen), default=None)
-    return {'state': 'online' if live else ('offline' if agents else 'none'), 'online': len(live), 'total': len(agents),
-            'last_seen': seen.isoformat() if seen else None}
+    out = {'state': 'online' if live else ('offline' if agents else 'none'), 'online': len(live), 'total': len(agents),
+           'last_seen': seen.isoformat() if seen else None}
+    if names:
+        out['sentinels'] = [{'name': a.name, 'state': 'online' if a in live else 'offline', 'last_seen': a.last_seen.isoformat() if a.last_seen else None}
+                            for a in sorted(agents, key=lambda a: a.name.lower()) if not (a.scope or {}).get('instance')]
+    return out
 
 
-def declared_networks():
+def declared_networks(names=False):
     """Every internal network a project the caller can see declared, oldest project first: its organization and project, the
     addresses in it, the last internal scan that finished, the error of the latest one when it failed, the last live-host sweep of the range, and the state of the Sentinels
     inside it. The ``networks`` of ``summary`` and the organization groups of the Sentinels page."""
@@ -126,8 +140,8 @@ def declared_networks():
         last = scans.filter(scan_status=SUCCESS_TASK).order_by('-start_scan_date').values_list('start_scan_date', flat=True).first() if names else None
         latest = scans.filter(scan_status__in=(SUCCESS_TASK, FAILED_TASK)).order_by('-start_scan_date').values_list('scan_status', 'error_message').first() if names else None
         if rng.project_id not in sentinels:
-            sentinels[rng.project_id] = _sentinel_state(project)
-        out.append({'org': project.org.slug if project.org_id else None, 'project': project.slug, 'cidr': rng.cidr, 'description': rng.description,
+            sentinels[rng.project_id] = _sentinel_state(project, names=names)
+        out.append({'org': project.org.slug if project.org_id else None, 'project': project.slug, 'project_name': project.name, 'cidr': rng.cidr, 'description': rng.description,
                     'hosts': len(names), 'last_scan_at': last.isoformat() if last else None,
                     'last_error': (latest[1] or 'the last internal scan failed') if latest and latest[0] == FAILED_TASK else '',
                     'sentinel': sentinels[rng.project_id],
