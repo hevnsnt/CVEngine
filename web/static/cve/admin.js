@@ -879,7 +879,9 @@ async function timingsTab(panel) {
     field(
       "Certificate transparency",
       fallbackLabel,
-      t.ct_fallback_forced_off
+      t.hosted_license_safe
+        ? "Off on this hosted server: CVENGINE_HOSTED_LICENSE_SAFE keeps Cert Spotter off, because its API without a key is for personal or evaluation use."
+        : t.ct_fallback_forced_off
         ? "Off on this server: CVENGINE_CT_FALLBACK turns it off whatever this box says."
         : "When crt.sh cannot answer, ask Cert Spotter (a few lookups an hour) so new hosts are still found.",
     ),

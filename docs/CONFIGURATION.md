@@ -208,7 +208,8 @@ Windows are hours. Every window is `CVENGINE_TTL_<SERVICE>` and a scanner skips 
 | `CVENGINE_SCRIPT_READ_MAX_REQUESTS`, `CVENGINE_SCRIPT_READ_MAX_SECONDS` | `300`, `600` | Script files read per scan by the web route check and per scan by the version probes, and seconds of reading each may spend; on top of six per host, 40 per script host (0.5 seconds apart) and each script URL once per scan. |
 | `CVENGINE_PROBE_MAX_HOSTS`, `CVENGINE_TTL_PROBE` | `60`, `72` | Hosts per scan the version and identity probes run on, and hours their results stay fresh (see [Pipeline](PIPELINE.md#version-and-identity-probes)). |
 | `CVENGINE_RUNZERO_SYNC_HOURS`, `CVENGINE_RUNZERO_IMPORT_MAX` | `6`, `500` | Hours between runZero syncs of each project that has a token (1 to 336; an hourly beat task starts the ones that are due), and the most new targets one sync may import when import is on (1 to 5000). See [runZero](#runzero). |
-| `CVENGINE_ARCHIVE_LOOKUP` | `1` | Set to `0` to stop asking the Internet Archive which URLs it saved for a target (passive, nothing is sent to the target). |
+| `CVENGINE_ARCHIVE_LOOKUP` | `1` | Set to `0` to stop asking the Internet Archive which URLs it saved for a target (passive, nothing is sent to the target). `CVENGINE_HOSTED_LICENSE_SAFE=1` turns it off too. |
+| `CVENGINE_HOSTED_LICENSE_SAFE` | unset (off) | `1`, `true`, `yes` or `on` for a hosted service that sells cvENGINE to its customers: turns off every tool and data source whose free terms allow no commercial hosted use. See [Hosted license-safe mode](#hosted-license-safe-mode). A self-hosted install leaves it unset and keeps every default. |
 | `CVENGINE_GC_MANUAL` | `1` | In the Celery workers, Python's cyclic garbage collector runs on a 30 second timer instead of starting from whichever allocation reaches its threshold (`cvengine/gevent_gc.py`). The automatic collector crashed the workers when it started during a greenlet switch. Once a worker has finished loading, the objects it holds are frozen (`gc.freeze()`, once, never again), so the timer only walks what was allocated since: a tick collects the young generations (generation 0 on Python 3.14.0 to 3.14.4, whose `gc.collect(1)` is a step of the incremental collector that often collects nothing; 1 elsewhere), and a full collection of the unfrozen objects runs every 10 minutes. A collection that takes a second or more is logged (at most one line every 10 minutes); the system status shows the last and the worst collection time of each lane. Set to `0` to put Python's own behavior back (nothing is frozen either). |
 | `CVENGINE_TTL_ARCHIVE_URLS` | `168` | Hours before a target's archived URLs are read again. |
 | `CVENGINE_SCREENSHOTS` | `1` | `0`, `false`, `no` or `off` turns off web screenshots: the scan stage, the Take screenshot button and the hourly backfill (see [Pipeline](PIPELINE.md#web-screenshots)). Pictures already taken stay. |
@@ -232,6 +233,21 @@ Windows are hours. Every window is `CVENGINE_TTL_<SERVICE>` and a scanner skips 
 | `CVENGINE_SUPPLIERS` | `1` | `0`, `false`, `no` or `off` turns off the daily third-party supplier checks (host cards and posture findings; [Pipeline](PIPELINE.md#third-party-suppliers)). Suppliers can still be listed. |
 | `CVENGINE_SUPPLIERS_MAX_PER_PROJECT`, `CVENGINE_SUPPLIERS_MAX_DOMAINS`, `CVENGINE_SUPPLIERS_MAX_REQUESTS` | `50`, `10`, `600` | Suppliers one project may list (1 to 500), exact names one supplier may list (1 to 25), and requests one daily sweep may make across all projects (50 to 5000; a certificate read counts as three). A supplier that does not fit waits for the next sweep. |
 | `CVENGINE_TTL_SUPPLIER`, `CVENGINE_TTL_SUPPLIER_FAILED` | `168`, `24` | Hours before a supplier is checked again, and before one that answered nothing is asked again. |
+
+### Hosted license-safe mode
+
+Some tools and data sources cvENGINE uses are free for testing your own systems or for non-commercial use, but need a paid license when a company runs them as a service for its customers. A self-hosted install keeps them all, with the defaults described elsewhere on this page. A hosted service sets `CVENGINE_HOSTED_LICENSE_SAFE=1` in `.env` and restarts; while it is set:
+
+| What | Why it is off | What happens |
+| :- | :- | :- |
+| WPScan (task kinds `wpscan` and `wpscan_thorough`) | The WPScan Public Source License needs a commercial license for managed or hosted use | Denied on every Sentinel, built-in and external, above every capability policy (shown as **Off on this hosted server**, source `hosted license`); allowing it is refused. The WordPress stage still detects WordPress and the Nuclei WordPress templates still run; it sends no WPScan task |
+| WPScan vulnerability database token | Its API needs an Enterprise plan for use in a service | Never sent with a task |
+| Shodan InternetDB | Free for non-commercial use only | Discovery leaves bbot's `shodan_idb` module out |
+| Internet Archive (Wayback) | Access is granted for scholarship and research | The server's CDX lookups stop and discovery leaves bbot's `wayback` module out |
+| Cloudflare Radar Zero Wire | CC BY-NC 4.0 | The feed is not read and email reports name no briefing, whatever the Reporting page switch says |
+| Cert Spotter | Its API without a key is for personal or evaluation use | The certificate transparency watch asks only crt.sh, and discovery leaves bbot's `certspotter` module out |
+
+Nothing is stored: unset the variable and restart to return to the defaults.
 
 ### Cloud hosts and port 25
 

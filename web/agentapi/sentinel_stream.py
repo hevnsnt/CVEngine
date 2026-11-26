@@ -591,10 +591,12 @@ def scope_policy(domain):
 
 def bbot_target(domain, mode, timeout, api_keys=False, trufflehog=False):
     """The ``target`` of a ``bbot_discovery`` task for ``domain`` (``$defs/targets/bbot_discovery``): what the mode runs (presets,
-    required flags, ``--force``, trufflehog excluded unless it may run, ``--strict-scope`` for a host-scoped target) and the scope it must keep to."""
+    required flags, ``--force``, trufflehog excluded unless it may run, the modules ``cveFeed.license_safe`` leaves out on a hosted install, ``--strict-scope`` for a host-scoped target) and the scope it must keep to."""
+    from cveFeed import license_safe
     options = mode_options(mode)
+    excluded = ([] if trufflehog else ['trufflehog']) + license_safe.excluded_bbot_modules()  # a hosted install leaves out the sources with non-commercial terms
     return {'domain': domain.name.strip().lower().rstrip('.'), 'mode': mode if mode in MODES else 'passive', **options,
-            'exclude_modules': [] if trufflehog else ['trufflehog'], 'strict_scope': bool(domain.is_host_scoped()),
+            'exclude_modules': excluded, 'strict_scope': bool(domain.is_host_scoped()),
             'timeout_seconds': max(60, min(86400, int(timeout))), 'api_keys': bool(api_keys), 'trufflehog': bool(trufflehog),
             'scope': scope_policy(domain)}
 

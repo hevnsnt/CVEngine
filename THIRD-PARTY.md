@@ -2,11 +2,16 @@
 
 cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x, released under the GPL-3.0 (see [LICENSE](LICENSE), [CONTRIBUTORS.md](CONTRIBUTORS.md)). It stands on the projects below. Each keeps its own license, and the license on its page applies.
 
+cvENGINE uses the Nmap Security Scanner to perform its tasks ([nmap.org](https://nmap.org)).
+
+Some tools and data sources below are free only for testing your own systems or for non-commercial use: WPScan and its vulnerability database, Shodan InternetDB, the Internet Archive, Cloudflare Radar Zero Wire and Cert Spotter without a key. A hosted service that sells cvENGINE sets `CVENGINE_HOSTED_LICENSE_SAFE=1`, which turns all of them off ([Configuration](docs/CONFIGURATION.md#hosted-license-safe-mode)).
+
 ## Scanners and tools
 
 | Project | License | Used for |
 | --- | --- | --- |
 | [bbot](https://github.com/blacklanternsecurity/bbot) | AGPL-3.0 | Subdomain and asset discovery, run as a separate process on the Sentinel (its own virtual environment, pinned in the Sentinel image); the server image has none |
+| bbot's dependencies [blastdns](https://github.com/blacklanternsecurity/blastdns), [blasthttp](https://github.com/blacklanternsecurity/blasthttp), [asndb](https://github.com/blacklanternsecurity/asndb), [radixtarget](https://github.com/blacklanternsecurity/radixtarget), [cloudcheck](https://github.com/blacklanternsecurity/cloudcheck), [baddns](https://github.com/blacklanternsecurity/baddns) and [badsecrets](https://github.com/blacklanternsecurity/badsecrets) | AGPL-3.0 (blastdns, asndb and radixtarget AGPL-3.0-or-later; baddns and badsecrets say GPL-3.0 in their package metadata but ship the AGPL-3.0 text, which is what applies); bbot's other dependencies are GPL, LGPL or permissive, and wordninja states no license | Installed with bbot in its own virtual environment on the Sentinel, run unmodified as part of that separate program, never imported by cvENGINE |
 | [nuclei](https://github.com/projectdiscovery/nuclei) | MIT | Vulnerability scanning and CVE tests |
 | [nuclei-templates](https://github.com/projectdiscovery/nuclei-templates) | MIT | The community template library |
 | [nmap](https://github.com/nmap/nmap) | [Nmap Public Source License](https://nmap.org/npsl/) | Service and OS fingerprinting and the UDP exposure sweep. Pinned to one release with its checksum: on amd64 the official release package from nmap.org is unpacked, on arm64 (where nmap.org publishes no binary) the release tarball is compiled |
@@ -21,7 +26,7 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x, rele
 | [badkeys.info](https://badkeys.info) blocklist data (from the [badkeys](https://github.com/badkeys/badkeys) project) | The badkeys software is MIT (Copyright Hanno Böck); the license of the blocklist data itself is not stated where it is downloaded and is recorded here as **unknown** | The known-weak SSH host keys sshamble checks against. Not baked into the image: the Sentinel downloads it daily with `sshamble badkeys-update` into its own state volume (off with `CVENGINE_BADKEYS_REFRESH=0` for an air-gapped Sentinel, which then reports "not checked") |
 | [cvengine-scanner](https://github.com/hevnsnt/cvENGINE-sentinel) (the scanner library) | GPL-3.0-only (the Sentinel repository's declared license) | The scan policy, parsers and the result contract the server shares with every Sentinel; `web/requirements.txt` pins it to a full commit sha |
 | The Sentinel image's Python libraries (`requests`, `python-gvm`, `xmltodict`, `h11`, `aardwolf`, `Pillow`, `redis`, `playwright`, `PyMySQL`, `pymongo`, `dnspython`, `cryptography`, `tldextract`) | MIT, Apache-2.0, BSD-3-Clause, ISC, GPL-3.0-or-later (python-gvm) and MIT-CMU (Pillow), each under its own license (read from the package metadata) | The Sentinel client's dependencies, pinned in the Sentinel repository's `requirements.txt` (PyMySQL and pymongo speak the one credential-less database greeting of `db_probe`; Pillow and aardwolf the RDP screenshot) |
-| [WPScan](https://github.com/wpscanteam/wpscan) | [WPScan Public Source License](https://github.com/wpscanteam/wpscan/blob/master/LICENSE) (free for testing your own systems and for pentesters; a commercial license is needed for managed or hosted use) | WordPress vulnerability scanning |
+| [WPScan](https://github.com/wpscanteam/wpscan) | [WPScan Public Source License](https://github.com/wpscanteam/wpscan/blob/master/LICENSE) (free for testing your own systems and for pentesters; a commercial license is needed for managed or hosted use, so `CVENGINE_HOSTED_LICENSE_SAFE=1` turns it off) | WordPress vulnerability scanning |
 | [testssl.sh](https://github.com/testssl/testssl.sh) | GPL-2.0 (run as a separate program, never linked) | Tests the TLS configuration of every TLS port: protocols, ciphers, forward secrecy and the named TLS vulnerabilities |
 | [Tailscale](https://github.com/tailscale/tailscale) (the `tailscale/tailscale` container image) | BSD-3-Clause | The optional `tailscale` compose service that joins a tailnet so scans can reach it; read through its local status API |
 | [Greenbone Community Edition](https://greenbone.github.io/docs/latest/): [gvmd](https://github.com/greenbone/gvmd) (with its library [gvm-libs](https://github.com/greenbone/gvm-libs), GPL-2.0-or-later) | AGPL-3.0-or-later | The vulnerability manager of the `openvas` profile of a Sentinel (the Sentinel repository's compose file; this server runs none of it); the Sentinel drives it over GMP. Every Greenbone component runs as a separate container (image from `registry.community.greenbone.net`), never linked into the cvENGINE image |
@@ -51,6 +56,9 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x, rele
 | [OSV](https://osv.dev) (Apache-2.0 code) and [Debian security tracker](https://security-tracker.debian.org) | Distribution fix data for backport detection |
 | [Red Hat Security Data API](https://access.redhat.com/security/data) (CC BY 4.0) | RHEL fix states, fixed builds and advisories for backport detection |
 | [crt.sh](https://crt.sh) | Certificate transparency lookups |
+| [Cert Spotter](https://sslmate.com/certspotter/) by SSLMate | The second certificate transparency source, asked when crt.sh cannot answer (its API without a key is for personal or evaluation use; off with `CVENGINE_CT_FALLBACK=0` or `CVENGINE_HOSTED_LICENSE_SAFE=1`) |
+| [Shodan InternetDB](https://internetdb.shodan.io) | Open ports and CPEs of an address, through bbot's `shodan_idb` module in discovery (free for non-commercial use only; left out with `CVENGINE_HOSTED_LICENSE_SAFE=1`) |
+| [Cloudflare Radar Zero Wire](https://radar.cloudflare.com/zero-wire) (CC BY-NC 4.0) | Vulnerability briefings named in email reports (switched on the Reporting page; off with `CVENGINE_HOSTED_LICENSE_SAFE=1`) |
 | [IANA RDAP bootstrap](https://data.iana.org/rdap/dns.json) and the registries it names | Registry lookups for the hygiene and dangling-domain checks |
 | [cvENGINE CVE seed](https://github.com/hevnsnt/CVEngine/releases/tag/cve-seed) | The pre-built CVE catalog a new install downloads and verifies on first start |
 | [GitHub API](https://docs.github.com/rest) | The in-app update check |
@@ -59,10 +67,10 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x, rele
 | [Greenbone Community feed](https://greenbone.github.io/docs/latest/) | The OpenVAS add-on's vulnerability tests, from `registry.community.greenbone.net` |
 | [HackerOne API](https://api.hackerone.com) | Submitting a report you wrote, with your own API token |
 | Slack, Discord, Telegram and Lark webhooks | Notifications to the webhook or bot you configure |
-| [Internet Archive CDX index](https://web.archive.org) | Saved URLs, as passive evidence of what a host once ran |
+| [Internet Archive CDX index](https://web.archive.org) | Saved URLs, as passive evidence of what a host once ran (access granted for scholarship and research; off with `CVENGINE_ARCHIVE_LOOKUP=0` or `CVENGINE_HOSTED_LICENSE_SAFE=1`) |
 | [Tailscale API](https://tailscale.com/api) and [security bulletins](https://tailscale.com/security-bulletins) | Read-only access to your own tailnet with your own credentials, and the fixed versions the Tailscale checks use |
 | [Tailworm](https://tailworm.com/) (an October 2026 security assessment of Tailscale and headscale, unconfirmed by the vendor) | Guidance behind the SSH, tag-owner and Funnel policy checks; referenced, nothing copied |
-| [wpscan.com API](https://wpscan.com/) | WordPress vulnerability data for WPScan, with your own token |
+| [wpscan.com API](https://wpscan.com/) | WordPress vulnerability data for WPScan, with your own token (use in a service needs a WPScan Enterprise plan; never sent with `CVENGINE_HOSTED_LICENSE_SAFE=1`) |
 | [runZero Export API](https://help.runzero.com/docs/exporting-asset-data/) | Asset inventory (OS, hardware, tags, CVE reports) read with your own Export API token from `console.runzero.com`; no runZero code is bundled |
 | [bounty-targets-data](https://github.com/arkadiyt/bounty-targets-data) (MIT) | Public scope of bug bounty programs, read at run time |
 | [Bugcrowd Vulnerability Rating Taxonomy](https://github.com/bugcrowd/vulnerability-rating-taxonomy) (Apache-2.0) | Bundled as `web/cveFeed/data/vrt.json` for report categories and priority |
@@ -82,7 +90,6 @@ cvENGINE talks to [Anthropic](https://www.anthropic.com), [OpenAI](https://opena
 | [qrcode-generator](https://github.com/kazuhikoarase/qrcode-generator) | MIT | `web/static/mfa/qrcode.js`, license header kept in the file |
 | [DejaVu Sans](https://dejavu-fonts.github.io) (Debian `fonts-dejavu-core`) | Bitstream Vera license with public-domain DejaVu changes | Installed in the image; the PDF reports are set in it |
 | [pypdf](https://github.com/py-pdf/pypdf) | BSD-3-Clause | A pinned Python requirement (`web/requirements.txt`); the tests use it to read the generated report PDFs back, the application does not import it |
-| [Inter](https://github.com/rsms/inter) | SIL Open Font License 1.1 | Loaded from Google Fonts by HTML reports, not shipped |
 
 ## Platform
 
