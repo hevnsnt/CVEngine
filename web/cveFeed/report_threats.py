@@ -328,8 +328,9 @@ def top(scope, start, end, limit=None, keep_hosts=False, with_hosts=False):
     from cveFeed.models import CVEEntry, ReportingSettings, ZeroWireBriefing
     limit = limit or top_limit()
     base = mailer.base_url()
+    from cveFeed import license_safe
     briefings = []
-    if ReportingSettings.current().zero_wire_enabled:
+    if ReportingSettings.current().zero_wire_enabled and not license_safe.enabled():  # a hosted install names no CC BY-NC briefing
         briefings = list(ZeroWireBriefing.objects.filter(published_at__gte=start, published_at__lt=end).order_by('-published_at', '-id')[:limit])
     covered = {c for b in briefings for c in b.cve_ids}
     held = {c.cve_id: c for c in CVEEntry.objects.filter(cve_id__in=covered)} if covered else {}

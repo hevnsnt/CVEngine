@@ -78,10 +78,11 @@ def get_threats(ctx, params):
 def get_zero_wire(ctx, params=None):
     """Whether the Zero Wire briefings are on, and (for an App Admin) when they were last read and why a read failed."""
     from cveFeed.models import ReportingSettings, ZeroWireBriefing
+    from cveFeed import license_safe
     row = ReportingSettings.current()
     out = {'enabled': row.zero_wire_enabled}
-    if ctx.user.is_superuser:
-        out.update(synced_at=row.zero_wire_synced_at.isoformat() if row.zero_wire_synced_at else None, error=row.zero_wire_error, briefings=ZeroWireBriefing.objects.count())
+    if ctx.user.is_superuser:  # hosted_off: CVENGINE_HOSTED_LICENSE_SAFE keeps it off whatever the switch says
+        out.update(hosted_off=license_safe.enabled(), synced_at=row.zero_wire_synced_at.isoformat() if row.zero_wire_synced_at else None, error=row.zero_wire_error, briefings=ZeroWireBriefing.objects.count())
     return out
 
 
