@@ -485,7 +485,8 @@ def plan_archive(h, ev):
     if not h.is_domain_target:
         return 'the web archive is asked once for the target, not for each host under it'
     if not archive_urls.lookup_enabled():
-        return 'the web archive lookup is switched off (CVENGINE_ARCHIVE_LOOKUP=0)'
+        from cveFeed import license_safe
+        return ('the web archive lookup is ' + license_safe.REASON) if license_safe.enabled() else 'the web archive lookup is switched off (CVENGINE_ARCHIVE_LOOKUP=0)'
     return _one(h, ev, ('archive-urls',))
 
 
