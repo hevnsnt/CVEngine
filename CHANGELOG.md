@@ -31,6 +31,7 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 
 ### Fixed
 
+- **Tests from outside contributors replaced (reNgine removal).** The BIND CPE alias tests and the compressed route probe tests are new modules (`tests/test_bind_cpe_alias.py`, `tests/test_compressed_probe_body.py`) written from a behaviour specification, and the contributed test code they cover is removed. The behaviour under test is unchanged.
 - The built-in scanner and the scanner library move to Sentinel `bf88f68`, which runs signed-in checks on external Sentinels when the sign-in's owner allows it.
 - **Direct Send on Microsoft 365 is shown only when a test found it open.** `mx_direct_send` ("Microsoft 365 mail: check that Direct Send is turned off") was raised for every domain and supplier whose MX is Microsoft 365, read from DNS alone, so tenants that already reject Direct Send were told to check it. The Sentinel now tests the tenant over SMTP and stops before DATA (cvENGINE-sentinel #129); the server keeps an `mx_direct_send` only with that test's evidence and a 25x reply (`agentapi.probe_results.direct_send_tested`), never takes one for a supplier (a supplier is never tested), and migration `cveFeed` 0195 resolves the untested ones already stored.
 
