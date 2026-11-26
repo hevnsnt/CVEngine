@@ -30,7 +30,7 @@
     <p class="ov-sub" id="status-sub" hidden></p>
   </div>
   <div class="ov-kpis" id="ov-kpis">
-    <a class="ov-kpi" data-kpi="exposed" aria-busy="true" {% if slug %}href="{% url 'cve_section' slug 'hosts' %}?exposed=1"{% endif %}><span class="ov-kpi-label">Externally facing hosts</span><span class="ov-kpi-row"><span class="ov-kpi-value">-</span><svg class="ov-spark" role="img" aria-label="" width="120" height="32" viewBox="0 0 120 32" hidden></svg></span><span class="ov-kpi-line"><span class="ov-delta"></span><span class="ov-foot"></span></span></a>
+    <a class="ov-kpi" data-kpi="exposed" aria-busy="true" {% if slug %}href="{% url 'cve_section' slug 'hosts' %}?exposed=1"{% endif %}><span class="ov-kpi-label">Hosts with open findings</span><span class="ov-kpi-row"><span class="ov-kpi-value">-</span><svg class="ov-spark" role="img" aria-label="" width="120" height="32" viewBox="0 0 120 32" hidden></svg></span><span class="ov-kpi-line"><span class="ov-delta"></span><span class="ov-foot"></span></span></a>
     <a class="ov-kpi" data-kpi="needs" aria-busy="true" {% if slug %}href="{% url 'cve_section' slug 'situations' %}?tier=hygiene"{% endif %}><span class="ov-kpi-label">Needs attention</span><span class="ov-kpi-row"><span class="ov-kpi-value">-</span><svg class="ov-spark" role="img" aria-label="" width="120" height="32" viewBox="0 0 120 32" hidden></svg></span><span class="ov-kpi-line"><span class="ov-delta"></span><span class="ov-foot"></span></span></a>
     <a class="ov-kpi" data-kpi="critical" aria-busy="true" {% if slug %}href="{% url 'cve_section' slug 'vulns' %}?severity=critical"{% endif %}><span class="ov-kpi-label">Critical findings open</span><span class="ov-kpi-row"><span class="ov-kpi-value">-</span><svg class="ov-spark" role="img" aria-label="" width="120" height="32" viewBox="0 0 120 32" hidden></svg></span><span class="ov-kpi-line"><span class="ov-delta"></span><span class="ov-foot"></span></span></a>
     <a class="ov-kpi" data-kpi="mttf" aria-busy="true" {% if slug %}href="{% url 'cve_section' slug 'vulns' %}?status=fixed"{% endif %}><span class="ov-kpi-label">Mean time to fix</span><span class="ov-kpi-row"><span class="ov-kpi-value">-</span><svg class="ov-spark" role="img" aria-label="" width="120" height="32" viewBox="0 0 120 32" hidden></svg></span><span class="ov-kpi-line"><span class="ov-delta"></span><span class="ov-foot"></span></span></a>
@@ -150,11 +150,11 @@
       <div class="ov-det-body">
         <div class="panel ov-solo">
           <div class="cell-stack">
-    <a class="cell" id="c-exposed" title="Externally facing hosts, out of every host the Hosts page lists. The same name in two targets of one project is one host, and so are names that resolve to the same addresses (example.com and www.example.com)." {% if slug %}href="{% url 'cve_section' slug 'hosts' %}?exposed=1"{% endif %}>
-      <div class="cell-head"><span class="eyebrow">Externally facing hosts</span><span class="go">Hosts</span></div>
-      <div class="big"><b id="s-exposed_hosts">-</b><small>of <span id="s-hosts">-</span> hosts</small></div>
-      <div class="meter" role="img" aria-label="Share of hosts that are exposed"><i id="m-exposed"></i></div>
-      <p>A host is exposed when a CVE matches it (one the AI has not ruled out), or an open finding is medium or worse.</p>
+    <a class="cell" id="c-exposed" title="A host counts when it has an open CVE match (one the AI has not ruled out) or an open finding of medium severity or higher, and names that point at the same machine (example.com and www.example.com on the same addresses) count once." {% if slug %}href="{% url 'cve_section' slug 'hosts' %}?exposed=1"{% endif %}>
+      <div class="cell-head"><span class="eyebrow">Hosts with open findings</span><span class="go">Hosts</span></div>
+      <div class="big"><b id="s-exposed_hosts">-</b><small>out of <span id="s-hosts">-</span> hosts</small></div>
+      <div class="meter" role="img" aria-label="Share of hosts with open findings"><i id="m-exposed"></i></div>
+      <p>A host counts when it has an open CVE match (one the AI has not ruled out) or an open finding of medium severity or higher.</p>
     </a>
     <nav class="strip in-cell" aria-label="Engine counters">
       <a id="n-matches" title="CVE matches the AI has not ruled out, one per host. The CVE matches page opens on the same view." {% if slug %}href="{% url 'cve_section' slug 'matches' %}"{% endif %}><p class="of"><b id="s-matches">-</b><small id="s-match_groups_note"></small></p><span>CVE matches</span></a>

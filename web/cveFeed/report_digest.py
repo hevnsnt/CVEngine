@@ -9,7 +9,7 @@ inbox as inert text. Links start with ``mailer.base_url()`` (never a request's H
 image, font or tracking pixel, and stays far under the 100 KB at which Gmail clips a message.
 
 **At a glance** is calm by design: it opens with the Overview's own status sentence (``cveFeed.overview.status_block``, one implementation of the words), then four
-tiles (hosts that need attention, externally facing hosts, new issues worth a look, fixed), then one quiet line with the big totals and the Fire / Smoke / Ice line
+tiles (hosts that need attention, hosts with open findings, new issues worth a look, fixed), then one quiet line with the big totals and the Fire / Smoke / Ice line
 explained. The raw totals are never a headline.
 
 The ``threats`` list ("This week's most important vulnerabilities") is filled by ``cveFeed.report_threats`` and holds only what was found on the scope's own hosts
@@ -285,9 +285,9 @@ def _tiles(digest):
     period = 'this month' if digest['cadence'] == 'monthly' else 'this week'
     needs, n_tone = _delta(h['needs'], h['needs_prev'], unit)
     facing, e_tone = _delta(h['exposed_hosts'], h['exposed_hosts_prev'], unit, rise='neutral')
-    of_hosts = f"of {h['hosts']:,} host{'' if h['hosts'] == 1 else 's'}" if h['hosts'] else ''
+    of_hosts = f"out of {h['hosts']:,} host{'' if h['hosts'] == 1 else 's'}" if h['hosts'] else ''
     return [{'label': 'Needs attention', 'value': f"{h['needs']:,}", 'delta': needs, 'tone': n_tone, 'note': f"host{'' if h['needs'] == 1 else 's'} to look at"},
-            {'label': 'Externally facing hosts', 'value': f"{h['exposed_hosts']:,}", 'delta': facing, 'tone': e_tone, 'note': of_hosts},
+            {'label': 'Hosts with open findings', 'value': f"{h['exposed_hosts']:,}", 'delta': facing, 'tone': e_tone, 'note': of_hosts},
             {'label': 'New issues worth a look', 'value': f"{h['new_worth_a_look']:,}", 'delta': '', 'tone': '', 'note': period},
             {'label': f'Fixed {period}', 'value': f"{h['fixed']:,}", 'delta': '', 'tone': '', 'note': ''}]
 

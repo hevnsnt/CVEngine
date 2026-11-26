@@ -96,7 +96,7 @@ class StatusTests(SimpleTestCase):
 
     def test_the_threat_and_exposure_clauses_follow_and_drop_when_empty(self):
         s = self.status(counts(proven=1, likely=26), threat_group=group(), exposed_tile=tile(value=55, delta=29))
-        self.assertEqual(s['sub'], 'Four new critical PHP flaws this week match 3 of your hosts by version. Externally facing hosts went from 26 to 55 since last Saturday.')
+        self.assertEqual(s['sub'], 'Four new critical PHP flaws this week match 3 of your hosts by version. Hosts with open findings went from 26 to 55 since last Saturday.')
         quiet = self.status(counts(proven=1), threat_group=None, exposed_tile=tile(delta=0))
         self.assertEqual(quiet['sub'], '')
         self.assertEqual(self.status(counts(proven=1), threat_group=group(matched=0))['sub'], '')  # no host matches: the clause goes
@@ -118,7 +118,7 @@ class StatusTests(SimpleTestCase):
         self.assertEqual(overview.threat_sentence(None), '')
 
     def test_exposure_sentence_says_a_date_when_the_baseline_is_not_a_week_back(self):
-        self.assertEqual(overview.exposure_sentence(tile(since='2026-11-18', delta=-3, value=10)), 'Externally facing hosts went from 13 to 10 since Nov 18.')
+        self.assertEqual(overview.exposure_sentence(tile(since='2026-11-18', delta=-3, value=10)), 'Hosts with open findings went from 13 to 10 since Nov 18.')
         self.assertEqual(overview.exposure_sentence(tile(delta=None, since=None)), '')
 
 
@@ -384,7 +384,7 @@ class TileTests(TestCase):
         self.assertEqual(t['exposed']['delta'], (14 - 7) * 3)
         self.assertEqual(t['exposed']['delta_text'], '▲ 21')
         self.assertEqual(t['exposed']['tone'], 'worse')
-        self.assertEqual(t['exposed']['foot'], 'since last Saturday · of 300 hosts')
+        self.assertEqual(t['exposed']['foot'], 'since last Saturday · out of 300 hosts')
         self.assertEqual(len(t['exposed']['series']), 14)
         self.assertEqual(t['exposed']['series'][-1], 42)
         self.assertEqual(t['needs']['label'], 'Needs attention')  # the email's tile, in the same words
@@ -420,7 +420,7 @@ class TileTests(TestCase):
 
     def test_the_live_count_is_today_and_beats_a_snapshot(self):
         t = self.tiles(live={'hosts': 321, 'exposed_hosts': 99})['exposed']
-        self.assertEqual((t['value'], t['delta'], t['foot']), (99, 99 - 21, 'since last Saturday · of 321 hosts'))
+        self.assertEqual((t['value'], t['delta'], t['foot']), (99, 99 - 21, 'since last Saturday · out of 321 hosts'))
         self.assertEqual(t['series'][-1], 99)
         self.assertEqual(self.tiles(live={'hosts': 321, 'exposed_hosts': 99})['needs']['value'], 31)  # the others stay the snapshot's
 
