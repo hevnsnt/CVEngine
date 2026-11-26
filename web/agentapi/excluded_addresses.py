@@ -28,7 +28,9 @@ def _row(r):
 def list_rows(org_id):
     from cveFeed.models import ExcludedAddress
     rows = ExcludedAddress.objects.filter(org_id=org_id).select_related('created_by').order_by('id')[:exclusions.MAX_ENTRIES + 1]
-    return {'organization_id': org_id, 'limit': exclusions.MAX_ENTRIES, 'results': [_row(r) for r in rows]}
+    from cveFeed import self_exclusion
+    # this cvENGINE server is never scanned, for every organization: shown beside the list, never an entry of it (nobody can remove it)
+    return {'organization_id': org_id, 'limit': exclusions.MAX_ENTRIES, 'results': [_row(r) for r in rows], 'this_server': self_exclusion.summary()}
 
 
 def add(actor, org, text, note='', confirm_broad=False):

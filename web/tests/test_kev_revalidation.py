@@ -679,6 +679,15 @@ class StableViewTests(TestCase):
         self.assertEqual(banner('220 mail ESMTP Postfix 10:15:32'), banner('220 mail ESMTP Postfix 23:59:01'))
         self.assertNotEqual(banner('220 mail ESMTP Postfix'), banner('220 mail ESMTP Exim'))
 
+    def test_earlier_checks_of_the_host_are_not_in_the_view(self):
+        """The last steps of the host's most recently validated findings moved with every validation of any finding on the host, which re-asked
+        every other match on it (the November 2026 doubling of triage calls)."""
+        one = host_context.stable_view(self.context(earlier_checks=[{'kind': 'nmap_sv', 'result': 'failed', 'summary': 'not run'}]))
+        two = host_context.stable_view(self.context(earlier_checks=[{'kind': 'fact_probe', 'result': 'observed', 'summary': 'nginx 1.18.0'}]))
+        self.assertEqual(one, two)
+        self.assertEqual(one['earlier_checks'], [])
+        self.assertEqual(one, host_context.stable_view(self.context(earlier_checks=[])))  # a host with no checks keeps the view it had
+
     def test_a_context_with_none_of_it_is_returned_as_it_is(self):
         plain = {'technologies': [{'name': 'nginx', 'version': '1.18.0'}], 'ports': [{'number': 22}, {'number': 443}],
                  'web': {'status': 200, 'kept_response_headers': ['server: nginx']}, 'labels': ['a'], 'certificates': [],
@@ -764,6 +773,24 @@ class HostTextSignatureTests(Base):
         text = [d['payload'].get('cpe'), d['payload'].get('service_extra'), d['host_context']]
         legacy = hashlib.sha1(json.dumps(text, sort_keys=True, default=str).encode()).hexdigest()[:16]
         self.assertEqual(d['signature_fields']['host_text'], legacy)
+
+    def test_a_validation_of_another_finding_on_the_host_does_not_move_the_signature(self):
+        """Each validation writes its steps on its own row, and the host context carried the latest of them for every finding on the host: the
+        signature of every other floorless match moved, so each was asked and validated again, which moved the others once more."""
+        match = self.floorless()
+        others = []
+        for n in range(3):  # the host's other findings, all there before the first description: only their validations change below
+            cve = CVEEntry.objects.create(cve_id=f'CVE-2099-34{n}', cvss=7.5, affected=self.cve.affected, published_at=timezone.now())
+            others.append(CVEMatch.objects.create(cve_entry=cve, subdomain=match.subdomain, matched_product='nginx', matched_version='1.21.0',
+                                                  source='port', version_in_range=None, evidence={'branch_unlisted': True}))
+        rows = [row for row, _ in triage.track(triage.with_cves(others))]
+        before = self.describe(match)
+        for n, (kind, result) in enumerate((('nmap_sv', 'failed'), ('fact_probe', 'observed'), ('http_head', 'reaffirmed'))):
+            Triage.objects.filter(pk=rows[n].pk).update(validated_at=timezone.now() + timedelta(seconds=n),
+                                                        validation_steps=[{'kind': kind, 'result': result, 'summary': f'step {n}'}])
+            after = self.describe(match)
+            self.assertEqual(before['signature'], after['signature'], kind)
+            self.assertEqual(after['host_context']['earlier_checks'], [])  # the model is not shown what the key leaves out
 
     def reviewed_row(self, match, provider):
         (row, d), = triage.track(triage.with_cves([match]))

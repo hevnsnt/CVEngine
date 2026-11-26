@@ -426,6 +426,7 @@ class NoLocalToolsTests(SimpleTestCase):
 LOOKUP = re.compile(r'\bgetaddrinfo\b|\bgethostbyname(?:_ex)?\b|\bdns\.resolver\b|\bdns\.query\b|\bcreate_connection\b|\bdns\.asyncresolver\b')
 LOOKUP_ALLOWED = {
     'cveFeed/openvas_scan.py': "own_addresses: this server's own DOMAIN_NAME, so OpenVAS is never pointed at the server itself",
+    'cveFeed/self_exclusion.py': "this server's own public names (DOMAIN_NAME, CVENGINE_ALLOWED_HOSTS), so no scan is ever sent at the server itself",
     'cveFeed/settings_api.py': 'the SSRF check of an outbound URL an App Admin enters (SMTP host, AI base URL), not a scan target',
     'cvengine/ai_providers.py': "the SSRF check of the AI provider's base URL, not a scan target",
     'cvengine/hook_guard.py': 'the SSRF check of a notification webhook URL (Slack, Discord, Lark), at save and before each send, not a scan target',

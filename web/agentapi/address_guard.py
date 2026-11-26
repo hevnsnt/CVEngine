@@ -118,13 +118,15 @@ def _networks_overlap(project_id, cidr):
     return exclusions.Refusal(f"{wanted} overlaps {net}, which is on the organization's do-not-scan list", entry=str(net)) if net else None
 
 
-def _refusals(project_id, values, resolved=None, unknown=()):
-    """``{value: Refusal}`` for the values the rule refuses: networks (a sweep of a range) by overlap, everything else by ``address_refusals``."""
+def _refusals(project_id, values, resolved=None, unknown=(), own=True):
+    """``{value: Refusal}`` for the values the rule refuses: networks (a sweep of a range) by overlap, everything else by ``address_refusals``. This
+    cvENGINE server's own names and addresses are refused for every project (``own``); a range sweep that covers the server's address is not refused for
+    it (the organization's list decides ranges), and the work that follows the sweep is refused for the server's address host by host."""
     from cveFeed import exclusions
     networks = [v for v in values if '/' in v and '://' not in v and _is_address_like(v)]
     out = {}
     plain = [v for v in values if v not in networks]
-    out.update(exclusions.address_refusals(project_id, plain, resolved, unknown=unknown))
+    out.update(exclusions.address_refusals(project_id, plain, resolved, unknown=unknown, own=own))
     for cidr in networks:
         try:
             refusal = _networks_overlap(project_id, cidr)
@@ -211,7 +213,9 @@ def result_refusal(task, result):
     refusal = task_refusal(task, wait_for_unknown=False)
     if refusal:
         return refusal
-    refusals = _refusals(task.project_id, result_addresses(result))
+    # the addresses a result names: a sweep's answer from the server's own address is not a reason to drop the whole result (``own=False``); the server's
+    # address was never handed out as work (dispatch refuses it), and its host is refused again for any work that follows
+    refusals = _refusals(task.project_id, result_addresses(result), own=False)
     return next(iter(refusals.values())) if refusals else None
 
 

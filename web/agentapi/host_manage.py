@@ -638,7 +638,8 @@ def list_excluded_addresses(ctx, slug, host=None):
     from cveFeed import exclusions
     project, _ = get_one_project(ctx, slug)
     if project.org_id is None:
-        return {'organization': None, 'results': []}
+        from cveFeed import self_exclusion
+        return {'organization': None, 'results': [], 'this_server': self_exclusion.summary()}
     out = {'organization': project.org.slug, **excluded_addresses.list_rows(project.org_id)}
     if host:
         if not isinstance(host, str) or len(host) > 500:

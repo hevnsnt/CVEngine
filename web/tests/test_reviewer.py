@@ -92,6 +92,11 @@ class TokenTests(Fixture):
         status, data = call(self.raw, 'GET', '/api/v1/reviewer/config')
         self.assertEqual(status, 200)
         self.assertTrue(data['enabled'])
+        # the finding review is a high-volume stage: the bulk model (the provider's cheapest current one) while the switch is on
+        self.assertEqual((data['review']['model'], data['ops']['model']), ('claude-haiku-5-5', 'claude-haiku-5-5'))
+        from dashboard.models import AIProviderSettings
+        AIProviderSettings.objects.update(use_bulk_model=False)
+        data = call(self.raw, 'GET', '/api/v1/reviewer/config')[1]
         self.assertEqual((data['review']['model'], data['ops']['model']), ('claude-sonnet-5-5', 'claude-haiku-5-5'))
         row = ReviewerSettings.current()
         row.review_model, row.ops_model = 'claude-opus-5-5', 'claude-sonnet-5-5'

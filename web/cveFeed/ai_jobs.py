@@ -134,6 +134,10 @@ def serving(row=None):
         return False, 'no AI provider is configured'
     if reviewer.paused():
         return False, 'scanning is paused'
+    from cveFeed import ai_budget
+    spent, why = ai_budget.blocked(row=row)
+    if spent:  # the money budget is spent: nothing is handed out, the jobs stay queued until the next UTC day or month
+        return False, why
     return True, ''
 
 
@@ -221,10 +225,18 @@ def enqueue(kind, stage, *, system, parts, schema=None, options=None, image=None
         return found
 
 
-def _for_container(job):
+def _for_container(job, row=None):
+    """The job as the container gets it. A high-volume stage is sent with the bulk model (``cvengine.ai_routing``), decided at hand-out so a
+    change on the Settings page applies to the jobs already queued; a model the stage chose itself (the tag choice model) is kept."""
+    from cvengine import ai_routing
+    options = dict(job.packet.get('options') or {})
+    if row is not None and not options.get('model'):
+        routed = ai_routing.model_for_stage(job.stage, row)
+        if routed:
+            options['model'] = routed
     out = {'id': job.pk, 'kind': job.kind, 'stage': job.stage, 'attempt': job.attempt, 'lease': job.lease,
            'system': job.packet.get('system') or '', 'parts': job.packet.get('parts') or [], 'schema': job.packet.get('schema'),
-           'options': job.packet.get('options') or {}}
+           'options': options}
     if job.packet.get('image'):
         out['image'] = job.packet['image']
     return out
@@ -279,7 +291,7 @@ def next_jobs(limit=8, now=None):
                 continue
             job.status, job.lease, job.lease_until, job.leases = 'leased', secrets.token_hex(12), now + timedelta(seconds=seconds), job.leases + 1
             job.save(update_fields=['status', 'lease', 'lease_until', 'leases', 'updated_at'])
-            packet = _for_container(job)
+            packet = _for_container(job, row)
             size += len(json.dumps(packet, default=str))
             out.append(packet)
     return out
