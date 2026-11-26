@@ -52,6 +52,11 @@ PATH_MARKERS = (
 
 
 def lookup_enabled():
+    """Off with ``CVENGINE_ARCHIVE_LOOKUP=0``, and on a hosted license-safe install (``cveFeed.license_safe``): the Internet Archive grants access
+    for scholarship and research."""
+    from cveFeed import license_safe
+    if license_safe.enabled():
+        return False
     return os.environ.get('CVENGINE_ARCHIVE_LOOKUP', '1').strip().lower() not in ('0', 'false', 'no', 'off')
 
 

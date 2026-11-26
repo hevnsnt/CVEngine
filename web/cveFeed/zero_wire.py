@@ -9,7 +9,8 @@ Like the other feed syncs (``cveFeed.intel``) this fetches one fixed public addr
 - a link is kept only when it is ``https://radar.cloudflare.com/zero-wire/...`` exactly;
 - XML with a DOCTYPE or an entity declaration is refused (no entity expansion can run), and the response and the number of items are capped.
 
-An App Admin can switch the sync off (``ReportingSettings.zero_wire_enabled``, on by default); with it off nothing is fetched. A failure is logged,
+An App Admin can switch the sync off (``ReportingSettings.zero_wire_enabled``, on by default); with it off nothing is fetched. A hosted install
+that sets ``CVENGINE_HOSTED_LICENSE_SAFE`` (``cveFeed.license_safe``) never fetches it either: the feed is CC BY-NC 4.0. A failure is logged,
 shown to the App Admin and retried at the next run: the digest uses whatever is stored.
 """
 import html
@@ -129,6 +130,9 @@ def sync(now=None, get=None):
     """Read the feed and store its briefings (upserted by guid). Does nothing, and fetches nothing, while the switch is off. Returns a small dict."""
     from cveFeed.models import ReportingSettings, ZeroWireBriefing
     now = now or timezone.now()
+    from cveFeed import license_safe
+    if license_safe.enabled():  # the feed is CC BY-NC 4.0: a hosted install never reads it
+        return {'skipped': 'Zero Wire is ' + license_safe.REASON}
     row = ReportingSettings.current()
     if not row.zero_wire_enabled:
         return {'skipped': 'switched off'}
