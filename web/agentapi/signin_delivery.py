@@ -5,7 +5,7 @@ the value once through ``POST sentinel/tasks/<id>/secret`` (``sentinel_broker.re
 always do so when its image reads secrets. An external Sentinel may do so only when every one of these holds (``decision``), checked wherever such a task
 is offered, claimed, counted or read:
 
-* the task is a kind an external client runs signed in (``KINDS``: the nuclei web passes and the signed-in route check);
+* the task is a kind an external client runs signed in (``KINDS``: the signed-in template passes and the signed-in route check);
 * the Sentinel has no problem (active, unrevoked, a sentinel scope token that is not read only);
 * its client says it handles a sign-in safely: ``info.features`` names ``FEATURE`` (``secret_read_external``). An older client never says so and is never
   sent one. ``secret_read`` is not reused: it is the built-in image's word, and a client that reports it outside the built-in scanner says nothing about
