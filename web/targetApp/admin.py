@@ -1,11 +1,20 @@
+"""Admin registrations for the targetApp app."""
+
 from django.contrib import admin
 
-from .models import *
+from targetApp.models import (
+    Domain,
+    DomainInfo,
+    DomainRegistration,
+    Registrar,
+    RelatedDomain,
+)
 
-admin.site.register(Domain)
-admin.site.register(RelatedDomain)
-# admin.site.register(RelatedTLD)
-#admin.site.register(NameServers)
-admin.site.register(Registrar)
-admin.site.register(DomainRegistration)
-admin.site.register(DomainInfo)
+for _model in (
+    Domain,
+    RelatedDomain,
+    Registrar,
+    DomainRegistration,
+    DomainInfo,
+):
+    admin.site.register(_model)

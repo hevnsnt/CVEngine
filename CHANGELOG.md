@@ -31,6 +31,7 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 
 ### Fixed
 
+- **Shared constants, roles and small helpers rewritten (reNgine removal).** `cvengine/definitions.py`, `cvengine/roles.py`, `cvengine/utilities.py`, `get_random` in `cvengine/init.py`, the admin registrations of startScan, targetApp and scanEngine and `startScan/apps.py` were written by a separate implementer from a behaviour specification. Every stored value, permission and role name is unchanged, and `tests/test_shared_helpers_rewrite.py` freezes them.
 - The built-in scanner and the scanner library move to Sentinel `bf88f68`, which runs signed-in checks on external Sentinels when the sign-in's owner allows it.
 - **Direct Send on Microsoft 365 is shown only when a test found it open.** `mx_direct_send` ("Microsoft 365 mail: check that Direct Send is turned off") was raised for every domain and supplier whose MX is Microsoft 365, read from DNS alone, so tenants that already reject Direct Send were told to check it. The Sentinel now tests the tenant over SMTP and stops before DATA (cvENGINE-sentinel #129); the server keeps an `mx_direct_send` only with that test's evidence and a 25x reply (`agentapi.probe_results.direct_send_tested`), never takes one for a supplier (a supplier is never tested), and migration `cveFeed` 0195 resolves the untested ones already stored.
 
