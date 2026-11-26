@@ -33,13 +33,16 @@ def resolving(answers):
 
 @override_settings(DOMAIN_NAME='scanner.example.com', ALLOWED_HOSTS=HOSTS, CSRF_TRUSTED_ORIGINS=['https://front.example.org'],
                    CACHES={'default': {'BACKEND': 'django.core.cache.backends.locmem.LocMemCache'}})
-class SelfExclusion(TestCase):
+class Fixture(TestCase):
     def setUp(self):
         self_exclusion.forget()
         self.addCleanup(self_exclusion.forget)
-        env = mock.patch.dict(os.environ, {'CVENGINE_OWN_ADDRESSES': ''})
+        env = mock.patch.dict(os.environ, {'CVENGINE_OWN_ADDRESSES': '', 'CVENGINE_SELF_ADDRESSES': ''})
         env.start()
         self.addCleanup(env.stop)
+        nics = mock.patch.object(self_exclusion, '_interface_addresses', create=True, return_value=set())  # the machine running the tests is not the server
+        self.nics = nics.start()
+        self.addCleanup(nics.stop)
         lookup = resolving({SERVER: [SERVER_IP, '10.0.0.5'], 'alias.example.net': ['192.168.1.9'], 'front.example.org': []})
         self.lookup = lookup.start()
         self.addCleanup(lookup.stop)
@@ -57,6 +60,8 @@ class SelfExclusion(TestCase):
             sub.ip_addresses.add(IpAddress.objects.get_or_create(address=address)[0])
         return sub
 
+
+class SelfExclusion(Fixture):
     # --- what counts as the server --------------------------------------------------------------------------------------------------------------
     def test_the_names_are_the_servers_exact_public_names_never_the_parent_domain(self):
         self.assertEqual(self_exclusion.names(), {SERVER, 'alias.example.net', 'front.example.org'})
@@ -152,3 +157,98 @@ class SelfExclusion(TestCase):
         self.assertEqual(rows['this_server']['label'], 'This cvENGINE server, never scanned')
         self.assertIn(SERVER, rows['this_server']['names'])
         self.assertIn(SERVER_IP, rows['this_server']['addresses'])
+
+
+CF_V4, CF_V4B = '104.21.54.43', '172.67.223.148'
+CF_V6 = '2606:4700:3034::6815:362b'
+
+
+class CloudflareFrontedServer(Fixture):
+    """The server's public name is behind Cloudflare (production: scanner.fieldcraftcyber.com): it resolves to Cloudflare's anycast addresses, which
+    front many unrelated sites. The name is excluded; those addresses are never denied."""
+
+    def setUp(self):
+        super().setUp()
+        self.lookup.side_effect = resolving({SERVER: [CF_V4, CF_V4B, CF_V6]}).kwargs['side_effect']
+
+    def test_the_name_is_excluded_but_its_cloudflare_addresses_are_not_denied(self):
+        self.assertIn(SERVER, self_exclusion.names())
+        got = {str(a) for a in self_exclusion.addresses()}
+        for cf in (CF_V4, CF_V4B, CF_V6):
+            self.assertNotIn(cf, got, cf)
+            self.assertIsNone(exclusions.address_excluded(self.project.pk, cf), cf)
+        self.assertIn('this cvENGINE server', exclusions.address_excluded(self.project.pk, SERVER))
+        self.assertIn('this cvENGINE server', address_guard.dispatch_refusal(self.project, 'nuclei', {'hosts': [{'name': SERVER}]}, note=False))
+
+    def test_an_unrelated_host_on_the_same_cloudflare_address_is_still_scannable(self):
+        self.host('shop.customer.org', CF_V4)
+        self.assertIsNone(exclusions.address_excluded(self.project.pk, 'shop.customer.org'))
+        self.assertIsNone(exclusions.address_excluded(self.project.pk, 'other.customer.org', resolved=[CF_V4]))
+        self.assertNotIn('shop.customer.org', exclusions.excluded_names(self.project.pk))
+        self.assertIsNone(address_guard.dispatch_refusal(self.project, 'nuclei', {'hosts': [{'name': 'shop.customer.org', 'ip': CF_V4}]}, note=False))
+        self.assertIsNone(address_guard.dispatch_refusal(self.project, 'nmap', {'ip': CF_V4}, note=False))
+        self.assertNotIn(f'{CF_V4}/32', sentinel_stream.scope_policy(self.domain)['deny_ranges'])
+
+    def test_the_list_says_which_addresses_were_left_out_and_why(self):
+        own = excluded_addresses.list_rows(self.org.pk)['this_server']
+        self.assertIn(SERVER, own['names'])
+        self.assertEqual(own['addresses'], ['9.9.9.9'])  # the public literal in the host settings, nothing from Cloudflare
+        left = {r['address']: r['reason'] for r in own['not_denied']}
+        self.assertEqual(set(left), {CF_V4, CF_V4B, CF_V6})
+        self.assertIn('Cloudflare', left[CF_V4])
+        self.assertIn('not denied', left[CF_V4])
+
+    def test_an_origin_address_set_in_the_settings_is_denied_with_its_reason(self):
+        with mock.patch.dict(os.environ, {'CVENGINE_SELF_ADDRESSES': '8.8.4.4'}):
+            self.assertIn('this cvENGINE server', exclusions.address_excluded(self.project.pk, '8.8.4.4'))
+            self.host('origin-alias.other.org', '8.8.4.4')
+            self.assertIn('this cvENGINE server', exclusions.address_excluded(self.project.pk, 'origin-alias.other.org'))
+            reasons = {r['address']: r['reason'] for r in self_exclusion.summary()['address_reasons']}
+        self.assertEqual(reasons['8.8.4.4'], 'set in CVENGINE_SELF_ADDRESSES')
+
+    def test_a_setting_wins_over_a_cdn_range(self):
+        with mock.patch.dict(os.environ, {'CVENGINE_SELF_ADDRESSES': CF_V4}):  # an owner who says so is believed
+            self.assertIn('this cvENGINE server', exclusions.address_excluded(self.project.pk, CF_V4))
+            self.assertNotIn(CF_V4, [r['address'] for r in self_exclusion.summary()['not_denied']])
+
+    def test_the_machines_own_public_interface_address_is_denied(self):
+        self.nics.return_value = {self_exclusion._address('8.8.8.4')}
+        self_exclusion.forget()
+        self.assertIn('this cvENGINE server', exclusions.address_excluded(self.project.pk, '8.8.8.4'))
+        reasons = {r['address']: r['reason'] for r in self_exclusion.summary()['address_reasons']}
+        self.assertIn('network interface', reasons['8.8.8.4'])
+
+    def test_openvas_never_takes_a_cloudflare_address_for_this_server(self):
+        from cveFeed import openvas_scan as ov
+        answer = [(2, 1, 6, '', (CF_V4, 0)), (2, 1, 6, '', ('8.8.4.4', 0))]
+        with mock.patch.dict(ov._own, {'at': 0.0}), mock.patch('socket.getaddrinfo', return_value=answer):
+            own = ov.own_addresses()
+        self.assertEqual(own, frozenset({'8.8.4.4'}))
+
+
+class SharedOrOwnResolvedAddress(Fixture):
+    """A name that resolves outside any CDN range: denied, unless unrelated hosts in the inventory resolve to the same address (shared hosting)."""
+
+    def test_a_resolved_address_outside_any_cdn_is_denied_with_its_reason(self):
+        self.assertIn('this cvENGINE server', exclusions.address_excluded(self.project.pk, SERVER_IP))
+        reasons = {r['address']: r['reason'] for r in self_exclusion.summary()['address_reasons']}
+        self.assertEqual(reasons[SERVER_IP], f'{SERVER} resolves to it')
+
+    def test_an_address_unrelated_hosts_resolve_to_is_shared_and_not_denied(self):
+        self.host('blog.unrelated.org', SERVER_IP)
+        self_exclusion.forget()
+        self.assertIsNone(exclusions.address_excluded(self.project.pk, SERVER_IP))
+        self.assertIsNone(exclusions.address_excluded(self.project.pk, 'blog.unrelated.org'))
+        left = {r['address']: r['reason'] for r in self_exclusion.summary()['not_denied']}
+        self.assertIn('blog.unrelated.org', left[SERVER_IP])
+        self.assertIn('this cvENGINE server', exclusions.address_excluded(self.project.pk, SERVER))  # the name stays excluded
+
+    def test_the_owners_own_hosts_beside_the_server_do_not_make_it_shared(self):
+        self.host('www.example.com', SERVER_IP)
+        self_exclusion.forget()
+        self.assertIn('this cvENGINE server', exclusions.address_excluded(self.project.pk, SERVER_IP))
+
+    def test_an_address_flagged_as_a_cdn_in_the_inventory_is_not_denied(self):
+        IpAddress.objects.create(address=SERVER_IP, is_cdn=True)
+        self_exclusion.forget()
+        self.assertIsNone(exclusions.address_excluded(self.project.pk, SERVER_IP))
