@@ -474,6 +474,7 @@ a.cve-link{font-family:var(--mono)}
 .scannerbar .sb-disabled{padding:var(--s-2) var(--s-3);background:var(--ice-bg);color:var(--ice-ink);box-shadow:inset 3px 0 0 var(--ring-ice);font-weight:var(--fw-semi)}
 .scannerbar .sb-cooling{padding:var(--s-2) var(--s-3);background:var(--smoke-bg);color:var(--smoke-ink);box-shadow:inset 3px 0 0 var(--smoke)}
 .scannerbar .sb-never{padding:var(--s-2) var(--s-3);background:var(--smoke-bg);color:var(--smoke-ink);box-shadow:inset 3px 0 0 var(--smoke);font-weight:var(--fw-semi)}
+.scannerbar .sb-aibudget{padding:var(--s-2) var(--s-3);background:var(--smoke-bg);color:var(--smoke-ink);box-shadow:inset 3px 0 0 var(--smoke);font-weight:var(--fw-semi)}
 .updatebar span{flex:1 1 280px;min-width:0;overflow-wrap:anywhere}
 
 /* ================= live dashboard ================= */

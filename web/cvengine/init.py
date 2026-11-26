@@ -2,6 +2,7 @@ import logging
 import secrets
 import os
 import stat
+import string
 import tempfile
 
 logger = logging.getLogger(__name__)
@@ -47,5 +48,6 @@ def first_run(secret_file, base_dir):
 
 
 def get_random():
-    charlist = 'abcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*(-_=+)'
-    return ''.join(secrets.choice(charlist) for _ in range(64))
+    """Return a 64 character random secret."""
+    alphabet = string.ascii_lowercase + string.digits + '!@#$%^&*(-_=+)'
+    return ''.join(secrets.choice(alphabet) for _ in range(64))

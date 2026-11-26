@@ -1,11 +1,4 @@
-"""
-WSGI config for cvengine project.
-
-It exposes the WSGI callable as a module-level variable named ``application``.
-
-For more information on this file, see
-https://docs.djangoproject.com/en/2.2/howto/deployment/wsgi/
-"""
+"""WSGI entry point loaded by the application server; it exposes `application`."""
 
 import os
 
@@ -15,8 +8,9 @@ os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'cvengine.settings')
 
 application = get_wsgi_application()
 
-# Build in the background, once per worker process, what the first request would otherwise build (cveFeed/warmup.py: the URL configuration and
-# the shared public caches). Returns at once and never raises; CVENGINE_WARMUP=0 turns it off.
+# Once per worker process this builds in the background what the first request
+# would otherwise build. It returns at once and never raises. Setting the
+# environment variable CVENGINE_WARMUP=0 turns it off.
 from cveFeed import warmup  # noqa: E402
 
 warmup.start('web')
