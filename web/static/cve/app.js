@@ -91,6 +91,12 @@ const internalBadge = (network) => {
   b.title = network ? `Inside ${network}: scanned only by a Sentinel in that network` : "Scanned only by a Sentinel inside the network";
   return b;
 };
+// a network printer (its fingerprint showed one): scanned gently, never on its print ports (cveFeed.internal_scan's gentle profile)
+const printerBadge = (evidence) => {
+  const b = badge("Printer: scanned gently", "internal");
+  b.title = `A printer (${evidence}): only read-only web checks run on it; no TLS audit, UDP sweep, targeted pass or OpenVAS, and nothing is ever sent to its print ports`;
+  return b;
+};
 // a CVE listed as exploited in the wild, shown on its row whatever the heat: under the KEV heat policy a KEV match is fire only when its
 // version is proven on the host (otherwise smoke until a check proves it), and KEV must still be visible at a glance
 const kevBadge = (heatCapped) => {
@@ -110,7 +116,8 @@ const heatBadge = (heat, reason) => {
 };
 // a hostname printed anywhere (except the host page itself) links to that host's page
 const hostUrl = hostHref;
-const hostLink = (name, project = slug) => (name && project ? hostAnchor(project, name) : name ? el("span", "", name) : el("span", "", "-"));
+// ``text``: the row's ``host_label`` (an internal host is written ``name (address)``); the link and every filter keep the address itself
+const hostLink = (name, project = slug, text = name) => (name && project ? hostAnchor(project, name, text) : name ? el("span", "", text || name) : el("span", "", "-"));
 // What a person calls a host or target, and the note they wrote, shown beside its address and never in place of it. Both are typed text: they only
 // ever become text nodes (el() sets textContent), the note is a tooltip and a clipped line.
 const aliasTag = (row) => (row && row.alias ? el("span", "alias-tag", row.alias, { title: [row.alias, row.note].filter(Boolean).join("\n") }) : null);
@@ -1590,7 +1597,7 @@ function renderFinding(d, cfg, row) {
   const chip = projChip(row);
   if (chip) head.append(chip);
   const idline = el("p", "note");
-  if (d.host) { idline.append(hostLink(d.host, project)); if (d.target && d.target !== d.host) idline.append(document.createTextNode(" · "), hostLink(d.target, project)); }
+  if (d.host) { idline.append(hostLink(d.host, project, d.host_label)); if (d.target && d.target !== d.host) idline.append(document.createTextNode(" · "), hostLink(d.target, project)); }
   else if (d.target) idline.append(hostLink(d.target, project));
   out.push(head, idline);
   if (detailAge) {
@@ -3812,7 +3819,8 @@ const pages = {
         showHost(null);
       };
       const head = el("div", "host-head");
-      head.append(el("h2", "host-title", h.host));
+      head.append(el("h2", "host-title", h.host_label || h.host));
+      if (h.printer) head.append(printerBadge(h.printer));
       head.append(el("span", "alias-tag host-alias", h.alias || "", { title: h.note || "" }));
       head.append(copyButton(h.host, "hostname"), copyButton(() => `${location.origin}${location.pathname}#${h.id}`, "link to this host", "link"));
       const HEAT = { fire: ["Fire", "fire"], smoke: ["Smoke", "smoke"], ice: ["Ice", "ice"], clean: ["Clean", "success"], unscanned: ["Not scanned", "queued"] };
@@ -4259,7 +4267,7 @@ const pages = {
           // line one: the name (a link to this very record, so it can be shared) and the score; line two: address, ports, CVEs
           const top = el("span", "hr-top");
           const nameBox = el("span", "cve-id");
-          nameBox.append(selfLink(hostAnchor(projectOf(h), h.host)));
+          nameBox.append(selfLink(hostAnchor(projectOf(h), h.host, h.host_label)));
           const tag = aliasTag(h);
           if (tag) nameBox.append(" ", tag); // beside the address, which stays the link
           top.append(nameBox, el("span", "hr-score", String(h.score || 0), { title: "Score" }));
@@ -4273,6 +4281,7 @@ const pages = {
           meta.append(ribbon);
           if (h.cve_matches) meta.append(badge(`${h.cve_matches} CVE`, "fire"));
           if (h.internal) meta.append(internalBadge(h.network));
+          if (h.printer) meta.append(printerBadge(h.printer));
           const chip = projChip(h);
           if (chip) meta.append(chip);
           row.append(top, meta);
@@ -4555,7 +4564,7 @@ const pages = {
           ? [rowLine(VG.joinNames(f.group.host_names || []), ""), groupHosts(f)]
           : FG.isGroup(f)
           ? [rowLine(`${f.group.registrable_domain}`, f.note ? ` · ${f.note}` : ""), groupHosts(f), f.description || ""]
-          : [rowLine(f.host ? hostLink(f.host, projectOf(f)) : "-", f.note ? ` · ${f.note}` : ""), f.description || ""],
+          : [rowLine(f.host ? hostLink(f.host, projectOf(f), f.host_label) : "-", f.note ? ` · ${f.note}` : ""), f.description || ""],
       }),
     });
     [type, sev, status].forEach((p) => p.refresh());
@@ -4638,7 +4647,7 @@ const pages = {
         title: projectOf(m) ? cveAnchor(projectOf(m), m.cve.cve_id, m.id) : m.cve.cve_id,
         lead: [heatBadge(m.cve.tier, m.heat_reason)],
         meta: [m.cve.kev ? kevBadge(m.cve.heat_capped) : null, heatWhy(m.heat_reason), m.host_reported ? badge("Reported by the host", "success") : null, aiBadge(m.triage, { project: projectOf(m), kind: "match", id: m.id }), validationBadge(m.triage), statusBadge({ ...m, status: m.remediation_status }), agentTag(m.agent_task), projChip(m)],
-        notes: [rowLine(m.host ? hostLink(m.host, projectOf(m)) : "-", ` · ${[m.product, m.version].filter(Boolean).join(" ") || "-"}`), m.cve.short_description || "Description unavailable in the CVE feed."],
+        notes: [rowLine(m.host ? hostLink(m.host, projectOf(m), m.host_label) : "-", ` · ${[m.product, m.version].filter(Boolean).join(" ") || "-"}`), m.cve.short_description || "Description unavailable in the CVE feed."],
       }),
     });
     paintCveNote();
@@ -4797,7 +4806,7 @@ pages.hygiene = function hygiene(mount) {
           return b;
         },
       },
-      { label: "Host", render: (f) => hostLink(f.host, projectOf(f)) },
+      { label: "Host", render: (f) => hostLink(f.host, projectOf(f), f.host_label) },
       { label: "Since", render: (f) => shortDate(f.first_seen) },
     ], 3), (f) => f.severity),
   });
@@ -5069,7 +5078,7 @@ pages.scan = async function scanDetail(mount) {
         [
           { label: "Severity", render: (v) => badge(v.severity, v.severity) },
           { label: "Finding", render: (v) => v.name },
-          { label: "Host", render: (v) => hostLink(v.host) },
+          { label: "Host", render: (v) => hostLink(v.host, slug, v.host_label) },
           { label: "CVE", render: (v) => (v.cves.length ? joinNodes(v.cves.map((c) => cveLink(slug, c, v.cve_matches && v.cve_matches[c], v.host))) : "-") },
           { label: "URL", render: (v) => (v.url ? pageAnchor({ url: v.url }, v.url, "host-link") : "-") },
         ],

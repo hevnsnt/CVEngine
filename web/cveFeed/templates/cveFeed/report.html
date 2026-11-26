@@ -107,7 +107,7 @@ secrets, closed findings). What goes into it, and the severity rules, are in cve
   <div class="client">{{ r.client }}</div>
   <div class="date">{{ r.report_date }}</div>
   <table>
-    {% if r.host %}<tr><td>Host</td><td>{{ r.host }}{% if r.host_alias %} ({{ r.host_alias }}){% endif %}</td></tr>{% endif %}
+    {% if r.host %}<tr><td>Host</td><td>{{ r.host_label|default:r.host }}{% if r.host_alias %} ({{ r.host_alias }}){% endif %}</td></tr>{% endif %}
     {% if r.host_note %}<tr><td>Note</td><td class="pre">{{ r.host_note }}</td></tr>{% endif %}
     {% if r.scope_kind == 'org' %}<tr><td>Organization</td><td>{{ r.organization }}</td></tr>
     <tr><td>Projects</td><td>{{ r.project }}: {% for n in r.scope_projects.names %}{{ n }}{% if not forloop.last %}, {% endif %}{% endfor %}{% if r.scope_projects.more %} and {{ r.scope_projects.more }} more{% endif %}{% if not r.scope_projects.whole %}. The organization has other projects that you do not have access to; this report does not cover them{% endif %}</td></tr>
@@ -152,7 +152,7 @@ secrets, closed findings). What goes into it, and the severity rules, are in cve
   <!--cv:begin--><table class="grid">
     <thead><tr><th>Host</th><th>Heat</th><th class="num">Score</th><th class="num">Open findings</th><th>Open ports</th><th>Owner</th></tr></thead>
     <tbody>{% for h in r.hosts %}<!--cv:row-->
-      <tr><td>{{ h.host }}{% if h.alias %}<br><span class="mute small">{{ h.alias }}</span>{% endif %}{% if h.project %}<br><span class="mute small">{{ h.project }}</span>{% endif %}{% if h.technologies %}<br><span class="mute small">{{ h.technologies|join:", " }}</span>{% endif %}</td>
+      <tr><td>{{ h.host_label|default:h.host }}{% if h.alias %}<br><span class="mute small">{{ h.alias }}</span>{% endif %}{% if h.project %}<br><span class="mute small">{{ h.project }}</span>{% endif %}{% if h.technologies %}<br><span class="mute small">{{ h.technologies|join:", " }}</span>{% endif %}</td>
         <td><span class="chip c-{{ h.heat }}">{{ h.heat }}</span></td><td class="num">{{ h.score }}</td><td class="num">{{ h.findings }}</td>
         <td>{% if h.port_count %}{{ h.ports|join:", " }}{% if h.ports_more %} +{{ h.ports_more }} more{% endif %}{% else %}<span class="mute">none open</span>{% endif %}<br><span class="mute small">{{ h.addresses }} address{{ h.addresses|pluralize:"es" }}</span></td>
         <td>{{ h.owner|default:"not set" }}{% if h.criticality and h.criticality != 'unknown' %}<br><span class="mute small">{{ h.criticality }} criticality</span>{% endif %}</td></tr>{% endfor %}
@@ -231,10 +231,10 @@ secrets, closed findings). What goes into it, and the severity rules, are in cve
     <h4>Affected hosts</h4>
     <table class="grid compact">
       <thead><tr><th>Host</th>{% if r.scope_kind == 'org' %}<th>Project</th>{% endif %}<th>{% if i.kind == 'cve' %}Detected{% elif i.kind == 'scanner' %}Matched at{% else %}Detail{% endif %}</th>{% if i.mixed_basis %}<th>Basis</th>{% endif %}<th>Status</th></tr></thead>
-      <tbody>{% for h in i.hosts %}<tr><td>{{ h.host }}{% if h.host_alias %} ({{ h.host_alias }}){% endif %}</td>{% if r.scope_kind == 'org' %}<td>{{ h.project }}</td>{% endif %}<td>{{ h.detail }}</td>{% if i.mixed_basis %}<td>{{ h.basis }}</td>{% endif %}<td>{{ h.tracking.status }}</td></tr>{% endfor %}</tbody>
+      <tbody>{% for h in i.hosts %}<tr><td>{{ h.host_label|default:h.host }}{% if h.host_alias %} ({{ h.host_alias }}){% endif %}</td>{% if r.scope_kind == 'org' %}<td>{{ h.project }}</td>{% endif %}<td>{{ h.detail }}</td>{% if i.mixed_basis %}<td>{{ h.basis }}</td>{% endif %}<td>{{ h.tracking.status }}</td></tr>{% endfor %}</tbody>
     </table>
     {% if i.hosts_more %}<p class="small mute">And {{ i.hosts_more }} more host{{ i.hosts_more|pluralize }}, listed on the Findings page in cvENGINE.</p>{% endif %}
-    {% if i.tracking %}<p class="small"><b>Remediation tracking.</b></p><ul class="tight small">{% for h in i.tracking %}<li>{{ h.host }}: {{ h.tracking.status }}{% if h.tracking.assignee %}, assigned to {{ h.tracking.assignee }}{% endif %}{% if h.tracking.changed %}, changed {{ h.tracking.changed }}{% if h.tracking.changed_by %} by {{ h.tracking.changed_by }}{% endif %}{% endif %}.{% if h.tracking.note %} Notes: <span class="pre">{{ h.tracking.note }}</span>{% endif %}</li>{% endfor %}</ul>{% endif %}
+    {% if i.tracking %}<p class="small"><b>Remediation tracking.</b></p><ul class="tight small">{% for h in i.tracking %}<li>{{ h.host_label|default:h.host }}: {{ h.tracking.status }}{% if h.tracking.assignee %}, assigned to {{ h.tracking.assignee }}{% endif %}{% if h.tracking.changed %}, changed {{ h.tracking.changed }}{% if h.tracking.changed_by %} by {{ h.tracking.changed_by }}{% endif %}{% endif %}.{% if h.tracking.note %} Notes: <span class="pre">{{ h.tracking.note }}</span>{% endif %}</li>{% endfor %}</ul>{% endif %}
     <h4>Recommendations</h4>
     {% if i.upgrade %}<p>{{ i.upgrade }}</p>{% endif %}
     {% if i.remediation %}<p class="pre">{{ i.remediation }}</p>{% endif %}
@@ -255,7 +255,7 @@ secrets, closed findings). What goes into it, and the severity rules, are in cve
   <h3>Scope</h3>
   <table class="grid kv">
     <tr><td>{% if r.scope_kind == 'org' %}Organization{% else %}Project{% endif %}</td><td>{% if r.scope_kind == 'org' %}{{ r.organization }} ({{ r.project }}){% else %}{{ r.project }}{% if r.organization %}, {{ r.organization }}{% endif %}{% endif %}</td></tr>
-    {% if r.host %}<tr><td>Host</td><td>{{ r.host }}{% if r.host_alias %} ({{ r.host_alias }}){% endif %}</td></tr>{% endif %}
+    {% if r.host %}<tr><td>Host</td><td>{{ r.host_label|default:r.host }}{% if r.host_alias %} ({{ r.host_alias }}){% endif %}</td></tr>{% endif %}
     {% if not r.host %}<tr><td>Targets</td><td>{{ r.scope.targets }}{% if r.scope.target_names %}: {% for n in r.scope.target_names %}{{ n }}{% if not forloop.last %}, {% endif %}{% endfor %}{% if r.scope.targets_more %} and {{ r.scope.targets_more }} more{% endif %}{% endif %}</td></tr>{% endif %}
     <tr><td>Inventory</td><td>{{ r.scope.hosts_total }} host{{ r.scope.hosts_total|pluralize }} in the current inventory</td></tr>
     <tr><td>Completed scans</td><td>{{ r.method.scans }}{% if r.method.first_scan %} (first {{ r.method.first_scan }}, latest {{ r.method.last_scan }}){% endif %}</td></tr>
@@ -318,7 +318,7 @@ secrets, closed findings). What goes into it, and the severity rules, are in cve
   {% if r.host %}<h2>Appendix {{ r.appendix.inventory }}. Host detail</h2>
   {% with h=r.hosts.0 %}{% if h %}
   <table class="grid kv">
-    <tr><td>Host</td><td>{{ h.host }}{% if h.alias %} ({{ h.alias }}){% endif %}</td></tr>
+    <tr><td>Host</td><td>{{ h.host_label|default:h.host }}{% if h.alias %} ({{ h.alias }}){% endif %}</td></tr>
     {% if h.aliases %}<tr><td>Also answers to</td><td>{{ h.aliases|join:", " }}</td></tr>{% endif %}
     {% if h.address_list %}<tr><td>Addresses</td><td>{{ h.address_list|join:", " }}</td></tr>{% endif %}
     {% if h.title %}<tr><td>Page title</td><td>{{ h.title }}{% if h.http_status %} (HTTP {{ h.http_status }}){% endif %}</td></tr>{% endif %}
@@ -336,7 +336,7 @@ secrets, closed findings). What goes into it, and the severity rules, are in cve
   {% if r.hosts %}
   <table class="grid compact">
     <thead><tr><th>Host</th>{% if r.scope_kind == 'org' %}<th>Project</th>{% endif %}<th>Heat</th><th>Open ports</th><th class="num">Findings</th></tr></thead>
-    <tbody>{% for h in r.hosts %}<tr><td>{{ h.host }}{% if h.alias %} ({{ h.alias }}){% endif %}</td>{% if r.scope_kind == 'org' %}<td>{{ h.project }}</td>{% endif %}<td>{{ h.heat }}</td>
+    <tbody>{% for h in r.hosts %}<tr><td>{{ h.host_label|default:h.host }}{% if h.alias %} ({{ h.alias }}){% endif %}</td>{% if r.scope_kind == 'org' %}<td>{{ h.project }}</td>{% endif %}<td>{{ h.heat }}</td>
       <td>{% if h.port_count %}{{ h.ports|join:", " }}{% if h.ports_more %} +{{ h.ports_more }} more{% endif %}{% else %}<span class="mute">none open</span>{% endif %}</td><td class="num">{{ h.findings }}</td></tr>{% endfor %}</tbody>
   </table>
   {% else %}<p class="mute">No hosts in the current inventory.</p>{% endif %}{% endif %}
@@ -363,7 +363,7 @@ secrets, closed findings). What goes into it, and the severity rules, are in cve
   {% if r.closed %}
   <table class="grid">
     <thead><tr><th style="width:32%">Finding</th><th style="width:24%">Host</th><th style="width:20%">Status</th><th>Why it was closed</th></tr></thead>
-    <tbody>{% for f in r.closed %}<tr><td>{{ f.title }}</td><td>{{ f.host }}{% if f.host_alias %}<br><span class="mute small">{{ f.host_alias }}</span>{% endif %}{% if f.project %}<br><span class="mute small">{{ f.project }}</span>{% endif %}</td>
+    <tbody>{% for f in r.closed %}<tr><td>{{ f.title }}</td><td>{{ f.host_label|default:f.host }}{% if f.host_alias %}<br><span class="mute small">{{ f.host_alias }}</span>{% endif %}{% if f.project %}<br><span class="mute small">{{ f.project }}</span>{% endif %}</td>
       <td>{{ f.tracking.status }}{% if f.tracking.changed %}<br><span class="mute small">{{ f.tracking.changed }}{% if f.tracking.changed_by %} by {{ f.tracking.changed_by }}{% endif %}</span>{% endif %}</td>
       <td class="pre">{{ f.tracking.note|default:"No reason recorded" }}</td></tr>{% endfor %}</tbody>
   </table>

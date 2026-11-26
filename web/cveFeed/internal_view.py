@@ -40,7 +40,9 @@ def connect():
 
 
 def _load():
-    """``{project_id: {'nets': [network...], 'names': {name: cidr}}}`` for every project that declared an internal range."""
+    """``{project_id: {'nets': [network...], 'names': {name: cidr}, 'labels': {name: display name}, 'printers': {name: evidence}}}`` for every
+    project that declared an internal range. The display name and the printer mark are the target row's (``targetApp.Domain``), read in the
+    same query as its name."""
     from cveFeed.models import InternalRange
     from startScan.models import Subdomain
     from targetApp.models import Domain
@@ -49,12 +51,22 @@ def _load():
     for project_id, cidr in InternalRange.objects.order_by('project_id', 'cidr').values_list('project_id', 'cidr'):
         table.setdefault(project_id, {'nets': [], 'names': {}})['nets'].append(ipaddress.ip_network(cidr, strict=False))
     for project_id, entry in table.items():
-        names = set(Domain.objects.filter(project_id=project_id, name__regex=_IP_LITERAL).values_list('name', flat=True))
+        entry.update(labels={}, printers={})
+        rows = list(Domain.objects.filter(project_id=project_id, name__regex=_IP_LITERAL).values_list('name', 'display_name', 'printer', 'printer_evidence'))
+        names = {r[0] for r in rows}
         names |= set(Subdomain._base_manager.filter(target_domain__project_id=project_id, name__regex=_IP_LITERAL).values_list('name', flat=True).distinct())
         for name in names:
             if sentinel_only_target(name, project_id, entry['nets']):
                 net = next((n for n in entry['nets'] if in_internal_range(name, [n])), None)
                 entry['names'][name.strip().lower()] = str(net) if net else ''
+        for name, display, printer, evidence in rows:
+            key = name.strip().lower()
+            if key not in entry['names']:
+                continue
+            if display:
+                entry['labels'][key] = display
+            if printer:
+                entry['printers'][key] = evidence or 'printer'
     return table
 
 
@@ -84,6 +96,29 @@ def network_of(project_id, name):
 
 def is_internal(project_id, name):
     return network_of(project_id, name) is not None
+
+
+def display_name(project_id, name):
+    """The name an internal host goes by (``targetApp.Domain.display_name``: reverse DNS, mDNS or NetBIOS, read inside the network), or ''."""
+    entry = table().get(project_id)
+    if not entry or not name:
+        return ''
+    return entry.get('labels', {}).get(str(name).strip().lower(), '')
+
+
+def host_label(project_id, name):
+    """How a host is written on every page, report and MCP answer: ``hostname (192.168.1.5)`` for an internal host whose name is known, else
+    ``name`` as it is. The address stays the identity: links, filters and exports keep using ``name``."""
+    from cveFeed.host_names import label
+    return label(display_name(project_id, name), name or '')
+
+
+def printer_of(project_id, name):
+    """What showed an internal host is a printer (scanned gently), or '' when it is not one."""
+    entry = table().get(project_id)
+    if not entry or not name:
+        return ''
+    return entry.get('printers', {}).get(str(name).strip().lower(), '')
 
 
 def internal_q(prefix='', name_field='name', project_field='target_domain__project_id'):

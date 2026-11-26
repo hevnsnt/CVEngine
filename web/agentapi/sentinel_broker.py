@@ -3147,7 +3147,7 @@ MAX_DISCOVER_HOSTS = 512  # one discover task sweeps a /24 (at most 254 hosts); 
 
 
 def _clean_discover_result(body):
-    """The live addresses a Sentinel found in the one chunk of an internal range it was asked to sweep: ``{ip, hostnames}`` entries,
+    """The live addresses a Sentinel found in the one chunk of an internal range it was asked to sweep: ``{ip, hostnames, names}`` entries,
     nothing else. Whether each address is really inside the chunk, and inside a range the project declared, is decided by the server
     when it stores them (``cveFeed.internal_discovery``), never trusted from here."""
     raw = body.get('hosts')
@@ -3162,7 +3162,13 @@ def _clean_discover_result(body):
             continue
         seen.add(ip)
         names = item.get('hostnames') if isinstance(item.get('hostnames'), list) else []
-        hosts.append({'ip': ip, 'hostnames': [_clip(n, 'host') for n in names[:5] if isinstance(n, str) and n.strip()]})
+        row = {'ip': ip, 'hostnames': [_clip(n, 'host') for n in names[:5] if isinstance(n, str) and n.strip()]}
+        # the names the host gave itself (contract: ``names``, mDNS and NetBIOS), each one line of host name text at most; read by cveFeed.host_names
+        own = item.get('names') if isinstance(item.get('names'), dict) else {}
+        kept = {key: _text(own[key], limit) for key, limit in (('mdns', 253), ('netbios', 15)) if isinstance(own.get(key), str) and _text(own[key], limit)}
+        if kept:
+            row['names'] = kept
+        hosts.append(row)
         result_cuts.add(cuts, 'names', 5, len([n for n in names[5:] if isinstance(n, str) and n.strip()]), target=ip)
     return {'hosts': hosts, **({'cuts': cuts} if cuts else {})}
 

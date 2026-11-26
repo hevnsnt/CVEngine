@@ -163,6 +163,16 @@ class Domain(models.Model):
 	# or self-signed chain there is expected, so the hygiene check rates it information (cveFeed.hygiene_rating). Set with
 	# POST targets/<id>/private-ca or the MCP tool set_target_private_ca. The database default keeps older code able to insert.
 	expect_private_ca = models.BooleanField(default=False, db_default=False)
+	# An internal host's name (cveFeed.host_names): what the network or the host itself calls the address, gathered by the Sentinel's discover
+	# sweep inside the network (reverse DNS, then mDNS, then NetBIOS) and refreshed on each sweep. Display only: ``name`` (the address) stays the
+	# identity, and every page shows ``display_name (address)``. ``display_name_source`` says which answer it came from.
+	display_name = models.CharField(max_length=253, blank=True, default='', db_default='')
+	display_name_source = models.CharField(max_length=10, blank=True, default='', db_default='')
+	display_name_at = models.DateTimeField(null=True, blank=True)
+	# The host is a network printer (cvengine_scanner.printers.is_printer on its fingerprint): it is scanned gently (cveFeed.internal_scan), and
+	# ``printer_evidence`` says what showed it. Set and cleared by each fingerprint of the host.
+	printer = models.BooleanField(default=False, db_default=False)
+	printer_evidence = models.CharField(max_length=300, blank=True, default='', db_default='')
 
 	class Meta:
 		constraints = [

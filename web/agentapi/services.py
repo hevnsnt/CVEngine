@@ -1676,7 +1676,12 @@ def _host(sub, others=(), labels=(), profile=None, excluded=False, root=None, sh
     unverified = _unverified_products(sub, others, ips)
     from cveFeed import internal_view
     network = internal_view.network_of(sub.target_domain.project_id if sub.target_domain else None, sub.name)
+    host_pid = sub.target_domain.project_id if sub.target_domain else None
     row = {'id': sub.id, 'internal': network is not None, 'network': network,
+            # an internal host's name, read inside its network (cveFeed.host_names): ``host`` stays the address, ``host_label`` is how it is written
+            'display_name': internal_view.display_name(host_pid, sub.name) if network is not None else '',
+            'host_label': internal_view.host_label(host_pid, sub.name) if network is not None else sub.name,
+            'printer': internal_view.printer_of(host_pid, sub.name) if network is not None else '',
             # what version and identity probes and the WordPress scan found, and where a WordPress candidate stands (detected how, scanned when, or why not)
             'probes': [{'probe': r.probe, 'kind': r.kind, 'product': r.product, 'version': r.version, 'variant': r.variant, 'outcome': r.outcome,
                         'confidence': r.confidence, 'source': r.source, 'observed_at': r.observed_at.isoformat()}
@@ -3540,6 +3545,7 @@ def _vuln(v):
             'seen_while_authenticated': any(t.name == 'seen-while-authenticated' for t in v.tags.all()),  # an authenticated request saw it (cveFeed.auth_checks)
             'first_seen': _iso(_seen(v, 'first_seen', v.discovered_date)), 'last_seen': _iso(_seen(v, 'last_seen', v.discovered_date)),
             'internal': _internal_row(v.target_domain.project_id if v.target_domain_id else None, v.subdomain.name if v.subdomain else ''),
+            'host_label': _host_label(v.target_domain.project_id if v.target_domain_id else None, v.subdomain.name if v.subdomain else None),
             'heat_override': _heat_override(_triage_of(v)), 'triage': _triage_brief(_triage_of(v)),
             'retest': _retest_of(v)}
 
@@ -3548,6 +3554,13 @@ def _internal_row(project_id, host):
     """Whether a row's host is inside a network its project declared internal (``cveFeed.internal_view``)."""
     from cveFeed import internal_view
     return internal_view.is_internal(project_id, host)
+
+
+def _host_label(project_id, host):
+    """How a row's host is written: ``name (address)`` for an internal host whose name is known (``cveFeed.internal_view.host_label``), else the
+    host as it is. ``host`` stays the address for links and filters."""
+    from cveFeed import internal_view
+    return internal_view.host_label(project_id, host) if host else host
 
 
 def list_vulnerabilities(ctx, slug, params):
@@ -4204,7 +4217,9 @@ def _match(m):
     cve['tier'] = match_heat(m)  # rated as it applies to this host (the heat policy: a KEV match is fire only when its version is proven)
     cve['validation_tier'] = validation_heat(m)  # the heat once proven: what orders validation
     cve['heat_capped'] = cve['tier'] != cve['validation_tier']
-    return {'id': m.id, 'cve': cve, 'host': sub.name if sub else None, 'version_only': match_policy.is_version_only(m),
+    return {'id': m.id, 'cve': cve, 'host': sub.name if sub else None,
+            'host_label': _host_label(sub.target_domain.project_id if sub and sub.target_domain_id else None, sub.name if sub else None),
+            'version_only': match_policy.is_version_only(m),
             'version_proven': match_policy.version_proven(m), 'heat_reason': heat_reason(m, cve['tier']),
             'heat_override': _heat_override(_triage_of(m)),
             'product': m.matched_product, 'version': m.matched_version, 'in_affected_range': m.version_in_range,
@@ -4560,7 +4575,7 @@ def _finding_row(kind, obj):
     project_id = {'cve': lambda o: o.subdomain.target_domain.project_id if o.subdomain else None, 'scanner': lambda o: o.target_domain.project_id,
                   'hygiene': lambda o: o.domain.project_id}[kind](obj)
     return {'type': kind, 'kind': FINDING_TYPES[kind], 'id': obj.id, 'title': title, 'host': host, 'note': note,
-            'internal': _internal_row(project_id, host or ''),
+            'internal': _internal_row(project_id, host or ''), 'host_label': _host_label(project_id, host),
             'heat': heat, 'severity': SEVERITY_NAMES.get(obj.sev, str(obj.sev)), 'status': status,
             'remediation_note': getattr(obj, 'remediation_note', ''),
             'status_changed_at': _iso(getattr(obj, 'remediation_updated_at', None)),

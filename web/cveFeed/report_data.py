@@ -918,7 +918,7 @@ def _host_row(h, findings_by_host, detail, everywhere=False):
     names = {h['host'].lower()} | {alias.lower() for alias in h['aliases']}
     if everywhere:
         names = {(h['project'], name) for name in names}
-    row = {'host': clean(h['host'], 200), 'alias': clean(h['alias'], ALIAS_MAX), 'heat': h['heat'] if h['heat'] in ('fire', 'smoke', 'ice', 'clean', 'unscanned') else 'unscanned',
+    row = {'host': clean(h['host'], 200), 'host_label': clean(h.get('host_label') or h['host'], 300), 'alias': clean(h['alias'], ALIAS_MAX), 'heat': h['heat'] if h['heat'] in ('fire', 'smoke', 'ice', 'clean', 'unscanned') else 'unscanned',
            'score': int(h['score'] or 0), 'findings': sum(findings_by_host.get(name, 0) for name in names), 'addresses': len(h['ips']),
            'ports': [f'{n}/{proto}' if proto else str(n) for n, proto in ports][:14], 'port_count': len(ports), 'ports_more': max(0, len(ports) - 14),
            'owner': clean(h['profile'].get('owner'), 80), 'criticality': clean(h['profile'].get('criticality'), 12),
@@ -1015,6 +1015,25 @@ def _label_hosts(project, hosts, entries):
         known.update({((row.project.slug, row.host) if everywhere else row.host): clean(row.alias, ALIAS_MAX) for row in qs.exclude(alias='')})
     for e in entries:
         e['host_alias'] = known.get(key(e, e['host'] or ''), '')
+    _internal_labels(project, entries, everywhere)
+
+
+def _internal_labels(project, entries, everywhere):
+    """Set ``host_label`` on each entry whose host is internal and named (``cveFeed.internal_view.host_label``: ``printer01 (192.168.1.5)``). No
+    query when none of the scope's projects declared an internal network; one (slug to id) in an organization report that has one."""
+    from cveFeed import internal_view
+    ids = set(getattr(project, 'ids', None) or ([project.id] if getattr(project, 'id', None) else []))
+    if not ids & set(internal_view.table()):
+        return
+    if everywhere:
+        from dashboard.models import Project
+        by_slug = dict(Project.objects.filter(pk__in=list(ids)).values_list('slug', 'id'))
+    for e in entries:
+        if e.get('host'):
+            pid = by_slug.get(e.get('project_slug', '')) if everywhere else project.id
+            label = internal_view.host_label(pid, e['host'])
+            if label != e['host']:
+                e['host_label'] = clean(label, 300)
 
 
 # --- scope and method ----------------------------------------------------------------------------------------------------------
@@ -1217,7 +1236,7 @@ def collect(project, host=None, include_closed=False, now=None, kind='findings',
         'kind': kind, 'scope_kind': 'org' if everywhere else 'project', 'scope_projects': scope_projects,
         'title': title, 'subject': label, 'client': client, 'header': clean(host, 200) if host else client,
         'project': project_line, 'organization': organization, 'host': clean(host or '', 200),
-        'host_alias': hosts[0]['alias'] if host and hosts else '', 'host_note': hosts[0].get('note', '') if host and hosts else '',
+        'host_alias': hosts[0]['alias'] if host and hosts else '', 'host_label': hosts[0].get('host_label', '') if host and hosts else '', 'host_note': hosts[0].get('note', '') if host and hosts else '',
         'generated': _stamp(now), 'generated_date': _date(now), 'report_date': _long_date(now),
         'include_closed': False if hosts_report else include_closed, 'branding': _branding(),
         'scope': scope, 'summary': summary, 'executive': executive,
