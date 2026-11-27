@@ -583,7 +583,7 @@ By default every request is anonymous. For an application the owner may test, an
 
 ### OpenVAS (optional)
 
-With the optional OpenVAS add-on switched on (Settings > OpenVAS, [OpenVAS](OPENVAS.md)), a background sweep on its own `openvas_queue` runs Greenbone's scanner against the hosts an App Admin listed for an opted-in project, one GVM task at a time, each host once a week, and stores what names a CVE. It is not a scan stage: it runs beside the pipeline, and after CVE correlation of a scan its findings are carried onto that scan's host rows from the stored observations (`openvas_scan.carry_forward`, a no-op while the add-on is off). Only a quality of detection of 80 or more is hard evidence (a CVE match with `template_result` `vulnerable`); a lower one is stored as an unconfirmed finding. While the add-on is off nothing is scheduled and nothing runs.
+With the optional OpenVAS add-on switched on (Administration > OpenVAS, [OpenVAS](OPENVAS.md)), a background sweep on its own `openvas_queue` runs Greenbone's scanner against the hosts an App Admin listed for an opted-in project, one GVM task at a time, each host once a week, and stores what names a CVE. It is not a scan stage: it runs beside the pipeline, and after CVE correlation of a scan its findings are carried onto that scan's host rows from the stored observations (`openvas_scan.carry_forward`, a no-op while the add-on is off). Only a quality of detection of 80 or more is hard evidence (a CVE match with `template_result` `vulnerable`); a lower one is stored as an unconfirmed finding. While the add-on is off nothing is scheduled and nothing runs.
 
 ## How many scans run at once
 
