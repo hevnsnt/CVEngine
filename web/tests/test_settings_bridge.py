@@ -297,3 +297,86 @@ class AgentCostRuleTests(TestCase):
                 with self.assertRaises(ApiError, msg=(name, path)):
                     bridge._default_deny(ctx(self.root), name, {field: value + 1}, None)
         bridge._default_deny(ctx(self.root), 'timings', {'ct_watch_minutes': 10 ** 5}, None)  # a listed entry: pacing, no spend
+
+
+class AgentDollarBudgetTests(TestCase):
+    """The AI dollar budget and the bulk model switch through an agent token: lower or set a budget where none is, never raise or clear one; the bulk model only on."""
+
+    def setUp(self):
+        import os
+        from decimal import Decimal
+        from cveFeed import ai_budget
+        from dashboard.models import AIProviderSettings
+        self.Decimal = Decimal
+        self.root = User.objects.create_superuser('budget_bridge_root', 'bb@x.io', 'x')
+        self.row = AIProviderSettings.objects.create(provider='anthropic', model='claude-sonnet-4-5', monthly_budget_usd=Decimal('100'), daily_budget_usd=None,
+                                                     use_bulk_model=True)
+        env = mock.patch.dict(os.environ, {ai_budget.MONTHLY_ENV: '', ai_budget.DAILY_ENV: ''})
+        env.start()
+        self.addCleanup(env.stop)
+        ai_budget.clear_cache()
+        self.addCleanup(ai_budget.clear_cache)
+
+    def refused(self, values):
+        before = type(self.row).objects.filter(pk=self.row.pk).values('monthly_budget_usd', 'daily_budget_usd', 'use_bulk_model').get()
+        with self.assertRaises(ApiError, msg=values) as caught:
+            bridge.change_setting(ctx(self.root), 'ai', values)
+        self.assertEqual(caught.exception.status, 403, values)
+        after = type(self.row).objects.filter(pk=self.row.pk).values('monthly_budget_usd', 'daily_budget_usd', 'use_bulk_model').get()
+        self.assertEqual(before, after, values)
+
+    def test_an_agent_may_lower_a_budget(self):
+        for value in ('80', 60, '$50.5'):
+            bridge.change_setting(ctx(self.root), 'ai', {'monthly_budget_usd': value})
+        self.row.refresh_from_db()
+        self.assertEqual(self.row.monthly_budget_usd, self.Decimal('50.50'))
+
+    def test_an_agent_may_not_raise_a_budget(self):
+        for value in ('100.01', 500, '1000000', '$200'):
+            self.refused({'monthly_budget_usd': value})
+
+    def test_an_agent_may_not_clear_a_budget(self):
+        for value in (None, '', '   '):
+            self.refused({'monthly_budget_usd': value})
+
+    def test_an_agent_may_set_a_budget_where_none_is_set(self):
+        bridge.change_setting(ctx(self.root), 'ai', {'daily_budget_usd': '5'})
+        self.row.refresh_from_db()
+        self.assertEqual(self.row.daily_budget_usd, self.Decimal('5.00'))
+        self.refused({'daily_budget_usd': '6'})  # now set: raising it is refused
+
+    def test_sending_empty_for_a_budget_that_is_not_set_changes_nothing(self):
+        bridge.change_setting(ctx(self.root), 'ai', {'daily_budget_usd': None})
+        self.row.refresh_from_db()
+        self.assertIsNone(self.row.daily_budget_usd)
+
+    def test_the_environment_limit_counts_as_the_limit_in_force(self):
+        import os
+        from cveFeed import ai_budget
+        with mock.patch.dict(os.environ, {ai_budget.DAILY_ENV: '10'}):
+            self.refused({'daily_budget_usd': '11'})
+            bridge.change_setting(ctx(self.root), 'ai', {'daily_budget_usd': '9'})
+        self.row.refresh_from_db()
+        self.assertEqual(self.row.daily_budget_usd, self.Decimal('9.00'))
+
+    def test_an_agent_may_switch_the_bulk_model_on_but_not_off(self):
+        for value in (False, 'false', 0, None):
+            self.refused({'use_bulk_model': value})
+        type(self.row).objects.filter(pk=self.row.pk).update(use_bulk_model=False)
+        bridge.change_setting(ctx(self.root), 'ai', {'use_bulk_model': True})
+        self.row.refresh_from_db()
+        self.assertTrue(self.row.use_bulk_model)
+
+    def test_a_person_in_the_web_interface_may_do_all_of_it(self):
+        from django.test import Client
+        c = Client()
+        c.force_login(self.root)
+        for body, field, expected in (({'monthly_budget_usd': '500'}, 'monthly_budget_usd', self.Decimal('500.00')),
+                                      ({'monthly_budget_usd': None}, 'monthly_budget_usd', None),
+                                      ({'daily_budget_usd': '7'}, 'daily_budget_usd', self.Decimal('7.00')),
+                                      ({'daily_budget_usd': '70'}, 'daily_budget_usd', self.Decimal('70.00')),
+                                      ({'use_bulk_model': False}, 'use_bulk_model', False)):
+            response = c.put('/cve/api/settings/ai', json.dumps(body), content_type='application/json')
+            self.assertEqual(response.status_code, 200, (body, response.content[:200]))
+            self.row.refresh_from_db()
+            self.assertEqual(getattr(self.row, field), expected, body)
