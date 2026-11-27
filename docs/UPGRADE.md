@@ -8,6 +8,29 @@ Older installs (reNgine and pre-release cvENGINE builds) ran PostgreSQL 12. The 
 
 To roll back, check out the previous commit and start it. It still uses the untouched old volume, without anything written since the upgrade.
 
+## Upgrading from 1.4.2 to 1.5.0
+
+Press the Update button: **Settings, Updates**, **Check now**, then **Approve** (or run `scripts/update.sh`, or let automatic deployment take it). Nothing has to be done by hand before or after on a standard install. The first press runs the host's 1.4.2 `apply-update.sh` up to the merge, then the 1.5.0 `scripts/update-deploy.sh` does the rest in the same run. In that run the update, by itself:
+
+- renames the old variables, certificate files, overlay references and network to the cvENGINE names, with backups ([The rename to cvENGINE names](#the-rename-to-cvengine-names));
+- writes `CVENGINE_DB_APP_PASSWORD`, creates the least-privilege database role `cvengine_app` and moves `web`, `celery` and `celery-beat` onto it, with the owner password only in the one-off `migrate` service ([Database roles](#database-roles-the-server-no-longer-runs-as-the-database-owner), [The owner password leaves the application containers](#the-owner-password-leaves-the-application-containers));
+- builds the image with the pinned Python 3.14.10 and runs the application as uid 10002 from its own copy of the source, after the `ownership` service hands the volumes over ([The server runs as its own account](#the-server-runs-as-its-own-account-from-its-own-copy-of-the-source));
+- writes this server's own addresses for the self exclusion ([The update writes this server's own addresses](#the-update-writes-this-servers-own-addresses));
+- generates `CVENGINE_UPSTREAM_SECRET`, creates `proxy_network` and enables again the accounts the old abuse guard disabled;
+- sizes the database memory settings for the host and recreates `db` and `redis` once (their data is kept);
+- runs the migrations (`cveFeed` 0178 to 0196, `agentapi` 0026 and 0027, `dashboard` 0038 to 0040, `startScan` 0029 to 0037, `scanEngine` 0009, `targetApp` 0009), after a database dump.
+
+**Two things the update may show you afterwards.**
+
+- **A host nginx in front of the bundled proxy.** If one sends the visitor's address in a header the proxy does not trust yet, App Admins see the notice *Visitors' own addresses do not reach cvENGINE yet* in the status strip and under **Settings, Updates**, with **Show the lines** and **Copy**. Paste the two lines into the host nginx `location` that proxies to cvENGINE, run `sudo nginx -t` and reload; the notice clears itself. This is the one step outside cvENGINE ([details](#the-abuse-guard-no-longer-disables-accounts-and-the-server-sees-the-real-client-address)). An install with nothing in front of the bundled proxy gets no notice.
+- **The bulk AI model.** Triage, validation plans and the finding review move to the provider's cheapest current model; turn **Use the bulk model for high-volume stages** off under Settings, AI model to keep every stage on the main model. An AI budget in dollars can be set on the same page; unset is no limit.
+
+**Before you approve.** Every update script since 1.3 refuses a checkout with a local change to a tracked file, and on this first press that check runs in the 1.4.2 script, so a file edited by hand on the host (for example a line added to `config/nginx/rengine.conf`) must be put back with `git checkout -- <file>` first, or the update stops with "local changes to tracked files" and 1.4.2 keeps running. From 1.5.0 on, a file whose content already equals the approved commit's no longer stops an update.
+
+**Sentinels.** A Sentinel inside a private network now takes only work for its project's declared internal ranges. Stored sign-ins on external Sentinels and the internal host names need the matching Sentinel release; the built-in scanner moves to it with the update.
+
+If something goes wrong, see [Rolling back](#rolling-back).
+
 ## Rolling back
 
 This covers going back from the 1.5.0 changes (everything after 1.4.2: the pinned Python in the image, the migrations listed below, the database role split, the separate network for the database and Redis, and the log limits) to 1.4.2. Going back means building and running the previous image again; the database keeps what the migrations did, so read the migration list before you start.

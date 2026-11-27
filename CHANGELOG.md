@@ -2,7 +2,21 @@
 
 cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The history of reNgine up to the fork is in [its changelog](https://github.com/yogeshojha/rengine/blob/master/CHANGELOG.md).
 
-## Unreleased
+## v1.5.0 (2026-11-27)
+
+### Highlights
+- **Internal networks are kept apart.** A Sentinel inside a private network takes only work for the internal ranges its project declares, never a public host. A new Internal network page lists those hosts, and every internal host is shown by name with its address, `hostname (192.168.1.71)`.
+- **Printers are scanned gently.** No tool sends data to a raw print port (515, 9100 to 9107) on any target, and an internal host recognized as a printer gets only read-only web checks, with no TLS audit, UDP sweep or OpenVAS.
+- **The cvENGINE server never scans itself.** Its own names and origin addresses are on every do-not-scan list, the installer and every update find those addresses for you, and sites behind a shared CDN are no longer refused because the server sits behind the same CDN.
+- **Signed-in scanning on your own external Sentinels, if you allow it.** A stored sign-in still goes only to the built-in scanner by default; its owner can allow the organization's own external Sentinels per sign-in, and every delivery is audited.
+- **License-safe mode for hosted services.** `CVENGINE_HOSTED_LICENSE_SAFE=1` turns off WPScan and every data source that needs a commercial license.
+- **AI spend you can cap.** A monthly or daily budget in dollars stops AI spend when it is reached, and the high-volume stages use the provider's cheaper model unless you turn that off. The new AI and your data page says what is sent to AI models.
+- **Reporting.** Findings and discovered-hosts reports for an organization or a project as PDF or CSV, weekly or monthly email reports, and a findings PDF that reads like a penetration test report.
+- **An MCP page** shows how to connect an agent, what to ask it, and the history of every MCP call.
+- **Stronger defaults on the server.** The application runs as its own account instead of root and connects to the database as a least-privilege role, the owner password is out of the application containers, every image and the Sentinel commit are pinned, and idle sessions end after 12 hours.
+- **The abuse guard no longer locks people out.** It never disables an account or revokes a token, the server sees each visitor's real address, and the update enables again the accounts the old guard disabled.
+- **Much less database work.** The Overview, Situations, Hosts, Findings, the graph and Sentinel polling read far less, and writes no longer wait for the disk.
+- **One button to update from 1.4.2.** The update renames the old reNgine names on the host, sizes the database memory for the machine and refuses a proxy configuration nginx rejects before it changes anything ([UPGRADE.md](docs/UPGRADE.md#upgrading-from-142-to-150)).
 
 ### Added
 - **Internal hosts show their name: `hostname (192.168.1.71)`.** An internal host was shown by its address alone everywhere. The Sentinel's discover sweep, inside the network, now reports each address's reverse DNS name from its own resolver, else the host's mDNS name, else its NetBIOS name (cvENGINE-sentinel #138); cvENGINE keeps it on the target row (`targetApp` 0009: `display_name`, `display_name_source`, `display_name_at`), refreshes it at every sweep and writes the host as `name (address)` on the Internal network page (findings and scan work), the Hosts list and host page, the Findings and CVE match lists, the finding page, the HTML and PDF reports, and in REST and MCP rows (`host_label`; hosts also carry `display_name`). The address stays the identity for links, filters, exports and the internal host rule. This server never asks the range anything ([SENTINELS.md](docs/SENTINELS.md#internal-networks)).

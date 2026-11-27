@@ -19,10 +19,11 @@ from targetApp.models import Domain
 OLD_COLUMNS = ('project_id', 'domain_id', 'host', 'source', 'requested_by_id', 'status', 'scan_id', 'celery_id', 'result', 'error',
                'created_at', 'started_at', 'finished_at')
 
-# The last migration of each app in the v1.4.2 tag: everything after them runs while 1.4.2's containers may still be inserting.
-RELEASED_LEAVES = {'cveFeed': '0177_service_features', 'dashboard': '0037_drop_unused_legacy_models',
-                   'startScan': '0028_subdomain_technology_source', 'agentapi': '0025_dns_readings',
-                   'scanEngine': '0008_drop_unused_legacy_models', 'targetApp': '0008_domain_expect_private_ca',
+# The last migration of each app in the newest release tag (v1.5.0): everything after them runs while that release's containers may still be
+# inserting. Move these to the new leaves when a release moves the base. OLD_COLUMNS above stays 1.4.2's: it is the insert 0193 was written for.
+RELEASED_LEAVES = {'cveFeed': '0196_authcredential_allow_external_sentinels', 'dashboard': '0040_ai_budget_bulk_model',
+                   'startScan': '0037_subdomain_lower_name_idx', 'agentapi': '0027_sentineltask_autovacuum',
+                   'scanEngine': '0009_rename_show_banner', 'targetApp': '0009_domain_display_name_printer',
                    'recon_note': '0002_drop_todonote'}
 
 
@@ -72,7 +73,8 @@ class FrontDatabaseDefaultTests(TestCase):
 
     def test_every_not_null_column_added_since_the_release_has_a_database_default(self):
         """What the upgrade rehearsal's schema check (.github/rehearsal/schema.sh) catches, found before a rehearsal runs: a column added after
-        1.4.2 to a table 1.4.2 already had must be nullable or carry db_default, or the old code's inserts fail during the update window."""
+        the newest release (RELEASED_LEAVES) to a table that release already had must be nullable or carry db_default, or the old code's inserts
+        fail during the update window."""
         loader = MigrationLoader(None, ignore_no_migrations=True)
         released = set()
         for app, name in RELEASED_LEAVES.items():
@@ -98,4 +100,4 @@ class FrontDatabaseDefaultTests(TestCase):
                     continue
                 if field.db_default is NOT_PROVIDED:
                     risky.append(f'{key[0]}.{key[1]}: {op.model_name}.{name}')
-        self.assertEqual(risky, [], 'NOT NULL columns without db_default that 1.4.2 cannot insert around')
+        self.assertEqual(risky, [], 'NOT NULL columns without db_default that the newest release cannot insert around')
