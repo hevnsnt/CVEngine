@@ -65,6 +65,9 @@ Found by a survey of the server and the Sentinel client. Each is moved to an exp
   watchdog pause an update pause.
 - **Stage runs** (`agentapi.StageRun.state`): explicit (above). Fixed while moving it: the close and the wait of a pass that outlived its lease
   overwrote the run another worker had resumed.
+- **Queued scans nothing will start.** A host pipeline still queued after 30 minutes, or any scan still queued after 48 hours
+  (`CVENGINE_SCAN_QUEUED_HOURS`), is moved to failed with the reason by the stuck job cleanup, only when the broker holds no message for it and no
+  open stage run carries it. The row is never deleted ([PIPELINE.md](PIPELINE.md#restarts-and-stuck-jobs)).
 - **Host assessments** (`HostAssessment.status`), archive review runs (`queued/running/partial/completed`, where partial means two things).
 - `SubScan.status` is dead (never written).
 
