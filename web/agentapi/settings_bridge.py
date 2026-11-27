@@ -141,6 +141,7 @@ AGENT_MAY_SWITCH_ON = {
     ('scan_control', 'paused'): 'pausing scanning is the safe direction (an agent may also resume: that sends False)',
     ('keys', 'clear'): 'clear:true removes a saved service key, which switches an outside service off (storing a key is refused: AGENT_CANNOT_STORE_KEYS)',
     ('watchdog', 'enabled'): 'a watchdog switch on is the safety net coming back (the watchdog changes nothing that spends money or widens a scan)',
+    ('ai', 'use_bulk_model'): 'the bulk work then runs on the cheaper bulk model: it lowers spend (switching it off is refused: AGENT_CANNOT_DISABLE)',
 }
 # Entries whose numbers an agent may change in either direction, with why none of them spends money or widens what is scanned.
 AGENT_NUMBERS_FREE = {
@@ -163,6 +164,12 @@ AGENT_ONLY_VALUES = {'updates': {'mode': ('manual',)}}
 AGENT_READ_ONLY_FIELDS = {'updates': ('repo', 'branch')}
 # Numbers of an entry's body that cost money or work: an agent may only lower them. {entry: {field: how the current number is read}}
 AGENT_LOWER_ONLY = {'ai': ('plan_daily_total', 'plan_daily_per_project', 'cve_guidance_daily', 'auto_fire_max_scans'), 'reviewer': ('review_daily_max',)}
+# Dollar budgets an agent may only tighten: {entry: fields}. The limit in force (``ai_budget.limits``: the saved one, else the environment's, else none) is what a
+# new amount is compared with. No limit means unlimited, so any amount is a lowering; an amount above the limit in force is refused, and so is clearing a saved
+# amount (empty or null), which falls back to the environment's limit or to none at all.
+AGENT_BUDGET_FIELDS = {'ai': ('monthly_budget_usd', 'daily_budget_usd')}
+# Switches whose OFF spends more: an agent may switch them on, never off. {entry: fields}. With the bulk model off every AI stage runs on the main model.
+AGENT_CANNOT_DISABLE = {'ai': ('use_bulk_model',)}
 # Tunables an agent may only lower: every cap (``caution='cap'``, which includes each AI spend cap) and the two switches that widen what is scanned or sent.
 # ``validate_min_gap_hours`` is the other way round (a shorter gap spends more), so an agent may only raise it. A cap of 0 turns the pacing off: more, not less.
 TUNABLE_ONLY_RAISE = ('validate_min_gap_hours',)
@@ -340,6 +347,12 @@ def _agent_body_rules(ctx, name, values, ident=None):
     for field, kind in AGENT_SCOPE_LISTS.get(name, {}).items():
         if field in values:
             _scope_list_rule(ctx, name, field, kind, values[field], ident)
+    for field in AGENT_CANNOT_DISABLE.get(name, ()):
+        if field in values and values[field] is not True:
+            raise ApiError(403, f'{field}: switching this off makes the AI work cost more, so only a person does it, in the web interface; an agent may switch it on')
+    for field in AGENT_BUDGET_FIELDS.get(name, ()):
+        if field in values:
+            _budget_rule(field, values[field])
     if name not in GENERIC_RULE_SKIPS:
         _default_deny(ctx, name, values, ident)
     for field in AGENT_LOWER_ONLY.get(name, ()):
@@ -348,6 +361,26 @@ def _agent_body_rules(ctx, name, values, ident=None):
         new, now = values[field], _current_body_number(name, field)
         if isinstance(new, bool) or not isinstance(new, int) or (isinstance(now, int) and new > now):
             raise ApiError(403, f'{field} is a limit on what this instance spends: an agent may only lower it (now {now}); only a person raises it, in the web interface')
+
+
+def _budget_rule(field, new):
+    """A dollar budget an agent sends: it may lower the limit in force or set one where there is none, never raise it or clear a saved one."""
+    from cveFeed import ai_budget
+    from dashboard.models import AIProviderSettings
+    row = AIProviderSettings.objects.first()
+    period = field.split('_', 1)[0]
+    now, source = ai_budget.limits(row)[period]
+    saved = ai_budget.clean_limit(getattr(row, field, None)) if row is not None else None
+    shown = f'${now}' if now is not None else 'no limit'
+    if new is None or (isinstance(new, str) and not new.strip()):
+        if saved is not None:
+            raise ApiError(403, f'{field}: clearing the budget lets the AI spend more (now {shown}); an agent may lower it, only a person clears or raises it, in the web interface')
+        return  # nothing saved: an empty value changes nothing
+    amount = ai_budget.clean_limit(new)
+    if amount is None or isinstance(new, bool):
+        return  # not an amount: the handler answers 400 with the rule
+    if now is not None and amount > now:
+        raise ApiError(403, f'{field} is a limit on what this instance spends: an agent may only lower it (now {shown}, from {source}); only a person raises it, in the web interface')
 
 
 def _ops_hours_rule(hours):
@@ -418,6 +451,8 @@ def _default_deny(ctx, name, values, ident):
     current = None
     for path, value in sent.items():
         field = path.rsplit('.', 1)[-1]
+        if field in AGENT_BUDGET_FIELDS.get(name, ()):  # a dollar amount, with its own rule (``_budget_rule``)
+            continue
         if isinstance(value, str) and value.strip() and not (name in AGENT_NUMBERS_FREE or field in AGENT_LOWER_ONLY.get(name, ())):
             # a text where the page shows a switch or a number: the handlers coerce it (bool('false') is True, int('5000') is 5000), so it is read as what the field is
             current = _current(ctx, name, ident) if current is None else current
