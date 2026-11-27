@@ -54,7 +54,7 @@ More in [Pipeline](docs/PIPELINE.md#triage-and-validation), [CVE intelligence](d
 
 cvENGINE is a self-hosted external attack surface and vulnerability assessment platform. Give it your domains and it keeps discovering the subdomains, addresses and certificates you expose, in a searchable, Shodan-style inventory of every host, port, service, technology and certificate. Forgotten and shadow assets come to light, and new hosts, opened ports and version changes land on a timeline as soon as a scan sees them. Every host is assessed with industry-standard open-source scanners, and [Situations](docs/SITUATIONS.md) ranks what to fix first: proof before likelihood, known exploited before severity alone.
 
-## cvENGINE 1.4.0 is here
+## What you get
 
 | | |
 | --- | --- |
@@ -66,7 +66,15 @@ cvENGINE is a self-hosted external attack surface and vulnerability assessment p
 | **Nothing switches on unseen** | Credential checks, the AI reviewer and anything else that costs money or widens a scan stay off until an administrator says yes. API tokens and AI agents cannot turn them on. |
 | **Runs itself** | A [watchdog](docs/WATCHDOG.md) repairs stuck workers, auto-tuning checks every change it makes and undoes what hurt, and you can publish through a [Cloudflare Tunnel](docs/HOSTING-ONLINE.md) with no inbound port. |
 
-Upgrading from 1.3? Read [upgrading to 1.4](docs/UPGRADE.md#upgrading-to-14) and the [operator notes](docs/1.4-OPERATOR-NOTES.md) first: back up, check free disk, and update your Sentinels. Every change is in the [changelog](CHANGELOG.md).
+### New in 1.5.0
+
+- **Internal networks, done right.** An internal Sentinel scans only the ranges you declared, the new **Internal network** page shows those hosts by name (`printer-2 (192.168.1.71)`), and printers are scanned gently: no tool ever sends data to a raw print port.
+- **Never scans itself.** The server's own names and origin addresses are excluded for every project, found by the installer and every update, even behind Cloudflare.
+- **Hardened server.** The containers run Python 3.14.10 as a non-root account, the server uses a least-privilege database role, and `make rotate-secrets` and `make restore-check` cover secrets and backups.
+- **AI spend you can cap.** A monthly or daily dollar budget, and a cheaper bulk model for the high-volume stages.
+- **Safer updates.** The update checks the proxy configuration before it changes anything and puts the previous version back when it fails.
+
+Upgrading from 1.4.2? Read the [1.5 operator notes](docs/1.5-OPERATOR-NOTES.md) and [upgrading to 1.5.0](docs/UPGRADE.md#upgrading-to-150) first: back up, check free disk, clear hand edits in the checkout, and update your Sentinels afterwards. Every change is in the [changelog](CHANGELOG.md).
 
 ## From domain to verdict
 
@@ -136,7 +144,7 @@ A public name with a trusted certificate, a Cloudflare Tunnel, Mac and Windows: 
 ## Safe by design
 
 - **Read-only by default.** No password lists. Checks that send credentials (Nuclei's default-login and brute-force templates) are off until an App Admin allows them, and denial-of-service templates are excluded.
-- **You draw the lines.** Loopback, link-local and cloud metadata addresses are never scanned, and each organization keeps a list of [addresses we must never scan](docs/1.4-OPERATOR-NOTES.md#addresses-we-must-never-scan) that holds whatever name leads there.
+- **You draw the lines.** Loopback, link-local and cloud metadata addresses are never scanned, nor is the cvENGINE server itself, and each organization keeps a list of [addresses we must never scan](docs/1.4-OPERATOR-NOTES.md#addresses-we-must-never-scan) that holds whatever name leads there. Printers are scanned gently.
 - **You hold the switches.** AI validation, the AI reviewer, OpenVAS and anything else that costs money start off, and an update asks before it changes them.
 - **Locked down.** Organization data is isolated, stored secrets are encrypted, and access is guarded by two-step sign-in, an IP allowlist and an audit log.
 
@@ -147,7 +155,7 @@ Only scan systems you own or are authorized to test.
 | Doc | What it covers |
 | --- | --- |
 | [Deployment](docs/DEPLOYMENT.md) and [Hosting online](docs/HOSTING-ONLINE.md) | Install, HTTPS, Cloudflare, backups, small hosts |
-| [Updates](docs/UPDATES.md), [Upgrade](docs/UPGRADE.md) and [1.4 operator notes](docs/1.4-OPERATOR-NOTES.md) | Staying current, and what 1.4 changes for an operator |
+| [Updates](docs/UPDATES.md), [Upgrade](docs/UPGRADE.md) and [1.5 operator notes](docs/1.5-OPERATOR-NOTES.md) | Staying current, and what 1.5.0 changes for an operator ([1.4 notes](docs/1.4-OPERATOR-NOTES.md)) |
 | [Sentinels](docs/SENTINELS.md) and [Built-in scanner](docs/BUILTIN-SCANNER.md) | Where every scan runs, scaling out and scanning private networks |
 | [Pipeline](docs/PIPELINE.md) and [Architecture](docs/ARCHITECTURE.md) | How it works, stage by stage |
 | [Search](docs/SEARCH.md), [Situations](docs/SITUATIONS.md) and [Fire, smoke, and ice](docs/FIRE-SMOKE-ICE.md) | Finding what matters, and how CVEs are rated |
