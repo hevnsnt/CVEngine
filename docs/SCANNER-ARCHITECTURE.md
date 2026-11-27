@@ -9,7 +9,7 @@ built-in scanner. The phases below say what each one moved. How the built-in sca
 ## Why
 
 cvENGINE and the Sentinel are two code bases that do the same scanning. The Sentinel image used to repeat the server's tool pins
-(its Dockerfile said "keep them equal on purpose"); the server image now carries no scan tool and pins only nuclei. Command lines, output
+(its Dockerfile said "keep them equal on purpose"); the server image now carries no scan tool at all. Command lines, output
 parsers and scan policy exist twice and have drifted more than once (the 1.3.1 client handoff, the policy parity work). A fix
 made on one side has to be carried across by hand.
 
@@ -20,8 +20,8 @@ made on one side has to be carried across by hand.
    External Sentinels remain for networks the server cannot reach. There is one scanner code base.
    External Sentinels take all scanning first; the built-in scanner is the path of last resort ([below](#the-built-in-scanner-is-the-last-resort)).
 3. bbot discovery and the HTTP probes move into the Sentinel too, not only the tool wrappers.
-4. Signed-in (authenticated) work is done only by the built-in Sentinel, through a secure read: the stored credential is never
-   in a task row and never reaches an external Sentinel.
+4. Signed-in (authenticated) work is done by the built-in Sentinel, through a secure read: the stored credential is never
+   in a task row. Since 1.5.0 the sign-in's owner may also allow an external Sentinel for it (below); by default none is offered it.
 5. OpenVAS is not part of the built-in scanner. It is installed only when it is enabled in Settings.
 6. The Sentinel repository owns the shared scanner code. cvENGINE pins a release of it, the way it pins nuclei or WPScan.
 
@@ -67,10 +67,10 @@ the finding) and the scanner runs the tool. A Sentinel declares these kinds only
 | Module | What it does | Decision |
 |---|---|---|
 | `cveFeed/probes.py` | version and identity probes | moved: the `http_probe` kind (contract 3), a batch of planned probes per task; the scanner runs them (`cvengine_scanner.probes.version_probes`), the server keeps the plan, the ledger and what is stored; `NEVER_LOCAL`: no scanner means `ScannerUnavailable` and the work stays due, the server's request code (`probes.fetch`, `probes.run_http_probe`, `route_auth.probe_url`) is deleted. `wpscan_scan.detect` (probe `wordpress-detect`) is a planned `http_probe` like the others |
-| `cveFeed/route_auth.py` (894), `auth_routes.py` | route state, anonymous and signed in | anonymous half moved: the `route_probe` kind (contract 3), a batch of up to 25 hosts per task; the server keeps the plan, the ledger and what is stored (states, changes, retired and zombie routes, the secrets inventory), the scanner asks, classifies, compares with a path that cannot exist, reads the front page's scripts and counts sensitive data; the local path stays behind `CVENGINE_LOCAL_FALLBACK`. The signed-in half (`auth_routes`) stays on the server, built-in only |
-| `cveFeed/vhost_scan.py` (499), `subdir_apps.py` | other sites on an address; apps under a path | moved: the `vhost_probe` kind (an address, its default response and each of the project's own names as the Host header) and the `subdir_probe` kind (a web host, the curated mount paths, the directories its own URLs and `robots.txt`/`sitemap.xml` show), contract 3; the server keeps the choice of names and hosts, the ledger, the verdict rules (recomputed from the reported fingerprints) and what is stored; a name, address or host the scanner did not answer stays due; the local path stays behind `CVENGINE_LOCAL_FALLBACK` |
-| `cveFeed/bucket_scan.py` (558), `bucket_probe.py` (427) | public cloud storage | moved: the `bucket_check` kind (contract 3), a batch of the sweep's due buckets per task; the server keeps the candidates, the ledger, the global rate (sent as the task's `rate`) and the evaluation; the local path stays behind `CVENGINE_LOCAL_FALLBACK` |
-| `cveFeed/supplier_scan.py` (647) | third-party supplier posture | moved: the `supplier_check` kind (contract 3), one task per supplier with its validated names, the pacing and the request budget left; the scanner runs the network part (`cvengine_scanner.probes.suppliers`: DNS, TLS, the pages, the MTA-STS file) and the server keeps the list, the budget, the ledger, the CVE match, the text of what to ask and what is stored; the local path stays behind `CVENGINE_LOCAL_FALLBACK` |
+| `cveFeed/route_auth.py` (894), `auth_routes.py` | route state, anonymous and signed in | anonymous half moved: the `route_probe` kind (contract 3), a batch of up to 25 hosts per task; the server keeps the plan, the ledger and what is stored (states, changes, retired and zombie routes, the secrets inventory), the scanner asks, classifies, compares with a path that cannot exist, reads the front page's scripts and counts sensitive data; the local path is deleted (`NEVER_LOCAL`; `CVENGINE_LOCAL_FALLBACK` is ignored since 1.4). The signed-in half (`auth_routes`) stays on the server, built-in only |
+| `cveFeed/vhost_scan.py` (499), `subdir_apps.py` | other sites on an address; apps under a path | moved: the `vhost_probe` kind (an address, its default response and each of the project's own names as the Host header) and the `subdir_probe` kind (a web host, the curated mount paths, the directories its own URLs and `robots.txt`/`sitemap.xml` show), contract 3; the server keeps the choice of names and hosts, the ledger, the verdict rules (recomputed from the reported fingerprints) and what is stored; a name, address or host the scanner did not answer stays due; the local path is deleted (`NEVER_LOCAL`; `CVENGINE_LOCAL_FALLBACK` is ignored since 1.4) |
+| `cveFeed/bucket_scan.py` (558), `bucket_probe.py` (427) | public cloud storage | moved: the `bucket_check` kind (contract 3), a batch of the sweep's due buckets per task; the server keeps the candidates, the ledger, the global rate (sent as the task's `rate`) and the evaluation; the local path is deleted (`NEVER_LOCAL`; `CVENGINE_LOCAL_FALLBACK` is ignored since 1.4) |
+| `cveFeed/supplier_scan.py` (647) | third-party supplier posture | moved: the `supplier_check` kind (contract 3), one task per supplier with its validated names, the pacing and the request budget left; the scanner runs the network part (`cvengine_scanner.probes.suppliers`: DNS, TLS, the pages, the MTA-STS file) and the server keeps the list, the budget, the ledger, the CVE match, the text of what to ask and what is stored; the local path is deleted (`NEVER_LOCAL`; `CVENGINE_LOCAL_FALLBACK` is ignored since 1.4) |
 | `cveFeed/zombie.py` | does a retired name's address still answer | moved: the `alive_check` kind (contract 3), the web check and then the bare connects of `changes._retire`; a check the scanner could not answer never retires a host; `NEVER_LOCAL`: the local checks are deleted |
 | `cveFeed/hygiene.py`, `mailfail.py` | DNS, TLS, SPF/DKIM/DMARC | moved: the `hygiene_check` kind (contract 3), one task per target's sweep (its TLS endpoints and the names that may have mail); the scanner reads the certificates and runs the mail checks (`cvengine_scanner.probes.hygiene`, `mailfail`, `rdap`), the server keeps `evaluate_cert`, the rating, the folding and what is stored; an endpoint or mail domain the scanner did not answer keeps its open findings; `NEVER_LOCAL`: the sweep's own network path is deleted, and so are `probe_tls`, `_fetch_cert`, `_chain_error`, `email_findings`, the DNS readers (`fetch_txt`, `fetch_records`, `has_record`, `ask_txt`, `dns_askers`), `mailfail.review` and the MTA-STS fetch: the server keeps only the evaluators over what a Sentinel reports |
 | `cveFeed/dangling_dns.py` | rating bbot's baddns findings | moved: the `dangling_dns_check` kind (contract 3), a batch of findings per task with the server's provider lists (`cveFeed/data/takeover_providers.json`); the scanner walks the zone cut, asks the registry and sends the control request (`cvengine_scanner.probes.dangling_dns`); a finding it could not rate keeps baddns's rating; `NEVER_LOCAL`: the server's `Net` and the local rating branch are deleted, only the rules and the provider lists stay |
@@ -86,7 +86,7 @@ the finding) and the scanner runs the tool. A Sentinel declares these kinds only
 constants (`-etags dos`, UDP port list, probe ports), `heavy_process.py` (the supervised runner).
 
 Status (phase 6). The library (`cvengine_scanner`, hevnsnt/cvENGINE-sentinel#34) holds all of the above except `heavy_process.py`, which
-runs processes and stays on the server until phase 8. The server pins the library in `web/requirements.txt` and no longer has its own
+ran processes and stayed on the server until phase 8, when it was deleted with the last local runs. The server pins the library in `web/requirements.txt` and no longer has its own
 `cveFeed/fingerprint.py`, `cms.py`, `versions.py`, `soft404.py` or `cvengine/nmap_service.py`; `port_inventory.parse_xml` is the library's reader,
 re-exported under its old name. Two parts stay on the server because they are not pure:
 - reading a page's scripts (`cveFeed/js_libraries.py`: `script_sources`, `from_script_urls`, `from_script_body`). It fetches files, and it
@@ -154,8 +154,11 @@ which send nothing to the target and need no vantage point.
     scanner and to the instance's own Sentinels that report `bbot_keys` (instance setting and per-Sentinel opt-out permitting), read once through the secure
     read; one gate, `sentinel_stream.key_delivery_decision` (see [SENTINELS.md](SENTINELS.md#discovery-api-keys-on-your-sentinels)). See [AGENT-API.md](AGENT-API.md) ("Streamed work").
 - **Signed-in work**: the built-in fetches a stored credential through a single-use read tied to one task, written to the audit
-  log, callable only by the trusted built-in agent. The credential is never in a task row, and an external Sentinel is never
-  offered a signed-in task.
+  log. The credential is never in a task row. An external Sentinel is offered a signed-in task only when the sign-in's owner (an App
+  Admin or the organization's admin) switched **Also send it to my external Sentinels** on for it (`allow_external_sentinels`), the
+  Sentinel reports `secret_read_external`, was enrolled by an App Admin or that organization's admin, and covers the project; one gate,
+  `agentapi/signin_delivery.decision`, answers for every place that offers, counts or reads such a task, and each delivery is audited as
+  `sentinel.signin.delivered` ([SENTINELS.md](SENTINELS.md#stored-sign-ins-on-external-sentinels)).
   - *Built (server side, dormant):* `POST /api/v1/sentinel/tasks/<id>/secret` (`agentapi.sentinel_broker.read_secret`). The task
     carries `secret_ref` (an `AuthCredential` reference) and `secret_read_at`. Only the built-in agent, for its own claimed or
     running task, may call it. An atomic update of `secret_read_at` is won before anything is decrypted, so it answers once

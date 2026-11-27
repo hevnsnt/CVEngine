@@ -1,9 +1,11 @@
-"""Tour-only seed: five more fictional companies next to Acme Corp, so the All projects graph has several constellations of clearly different size and heat.
-Run AFTER scripts/demo/seed_demo.py, in the same database (scripts/demo/make_gif.sh does it; the CI UI gates do not, so they see no change):
+"""Tour-only seed: five more fictional companies next to the demo company, so the All projects graph has several constellations of clearly different
+size and heat, plus what the 1.5 tour shows on the internal network: the names internal hosts go by and a printer that is scanned gently.
+Run AFTER the rebranded copy of scripts/demo/seed_demo.py (scripts/demo/rebrand.py), in the same database (scripts/demo/make_gif.sh does both;
+the CI UI gates do not, so they see no change):
 
     python3 manage.py shell < ../scripts/demo/seed_tour_projects.py
 
-Everything is made up: the companies, their *-example.* domains, and addresses from the documentation ranges (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24).
+Everything is made up (invented names that no known company uses): the companies, their *-example.* domains, and addresses from the documentation ranges (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24).
 Never run it against a real install.
 """
 import random
@@ -12,8 +14,10 @@ from datetime import timedelta
 from django.contrib.auth.models import User
 from django.utils import timezone
 
+from agentapi.models import Agent
+from cveFeed import stats_history
 from cveFeed.discovery import NUCLEI_SCAN_ACTIVITY_NAMES
-from cveFeed.models import CVEEntry, CVEMatch, HostState
+from cveFeed.models import CVEEntry, CVEMatch, HostState, StatsSnapshot
 from dashboard.models import Org, OrgMembership, Project
 from scanEngine.models import EngineType
 from startScan.models import IpAddress, Port, ScanActivity, ScanHistory, Subdomain
@@ -31,11 +35,11 @@ PRODUCTS = [(443, 'https', 'nginx', '1.25.3'), (443, 'https', 'Apache httpd', '2
             (8443, 'https', 'Jenkins', '2.426.2'), (5432, 'postgresql', 'PostgreSQL', '15.4'), (443, 'https', 'Atlassian Confluence', '8.3.1')]
 # name, slug, domain, hosts, [(heat, count)], address prefix, first octet of addresses
 PROJECTS = [
-    ('Bluepeak Logistics', 'bluepeak-logistics', 'bluepeak-example.com', 24, [('fire', 3), ('smoke', 4), ('ice', 2)], '198.51.100.', 100),
-    ('Harbor Foods', 'harbor-foods', 'harborfoods-example.org', 15, [('smoke', 3), ('ice', 1)], '203.0.113.', 100),
-    ('Cedar Ridge Clinics', 'cedar-ridge-clinics', 'cedarridge-example.net', 12, [('smoke', 1), ('ice', 3)], '192.0.2.', 100),
-    ('Sunvale Energy', 'sunvale-energy', 'sunvale-example.com', 9, [('smoke', 2), ('ice', 1)], '198.51.100.', 140),
-    ('Pinewood Media', 'pinewood-media', 'pinewood-example.net', 5, [], '203.0.113.', 140),
+    ('Thistlegate Logistics', 'thistlegate-logistics', 'thistlegate-example.com', 24, [('fire', 3), ('smoke', 4), ('ice', 2)], '198.51.100.', 100),
+    ('Grellbrook Foods', 'grellbrook-foods', 'grellbrook-example.org', 15, [('smoke', 3), ('ice', 1)], '203.0.113.', 100),
+    ('Fennick Hollow Clinics', 'fennick-hollow-clinics', 'fennickhollow-example.net', 12, [('smoke', 1), ('ice', 3)], '192.0.2.', 100),
+    ('Brindlewick Energy', 'brindlewick-energy', 'brindlewick-example.com', 9, [('smoke', 2), ('ice', 1)], '198.51.100.', 140),
+    ('Pellowick Media', 'pellowick-media', 'pellowick-example.net', 5, [], '203.0.113.', 140),
 ]
 for name, slug, domain_name, n_hosts, heats, prefix, first in PROJECTS:
     org = Org.objects.get_or_create(slug=slug, defaults={'name': name})[0]
@@ -62,4 +66,40 @@ for name, slug, domain_name, n_hosts, heats, prefix, first in PROJECTS:
             CVEMatch.objects.create(cve_entry=cve, subdomain=sub, scan_history=scan, matched_product=sub.webserver, matched_version='', version_in_range=True, confidence=0.9, source='version',
                                     ai_verdict='confirmed' if cve.kev else 'likely', ai_reason='The advertised version is inside the affected range.', remediation_status='open',
                                     **({'template_result': 'vulnerable', 'template_id': cve.cve_id.lower(), 'template_tested_at': NOW - timedelta(hours=3)} if heat == 'fire' else {}))
-print('seeded', len(PROJECTS), 'more projects')
+
+# --- 1.5: what internal hosts are called, and the printer --------------------------------------------------------------------------------------
+# The Sentinel's discover sweep reports the name each address goes by inside the network (reverse DNS, mDNS, NetBIOS), kept on the host's target
+# row; every page then writes the host as 'name (address)'. One host's fingerprint showed a printer: it gets only the read-only web pass.
+home = Project.objects.get(slug='quillfern-group')
+NAMES = {'10.20.0.5': 'files-hq', '10.20.0.7': 'print-hq-2f', '10.20.0.9': 'intranet', '10.20.0.12': 'hr-portal', '10.20.0.20': 'nas-hq',
+         '10.20.0.31': 'cam-lobby', '10.20.0.40': 'pbx-hq', '10.20.0.50': 'dc01', '10.20.0.51': 'jump01', '10.30.0.4': 'erp01', '10.30.0.8': 'sql01',
+         '10.30.0.9': 'ldap01', '10.30.0.15': 'build01', '10.30.0.22': 'backup01', '10.30.0.30': 'vmhost01', '10.30.0.40': 'k8s-n1', '10.30.0.41': 'k8s-n2',
+         '10.30.0.50': 'runner01'}
+for address, name in NAMES.items():
+    Domain.objects.filter(project=home, name=address).update(display_name=name, display_name_source='rdns', display_name_at=NOW - timedelta(hours=5))
+Domain.objects.filter(project=home, name='10.20.0.7').update(printer=True, printer_evidence='IPP answered on port 631')
+# the Sentinels run the release the tour shows, and have just checked in
+for agent in Agent.objects.filter(kind='scanner'):
+    Agent.objects.filter(pk=agent.pk).update(info={**(agent.info or {}), 'version': '1.5.0'}, last_seen=NOW - timedelta(seconds=5 + agent.pk))
+# --- this week's threats: two invented CVEs on an invented product, so the Overview's weekly card is not empty and names no real vendor ----------
+for cve_id, summary, cvss, kev in (
+        ('CVE-2026-91437', 'An authentication bypass in the Lanternfold Gateway admin console lets a remote attacker run commands as root.', 9.8, True),
+        ('CVE-2026-91562', 'A crafted upload to Lanternfold Gateway file sharing writes files outside its folder; a public exploit exists.', 9.1, False)):
+    CVEEntry.objects.update_or_create(cve_id=cve_id, defaults={
+        'title': cve_id, 'summary': summary, 'cvss': cvss, 'kev': kev, 'status': 'published', 'exploit_db': True, 'published_at': NOW - timedelta(days=3),
+        'first_seen_at': NOW - timedelta(days=3), 'affected': [{'vendor': 'Lanternfold', 'product': 'Lanternfold Gateway'}],
+        'intel': {'kev': {'cisa_kev': {'added': (NOW - timedelta(days=2)).date().isoformat(), 'vendor': 'Lanternfold', 'product': 'Lanternfold Gateway',
+                                       'name': 'Lanternfold Gateway authentication bypass'}}} if kev else {}})
+# --- the daily history the Overview tiles draw (a sparkline and a change on each tile): today's snapshot as the product writes it, and three weeks
+# before it with a little more exposure each day back and a few findings fixed along the way, so no tile shows a bare dash
+stats_history.snapshot_all_projects()
+for snap in list(StatsSnapshot.objects.filter(date=NOW.date())):
+    for back in range(1, 22):
+        grow = 1 + 0.015 * back
+        found = {k: round(int(v or 0) * grow + (back % 3 == 0)) for k, v in (snap.open_findings or {}).items()}
+        found['critical'] = max(1, round(int((snap.open_findings or {}).get('critical') or 0) * grow) + 1)
+        StatsSnapshot.objects.update_or_create(project=snap.project, date=snap.date - timedelta(days=back), defaults={
+            'hosts': snap.hosts - back // 4, 'exposed_hosts': round(snap.exposed_hosts * grow), 'open_findings': found, 'cve_matches': snap.cve_matches,
+            'fixed': 2 + (21 - back) // 3, 'mean_days_to_fix': round(6.5 - (21 - back) * 0.08, 1),
+            'needs_hosts': None if snap.needs_hosts is None else round(snap.needs_hosts * grow)})
+print('seeded', len(PROJECTS), 'more projects and', len(NAMES), 'internal host names')

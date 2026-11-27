@@ -32,6 +32,8 @@ The **Email reports** tab is described [below](#email-reports).
 
 A CSV is built by the same worker job as a PDF and downloaded the same way. It starts with a byte order mark so Excel reads it as UTF-8, and a cell that begins with `=`, `+`, `-`, `@`, a tab or a carriage return gets an apostrophe in front, so a host name or a finding title from a scanned machine stays text. A CSV holds at most `CVENGINE_REPORT_CSV_MAX_ROWS` rows (20,000 by default), hottest first, and the report row says how many were left out.
 
+An internal host whose name the Sentinel read inside the network is written `hostname (192.168.1.71)` in the PDF reports ([HOST-INVENTORY.md](HOST-INVENTORY.md#internal-hosts-names-and-printers)); with no name known, the address alone.
+
 ## Organization and project reports
 
 A project report holds that project's rows. An organization report holds the organization's projects **you can read**:
