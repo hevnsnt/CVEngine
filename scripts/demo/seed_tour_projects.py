@@ -14,13 +14,14 @@ from datetime import timedelta
 from django.contrib.auth.models import User
 from django.utils import timezone
 
+from agentapi.models import Agent
+from cveFeed import stats_history
 from cveFeed.discovery import NUCLEI_SCAN_ACTIVITY_NAMES
-from cveFeed.models import CVEEntry, CVEMatch, HostState
+from cveFeed.models import CVEEntry, CVEMatch, HostState, StatsSnapshot
 from dashboard.models import Org, OrgMembership, Project
 from scanEngine.models import EngineType
 from startScan.models import IpAddress, Port, ScanActivity, ScanHistory, Subdomain
 from targetApp.models import Domain
-from agentapi.models import Agent
 
 random.seed(29)
 NOW = timezone.now()
@@ -91,8 +92,6 @@ for cve_id, summary, cvss, kev in (
                                        'name': 'Lanternfold Gateway authentication bypass'}}} if kev else {}})
 # --- the daily history the Overview tiles draw (a sparkline and a change on each tile): today's snapshot as the product writes it, and three weeks
 # before it with a little more exposure each day back and a few findings fixed along the way, so no tile shows a bare dash
-from cveFeed import stats_history
-from cveFeed.models import StatsSnapshot
 stats_history.snapshot_all_projects()
 for snap in list(StatsSnapshot.objects.filter(date=NOW.date())):
     for back in range(1, 22):
