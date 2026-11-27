@@ -49,6 +49,8 @@ ENTRIES = {
     'ip_allowlist': ('settings', 'ip_allowlist', 'The allowed source addresses for the whole web interface and whether the allowlist is enforced.', None),
     'ip_allowlist_entry_add': ('settings', 'ip_allowlist/entries', 'Add an address or range to the allowlist. Action.', None),
     'ip_allowlist_entry': ('settings', 'ip_allowlist/entries/(?P<entry_id>\\d+)', 'One allowlist entry. The id is the entry id.', 'entry_id'),
+    'ip_bans': ('settings', 'ip_bans', 'The address bans the input guard has in force (address, reason, until when).', None),
+    'ip_ban_lift': ('settings', 'ip_bans/(?P<ban_id>\\d{1,12})/lift', 'Lift one address ban. The id is the ban id. Action.', 'ban_id'),
     'tailscale': ('settings', 'tailscale', 'Tailscale sync per project: which are connected (never the key).', None),
     'tailscale_project': ('settings', 'tailscale/(?P<project_id>\\d+)', 'Tailscale sync for one project. The id is the project id.', 'project_id'),
     'tailscale_test': ('settings', 'tailscale/(?P<project_id>\\d+)/test', 'Test the Tailscale connection of one project. Action.', 'project_id'),
@@ -63,7 +65,7 @@ ENTRIES = {
     'cve_seed_build': ('settings', 'cve_seed/build', 'Build a CVE seed export. Action.', None),
     'cve_guidance_run': ('settings', 'cve_guidance/run', 'Run the CVE guidance job now. Action.', None),
     # --- admin tables (administrators; the instance ones need an App Admin) -----------------------------------------------------------------------------
-    'timings': ('admin', 'timings', 'Timings: CVE feed interval, daily hygiene hour (UTC), certificate transparency interval, discovery and template-scan run limits.', None),
+    'timings': ('admin', 'timings', 'Timings: CVE feed interval, daily hygiene hour (UTC), certificate transparency interval and its fallback source (ct_fallback_source, true or false), discovery and template-scan run limits.', None),
     'scan_control': ('admin', 'scan-control', 'The scanning pause (and its reason).', None),
     'watchdog': ('admin', 'watchdog', 'The watchdog: what it watches, what it changed, its switches. A POST changes a switch or asks for an action.', None),
     'audit': ('admin', 'audit', 'The audit log of administrative changes (last 200).', None),
@@ -84,6 +86,8 @@ NOT_EXPOSED = {
     ('settings', 'autotune/decisions/(?P<decision_id>\\d+)/apply'): 'apply_tuning_suggestion.',
     ('settings', 'autotune/decisions/(?P<decision_id>\\d+)/revert'): 'revert_tuning_decision.',
     ('settings', 'autotune/release'): 'release_tuning_pin.',
+    ('settings', 'client_address/snippet'): 'the host nginx lines hold the install\'s upstream secret; a person reads them in the web interface.',
+    ('settings', 'client_address/recheck'): 'the button of the client address notice; every update and the operations checks run the same check.',
 }
 # Entries an agent may read but not change. The allowlist is the perimeter: its handlers refuse a change that would lock the caller out by looking at the
 # caller's address, and an agent has no address of its own (the bridge's request is built here), so it must not be able to move the perimeter at all.
@@ -92,6 +96,8 @@ READ_ONLY_FOR_AGENTS = {
     'ip_allowlist': 'the allowed addresses are the perimeter of the instance; an agent can read the list, a person changes it in the web interface.',
     'ip_allowlist_entry_add': 'the allowed addresses are the perimeter of the instance; a person changes them in the web interface.',
     'ip_allowlist_entry': 'the allowed addresses are the perimeter of the instance; a person changes them in the web interface.',
+    'ip_bans': 'the bans are the perimeter of the instance; an agent can read them, a person lifts one in the web interface.',
+    'ip_ban_lift': 'lifting a ban lets an address that sent attack input back in; a person decides that, in the web interface.',
     'updates_approve': 'approving an update restarts the whole instance; an agent may check for one and read its state, a person presses the button.',
     'setup_questions': 'an answer can switch on a feature the AI provider or the host bills for, or change what is scanned; only a person decides that, in the web interface. An agent can read the questions.',
     'config_maxxing_reset': 'it puts auto-tuning back on Auto with the AI advisor on, puts every spend cap back to its default (raising any a person lowered) and removes every pin; an agent lowers one number at a time with change_setting, a person resets in the web interface.',
@@ -135,6 +141,7 @@ AGENT_MAY_SWITCH_ON = {
     ('scan_control', 'paused'): 'pausing scanning is the safe direction (an agent may also resume: that sends False)',
     ('keys', 'clear'): 'clear:true removes a saved service key, which switches an outside service off (storing a key is refused: AGENT_CANNOT_STORE_KEYS)',
     ('watchdog', 'enabled'): 'a watchdog switch on is the safety net coming back (the watchdog changes nothing that spends money or widens a scan)',
+    ('ai', 'use_bulk_model'): 'the bulk work then runs on the cheaper bulk model: it lowers spend (switching it off is refused: AGENT_CANNOT_DISABLE)',
 }
 # Entries whose numbers an agent may change in either direction, with why none of them spends money or widens what is scanned.
 AGENT_NUMBERS_FREE = {
@@ -157,6 +164,12 @@ AGENT_ONLY_VALUES = {'updates': {'mode': ('manual',)}}
 AGENT_READ_ONLY_FIELDS = {'updates': ('repo', 'branch')}
 # Numbers of an entry's body that cost money or work: an agent may only lower them. {entry: {field: how the current number is read}}
 AGENT_LOWER_ONLY = {'ai': ('plan_daily_total', 'plan_daily_per_project', 'cve_guidance_daily', 'auto_fire_max_scans'), 'reviewer': ('review_daily_max',)}
+# Dollar budgets an agent may only tighten: {entry: fields}. The limit in force (``ai_budget.limits``: the saved one, else the environment's, else none) is what a
+# new amount is compared with. No limit means unlimited, so any amount is a lowering; an amount above the limit in force is refused, and so is clearing a saved
+# amount (empty or null), which falls back to the environment's limit or to none at all.
+AGENT_BUDGET_FIELDS = {'ai': ('monthly_budget_usd', 'daily_budget_usd')}
+# Switches whose OFF spends more: an agent may switch them on, never off. {entry: fields}. With the bulk model off every AI stage runs on the main model.
+AGENT_CANNOT_DISABLE = {'ai': ('use_bulk_model',)}
 # Tunables an agent may only lower: every cap (``caution='cap'``, which includes each AI spend cap) and the two switches that widen what is scanned or sent.
 # ``validate_min_gap_hours`` is the other way round (a shorter gap spends more), so an agent may only raise it. A cap of 0 turns the pacing off: more, not less.
 TUNABLE_ONLY_RAISE = ('validate_min_gap_hours',)
@@ -334,6 +347,12 @@ def _agent_body_rules(ctx, name, values, ident=None):
     for field, kind in AGENT_SCOPE_LISTS.get(name, {}).items():
         if field in values:
             _scope_list_rule(ctx, name, field, kind, values[field], ident)
+    for field in AGENT_CANNOT_DISABLE.get(name, ()):
+        if field in values and values[field] is not True:
+            raise ApiError(403, f'{field}: switching this off makes the AI work cost more, so only a person does it, in the web interface; an agent may switch it on')
+    for field in AGENT_BUDGET_FIELDS.get(name, ()):
+        if field in values:
+            _budget_rule(field, values[field])
     if name not in GENERIC_RULE_SKIPS:
         _default_deny(ctx, name, values, ident)
     for field in AGENT_LOWER_ONLY.get(name, ()):
@@ -342,6 +361,26 @@ def _agent_body_rules(ctx, name, values, ident=None):
         new, now = values[field], _current_body_number(name, field)
         if isinstance(new, bool) or not isinstance(new, int) or (isinstance(now, int) and new > now):
             raise ApiError(403, f'{field} is a limit on what this instance spends: an agent may only lower it (now {now}); only a person raises it, in the web interface')
+
+
+def _budget_rule(field, new):
+    """A dollar budget an agent sends: it may lower the limit in force or set one where there is none, never raise it or clear a saved one."""
+    from cveFeed import ai_budget
+    from dashboard.models import AIProviderSettings
+    row = AIProviderSettings.objects.first()
+    period = field.split('_', 1)[0]
+    now, source = ai_budget.limits(row)[period]
+    saved = ai_budget.clean_limit(getattr(row, field, None)) if row is not None else None
+    shown = f'${now}' if now is not None else 'no limit'
+    if new is None or (isinstance(new, str) and not new.strip()):
+        if saved is not None:
+            raise ApiError(403, f'{field}: clearing the budget lets the AI spend more (now {shown}); an agent may lower it, only a person clears or raises it, in the web interface')
+        return  # nothing saved: an empty value changes nothing
+    amount = ai_budget.clean_limit(new)
+    if amount is None or isinstance(new, bool):
+        return  # not an amount: the handler answers 400 with the rule
+    if now is not None and amount > now:
+        raise ApiError(403, f'{field} is a limit on what this instance spends: an agent may only lower it (now {shown}, from {source}); only a person raises it, in the web interface')
 
 
 def _ops_hours_rule(hours):
@@ -412,6 +451,8 @@ def _default_deny(ctx, name, values, ident):
     current = None
     for path, value in sent.items():
         field = path.rsplit('.', 1)[-1]
+        if field in AGENT_BUDGET_FIELDS.get(name, ()):  # a dollar amount, with its own rule (``_budget_rule``)
+            continue
         if isinstance(value, str) and value.strip() and not (name in AGENT_NUMBERS_FREE or field in AGENT_LOWER_ONLY.get(name, ())):
             # a text where the page shows a switch or a number: the handlers coerce it (bool('false') is True, int('5000') is 5000), so it is read as what the field is
             current = _current(ctx, name, ident) if current is None else current
@@ -522,7 +563,7 @@ def _who(ctx):
     return info.get('agent_name') or info.get('name') or 'an agent'
 
 
-_READABLE = ('ip_allowlist', 'ip_allowlist_entry_add', 'ip_allowlist_entry')
+_READABLE = ('ip_allowlist', 'ip_allowlist_entry_add', 'ip_allowlist_entry', 'ip_bans')
 
 
 def list_settings(ctx):

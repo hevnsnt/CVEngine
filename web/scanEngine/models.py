@@ -1,5 +1,5 @@
 import yaml
-from reNgine.crypto_fields import ENCRYPTED_COLUMN_LENGTH, EncryptedCharField, EncryptedJSONField, EncryptedTextField
+from cvengine.crypto_fields import ENCRYPTED_COLUMN_LENGTH, EncryptedCharField, EncryptedTextField
 from django.db import models
 
 
@@ -29,9 +29,6 @@ class EngineType(models.Model):
 
     def __str__(self):
         return self.engine_name
-
-    def get_number_of_steps(self):
-        return len(self.tasks) if self.tasks else 0
 
     @hybrid_property
     def tasks(self):
@@ -76,7 +73,7 @@ class VulnerabilityReportSetting(models.Model):
     company_address = models.CharField(max_length=200, null=True, blank=True)
     company_email = models.CharField(max_length=100, null=True, blank=True)
     company_website = models.CharField(max_length=100, null=True, blank=True)
-    show_rengine_banner = models.BooleanField(default=True)
+    show_cvengine_banner = models.BooleanField(default=True, db_default=True)
     show_executive_summary = models.BooleanField(default=True)
     executive_summary_description = models.TextField(blank=True, null=True)
     show_footer = models.BooleanField(default=False)

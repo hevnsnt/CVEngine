@@ -2,6 +2,7 @@
 // with Start and Dismiss, Review now, and (for administrators) the project's mode in a closed disclosure. Every word from the model or the scanned host is set
 // with textContent (the el() helper), never as markup. The plain words live in host-review-logic.js.
 import { api, badge, el, toast } from "/staticfiles/cve/ui.js";
+import { notesList, notesSummary } from "/staticfiles/cve/notes-logic.js";
 import { CLAIMS_TEXT, CLOSE_NOTE, HELD_TEXT, MODES, canReview, emptyText, findingView, modeHelp, stateOf, stepView, summary, waitingText, whenText } from "/staticfiles/cve/host-review-logic.js";
 
 const POLL_MS = 5000;
@@ -196,6 +197,12 @@ export function hostReviewCard({ base, hostId, isCurrent = () => true, ago = FAL
           body.append(old);
         }
       }
+    }
+    if ((data.notes || []).length) {
+      // the operator notes on this host (newest first): the AI review reads them as claims to weigh
+      const box = el("details", "hr-notes", null, { "data-keep-key": `host-notes-${hostId}` });
+      box.append(el("summary", "", `Notes on this host (${data.notes.length})`), el("p", "note hr-sub", notesSummary(data.notes)), notesList(data.notes, el, badge, ago));
+      body.append(box);
     }
     settingsBox();
   }

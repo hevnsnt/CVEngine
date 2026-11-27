@@ -81,7 +81,7 @@ class WeeklyDeepNucleiTests(TestCase):
         domain = self.scan.domain
         scans = [self.scan] + [ScanHistory.objects.create(domain=domain, scan_type=engine, scan_status=2, start_scan_date=timezone.now()) for _ in range(3)]
         for number, old in enumerate(scans):
-            sub = Subdomain.objects.create(name='a.weekly.test', target_domain=domain, scan_history=old)
+            sub = Subdomain.objects.get_or_create(name='a.weekly.test', target_domain=domain, scan_history=old)[0]  # setUp stored the first scan's
             for name in ('Exposed panel', 'Old TLS'):
                 Vulnerability.objects.create(name=name, http_url='https://a.weekly.test/', target_domain=domain, scan_history=old,
                                              subdomain=sub, severity=2, description=f'copy {number}')
@@ -90,3 +90,53 @@ class WeeklyDeepNucleiTests(TestCase):
         copied, hosts = nuclei_scan.reuse_findings(fresh, self.project.id, ['a.weekly.test'])
         self.assertEqual((copied, hosts), (2, 1))
         self.assertEqual(sorted(Vulnerability.objects.filter(scan_history=fresh).values_list('description', flat=True)), ['copy 3', 'copy 3'])
+
+    def _old_finding(self, scan, sub, name, links=True):
+        from startScan.models import CveId, CweId, Vulnerability, VulnerabilityReference, VulnerabilityTags
+        vuln = Vulnerability.objects.create(name=name, http_url=f'https://{sub.name}/', target_domain=scan.domain, scan_history=scan,
+                                            subdomain=sub, severity=2)
+        if links:
+            vuln.tags.set([VulnerabilityTags.objects.create(name=f'{name} tag {n}') for n in range(2)])
+            vuln.references.add(VulnerabilityReference.objects.create(url=f'https://ref.test/{name}'))
+            vuln.cve_ids.add(CveId.objects.get_or_create(name=f'CVE-2026-{len(name):04d}')[0])  # names are unique
+            vuln.cwe_ids.add(CweId.objects.get_or_create(name='CWE-79')[0])
+        return vuln
+
+    def _links(self, vuln):
+        return (sorted(vuln.tags.values_list('pk', flat=True)), sorted(vuln.references.values_list('pk', flat=True)),
+                sorted(vuln.cve_ids.values_list('pk', flat=True)), sorted(vuln.cwe_ids.values_list('pk', flat=True)))
+
+    def test_reuse_copies_every_link_of_each_finding(self):
+        """A copied finding carries the tags, references, CVE and CWE ids of the copy it was made from, and a finding with none gets none."""
+        from cveFeed import nuclei_scan
+        from startScan.models import Vulnerability
+        linked = self._old_finding(self.scan, self.first, 'Exposed panel')
+        bare = self._old_finding(self.scan, self.first, 'Old TLS', links=False)
+        fresh = ScanHistory.objects.create(domain=self.scan.domain, scan_type=self.scan.scan_type, scan_status=1, start_scan_date=timezone.now())
+        Subdomain.objects.create(name='a.weekly.test', target_domain=self.scan.domain, scan_history=fresh)
+        self.assertEqual(nuclei_scan.reuse_findings(fresh, self.project.id, ['a.weekly.test']), (2, 1))
+        copies = {v.name: v for v in Vulnerability.objects.filter(scan_history=fresh)}
+        self.assertEqual(self._links(copies['Exposed panel']), self._links(linked))
+        self.assertEqual(self._links(copies['Old TLS']), ([], [], [], []))
+        self.assertEqual(self._links(linked)[0].__len__(), 2)
+        self.assertEqual(self._links(bare), ([], [], [], []))  # the source rows are untouched
+
+    def test_reuse_reads_the_links_once_per_chunk_not_per_finding(self):
+        """Each extra copied finding costs its own INSERT only: the link reads and writes do not grow with the findings."""
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+        from cveFeed import nuclei_scan
+        domain = self.scan.domain
+
+        def fresh_scan():
+            scan = ScanHistory.objects.create(domain=domain, scan_type=self.scan.scan_type, scan_status=1, start_scan_date=timezone.now())
+            Subdomain.objects.create(name='a.weekly.test', target_domain=domain, scan_history=scan)
+            return scan
+        self._old_finding(self.scan, self.first, 'F0')
+        with CaptureQueriesContext(connection) as one:
+            self.assertEqual(nuclei_scan.reuse_findings(fresh_scan(), self.project.id, ['a.weekly.test']), (1, 1))
+        for n in range(1, 4):
+            self._old_finding(self.scan, self.first, f'F{n}')
+        with CaptureQueriesContext(connection) as four:
+            self.assertEqual(nuclei_scan.reuse_findings(fresh_scan(), self.project.id, ['a.weekly.test']), (4, 1))
+        self.assertEqual(len(four) - len(one), 3)

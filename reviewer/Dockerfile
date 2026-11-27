@@ -1,11 +1,14 @@
 # The AI reviewer (docs/AI-REVIEWER.md): a small image with the reviewer package and its pinned dependencies, nothing else. No cvENGINE
 # source, no scanners, no shell tools beyond the base image's. It runs as an unprivileged user on a read-only filesystem (docker-compose.yml).
-FROM python:3.13-slim-bookworm@sha256:a5a7017efc5969e00ae2b91c8eb0631049a569652aa4ffc4501769049ae45c72
+FROM python:3.13-slim-bookworm@sha256:f0fa218d5b06f9b9235024fa061cde2cb141f726de52134471053d2d9b5324a3
 
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
 
 COPY requirements.txt /opt/reviewer/requirements.txt
+# pip is removed once the packages are in: the reviewer never installs anything, and the copies of urllib3, msgpack and setuptools that pip carries
+# inside itself (older than the ones it installs) would otherwise sit in the image as known vulnerable code nothing runs.
 RUN pip install --no-cache-dir -r /opt/reviewer/requirements.txt \
+    && python3 -m pip uninstall --yes pip \
     && groupadd --system --gid 10002 reviewer \
     && useradd --system --uid 10002 --gid 10002 --home-dir /nonexistent --no-create-home --shell /usr/sbin/nologin reviewer
 

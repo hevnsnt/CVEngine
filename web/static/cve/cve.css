@@ -474,6 +474,7 @@ a.cve-link{font-family:var(--mono)}
 .scannerbar .sb-disabled{padding:var(--s-2) var(--s-3);background:var(--ice-bg);color:var(--ice-ink);box-shadow:inset 3px 0 0 var(--ring-ice);font-weight:var(--fw-semi)}
 .scannerbar .sb-cooling{padding:var(--s-2) var(--s-3);background:var(--smoke-bg);color:var(--smoke-ink);box-shadow:inset 3px 0 0 var(--smoke)}
 .scannerbar .sb-never{padding:var(--s-2) var(--s-3);background:var(--smoke-bg);color:var(--smoke-ink);box-shadow:inset 3px 0 0 var(--smoke);font-weight:var(--fw-semi)}
+.scannerbar .sb-aibudget{padding:var(--s-2) var(--s-3);background:var(--smoke-bg);color:var(--smoke-ink);box-shadow:inset 3px 0 0 var(--smoke);font-weight:var(--fw-semi)}
 .updatebar span{flex:1 1 280px;min-width:0;overflow-wrap:anywhere}
 
 /* ================= live dashboard ================= */
@@ -919,6 +920,8 @@ pre.mono{margin:0 0 var(--s-2);padding:var(--s-2) var(--s-3);background:var(--in
 .list-head .chip-x span{font-size:var(--fs-4);line-height:1;color:var(--muted)}
 .list-head .filters-pop{position:absolute;left:0;right:0;top:100%;z-index:7;display:flex;flex-direction:column;gap:var(--s-3);margin:0 var(--s-3);padding:var(--s-3);max-height:calc(100dvh - var(--bar) - 170px);overflow-y:auto;background:var(--surface);border:1px solid var(--line-2);border-radius:var(--r);box-shadow:var(--pop)}
 .list-head .filters-pop[hidden]{display:none}
+.list-head .names-pick[hidden]{display:none} /* the Overview's host list: only while the page is narrowed to it */
+.list-head .names-pick button{max-width:100%;overflow-wrap:anywhere;text-align:left}
 .split>.split-list>.host-rows{max-height:none;overflow:visible;flex:none}
 .split>.split-list>.host-rows .host-row{scroll-margin-top:calc(var(--head-h,130px) + var(--s-2))}
 .split>.split-list>.more-row{margin:0;padding:2px 0 var(--s-2)}
@@ -964,7 +967,60 @@ pre.mono{margin:0 0 var(--s-2);padding:var(--s-2) var(--s-3);background:var(--in
   .about-table td .about-detail{grid-column:2}
   .about-table td.num{font-size:12px}
 }
-.about-rengine{padding-top:24px;border-top:1px solid var(--line)}
+/* AI and your data (/cve/ai/, cveFeed/ai_disclosure.py): the About page's sections, with one folded card per AI job */
+.ai-now{padding:20px;display:grid;gap:8px}
+.ai-now h2{font-size:var(--fs-4);margin:0}
+.ai-now-lede{margin:0;font-size:var(--fs-3);max-width:72ch;overflow-wrap:anywhere}
+.ai-now .note{margin:0}
+.ai-dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:8px;vertical-align:1px;background:var(--muted)}
+.ai-dot.hosted{background:var(--smoke,#c58a1e)}.ai-dot.local{background:var(--ok,#3f8f5f)}
+.ai-group-h{font-size:var(--fs-3);font-weight:var(--fw-semi);margin:24px 0 4px}
+.ai-job>summary{flex-wrap:wrap;row-gap:4px}
+.ai-job .ai-state{margin-left:8px}
+.ai-job .ai-state.off{color:var(--muted)}
+.ai-job>.about-text{margin:0 0 8px}
+.ai-facts{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:0 20px;margin:0 0 16px;font-size:var(--fs-2);max-width:880px}
+.ai-facts>div{display:contents}
+.ai-facts dt{color:var(--muted);padding:8px 0;border-top:1px solid var(--line)}
+.ai-facts dd{margin:0;padding:8px 0;border-top:1px solid var(--line);color:var(--ink-2);overflow-wrap:anywhere;min-width:0}
+.ai-facts ul,.ai-list{margin:0;padding-left:20px}
+.ai-facts li,.ai-list li{margin:2px 0}
+.ai-list{font-size:var(--fs-3);max-width:72ch;color:var(--ink-2)}
+.ai-data .about-text+.about-text{margin-top:8px}
+@media (max-width:560px){.ai-facts{grid-template-columns:minmax(0,1fr)}.ai-facts dt{padding-bottom:0}.ai-facts dd{border-top:0;padding-top:2px}}
+.api-keys-ai{margin:0}
+/* MCP (/cve/mcp/, cveFeed/mcp_page.py): connect an agent, what to ask, and the History of tool calls */
+.mcp-jump{display:flex;gap:16px;flex-wrap:wrap;margin:4px 0 0;font-size:var(--fs-3)}
+.mcp-jump .count{font:var(--fw-medium) var(--fs-1) var(--mono);color:var(--muted);margin-left:2px}
+.mcp-steps{margin:0 0 16px;padding-left:20px;font-size:var(--fs-3);max-width:72ch;color:var(--ink-2)}
+.mcp-steps li{margin:4px 0}
+.mcp-endpoint{padding:12px 16px;margin-bottom:16px;display:grid;gap:4px;max-width:880px}
+.mcp-endpoint-row{display:flex;gap:12px;align-items:center;flex-wrap:wrap;min-width:0}
+.mcp-endpoint-row code{font:var(--fw-medium) var(--fs-2) var(--mono);overflow-wrap:anywhere;min-width:0}
+.mcp-client>summary{flex-wrap:wrap;row-gap:2px}
+.mcp-client>summary .note{font-weight:var(--fw-regular);margin-left:8px}
+.mcp-code{position:relative;max-width:880px;margin-bottom:8px}
+.mcp-code pre{margin:0;padding:12px 16px;padding-right:76px;background:var(--sunk);border-radius:var(--r);overflow-x:auto;font:var(--fw-medium) var(--fs-2)/1.5 var(--mono)}
+.mcp-code .btn{position:absolute;top:8px;right:8px}
+.mcp-client>.note{margin:0 0 12px;max-width:72ch}
+.mcp-examples{display:grid;gap:12px;grid-template-columns:repeat(auto-fill,minmax(min(100%,300px),1fr));margin-bottom:16px}
+.mcp-example{padding:12px 16px;display:grid;gap:8px;align-content:start;min-width:0}
+.mcp-example p{margin:0}
+.mcp-ask{font-weight:var(--fw-semi);font-size:var(--fs-3)}
+.mcp-tools{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.mcp-tools code{font:var(--fw-medium) var(--fs-1) var(--mono);background:var(--sunk);padding:2px 8px;border-radius:var(--r-s)}
+.mcp-write{background:var(--smoke-bg);color:var(--smoke-ink)}
+.mcp-filter{display:flex;gap:8px 16px;flex-wrap:wrap;align-items:end;margin:0 0 12px;font-size:var(--fs-2)}
+.mcp-filter label{display:grid;gap:4px;color:var(--ink-2)}
+.mcp-filter select{min-height:36px;padding:0 8px;border:1px solid var(--line-2);border-radius:var(--r);background:var(--surface);color:var(--ink);font:inherit;max-width:220px}
+.mcp-filter .mcp-check{display:flex;align-items:center;gap:8px;min-height:36px}
+.mcp-table .c-when{width:13%}.mcp-table .c-who{width:20%}.mcp-table .c-tool{width:22%}.mcp-table .c-args{width:27%}.mcp-table .c-result{width:18%}
+.mcp-args summary{cursor:pointer;color:var(--ink-2)}
+.mcp-args pre{margin:4px 0 0;white-space:pre-wrap;overflow-wrap:anywhere;font:var(--fw-medium) var(--fs-1)/1.45 var(--mono);color:var(--ink-2)}
+.mcp-ok{color:var(--ok-ink)}.mcp-fail{color:var(--fire-ink);font-weight:var(--fw-semi)}
+.mcp-pages{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+@media (max-width:720px){.mcp-table thead{display:none}.mcp-table,.mcp-table tbody,.mcp-table tr,.mcp-table td{display:block;width:100%}.mcp-table colgroup{display:none}.mcp-table tr{border-top:1px solid var(--line);padding:8px 0}.mcp-table td{border-top:0;padding:2px 0}.mcp-table td::before{content:attr(data-label);display:block;font-size:var(--fs-1);color:var(--muted)}}
+.about-upstream{padding-top:24px;border-top:1px solid var(--line)}
 .two-step h3,.recovery h3,.card>h3{margin-bottom:var(--s-1)}
 .two-step .note{margin-bottom:var(--s-3)}
 .two-step-form{display:grid;gap:var(--s-3);margin-top:var(--s-1)}
@@ -1764,7 +1820,7 @@ html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointe
 @media (prefers-reduced-motion:reduce){.update-live .ul-track i{animation:none;width:100%;opacity:.5}}
 .proj-wrap:has(.org-switch){gap:var(--s-1)}.proj-wrap:has(.org-switch) .select+.select,.proj-wrap:has(.org-switch) .select+.proj-label+.select{margin-top:2px}
 
-/* Live: exposed hosts and the CVE feed temperatures stack in the first column; AI activity takes the third column, above the fold */
+/* Live: hosts with open findings and the CVE feed temperatures stack in the first column; AI activity takes the third column, above the fold */
 .cell-stack{display:flex;flex-direction:column;min-width:0}
 .cell-stack>.cell{flex:none}
 .cell-stack>.cell+.cell{border-top:1px solid var(--line);border-left:0;padding-top:var(--s-4)}
@@ -1973,6 +2029,9 @@ html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointe
 .gl-big{font-size:var(--fs-5);font-weight:var(--fw-semi);line-height:1.2;overflow-wrap:break-word;word-break:normal}
 .gl-big.mono{font-family:var(--mono);font-size:var(--fs-4)}
 .gl-sub{color:var(--muted);font-size:var(--fs-2)}
+.gl-desc{margin:0 0 var(--s-2,.5rem);font-size:var(--fs-3,1rem);line-height:1.45;overflow-wrap:break-word}
+.gl-repeats{margin-top:var(--s-2,.5rem)}
+.gl-repeats summary{cursor:pointer}
 /* narrow card: the label sits above its value; wide card: a label column of fit to its longest label (up to 12em: "Template check" stays on one line) beside it. Values wrap at spaces, and only a token longer than the line (a URL) may break. */
 .gl-facts{display:grid;grid-template-columns:minmax(0,1fr);gap:0;margin:var(--s-1) 0 0;font-size:var(--fs-2)}
 .gl-facts dt{color:var(--muted);font-family:var(--mono);margin-top:var(--s-2);padding-right:.25em}
@@ -2056,7 +2115,7 @@ html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointe
 .feed-head .temp.ice::before{background:var(--ice)}
 .feed-head .temp[aria-pressed="true"]::before{box-shadow:0 0 0 2px var(--on-ink)}
 
-/* ---- live dashboard: the counters sit under Exposed hosts instead of in a bar of their own ---- */
+/* ---- live dashboard: the counters sit under Hosts with open findings instead of in a bar of their own ---- */
 .strip.in-cell{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0;margin:0;border:0;border-top:1px solid var(--line);border-radius:0;flex:1 1 auto;align-content:start;background:var(--surface)}
 .strip.in-cell a,.strip.in-cell a.wide{flex:none;min-width:0;padding:var(--s-4) var(--s-5);border-bottom:1px solid var(--line)}
 .strip.in-cell #n-matches,.strip.in-cell #n-coverage,.strip.in-cell #n-oldest{border-right:1px solid var(--line)}
@@ -2324,6 +2383,12 @@ section.internal[hidden]{display:none}
 .group-members li{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s-2);min-width:0}
 .group-members a{overflow-wrap:anywhere}
 .group-note{margin:var(--s-2) 0}
+.vg-group{margin-top:var(--s-1);font-size:var(--fs-1)}
+.vg-group>summary{cursor:pointer;display:flex;flex-wrap:wrap;align-items:center;gap:var(--s-2)}
+.vg-title{overflow-wrap:anywhere}
+.vg-members,.vg-singles{list-style:none;margin:var(--s-1) 0 0;padding:0;display:grid;gap:var(--s-1)}
+.vg-members li,.vg-singles li{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s-2);min-width:0}
+.vg-members a,.vg-singles a{overflow-wrap:anywhere}
 /* admin alerts (static/cve/alertbar.js, docs/AI-REVIEWER.md): each is a row of the status strip's Details */
 .scannerbar .ab-row{display:flex;gap:var(--s-3);align-items:flex-start;padding:var(--s-2) var(--s-3);background:var(--smoke-bg);color:var(--smoke-ink);box-shadow:inset 3px 0 0 var(--smoke)}
 .scannerbar .ab-critical{background:var(--fire-bg);color:var(--fire-ink);box-shadow:inset 3px 0 0 var(--fire)}
@@ -2333,6 +2398,9 @@ section.internal[hidden]{display:none}
 .scannerbar .ab-label{font-weight:var(--fw-semi)}
 .scannerbar .ab-more{margin:0;font-size:var(--fs-2)}
 .scannerbar .ab-decision{display:inline-flex;align-items:center;margin-top:var(--s-1);min-height:var(--hit,auto);color:inherit;font-weight:var(--fw-semi);text-decoration:underline}
+/* the client address notice (client-address-notice.js): the host nginx lines wrap inside the notice, never widen the page */
+.ca-buttons{display:flex;flex-wrap:wrap;gap:var(--s-1);margin-top:var(--s-1)}
+.ca-lines{max-width:100%;overflow-x:auto;white-space:pre-wrap;overflow-wrap:anywhere;font:var(--fw-medium) var(--fs-1) var(--mono);margin:var(--s-1) 0 0}
 
 /* ---- CVE catalog (/cve/cves/, explorer.js): a search box, ranked rows in the feed's heat style, and a detail drawer ---- */
 .cvx-sr{position:absolute;width:1px;height:1px;padding:0;margin:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
@@ -2985,3 +3053,176 @@ a.hr-name{text-underline-offset:2px}
 .map[data-tier="mini"] .hx .hx-owner:not(:empty){margin-top:0;line-height:1.25}
 /* a long "Org / Project" ends in an ellipsis inside the tile instead of running past its edge and being cut mid-letter */
 .map[data-size="xl"] .hx .hx-owner{max-width:100%}
+/* Reporting page: the scope picker, a report card per tab and the list of recent reports */
+.reports-scope{margin-bottom:var(--s-4);max-width:560px}
+.reports-scope select{width:100%;margin-top:var(--s-2)}
+.reports-includes{margin:var(--s-2) 0 0;overflow-wrap:anywhere}
+.report-card,.report-recent{margin-bottom:var(--s-4);max-width:760px}
+.report-card h2,.report-recent h2{margin-bottom:var(--s-2)}
+.report-generate{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s-2) var(--s-3);margin-top:var(--s-3)}
+.report-row{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s-2) var(--s-3);padding:var(--s-3) 0;border-top:1px solid var(--line)}
+.report-row:first-child{border-top:0}
+.report-what{display:flex;flex-direction:column;gap:2px;flex:1 1 240px;min-width:0}
+.report-what .note{overflow-wrap:anywhere}
+.report-error{flex-basis:100%}
+@media (max-width:619px){.report-generate .btn,.report-row .btn{min-height:44px}.report-row{align-items:flex-start}}
+/* Reporting, Email reports tab: a card per email report, the create and edit dialog, the preview frame */
+.report-email{max-width:760px}
+.report-sub{margin-bottom:var(--s-3)}
+.report-sub .card-head h3{margin:0;overflow-wrap:anywhere}
+.report-line{margin:var(--s-1) 0 0;overflow-wrap:anywhere}
+.report-actions{display:flex;flex-wrap:wrap;gap:var(--s-2);margin-top:var(--s-3)}
+.report-seg{margin-bottom:var(--s-3)}
+.report-seg [aria-pressed="true"]{background:var(--ink);color:var(--on-ink);border-color:var(--ink)}
+.chip.bad{background:var(--fire-bg);color:var(--fire-ink)}
+.report-preview{width:100%;height:60vh;min-height:320px;border:1px solid var(--line);border-radius:var(--r);background:var(--surface)}
+.report-plain{white-space:pre-wrap;overflow-wrap:anywhere;max-height:60vh;overflow:auto;font:var(--fs-2)/1.5 var(--mono);margin:0}
+.dlg[aria-label$="email report"] textarea{width:100%}
+@media (max-width:619px){
+  .dlg[aria-label$="email report"],.dlg[aria-label^="Preview of the email"]{width:100vw;max-width:100vw;height:100dvh;max-height:100dvh;margin:0;border-radius:0}
+  .dlg[aria-label$="email report"] .btn,.dlg[aria-label^="Preview of the email"] .btn,.report-actions .btn{min-height:44px}
+  .report-preview{height:70dvh}
+  .reports-tabs [role=tablist]{display:flex;overflow-x:auto}
+}
+/* Reporting, Email reports tab: this week's most important vulnerabilities */
+.report-threats{margin-bottom:var(--s-4)}
+.report-threats h2{margin-bottom:var(--s-3)}
+.report-threat{padding:var(--s-3) 0;border-top:1px solid var(--line)}
+.report-threat:first-child{border-top:0}
+.report-threat-title{font-weight:var(--fw-semi);overflow-wrap:anywhere}
+.report-threat p{margin:var(--s-1) 0 0;overflow-wrap:anywhere}
+.report-impact{font-weight:var(--fw-semi)}
+.report-impact.bad{color:var(--fire-ink)}.report-impact.warn{color:var(--smoke-ink)}
+
+/* ---- Overview front: the status, four tiles, this week's threats, Fix first, What changed and the folded Health (static/cve/overview.js).
+   The live discovery card and the AI activity box keep their own rules above; only the places they sit in are laid out here. ---- */
+.ov-head{align-items:center;gap:var(--s-3) var(--s-4);margin-bottom:var(--s-4)}
+.ov-head .pagetabs{margin:0}
+.ov-head-actions{display:flex;align-items:center;gap:var(--s-2);flex-wrap:wrap;margin-left:auto}
+.ov-head-actions .btn{gap:var(--s-2)}
+.ov-status{display:flex;flex-direction:column;gap:var(--s-5);margin-bottom:var(--s-8)}
+.ov-lead{display:flex;flex-direction:column;gap:var(--s-2)}
+.ov-meta{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s-2);font-size:var(--fs-1);color:var(--muted)}
+.ov-pill{display:inline-flex;align-items:center;gap:var(--s-2);padding:var(--s-1) var(--s-2);border-radius:999px;font-weight:var(--fw-semi)}
+.ov-pill .dot,.ov-sentinels .dot{width:7px;height:7px;border-radius:50%;background:currentColor;flex:none}
+.ov-pill.fire{background:var(--fire-bg);color:var(--fire-ink)}.ov-pill.fire .dot{background:var(--fire)}
+.ov-pill.smoke{background:var(--smoke-bg);color:var(--smoke-ink)}.ov-pill.smoke .dot{background:var(--smoke)}
+.ov-pill.ok{background:var(--ok-bg);color:var(--ok-ink)}.ov-pill.ok .dot{background:var(--ok)}
+.ov-sentinels{display:inline-flex;align-items:center;gap:var(--s-2)}
+.ov-sentinels[hidden]{display:none}
+.ov-sentinels .dot{background:var(--ok)}.ov-sentinels.off .dot{background:var(--muted)}
+.ov-headline{font-size:var(--fs-7);line-height:1.2;font-weight:var(--fw-semi);letter-spacing:-.02em;text-wrap:pretty;max-width:none}
+.ov-sub{margin:0;font-size:var(--fs-4);color:var(--ink-2);max-width:none}
+.ov-sub[hidden]{display:none}
+.ov-kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:var(--s-3)}
+.ov-kpi{display:flex;flex-direction:column;gap:var(--s-2);min-width:0;padding:var(--s-4);background:var(--surface);border:1px solid var(--line);border-radius:var(--r-l);color:var(--ink);text-decoration:none;transition:border-color .12s}
+@media (hover:hover) and (pointer:fine){.ov-kpi:hover{border-color:var(--ink)}}
+.ov-kpi-label{font-size:var(--fs-2);color:var(--muted)}
+.ov-kpi-row{display:flex;align-items:flex-end;justify-content:space-between;gap:var(--s-2)}
+.ov-kpi-value{font-size:var(--fs-8);font-weight:var(--fw-semi);letter-spacing:-.02em;line-height:1;font-variant-numeric:tabular-nums}
+.ov-kpi-value small{font-size:var(--fs-3);font-weight:var(--fw-medium);color:var(--muted);letter-spacing:0}
+.ov-spark{flex:none;max-width:45%;height:32px;color:var(--ink-2)}
+.ov-spark[hidden]{display:none}
+.ov-kpi-line{font-size:var(--fs-2);overflow-wrap:anywhere}
+.ov-delta{font-weight:var(--fw-semi)}
+.ov-delta.worse,.ov-changed-n.worse{color:var(--fire-ink)}
+.ov-delta.better,.ov-changed-n.better{color:var(--ok-ink)}
+.ov-foot{color:var(--muted)}
+.ov-sec{display:flex;flex-direction:column;gap:var(--s-3);margin-bottom:var(--s-8)}
+.ov-sec-head{display:flex;flex-wrap:wrap;align-items:baseline;justify-content:space-between;gap:var(--s-2)}
+.ov-sec-head h2,.ov-health h2{font-size:var(--fs-5);letter-spacing:-.01em}
+.ov-note{font-size:var(--fs-2);color:var(--muted)}
+.ov-link{font-size:var(--fs-2);font-weight:var(--fw-medium)}
+.ov-link[hidden]{display:none}
+.ov-empty{margin:0;padding:var(--s-5);background:var(--surface);border:1px solid var(--line);border-radius:var(--r-l);color:var(--muted)}
+.ov-empty[hidden]{display:none}
+/* threats */
+.ov-threats{display:flex;flex-direction:column;gap:var(--s-3)}
+.ov-threat{display:flex;flex-wrap:wrap;gap:var(--s-6);padding:var(--s-5);background:var(--surface);border:1px solid var(--line);border-radius:var(--r-l)}
+.ov-threat-main{flex:3 1 380px;min-width:0;display:flex;flex-direction:column;gap:var(--s-3)}
+.ov-threat h3{font-size:var(--fs-5);letter-spacing:-.01em;line-height:1.3;overflow-wrap:anywhere}
+.ov-threat-text,.ov-fix-line,.ov-cves{margin:0}
+.ov-threat-text{color:var(--ink-2);overflow-wrap:anywhere}
+.ov-fix-line{font-size:var(--fs-2);color:var(--ink-2)}
+.ov-cves{font:var(--fw-regular) var(--fs-1) var(--mono);color:var(--muted);overflow-wrap:anywhere}
+.ov-badges{display:flex;flex-wrap:wrap;gap:var(--s-2)}
+.ov-badge{font-size:var(--fs-1);font-weight:var(--fw-medium);padding:var(--s-1) var(--s-2);border-radius:999px;background:var(--sunk);color:var(--ink-2)}
+.ov-badge.reach{background:var(--fire-bg);color:var(--fire-ink);font-weight:var(--fw-semi)}
+.ov-badge.kev{background:var(--smoke-bg);color:var(--smoke-ink)}
+.ov-impact{flex:1 1 240px;min-width:0;display:flex;flex-direction:column;gap:var(--s-3);padding:var(--s-4);border-radius:var(--r);background:var(--surface-2);border:1px solid var(--line)}
+.ov-impact-row{display:flex;flex-direction:column;gap:2px}
+.ov-impact-big{font-size:var(--fs-5);font-weight:var(--fw-semi);line-height:1.1}
+.ov-impact-big.hot{font-size:var(--fs-8);letter-spacing:-.02em;color:var(--fire-ink)}
+.ov-impact-text{font-size:var(--fs-2);color:var(--ink-2);overflow-wrap:anywhere}
+/* a count and a project's share of it are links to exactly those hosts: the same type as the text, underlined when pointed at or focused */
+a.ov-impact-big,a.ov-impact-link{color:inherit;text-decoration:none;align-self:flex-start}
+a.ov-impact-big.hot{color:var(--fire-ink)}
+a.ov-impact-big:focus-visible,a.ov-impact-link:focus-visible{text-decoration:underline}
+@media (hover:hover){a.ov-impact-big:hover,a.ov-impact-link:hover{text-decoration:underline}}
+@media (pointer:coarse){a.ov-impact-big{display:flex;align-items:center;min-height:var(--hit);min-width:var(--hit)}}
+.ov-actions-row{display:flex;flex-wrap:wrap;gap:var(--s-2)}
+.ov-folded-wrap{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-l);overflow:hidden}
+.ov-folded>summary,.ov-det>summary{list-style:none;cursor:pointer}
+.ov-folded>summary::-webkit-details-marker,.ov-det>summary::-webkit-details-marker{display:none}
+.ov-folded>summary{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s-2) var(--s-3);padding:var(--s-3) var(--s-5);min-height:44px}
+.ov-folded-title{font-weight:var(--fw-semi)}
+.ov-folded-note{font-size:var(--fs-2);color:var(--muted)}
+.ov-folded ul{list-style:none;margin:0;padding:0 var(--s-5) var(--s-3)}
+.ov-folded li{display:flex;flex-wrap:wrap;justify-content:space-between;gap:var(--s-1) var(--s-4);padding:var(--s-2) 0;border-top:1px solid var(--line);font-size:var(--fs-2)}
+.ov-folded-what{min-width:0;overflow-wrap:anywhere;color:var(--ink-2)}
+.ov-folded-what strong{color:var(--ink)}
+.ov-folded-detail{font-family:var(--mono);font-size:var(--fs-1);color:var(--muted)}
+.ov-chev{flex:none;width:7px;height:7px;border-right:2px solid var(--muted);border-bottom:2px solid var(--muted);transform:rotate(-45deg);transition:transform .15s var(--ease);margin:0 4px}
+details[open]>summary .ov-chev{transform:rotate(45deg)}
+@media (prefers-reduced-motion:reduce){.ov-chev{transition:none}}
+/* Fix first beside What changed and the AI activity: equal height, the list's rows share what the right column needs */
+.ov-cols{display:grid;grid-template-columns:minmax(0,1fr);gap:var(--s-5);align-items:stretch;margin:var(--s-4) 0 var(--s-8)}
+@media (min-width:1000px){.ov-cols{grid-template-columns:minmax(0,3fr) minmax(0,2fr)}}
+.ov-fixfirst{display:flex;flex-direction:column;gap:var(--s-3);min-width:0}
+.ov-fix-list{flex:1 1 auto;display:flex;flex-direction:column;list-style:none;margin:0;padding:0;background:var(--surface);border:1px solid var(--line);border-radius:var(--r-l);overflow:hidden}
+.ov-fix-list[hidden]{display:none}
+.ov-fix-row{flex:1 1 auto;display:flex;flex-wrap:wrap;align-items:center;gap:var(--s-3) var(--s-5);padding:var(--s-4) var(--s-5);border-bottom:1px solid var(--line)}
+.ov-fix-row:last-child{border-bottom:0}
+.ov-rank{width:16px;flex:none;font:var(--fw-regular) var(--fs-1) var(--mono);color:var(--muted)}
+.ov-fix-mid{flex:1 1 260px;min-width:0;display:flex;flex-direction:column;gap:4px}
+.ov-fix-head{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s-2)}
+.ov-fix-host{font-weight:var(--fw-semi);text-decoration:none;overflow-wrap:anywhere}
+.ov-fix-host:is(a):hover{text-decoration:underline}
+.ov-chip{font-size:var(--fs-1);font-weight:var(--fw-semi);padding:2px var(--s-2);border-radius:999px;background:var(--sunk);color:var(--ink-2);white-space:nowrap}
+.ov-chip.proven{background:var(--fire);color:var(--on-solid)}
+.ov-chip.likely{background:var(--smoke-bg);color:var(--smoke-ink)}
+.ov-chip.hygiene{background:transparent;color:var(--fire-ink);box-shadow:inset 0 0 0 1px var(--fire)}
+.ov-fix-project{font-size:var(--fs-1);color:var(--muted)}
+.ov-fix-reason{font-size:var(--fs-2);color:var(--ink-2);overflow-wrap:anywhere}
+.ov-fix-action{white-space:normal;text-align:left;max-width:100%;height:auto;min-height:36px;padding-block:var(--s-2)}
+.ov-side{display:flex;flex-direction:column;gap:var(--s-5);min-width:0}
+.ov-changed{display:flex;flex-direction:column;gap:var(--s-3)}
+.ov-changed-list{list-style:none;margin:0;padding:0;background:var(--surface);border:1px solid var(--line);border-radius:var(--r-l);overflow:hidden}
+.ov-changed-row{display:flex;gap:var(--s-3);padding:var(--s-3) var(--s-4);border-bottom:1px solid var(--line)}
+.ov-changed-row:last-child{border-bottom:0}
+.ov-changed-n{min-width:44px;font-size:var(--fs-5);font-weight:var(--fw-semi);line-height:1.2}
+.ov-changed-text{min-width:0;font-size:var(--fs-2);color:var(--ink-2);overflow-wrap:anywhere}
+.ov-changed-text strong{color:var(--ink);font-weight:var(--fw-semi)}
+.panel.ov-solo{grid-template-columns:minmax(0,1fr);margin-bottom:0}
+.panel.ov-ai{flex:1 1 auto;display:flex;flex-direction:column;min-height:300px}
+.panel.ov-ai>.ai-cell{flex:1 1 auto}
+/* Health: every old panel, folded */
+.ov-health{display:flex;flex-direction:column;gap:var(--s-3);margin-bottom:var(--s-8)}
+.ov-health-list{display:flex;flex-direction:column;gap:var(--s-2)}
+.ov-det{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-l);overflow:hidden}
+.ov-det>summary{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s-1) var(--s-3);padding:var(--s-3) var(--s-4);min-height:44px}
+.ov-det-title{font-weight:var(--fw-semi)}
+.ov-det-sub{font-size:var(--fs-2);color:var(--muted)}
+.ov-det-body{border-top:1px solid var(--line)}
+.ov-det-body .panel{margin-bottom:0;border:0;border-radius:0}
+.ov-det-body .strip.in-cell{border-top:0}
+.ov-det-body .internal{padding:var(--s-4) var(--s-5)}
+.ov-det:has(#n-oldest[hidden]),.ov-det:has(#n-internal[hidden]){display:none}
+.ov-det-feed .feed-card{margin-top:0!important;border:0;border-radius:0}
+.ov-det-body .trends{margin:0;padding:0 var(--s-4) var(--s-4)}
+@media (max-width:719px){.ov-headline{font-size:var(--fs-6)}.ov-kpi-value{font-size:var(--fs-7)}.ov-threat{padding:var(--s-4);gap:var(--s-4)}}
+@media (max-width:1023px),(pointer:coarse){.ov-link,a.ov-fix-host{display:inline-flex;align-items:center;min-height:44px}}
+
+.sb-row-mfa,.sb-row .sb-mfa{margin:0}
+.sb-row-mfa{display:flex;gap:var(--s-3);align-items:center;flex-wrap:wrap}
+.sb-row-mfa form{margin:0}

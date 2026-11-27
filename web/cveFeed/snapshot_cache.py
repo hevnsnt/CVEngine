@@ -33,7 +33,7 @@ import time
 
 from django.core.cache import cache
 
-from reNgine import livecache_config
+from cvengine import livecache_config
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +53,7 @@ BEAT_KEY = 'cve:snap:refresher'  # the refresher's heartbeat: {'at', 'interval',
 METRIC_TTL = 3 * 3600
 # a request: served fresh / served stale / computed / waited for a winner; the refresher: refreshed a snapshot, skipped a run (a stressed worker), overran its budget
 OUTCOMES = ('hit', 'stale', 'miss', 'waited', 'refreshed', 'unchanged', 'skipped', 'overran')
-NAMES = ('stats', 'discovery-counts', 'graph-version', 'graph-live', 'search-facets', 'activity-days', 'retest-counts', 'situations', 'refresher')
+NAMES = ('stats', 'discovery-counts', 'graph-version', 'graph-live', 'search-facets', 'activity-days', 'retest-counts', 'situations', 'overview', 'overview-threats', 'overview-sentinels', 'refresher')
 
 INTERNAL = ('host-reps',)  # snapshots the others are built from: not counted as polls (the per-hour counters are what people asked for)
 ADAPTIVE = ('stats', 'discovery-counts')  # snapshots whose freshness follows the cost of computing them ('host-reps' is not: the live host count stays at most its own 5 s old)
@@ -62,6 +62,7 @@ COST_CEILING = 120  # ...and never for more than this many seconds
 
 _hot_seen = {}  # (name, scope) -> when this process last registered it: a poll does not write to the cache each time
 _building = contextvars.ContextVar('cve_snapshot_building', default=False)
+_project_ids = contextvars.ContextVar('cve_snapshot_project_ids', default=None)  # every project id, read once per snapshot computation (``scope_hash``)
 
 
 def building():
@@ -233,7 +234,14 @@ def scope_hash(*params):
     from tenancy import scope
     allowed = scope.current_allowed()
     if allowed is None:
-        ids, marker = sorted(Project.objects.values_list('id', flat=True)), 'all'
+        memo = _project_ids.get()  # inside a computation the nested snapshots (situations, threats, host rows) hash the same list: read it once
+        if memo is None or 'ids' not in memo:
+            ids = sorted(Project.objects.values_list('id', flat=True))
+            if memo is not None:
+                memo['ids'] = ids
+        else:
+            ids = memo['ids']
+        marker = 'all'
     else:
         ids, marker = sorted(allowed), 'ids'
     raw = json.dumps([marker, ids, [str(p) for p in params]], separators=(',', ':'))
@@ -273,9 +281,14 @@ def _build(compute, etag_of, rev, by='request', fingerprint=None):
     started = _elapsed()
     seen = fingerprint() if fingerprint is not None else None  # taken before the computation: a write during it makes the next look find a change
     flag = _building.set(True)
+    ids_token = _project_ids.set({}) if _project_ids.get() is None else None
     try:
-        payload = compute()
+        from cveFeed import current_scans
+        with current_scans.shared_sets():  # a snapshot is one moment: its statements share one read of the current scans
+            payload = compute()
     finally:
+        if ids_token is not None:
+            _project_ids.reset(ids_token)
         _building.reset(flag)
     entry = {'payload': payload, 'etag': (etag_of or token_of)(payload), 'at': _now(), 'rev': rev, 'by': by, 'took': round(_elapsed() - started, 3)}
     entry['computed_at'] = entry['at']  # a renewal moves ``at`` (how fresh the entry is) but never this (when its payload was worked out)

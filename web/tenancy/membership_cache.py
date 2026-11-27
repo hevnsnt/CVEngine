@@ -26,7 +26,7 @@ import uuid
 from django.core.cache import cache
 from django.db import connection
 
-from reNgine import livecache_config
+from cvengine import livecache_config
 from tenancy import roles
 
 EPOCH_KEY = 'cve:tenancy:epoch'

@@ -150,10 +150,18 @@ test('a count or a badge asks for the count alone, and an export or a palette pr
   assert.match(app, /peek: async \(\) => \(await api\("GET", `\$\{path\}\?\$\{query\(\{ \.\.\.params\(\), page: 1, page_size: 0 \}\)\}`\)\)\.count/, 'the list peek is a count-only request');
   assert.doesNotMatch(app, /page_size: 1 \}\)\}`\)\)\.(?:count|total)/, 'a filter chip counter must not fetch a row for its count');
   assert.doesNotMatch(app, /page_size: 1 \}\)\}`\)\.then\(\(r\) => r\.count\)/, 'the tile counters must not fetch a row for their count');
-  assert.match(app, /search\?\$\{query\(\{ q: q\.value, sort: sortBy\.value, facets: "none", page, page_size: size \}\)\}/, 'the hosts CSV export skips the heat facets');
+  assert.match(app, /search\?\$\{query\(\{ q: q\.value, sort: sortBy\.value, (?:\.\.\.\(namesFilter \? \{ names: namesFilter \} : \{\}\), )?(?:\.\.\.\(archivedFilter !== "0" \? \{ archived: archivedFilter \} : \{\}\), )?facets: "none", page, page_size: size \}\)\}/, 'the hosts CSV export skips the heat facets');
   assert.match(read('palette-search.js'), /page_size=6&facets=none/, 'the palette preview skips the heat facets');
   // the dashboard coverage line reads the heat facets, so it keeps them
   assert.match(read('dashboard.js'), /search\?q=&page_size=1`/);
+});
+
+test('the Hosts page leaves archived hosts out unless asked, and a link to one host still opens it', () => {
+  const app = read('app.js');
+  assert.match(app, /const ARCHIVED_CHIPS = \[\["0", "Active"\], \["only", "Archived"\], \["1", "Both"\]\];/, 'the Archived chips: Active (the default), Archived, Both');
+  assert.match(app, /let archivedFilter = readParam\("archived", wantedHost \? "1" : "0", /, 'a ?host= link includes archived hosts');
+  assert.match(app, /\.\.\.\(archivedFilter !== "0" \? \{ archived: archivedFilter \} : \{\}\) \}\),/, 'the list asks the server for the archived view');
+  assert.match(app, /archived: "0" \};/, 'the default stays out of the link');
 });
 
 class SentinelElement {

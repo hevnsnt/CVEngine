@@ -10,7 +10,7 @@ from django.utils import timezone
 from cveFeed import triage
 from cveFeed.models import CVEEntry, CVEMatch, HygieneFinding, MatchVerdict, RouteAuth, Triage, TriageVerdict
 from dashboard.models import AIProviderSettings, Org, Project
-from reNgine import ai_providers, resources
+from cvengine import ai_providers, resources
 from tests import ai_queue
 from startScan.models import Subdomain, Vulnerability
 from targetApp.models import Domain

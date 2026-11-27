@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="robots" content="noindex">
+<title>cvENGINE email reports</title>
+<style>
+  body{margin:0;background:#f4f4f5;font:400 16px/1.6 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#2e2e32}
+  main{max-width:520px;margin:0 auto;padding:48px 16px}
+  .card{background:#fff;border:1px solid #e4e4e7;border-radius:14px;padding:32px 28px}
+  h1{margin:0 0 12px;font-size:22px;line-height:1.25;color:#0a0a0b}
+  p{margin:0 0 16px}.soft{color:#68686f;font-size:14px}
+  button{min-height:48px;padding:0 28px;border:0;border-radius:10px;background:#0a0a0b;color:#fff;font-weight:700;font-size:16px;font-family:inherit;cursor:pointer}
+  .logo{font:900 italic 26px/1 'Helvetica Neue',Arial,sans-serif;letter-spacing:-1.5px;margin:0 0 18px 4px;color:#0a0a0b}.logo i{color:#ff5a00}
+  @media (prefers-color-scheme:dark){body{background:#0d0e10;color:#d4d4d8}.card{background:#17181b;border-color:#2a2c31}h1,.logo{color:#f2f2f4}.soft{color:#a4a4ad}button{background:#ff5a00;color:#0a0a0b}}
+</style>
+</head>
+<body>
+<main>
+  <div class="logo" aria-hidden="true">cvENG<i>I</i>NE</div>
+  <div class="card">
+  {% if state == 'confirm' %}
+    <h1>Stop these emails?</h1>
+    <p>Stop sending &lsquo;{{ name }}&rsquo; ({{ scope }}) to <strong>{{ masked }}</strong>?</p>
+    <form method="post"><button type="submit">Unsubscribe</button></form>
+    <p class="soft" style="margin-top:16px">Nothing changes until you press the button. Someone with access to cvENGINE can add the address back.</p>
+  {% elif state == 'done' %}
+    <h1>You will not get this email any more.</h1>
+    <p class="soft">&lsquo;{{ name }}&rsquo; ({{ scope }}) will not be sent to this address again.</p>
+  {% elif state == 'test' %}
+    <h1>This was a test email.</h1>
+    <p class="soft">The link in a test message does nothing. The real emails carry a link that stops them for the address they were sent to.</p>
+  {% else %}
+    <h1>This link is not valid.</h1>
+    <p class="soft">It may be old or damaged. If you already unsubscribed, you will not get more of these emails.</p>
+  {% endif %}
+  </div>
+</main>
+</body>
+</html>

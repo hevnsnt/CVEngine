@@ -2,7 +2,7 @@
 
 cvENGINE runs headless: nobody is expected to open a shell and type a management command after an update. Every backfill command an
 update ships (each is a dry run unless ``--apply``, so a person can still preview one) is listed in ``BACKFILLS`` and applied
-automatically: when a worker starts (``reNgine.celery.run_pending_backfills``), the ``run_upgrade_backfills`` task works through the ones
+automatically: when a worker starts (``cvengine.celery.run_pending_backfills``), the ``run_upgrade_backfills`` task works through the ones
 this install has not finished, one per run, in the order listed, and records each as done (``BackgroundCursor`` lane ``bf:<name>``).
 
 * One worker at a time: the run holds a Redis claim, and a run that finds it held returns at once.
@@ -54,10 +54,17 @@ BACKFILLS = (
     'neutralise_screenshots',             # stored discovery screenshots named by a Sentinel (x.html, x.svg): renamed to a picture name or removed
     'backfill_shodan_cpes',               # every Shodan InternetDB CPE a reported reading ("vendor product"), CPE technologies removed (re-correlated)
     'backfill_technology_names',          # technology rows folded onto one spelling, MariaDB's "5.5.5-" prefix off port versions (re-correlated)
+    'cleanup_shodan_matches',             # open CVE matches whose only basis is a Shodan InternetDB reading close as false positives (a lead, not a finding)
     'recheck_openvas_reference_checks',   # OpenVAS matches a behaviour check (TRACE enabled) or a protocol, cipher or end-of-life check confirmed (#414)
     'backfill_version_scripts',           # vmware-version's ESXi build and the other version script output stored ports keep, runZero hw hints (re-correlated)
     'revalidate_ai_drafts',               # AI-written checks closed only because no scanner could check them go back to validation; reasons named
     'backfill_llamacpp_builds',           # llama.cpp blocks kept with no range: their record's "< b5662" read as build 5662 (re-correlated)
+    'backfill_php_link_tells',            # PHP read only from a link to a .php URL: route fingerprints and probe rows become leads, the PHP links go (re-correlated)
+    'rewrite_tls_findings',               # open TLS audit findings (testssl.sh) reworded from their stored evidence: plain text, confidence in the title, unproven capped at Medium
+    'close_archived_findings',            # the open findings of hosts archived before archiving closed them: closed as fixed, the note says the host was archived
+    'recheck_branch_fixes',               # matches past a fix the advisory states for their own release line (F5's nginx records), re-correlated
+    'audit_finding_hosts',                # the open findings of hosts gone from the current inventory (or archived): closed as fixed, reopened when the host is back
+    'reenable_guard_disabled_users',      # 1.5.0: accounts the old abuse guard disabled, enabled again (only those; tokens stay revoked)
     'rerate_findings',                    # 1.3.5: rescore hosts for the new heat rules, clear stale fire marks (last: counts everything above)
 )
 MAX_ATTEMPTS = 3
@@ -121,7 +128,7 @@ def run_one(name, call=None):
 def run_next(call=None):
     """Run the first pending backfill under the claim. Returns ``{'state', 'name', 'remaining'}``: ``state`` is ``off``, ``none`` (all
     done), ``held`` (another worker runs them), or the outcome of the backfill it ran."""
-    from reNgine import resources
+    from cvengine import resources
     if not enabled():
         return {'state': 'off', 'name': '', 'remaining': 0}
     todo = pending()

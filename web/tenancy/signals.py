@@ -3,7 +3,7 @@ from django.db import transaction
 from django.db.models.signals import post_delete, post_save
 from django.dispatch import receiver
 
-from tenancy import membership_cache, roles, scope
+from tenancy import membership_cache, roles, scope, snapshot
 
 
 @receiver(post_save, sender='dashboard.Project')
@@ -21,6 +21,8 @@ def place_new_project(sender, instance, created, **kwargs):
         org = org or Org.objects.order_by('id').first()
         if org:
             type(instance)._base_manager.filter(pk=instance.pk).update(org=org)  # unscoped: the new project is not in the caller's set yet
+            from cveFeed import exclusions
+            exclusions.forget()  # the project now reads its new organization's exclusion lists
     if user and not user.is_superuser:
         ProjectMembership.objects.get_or_create(
             user=user, project=instance, defaults={'role': roles.ADMIN})
@@ -41,5 +43,6 @@ def keep_global_role_in_sync(sender, instance, **kwargs):
 def forget_cached_scopes(sender, **kwargs):
     """What a user may see changed: drop every user's cached set of project ids (tenancy.membership_cache). Once now, for what reads next in this
     transaction, and once more when it commits, so a poll that cached the old answer in between is not believed."""
+    snapshot.changed()  # the running request asks the database again from here on, and no other request believes what it read before
     membership_cache.bump_epoch()
     transaction.on_commit(membership_cache.bump_epoch, robust=True)  # robust: a failure here is logged, it never stops the commit's other callbacks

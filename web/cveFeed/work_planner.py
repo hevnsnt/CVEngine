@@ -120,7 +120,7 @@ NOT_PLANNED = {
     'hygiene_check': ('email-auth', 'its own daily sweep (run_hygiene_all)'),
     'dangling_dns_check': (None, 'a follow-up of a baddns finding'),
     'route_probe': ('web-routes', 'a stage of the host pipeline; the planner needs its rows as a prerequisite of secrets_scan and waits for them (a follow-up)'),
-    'route_probe_signed': ('routes-signed-in', 'built-in scanner only, needs a stored sign-in: never queued by a planner'),
+    'route_probe_signed': ('routes-signed-in', 'needs a stored sign-in (built-in scanner, or an external Sentinel the owner allowed): never queued by a planner'),
     'page_read': (None, 'a validation re-test, queued by validation'),
     'identity_check': (None, 'name and certificate reads of discovery, not a per-host check'),
     'web_screenshot': (None, 'its own drain and hourly backfill (drain_screenshots)'),
@@ -604,7 +604,7 @@ def execute_batch(batch_id, dispatch=None):
     from cveFeed.bounty_gate import Gate
     from cveFeed.models import PlannerBatch
     from cveFeed.scan_control import pause_requested
-    from reNgine.resources import AddressExcluded, ScannerUnavailable
+    from cvengine.resources import AddressExcluded, ScannerUnavailable
     now = timezone.now()
     if not PlannerBatch.objects.filter(pk=batch_id, status='queued').update(status='running', started_at=now):
         return {'status': 'ignored'}

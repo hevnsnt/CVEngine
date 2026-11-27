@@ -9,7 +9,7 @@ built-in scanner. The phases below say what each one moved. How the built-in sca
 ## Why
 
 cvENGINE and the Sentinel are two code bases that do the same scanning. The Sentinel image used to repeat the server's tool pins
-(its Dockerfile said "keep them equal on purpose"); the server image now carries no scan tool and pins only nuclei. Command lines, output
+(its Dockerfile said "keep them equal on purpose"); the server image now carries no scan tool at all. Command lines, output
 parsers and scan policy exist twice and have drifted more than once (the 1.3.1 client handoff, the policy parity work). A fix
 made on one side has to be carried across by hand.
 
@@ -20,8 +20,8 @@ made on one side has to be carried across by hand.
    External Sentinels remain for networks the server cannot reach. There is one scanner code base.
    External Sentinels take all scanning first; the built-in scanner is the path of last resort ([below](#the-built-in-scanner-is-the-last-resort)).
 3. bbot discovery and the HTTP probes move into the Sentinel too, not only the tool wrappers.
-4. Signed-in (authenticated) work is done only by the built-in Sentinel, through a secure read: the stored credential is never
-   in a task row and never reaches an external Sentinel.
+4. Signed-in (authenticated) work is done by the built-in Sentinel, through a secure read: the stored credential is never
+   in a task row. Since 1.5.0 the sign-in's owner may also allow an external Sentinel for it (below); by default none is offered it.
 5. OpenVAS is not part of the built-in scanner. It is installed only when it is enabled in Settings.
 6. The Sentinel repository owns the shared scanner code. cvENGINE pins a release of it, the way it pins nuclei or WPScan.
 
@@ -60,17 +60,17 @@ the finding) and the scanner runs the tool. A Sentinel declares these kinds only
 | `cveFeed/db_exposure.py` | one credential-less connect per database | `db_probe` | the finding is made here; `open: null` (no client for that database on the scanner) runs here when it may |
 | `cveFeed/path_probe.py` | the plain SYN and the FIN+PSH+URG probe | `path_probe` | the built-in scanner while the install has one (`sentinel_broker.BUILTIN_KINDS`): it measures the path the scans leave from. With none, the project's own Sentinels run it and each one's verdict is kept as its own (`os_detection.record_sentinel_path`). One task per project that holds the addresses |
 | `cveFeed/templategen.py` | `nuclei -validate`, the benign loopback fixture, an approved template's test | `nuclei_validate` | the built-in scanner while the install has one; with none, the project's own Sentinels of contract 4 under `agentapi.ai_checks` (approved, read-only, own target and port, bound by `template_sha256` and `GET sentinel/tasks/{id}/check`). The test is filed under the hosts' own project and never carries a signed-in run; with no scanner and no local nuclei, no AI template is written |
-| `reNgine/discovery_events.py`, `cveFeed/discovery.py` | the discovery, a streaming producer for up to six hours | `bbot_discovery` | deleted locally (`NEVER_LOCAL`): a streamed task, also contract version 3 (see **bbot** under Target shape); the server keeps the modes table and the rules that name and file what comes back |
+| `cvengine/discovery_events.py`, `cveFeed/discovery.py` | the discovery, a streaming producer for up to six hours | `bbot_discovery` | deleted locally (`NEVER_LOCAL`): a streamed task, also contract version 3 (see **bbot** under Target shape); the server keeps the modes table and the rules that name and file what comes back |
 
 ### C. In-process network probes (Python in server workers)
 
 | Module | What it does | Decision |
 |---|---|---|
 | `cveFeed/probes.py` | version and identity probes | moved: the `http_probe` kind (contract 3), a batch of planned probes per task; the scanner runs them (`cvengine_scanner.probes.version_probes`), the server keeps the plan, the ledger and what is stored; `NEVER_LOCAL`: no scanner means `ScannerUnavailable` and the work stays due, the server's request code (`probes.fetch`, `probes.run_http_probe`, `route_auth.probe_url`) is deleted. `wpscan_scan.detect` (probe `wordpress-detect`) is a planned `http_probe` like the others |
-| `cveFeed/route_auth.py` (894), `auth_routes.py` | route state, anonymous and signed in | anonymous half moved: the `route_probe` kind (contract 3), a batch of up to 25 hosts per task; the server keeps the plan, the ledger and what is stored (states, changes, retired and zombie routes, the secrets inventory), the scanner asks, classifies, compares with a path that cannot exist, reads the front page's scripts and counts sensitive data; the local path stays behind `CVENGINE_LOCAL_FALLBACK`. The signed-in half (`auth_routes`) stays on the server, built-in only |
-| `cveFeed/vhost_scan.py` (499), `subdir_apps.py` | other sites on an address; apps under a path | moved: the `vhost_probe` kind (an address, its default response and each of the project's own names as the Host header) and the `subdir_probe` kind (a web host, the curated mount paths, the directories its own URLs and `robots.txt`/`sitemap.xml` show), contract 3; the server keeps the choice of names and hosts, the ledger, the verdict rules (recomputed from the reported fingerprints) and what is stored; a name, address or host the scanner did not answer stays due; the local path stays behind `CVENGINE_LOCAL_FALLBACK` |
-| `cveFeed/bucket_scan.py` (558), `bucket_probe.py` (427) | public cloud storage | moved: the `bucket_check` kind (contract 3), a batch of the sweep's due buckets per task; the server keeps the candidates, the ledger, the global rate (sent as the task's `rate`) and the evaluation; the local path stays behind `CVENGINE_LOCAL_FALLBACK` |
-| `cveFeed/supplier_scan.py` (647) | third-party supplier posture | moved: the `supplier_check` kind (contract 3), one task per supplier with its validated names, the pacing and the request budget left; the scanner runs the network part (`cvengine_scanner.probes.suppliers`: DNS, TLS, the pages, the MTA-STS file) and the server keeps the list, the budget, the ledger, the CVE match, the text of what to ask and what is stored; the local path stays behind `CVENGINE_LOCAL_FALLBACK` |
+| `cveFeed/route_auth.py` (894), `auth_routes.py` | route state, anonymous and signed in | anonymous half moved: the `route_probe` kind (contract 3), a batch of up to 25 hosts per task; the server keeps the plan, the ledger and what is stored (states, changes, retired and zombie routes, the secrets inventory), the scanner asks, classifies, compares with a path that cannot exist, reads the front page's scripts and counts sensitive data; the local path is deleted (`NEVER_LOCAL`; `CVENGINE_LOCAL_FALLBACK` is ignored since 1.4). The signed-in half (`auth_routes`) stays on the server, built-in only |
+| `cveFeed/vhost_scan.py` (499), `subdir_apps.py` | other sites on an address; apps under a path | moved: the `vhost_probe` kind (an address, its default response and each of the project's own names as the Host header) and the `subdir_probe` kind (a web host, the curated mount paths, the directories its own URLs and `robots.txt`/`sitemap.xml` show), contract 3; the server keeps the choice of names and hosts, the ledger, the verdict rules (recomputed from the reported fingerprints) and what is stored; a name, address or host the scanner did not answer stays due; the local path is deleted (`NEVER_LOCAL`; `CVENGINE_LOCAL_FALLBACK` is ignored since 1.4) |
+| `cveFeed/bucket_scan.py` (558), `bucket_probe.py` (427) | public cloud storage | moved: the `bucket_check` kind (contract 3), a batch of the sweep's due buckets per task; the server keeps the candidates, the ledger, the global rate (sent as the task's `rate`) and the evaluation; the local path is deleted (`NEVER_LOCAL`; `CVENGINE_LOCAL_FALLBACK` is ignored since 1.4) |
+| `cveFeed/supplier_scan.py` (647) | third-party supplier posture | moved: the `supplier_check` kind (contract 3), one task per supplier with its validated names, the pacing and the request budget left; the scanner runs the network part (`cvengine_scanner.probes.suppliers`: DNS, TLS, the pages, the MTA-STS file) and the server keeps the list, the budget, the ledger, the CVE match, the text of what to ask and what is stored; the local path is deleted (`NEVER_LOCAL`; `CVENGINE_LOCAL_FALLBACK` is ignored since 1.4) |
 | `cveFeed/zombie.py` | does a retired name's address still answer | moved: the `alive_check` kind (contract 3), the web check and then the bare connects of `changes._retire`; a check the scanner could not answer never retires a host; `NEVER_LOCAL`: the local checks are deleted |
 | `cveFeed/hygiene.py`, `mailfail.py` | DNS, TLS, SPF/DKIM/DMARC | moved: the `hygiene_check` kind (contract 3), one task per target's sweep (its TLS endpoints and the names that may have mail); the scanner reads the certificates and runs the mail checks (`cvengine_scanner.probes.hygiene`, `mailfail`, `rdap`), the server keeps `evaluate_cert`, the rating, the folding and what is stored; an endpoint or mail domain the scanner did not answer keeps its open findings; `NEVER_LOCAL`: the sweep's own network path is deleted, and so are `probe_tls`, `_fetch_cert`, `_chain_error`, `email_findings`, the DNS readers (`fetch_txt`, `fetch_records`, `has_record`, `ask_txt`, `dns_askers`), `mailfail.review` and the MTA-STS fetch: the server keeps only the evaluators over what a Sentinel reports |
 | `cveFeed/dangling_dns.py` | rating bbot's baddns findings | moved: the `dangling_dns_check` kind (contract 3), a batch of findings per task with the server's provider lists (`cveFeed/data/takeover_providers.json`); the scanner walks the zone cut, asks the registry and sends the control request (`cvengine_scanner.probes.dangling_dns`); a finding it could not rate keeps baddns's rating; `NEVER_LOCAL`: the server's `Net` and the local rating branch are deleted, only the rules and the provider lists stay |
@@ -86,8 +86,8 @@ the finding) and the scanner runs the tool. A Sentinel declares these kinds only
 constants (`-etags dos`, UDP port list, probe ports), `heavy_process.py` (the supervised runner).
 
 Status (phase 6). The library (`cvengine_scanner`, hevnsnt/cvENGINE-sentinel#34) holds all of the above except `heavy_process.py`, which
-runs processes and stays on the server until phase 8. The server pins the library in `web/requirements.txt` and no longer has its own
-`cveFeed/fingerprint.py`, `cms.py`, `versions.py`, `soft404.py` or `reNgine/nmap_service.py`; `port_inventory.parse_xml` is the library's reader,
+ran processes and stayed on the server until phase 8, when it was deleted with the last local runs. The server pins the library in `web/requirements.txt` and no longer has its own
+`cveFeed/fingerprint.py`, `cms.py`, `versions.py`, `soft404.py` or `cvengine/nmap_service.py`; `port_inventory.parse_xml` is the library's reader,
 re-exported under its old name. Two parts stay on the server because they are not pure:
 - reading a page's scripts (`cveFeed/js_libraries.py`: `script_sources`, `from_script_urls`, `from_script_body`). It fetches files, and it
   hands what it read to the library's `fingerprint.from_response` as `from_scripts` pairs;
@@ -107,7 +107,7 @@ Each of those names is an import of the library's value, never a copy.
 
 Correlation, triage, validation, the CVE feeds (`intel.py`, `distro_sync.py`), the work conductor and its fairness rules,
 bug-bounty gates, exclusions and range safety, tenancy, persistence, reports (`report_pdf.py`), integrations (runZero, Tailscale
-API, mail, bounty), and the passive third-party lookups (`ctmonitor.py` for crt.sh, `archive_urls.py` for the Internet Archive),
+API, mail, bounty), and the passive third-party lookups (`ctmonitor.py` for crt.sh and Cert Spotter, `archive_urls.py` for the Internet Archive),
 which send nothing to the target and need no vantage point.
 
 ### Open items from the inventory
@@ -120,7 +120,7 @@ which send nothing to the target and need no vantage point.
   the index for what it needs to know. The server also looks no target name up any more: the Sentinel that runs the work judges every address a
   name resolves to (an outside task says `external`, so an internal Sentinel holds it to public space), and the TLS audit and OpenVAS name a stored
   address. `tests/test_no_local_tools.py` fails a server-side lookup and a scan tool in the server image.
-- `reNgine/tasks.py` starts no subprocess any more (the legacy `run_command` and its `geoiplookup` caller are gone); the memory gate (`heavy_job`) and its per-tool `heavy.<kind>` settings are removed as well.
+- `cvengine/tasks.py` starts no subprocess any more (the legacy `run_command` and its `geoiplookup` caller are gone); the memory gate (`heavy_job`) and its per-tool `heavy.<kind>` settings are removed as well.
 - Anything run from `fullscan`, `probes` and `route_auth` that today shares Redis claims or ledgers with the server needs those
   claims moved to the server side of the contract (the server takes the claim, the task carries the answer).
 
@@ -154,8 +154,11 @@ which send nothing to the target and need no vantage point.
     scanner and to the instance's own Sentinels that report `bbot_keys` (instance setting and per-Sentinel opt-out permitting), read once through the secure
     read; one gate, `sentinel_stream.key_delivery_decision` (see [SENTINELS.md](SENTINELS.md#discovery-api-keys-on-your-sentinels)). See [AGENT-API.md](AGENT-API.md) ("Streamed work").
 - **Signed-in work**: the built-in fetches a stored credential through a single-use read tied to one task, written to the audit
-  log, callable only by the trusted built-in agent. The credential is never in a task row, and an external Sentinel is never
-  offered a signed-in task.
+  log. The credential is never in a task row. An external Sentinel is offered a signed-in task only when the sign-in's owner (an App
+  Admin or the organization's admin) switched **Also send it to my external Sentinels** on for it (`allow_external_sentinels`), the
+  Sentinel reports `secret_read_external`, was enrolled by an App Admin or that organization's admin, and covers the project; one gate,
+  `agentapi/signin_delivery.decision`, answers for every place that offers, counts or reads such a task, and each delivery is audited as
+  `sentinel.signin.delivered` ([SENTINELS.md](SENTINELS.md#stored-sign-ins-on-external-sentinels)).
   - *Built (server side, dormant):* `POST /api/v1/sentinel/tasks/<id>/secret` (`agentapi.sentinel_broker.read_secret`). The task
     carries `secret_ref` (an `AuthCredential` reference) and `secret_read_at`. Only the built-in agent, for its own claimed or
     running task, may call it. An atomic update of `secret_read_at` is won before anything is decrypted, so it answers once
@@ -166,12 +169,13 @@ which send nothing to the target and need no vantage point.
     `secret_read` feature (`SentinelEff.reads_secrets`); the task the scanner receives says `signed_in: true`. The client reads the credential
     once, runs nuclei with a 0600 secrets file on a memory file system (`-sf`, `-dr`), wipes it and redacts any echo (cvENGINE-sentinel
     `client/signed_in.py`); any other Sentinel refuses such a task. Without such a scanner the pass waits: nuclei has no local path. The signed-in CVE template check is the `nuclei_validate` kind, built-in scanner only.
-- **Updates**: the built-in scanner follows the newest published image (`ghcr.io/hevnsnt/cvengine-sentinel:main`) and is no longer paired with a
-  digest by the release (owner decision, 2026-11-08: a fix merged to the Sentinel must reach an install without a person re-pinning). The server's update
-  scripts and a daily Scanner update pull it, start it and keep it only once it is healthy and checked in with a contract version the server accepts, else put the
-  previous image back. `scanner.lock.json` is the known-good floor (commit, contract version, an optional digest for provenance). The built-in never updates
-  itself from inside; the host does. The version check compares against GitHub's head of the Sentinel's main branch (`agentapi.sentinel_version`). An operator
-  who wants to hold a version sets `CVENGINE_SCANNER_IMAGE` to a digest or tag.
+- **Updates**: the built-in scanner runs the image the release pins by digest (`scanner.lock.json`, the default of docker-compose.yml), published from the same
+  Sentinel commit the server's scanner library is installed from. The owner decision of 2026-11-08 (follow the moving tag `main` so a Sentinel fix needs no
+  re-pin) was reversed by the security review (S5, signed off by the owner): whoever could push to the Sentinel's `main` reached web, celery and the scanner at
+  the next update with no review here. A Sentinel fix now reaches an install with the cvENGINE update whose pull request ran `scripts/scanner_lock.py bump`. The
+  update scripts pull the pinned image, start it and keep it only once it is healthy and checked in with a contract version the server accepts, else put the
+  previous image back. The built-in never updates itself from inside; the host does. The version check still compares against GitHub's head of the Sentinel's
+  main branch (`agentapi.sentinel_version`) and shows how far behind the pin is. An operator who wants another image sets `CVENGINE_SCANNER_IMAGE` to a digest or tag.
 - **Contract**: the file gains a `targets` half (server to scanner) next to `results`, a `contract_version` declared at
   registration and heartbeat, and a minimum contract version per kind. The server supports the current and previous
   contract for external Sentinels and sends a kind only to a Sentinel that can run it.
@@ -181,7 +185,7 @@ which send nothing to the target and need no vantage point.
 0. Result contract, fixtures and tests. Done in PR 276.
 1. This inventory, kept current as work lands.
 2. Publish the Sentinel image with an SBOM. Add the `targets` half and `contract_version` to the contract. Done. The image: the Sentinel repository's `publish.yml` pushes `ghcr.io/hevnsnt/cvengine-sentinel` for amd64 and arm64 with an SBOM and provenance on every push to `main` and every tag, prints the digest, and checks the image has no git, Go, GVM stack or docker socket; WPScan and its gems are installed from a lockfile with checksums and nothing is updated at build time. cvENGINE follows its `main` tag, with `scanner.lock.json` (`scripts/scanner_lock.py`) as the known-good floor. The contract: the `targets` half, `contract_version` declared at registration and heartbeat, `kind_since` and `min_supported_contract_version`, and the server offers a kind only to a Sentinel whose version can run it. The Sentinel client sends `info.contract_version` (2) and runs the `waf` kind (hevnsnt/cvENGINE-sentinel#25, #28: it asks a server for `waf` only when the server's contract has it, so a 1.3 server is unaffected). Contract version 2 adds the `waf` kind (schema, fixtures, a server-side `persist_waf_result`), offered only to a Sentinel that declares 2; the wafw00f stage dispatches it since 1.4. Contract version 3 adds `nmap_full`, `nmap_verify`, `node2shell`, `rdp_shot`, `db_probe`, `path_probe` and `nuclei_validate` (section B); the frozen fixtures of version 2 are in `tests/fixtures/sentinel_results/v2/`.
-3. The built-in scanner service in compose, enrolled automatically, shown in system status. Done, on by default (`CVENGINE_BUILTIN_SCANNER=0` turns it off and revokes it): a default compose service on the newest published image, on a network of its own (`scanner_network`, shared only with web), with a health check on its heartbeats and a watchdog that restarts it; it reads its enrollment from the shared volume and re-enrols by itself when its token is refused; `install.sh`, `make up`, `scripts/update.sh`, the web updater and `apply-update.sh` pull the newest image, start it once the server answers and roll back to the previous image when it is not healthy and checked in ([UPDATES.md](UPDATES.md#the-built-in-scanner)); the upgrade rehearsal checks it comes up and enrols. System status carries `scanning.builtin_scanner` and the Sentinels page marks its card Built-in.
+3. The built-in scanner service in compose, enrolled automatically, shown in system status. Done, on by default (`CVENGINE_BUILTIN_SCANNER=0` turns it off and revokes it): a default compose service on the image the release pins by digest, on a network of its own (`scanner_network`, shared only with web), with a health check on its heartbeats and a watchdog that restarts it; it reads its enrollment from the shared volume and re-enrols by itself when its token is refused; `install.sh`, `make up`, `scripts/update.sh`, the web updater and `apply-update.sh` pull the pinned image, start it once the server answers and roll back to the previous image when it is not healthy and checked in ([UPDATES.md](UPDATES.md#the-built-in-scanner)); the upgrade rehearsal checks it comes up and enrols. System status carries `scanning.builtin_scanner` and the Sentinels page marks its card Built-in.
 4. Make waiting non-fatal before any fallback is deleted. Done. A stage whose kind may not run here and that no scanner took waits
    (`resources.ScannerUnavailable`): nothing is marked failed or recorded, the strip on every page says the scanner is offline, and the
    hosts of a scan or host run during which a stage waited are queued again as a deferred re-test (`cveFeed.scanner_wait`, due
@@ -223,7 +227,7 @@ A Sentinel task is created by a Celery job that waits for it and files its resul
 
 1. The scanner becomes a hard dependency. Addressed: a health check on its heartbeats, a watchdog restart, the status line and strip, non-fatal waiting with re-queueing (phase 4), a rollback of a new image that does not heartbeat, and the default taking kinds off the server only once the built-in scanner has enrolled (a host whose image never came up keeps scanning locally). `CVENGINE_LOCAL_FALLBACK=all` is the escape hatch.
 2. The kinds list is longer than the eight that exist (section B). Deleting a local path before its kind exists breaks it.
-3. Version coupling: two updaters must not exist. Addressed: the built-in scanner's self-update is forced off, and the server's update scripts and the Scanner update replace its image (the newest published one), gated by the contract version the server reads (`web/agentapi/sentinel_contract.py`: a scanner below the floor is offered nothing, a newer one keeps the kinds this server knows). A moving tag removes the human review gate, so the rails are: the Sentinel's `main` only receives code after its checks pass, the update keeps a new image only once it is healthy and checked in, the previous image is the rollback, and `CVENGINE_SCANNER_IMAGE` holds a version.
+3. Version coupling: two updaters must not exist. Addressed: the built-in scanner's self-update is forced off, and the server's update scripts and the Scanner update replace its image (the one the release pins), gated by the contract version the server reads (`web/agentapi/sentinel_contract.py`: a scanner below the floor is offered nothing, a newer one keeps the kinds this server knows). The image moves only by a reviewed pin bump in this repository, and the rails are: the update keeps a new image only once it is healthy and checked in, the previous image is the rollback, and `CVENGINE_SCANNER_IMAGE` holds a version.
 4. The image was not reproducible (it installed WPScan and updated it at build time). Addressed: WPScan and its gems come from a lockfile with checksums, nothing is updated at build time, and the image is published with an SBOM and build provenance (a digest per build, which the lock records for the floor).
 5. Per-task overhead at 10,000 hosts: testssl, UDP and WPScan are one task per target, each with rows and an activity line.
    Batch them in contract version 2.
@@ -278,8 +282,8 @@ file at its next run, and writes a new blob if the scanner is later lost (token 
 setting or the AI reviewer is on, because both reach the server as `http://web:8000` (`CVENGINE_SCANNER_SERVER_URL` overrides; the host network overlay sets
 `http://127.0.0.1:8000`). Celery writes the first blob at start-up instead of waiting for beat, and the installer writes it right after the admin account
 exists. The scanner reads the blob from the file itself (`CVENGINE_SENTINEL_BLOB_FILE`) and waits for it with no token; when the server refuses its token
-later it forgets it and enrols again with the next blob, never trying a spent one twice. The image is the moving tag `main` that `scanner.lock.json` names
-(`CVENGINE_SCANNER_IMAGE` holds another; `make scanner-build` builds the floor commit from source).
+later it forgets it and enrols again with the next blob, never trying a spent one twice. The image is the digest `scanner.lock.json` pins
+(`CVENGINE_SCANNER_IMAGE` holds another; `make scanner-build` builds the pinned commit from source).
 
 It is shown in System status as `scanning.builtin_scanner` (`builtin_scanner.status()`: `enabled`, `enrolled`, `live`, `agent_id`, `name`,
 `last_seen`; just `{'enabled': False}` while the switch is off), with a `problems` line for an App Admin when it is on and not enrolled ten minutes after the
@@ -321,7 +325,7 @@ It never writes `ScanControl`, never stops a running scan and never holds back l
 conductor goes on starting it and only records `scanner_waiting` with its round), the internal-range Sentinel-only path are untouched. The OpenVAS tick already waits for a Sentinel only. A kind a Sentinel keeps failing (`failing_kinds`) is withheld from it
 for a cool-off and so also reads as waiting.
 
-A kind can also wait because it is **turned off**, not because a scanner is gone: a live Sentinel has it and its capability policy (the administrator's, the instance default of its class, or its own machine) denies it. `state()` then carries `disabled` (only when not empty): the waiting kinds that a live Sentinel has and denies, with no other active Sentinel that has them offline. The banner splits the two: "Scanner offline: ..." is only for kinds really waiting for a scanner (`offline_kinds()`), and "OpenVAS is turned off on every Sentinel that has it. Nothing has failed; the work stays due until one is turned back on" (`disabled_message`, also in `messages`) for the others; a sweep's skipped text says the same. `waiting_kinds()` is still every waiting kind, so the sweeps stay off both.
+A kind can also wait because it is **turned off**, not because a scanner is gone: a live Sentinel has it and its capability policy (the administrator's, the instance default of its class, or its own machine) denies it. `state()` then carries `disabled` (only when not empty): the waiting kinds that a live Sentinel has and denies, with no other active Sentinel that has them offline. The banner splits the two: "Scanner offline: ..." is only for kinds really waiting for a scanner (the `offline` sentence of `messages()`), and "OpenVAS is turned off on every Sentinel that has it. Nothing has failed; the work stays due until one is turned back on" (`disabled_message`, also in `messages`) for the others; a sweep's skipped text says the same. `waiting_kinds()` is still every waiting kind, so the sweeps stay off both.
 
 **Why a kind has nowhere to go (`sentinel_broker.explain_none`, `NONE_REASONS`).** In the order a reader should act on them: `disabled`, `offline`, `withheld`, `inactive`, `outdated` (hard reasons: a Sentinel has the kind and something keeps it from taking it), then `busy`, `builtin`, `limited` and `never`. `busy` is back-pressure, not a fault: a live, enabled Sentinel has the kind and every slot it may use is taken, so the work waits its turn ("every Sentinel that can run bbot discovery is busy right now (johnny 5 of 5, other 5 of 5); this waits its turn and is asked again"; the names and loads are for administrators, and `public` is the same sentence without them, which is what a project member's activity line carries). `builtin` is work that reads a stored key or sign-in, so only the built-in scanner may run it while none is live. `limited` is a live Sentinel that declares the kind but whose own limits leave it out. `never` is said only when no Sentinel that covers the project lists the kind ("no Sentinel that covers this lists bbot discovery ...; they offer nmap, dns resolve"), and then names what the live ones do offer.
 

@@ -38,7 +38,7 @@ LABELS = {'openvas': 'OpenVAS', 'discover': 'internal discovery', 'waf': 'WAF de
           'vhost_probe': 'virtual host checks', 'subdir_probe': 'subdirectory application checks', 'supplier_check': 'supplier posture checks', 'hygiene_check': 'TLS and email checks', 'dangling_dns_check': 'dangling DNS checks', 'route_probe': 'web route checks', 'route_probe_signed': 'signed-in web route checks', 'page_read': 'validation page reads',
           'identity_check': 'name and certificate reads', 'web_screenshot': 'web screenshots', 'ssh_probe': 'SSH inspection', 'java_runtime': 'Java runtime reads', 'version_read': 'version source reads', 'version_digest': 'edge appliance build reads', 'version_rows': 'status page version reads',
           'wpscan_thorough': 'thorough WordPress scan'}
-SOURCES = ('agent', 'instance default', 'machine', 'contract', 'cool-off', 'pause', 'default')
+SOURCES = ('agent', 'instance default', 'machine', 'hosted license', 'contract', 'cool-off', 'pause', 'default')
 
 
 def label(kind):
@@ -186,7 +186,6 @@ def pause(agent, kind, hours, reason, by='auto-tuning', now=None):
     """Withhold ``kind`` from ``agent`` for ``hours`` (held to ``PAUSE_MIN_HOURS``..``PAUSE_MAX_HOURS``). Refused (``PauseRefused``) for an unknown kind, when
     ``MAX_PAUSED_KINDS`` other kinds are paused already, or when this is the last live Sentinel that can run the kind (a pause must never leave the work nowhere to
     go). Returns the time the pause ends."""
-    from agentapi.models import Agent
     now = now or timezone.now()
     if kind not in SentinelTask.KINDS:
         raise PauseRefused(f'{kind} is not a task kind')
@@ -289,10 +288,13 @@ def is_builtin(agent):
 
 def resolve(agent, builtin=None):
     """``{kind: {'mode', 'cap', 'source', 'by', 'at', 'machine'}}`` for every kind. ``source`` says which level decided the mode: ``machine`` (a veto, mode
-    ``deny``), ``agent`` (this Sentinel's own policy), ``instance default`` or ``default`` (nothing set: ``allow``). ``builtin`` is whether the Sentinel is
+    ``deny``), ``agent`` (this Sentinel's own policy), ``instance default`` or ``default`` (nothing set: ``allow``); ``hosted license`` (mode ``deny``) for the WordPress
+    scanner's kinds on an install that sets ``CVENGINE_HOSTED_LICENSE_SAFE`` (``cveFeed.license_safe``), above every policy. ``builtin`` is whether the Sentinel is
     the install's own scanner (looked up when not given)."""
+    from cveFeed import license_safe
     builtin = is_builtin(agent) if builtin is None else builtin
     veto = machine_denied(agent)
+    hosted = set(license_safe.licensed_kinds()) if license_safe.enabled() else set()  # a hosted install never runs the WordPress scanner, whatever a policy says
     pauses = active_pauses(agent)
     own, own_at, own_by = managed_envelope(agent)
     shared = defaults()
@@ -302,6 +304,8 @@ def resolve(agent, builtin=None):
         if kind in veto:
             out[kind] = {'mode': 'deny', 'cap': None, 'source': 'machine', 'by': None, 'at': ((agent.reported_settings or {}).get('disabled_kinds') or {}).get('at'),
                          'machine': True}
+        elif kind in hosted:
+            out[kind] = {'mode': 'deny', 'cap': None, 'source': 'hosted license', 'by': None, 'at': None, 'machine': False}
         elif kind in pauses:
             out[kind] = {'mode': 'deny', 'cap': None, 'source': 'pause', 'by': pauses[kind].get('by'), 'at': pauses[kind].get('at'), 'machine': False,
                          'until': pauses[kind]['until'].isoformat(), 'reason': pauses[kind].get('reason')}
@@ -337,11 +341,14 @@ def refuse_unavailable(agent, change):
     """``ApiError`` (409) when ``change`` (the cleaned ``{kind: entry|None}``) allows or prefers a kind the Sentinel cannot run: one it did not declare (its
     tool is missing or off) or one its machine turned off. Only what a Sentinel actually declares can be enabled; ``deny``, a cap-less removal and a change
     that keeps a kind off are always fine."""
+    from cveFeed import license_safe
     veto = machine_denied(agent)
     declared = set(agent.capabilities or [])
     for kind, entry in change.items():
         if entry is None or entry['mode'] == 'deny':
             continue
+        if kind in license_safe.licensed_kinds() and license_safe.enabled():
+            raise ApiError(409, f'{label(kind)} is {license_safe.REASON}; it cannot be allowed here')
         if kind in veto:
             raise ApiError(409, f'{label(kind)} is turned off on the Sentinel\'s machine (CVENGINE_SENTINEL_DISABLE); cvENGINE cannot turn it back on, change it on the machine')
         if kind not in declared:

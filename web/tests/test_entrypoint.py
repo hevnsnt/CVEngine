@@ -38,7 +38,7 @@ class EntrypointTests(SimpleTestCase):
 
     def test_the_classic_worker_defaults_to_ten_slots(self):
         # certificate lookups may sleep up to 30 s in a slot waiting for crt.sh's pacing (ctmonitor.MAX_INLINE_WAIT), and every running task holds a
-        # database connection: ten, not twenty, now that the autoscaler really fills them (reNgine/gevent_autoscale.py)
+        # database connection: ten, not twenty, now that the autoscaler really fills them (cvengine/gevent_autoscale.py)
         saved = os.environ.pop('CLASSIC_CONCURRENCY', None)
         try:
             classic = [c for c in worker_commands() if 'classic_worker' in c]
@@ -51,6 +51,28 @@ class EntrypointTests(SimpleTestCase):
             if saved is not None:
                 os.environ['CLASSIC_CONCURRENCY'] = saved
 
+    def test_the_database_sizing_is_documented_with_its_restart(self):
+        root = SCRIPT.parent.parent
+        deploy = (root / 'docs' / 'DEPLOYMENT.md').read_text()
+        sizing = deploy.split('## Sizing the database', 1)[1].split('\n## ', 1)[0]
+        for needle in ('`POSTGRES_SHARED_BUFFERS` | `256MB` | `1GB`', '`POSTGRES_EFFECTIVE_CACHE_SIZE` | `768MB` | `4GB`', '`POSTGRES_WORK_MEM` | `4MB` | `16MB`',
+                       '`POSTGRES_MAINTENANCE_WORK_MEM` | `64MB` | `256MB`', '`DB_MEM_LIMIT`', '`4g`', 'per connection', '2 workers of 8 threads',
+                       'docker compose up -d db', 'CREATE EXTENSION IF NOT EXISTS pg_stat_statements'):
+            self.assertIn(needle, sizing)
+        config = (root / 'docs' / 'CONFIGURATION.md').read_text()
+        for name in ('POSTGRES_WORK_MEM', 'POSTGRES_SHARED_PRELOAD_LIBRARIES', 'DB_MEM_LIMIT', 'docker compose up -d db',
+                     '`POSTGRES_TRACK_IO_TIMING` | `off`', '`POSTGRES_LOG_MIN_DURATION_STATEMENT` | `-1`', 'DEPLOYMENT.md#finding-slow-queries'):
+            self.assertIn(name, config)
+
+    def test_finding_slow_queries_is_documented(self):
+        deploy = (SCRIPT.parent.parent / 'docs' / 'DEPLOYMENT.md').read_text()
+        section = deploy.split('## Finding slow queries', 1)[1].split('\n## ', 1)[0]
+        for needle in ('`POSTGRES_SHARED_PRELOAD_LIBRARIES` | empty | `pg_stat_statements`', '`POSTGRES_TRACK_IO_TIMING` | `off` | `on`',
+                       '`POSTGRES_LOG_MIN_DURATION_STATEMENT` | `-1` (no log) | `1000`', 'CREATE EXTENSION IF NOT EXISTS pg_stat_statements',
+                       'FROM pg_stat_statements ORDER BY total_exec_time DESC', 'shared_blk_read_time', 'docker compose up -d db',
+                       'the update never sets them'):
+            self.assertIn(needle, section)
+
     def test_postgres_allows_enough_connections_for_the_workers_and_updates_apply_it(self):
         root = SCRIPT.parent.parent
         for name in ('docker-compose.yml', 'docker-compose.dev.yml'):
@@ -58,8 +80,15 @@ class EntrypointTests(SimpleTestCase):
             self.assertIn('command: ["postgres", "-c", "max_connections=${POSTGRES_MAX_CONNECTIONS:-300}"', text, name)
             # the memory settings a 2 GB host needs (docs/DEPLOYMENT.md, Small hosts), each overridable from .env, with defaults that are safe from 1 GB up
             for setting in ('shared_buffers=${POSTGRES_SHARED_BUFFERS:-256MB}', 'effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-768MB}',
-                            'maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM:-64MB}', 'random_page_cost=${POSTGRES_RANDOM_PAGE_COST:-1.1}'):
+                            'maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM:-64MB}', 'random_page_cost=${POSTGRES_RANDOM_PAGE_COST:-1.1}',
+                            # PostgreSQL's own defaults, so an install that sets neither runs exactly as before
+                            'work_mem=${POSTGRES_WORK_MEM:-4MB}', 'shared_preload_libraries=${POSTGRES_SHARED_PRELOAD_LIBRARIES:-}',
+                            # the slow query diagnostics, off by default (PostgreSQL's own defaults: no IO timing, no slow statement log)
+                            'track_io_timing=${POSTGRES_TRACK_IO_TIMING:-off}', 'log_min_duration_statement=${POSTGRES_LOG_MIN_DURATION_STATEMENT:--1}'):
                 self.assertIn(setting, text, name)
+        # the shipped file sets no memory ceiling on db (an overlay's DB_MEM_LIMIT does): adding one would change every install on update
+        db = (root / 'docker-compose.yml').read_text().split('\n  db:\n', 1)[1].split('\n  redis:\n', 1)[0]
+        self.assertNotIn('mem_limit', db)
         # an existing install gets it on update: the db container is recreated when its definition changed, before the migration runs
         for name in ('update.sh', 'apply-update.sh', 'update-deploy.sh'):
             text = (root / 'scripts' / name).read_text()
@@ -164,17 +193,19 @@ def web_command(**env):
         stub.write_text('#!/bin/sh\necho "$@"\n')
         stub.chmod(0o755)
         environ = {k: v for k, v in os.environ.items() if not k.startswith('GUNICORN_') and k != 'DEBUG'}
-        environ.update(PATH=f'{tmp}:{os.environ["PATH"]}', **env)
+        environ.update(PATH=f'{tmp}:{os.environ["PATH"]}', CVENGINE_DB_ROLE_STATE=f'{tmp}/db-role', **env)
         out = subprocess.run(['bash', str(WEB_SCRIPT)], capture_output=True, text=True, env=environ, check=True).stdout
     return out.splitlines()
 
 
 class WebEntrypointTests(SimpleTestCase):
-    def test_production_runs_gunicorn_after_migrating(self):
+    def test_production_runs_gunicorn_and_never_migrates_itself(self):
+        # the one-off migrate service migrates (the only container with the owner's password); web only waits for migrate --check
         lines = web_command(DEBUG='0')
-        self.assertEqual(lines[0], 'manage.py migrate --noinput')
-        self.assertIn('-m gunicorn reNgine.wsgi:application', lines[1])
-        self.assertIn('--bind 0.0.0.0:8000', lines[1])  # the proxy's upstream is rengine:8000
+        self.assertNotIn('manage.py migrate --noinput', lines)
+        self.assertIn('-m gunicorn cvengine.wsgi:application', lines[0])
+        lines = [''] + lines  # the assertions below read the gunicorn line as lines[1]
+        self.assertIn('--bind 0.0.0.0:8000', lines[1])  # the proxy's upstream is cvengine:8000
         self.assertIn('--worker-class gthread', lines[1])
         self.assertNotIn('runserver', ' '.join(lines))
 
@@ -182,19 +213,19 @@ class WebEntrypointTests(SimpleTestCase):
         self.assertIn('gunicorn', ' '.join(web_command()))
 
     def test_timeout_covers_the_proxy_read_timeout_and_is_tunable(self):
-        self.assertIn('--timeout 300', web_command(DEBUG='0')[1])
-        self.assertIn('--timeout 600 ', web_command(DEBUG='0', GUNICORN_TIMEOUT='600')[1] + ' ')
-        self.assertIn('--workers 2', web_command(DEBUG='0', GUNICORN_WORKERS='2')[1])
+        self.assertIn('--timeout 300', web_command(DEBUG='0')[0])
+        self.assertIn('--timeout 600 ', web_command(DEBUG='0', GUNICORN_TIMEOUT='600')[0] + ' ')
+        self.assertIn('--workers 2', web_command(DEBUG='0', GUNICORN_WORKERS='2')[0])
 
     def test_development_keeps_runserver(self):
         lines = web_command(DEBUG='1')
-        self.assertEqual(lines[1], 'manage.py runserver 0.0.0.0:8000')
+        self.assertEqual(lines[0], 'manage.py runserver 0.0.0.0:8000')
         self.assertNotIn('gunicorn', ' '.join(lines))
 
     def test_proxy_upstream_port_matches(self):
-        conf = Path(__file__).resolve().parents[2] / 'config' / 'nginx' / 'rengine.conf'
+        conf = Path(__file__).resolve().parents[2] / 'config' / 'nginx' / 'cvengine.conf'
         if conf.is_file():  # the config directory is not mounted inside the web container
-            self.assertIn('http://rengine:8000;', conf.read_text())
+            self.assertIn('http://cvengine:8000;', conf.read_text())
 
 
 class BeatEntrypointTests(SimpleTestCase):
@@ -208,7 +239,7 @@ class BeatEntrypointTests(SimpleTestCase):
             sleep.write_text('#!/bin/sh\nexit 0\n')
             python.chmod(0o755)
             sleep.chmod(0o755)
-            env = {**os.environ, 'PATH': f'{temp}:{os.environ["PATH"]}', 'MIGRATION_EXIT': '1'}
+            env = {**os.environ, 'PATH': f'{temp}:{os.environ["PATH"]}', 'MIGRATION_EXIT': '1', 'CVENGINE_DB_ROLE_STATE': f'{temp}/db-role'}
             failed = subprocess.run(['bash', str(BEAT_SCRIPT), 'echo', 'beat-started'], capture_output=True, text=True, env=env)
             self.assertNotEqual(failed.returncode, 0)
             self.assertIn('attempt 60/60', failed.stdout)

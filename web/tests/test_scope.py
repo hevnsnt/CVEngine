@@ -8,7 +8,7 @@ from django.utils import timezone
 
 from cveFeed import discovery, ctmonitor, tasks
 from dashboard.models import Org, Project
-from reNgine import resources
+from cvengine import resources
 from scanEngine.models import EngineType
 from startScan.models import ScanHistory
 from targetApp.models import Domain

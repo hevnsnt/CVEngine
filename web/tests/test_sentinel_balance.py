@@ -147,7 +147,7 @@ class NeverHoldBackTests(BalanceBase):
             x, y = self.pair()
             change(x, y)
             created = timezone.now()
-            task = SentinelTask.objects.create(project=self.project, kind=kind, target={'addresses': ['192.0.2.10']}, **{'ips': ['192.0.2.10'], **task_fields})
+            task = SentinelTask.objects.create(project=self.project, kind=kind, **{'target': {'addresses': ['192.0.2.10']}, 'ips': ['192.0.2.10'], **task_fields})
             SentinelTask.objects.filter(pk=task.pk).update(created_at=created)
             taken, why = self.claim(x, [kind], created + timedelta(seconds=1))
             self.assertIsNotNone(taken, why)
@@ -204,7 +204,7 @@ class NeverHoldBackTests(BalanceBase):
 
         def inside(x, y):
             Agent.objects.filter(pk=x.pk).update(network='internal', capabilities=['nmap', 'naabu', 'network:internal'])
-        self.check(inside, ips=['10.20.0.5'], host='10.20.0.5')
+        self.check(inside, ips=['10.20.0.5'], host='10.20.0.5', target={'addresses': ['10.20.0.5']})
 
     def test_when_the_task_needs_a_stored_credential_and_the_lighter_one_is_not_the_built_in_scanner(self):
         fake = FakeScanner(kinds=['nmap']).start_for(self)

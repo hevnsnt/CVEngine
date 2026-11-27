@@ -18,7 +18,7 @@ from urllib.parse import urlsplit
 
 from agentapi import services as svc
 from agentapi.services import ApiError
-from tenancy import audit, roles
+from tenancy import audit
 
 CHUNK = 500
 LOOKUP_CHUNK = 2000  # ids in one IN list
@@ -26,7 +26,7 @@ FORMATS = ('csv', 'txt')
 SCOPES = ('external', 'all')
 MCP_MAX_BYTES = 3 * 1024 * 1024  # an MCP answer is capped at 4 MiB in all (agentapi.mcp.MAX_RESPONSE_BYTES): a bigger file is downloaded from REST
 COLUMNS = ('Host', 'IP addresses', 'Open TCP ports', 'Open UDP ports', 'Services', 'Web URLs', 'Project', 'Organization', 'Target', 'First seen', 'Last seen')
-BOM = '﻿'  # makes Excel read the file as UTF-8
+BOM = '\ufeff'  # makes Excel read the file as UTF-8
 _FORMULA = re.compile(r'^[=+\-@\t\r]')
 WEB_PORTS_TLS = (443, 8443)
 
@@ -84,20 +84,9 @@ def _iso(value):
 
 def _projects(ctx, slug, org_slug):
     """``(label for the file name, [projects])``: the one project (any role may read it), or the projects of the organization that the caller may see."""
-    from dashboard.models import Org, Project
-    if bool(slug) == bool(org_slug):
-        raise ApiError(400, 'give a project or an organization, not both')
-    if slug:
-        project, _ = svc.get_one_project(ctx, slug)  # _all is a 400: an export names its project or its organization
-        return project.slug, [project]
-    org = Org.objects.filter(slug=str(org_slug)).first()
-    if org is None or not svc._visible_org(ctx.user, org):
-        raise ApiError(404, 'organization not found')  # the same answer whether it is missing or not yours
-    allowed = roles.allowed_project_ids(ctx.user)  # None: an App Admin, every project
-    qs = Project.objects.filter(org=org).select_related('org').order_by('slug')
-    if allowed is not None:
-        qs = qs.filter(id__in=sorted(allowed))
-    return org.slug, list(qs)
+    from agentapi import report_scope
+    scope = report_scope.resolve(ctx, project=slug, org=org_slug)  # both or neither is a 400; _all is a 400; a missing or foreign organization is a 404
+    return scope.slug, scope.projects
 
 
 def _plan(project, external, include_archived):
@@ -285,8 +274,19 @@ def response(ctx, params, slug=None, org=None):
 def tool(ctx, args):
     """The MCP tool ``export_hosts``: the same file as text, with its name and counts (a file too big for an MCP answer is a 413 that points at REST)."""
     export = prepare(ctx, args, slug=args.get('project'), org=args.get('org'))
-    text = export.text()
-    if len(text.encode('utf-8')) > MCP_MAX_BYTES:
+    # the text is gathered chunk by chunk and given up as soon as it is past the cap: a file too big for an answer is refused after the chunks
+    # that pass the cap, not after every chunk of the project was read (the size only grows, so the answer is the same)
+    parts, size, chunks = [], 0, export.chunks()
+    try:
+        for part in chunks:
+            parts.append(part)
+            size += len(part.encode('utf-8'))
+            if size > MCP_MAX_BYTES:
+                break
+    finally:
+        chunks.close()
+    text = ''.join(parts)
+    if size > MCP_MAX_BYTES:
         raise ApiError(413, f'the list is too large for an MCP answer ({export.hosts} hosts): download it with GET {"orgs" if args.get("org") else "projects"}/'
                        f'{args.get("org") or args.get("project")}/hosts/export, or narrow it with scope=external and archived=0')
     return {'filename': export.filename, 'format': export.format, 'scope': export.scope, 'archived': export.include_archived, 'hosts': export.hosts,

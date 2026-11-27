@@ -4,8 +4,8 @@ from unittest import mock
 
 from django.test import SimpleTestCase
 
-from reNgine import discovery_events
-from reNgine.discovery_events import DEFAULT_MODE, MODES, trufflehog_enabled
+from cvengine import discovery_events
+from cvengine.discovery_events import DEFAULT_MODE, MODES, trufflehog_enabled
 
 
 class ModesTests(unittest.TestCase):

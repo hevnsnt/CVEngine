@@ -63,7 +63,6 @@ def _apply_reviewer(user, mode):
 
 
 def _host_review_facts():
-    from cveFeed import reviewer
     from cveFeed.models import ReviewerSettings
     row = _reviewer_row() or ReviewerSettings()
     return [f'Host review: the AI reads every open finding of a host that changed, one provider call per host, at most {row.host_review_daily_max:,} a day, and suggests one '
@@ -364,10 +363,11 @@ BY_KEY = {q.key: q for q in QUESTIONS}
 
 def _answers():
     from cveFeed.models import SetupAnswer
-    return {a.key: a for a in SetupAnswer.objects.all()}
+    return {a.key: a for a in SetupAnswer.objects.select_related('answered_by')}  # ``answered_by`` is read for every answered question
 
 
-def _describe(q, answers):
+def _state(q, answers):
+    """``(state, row, new_lines, applies, why)`` of one question (see ``snapshot``): what ``_describe`` says about it, without its choices and facts."""
     applies, why = q.applies()
     row = answers.get(q.key)
     new_lines = []
@@ -384,6 +384,11 @@ def _describe(q, answers):
         state = 'later'
     else:
         state = 'pending'
+    return state, row, new_lines, applies, why
+
+
+def _describe(q, answers):
+    state, row, new_lines, applies, why = _state(q, answers)
     safe = q.safe_default() if callable(q.safe_default) else q.safe_default
     out = {'key': q.key, 'since': q.since, 'title': q.title, 'text': q.text, 'state': state, 'link': q.link, 'link_text': q.link_text,
            'applies': applies, 'why_not': why, 'safe_default': safe, 'current': q.current() if applies else 'off',
@@ -417,10 +422,19 @@ def snapshot():
             'safe_default': 'A feature that costs money or changes what is scanned stays off until you answer.'}
 
 
+def counts():
+    """``{'pending', 'later', 'open'}``: the numbers of ``snapshot`` from the states alone. The status strip's poll and every dashboard load ask only these, and the
+    choices and facts of the questions cost a dozen more queries (the scanner question's choices build every live Sentinel's rights)."""
+    answers = _answers()
+    states = [_state(q, answers)[0] for q in QUESTIONS]
+    pending, later = states.count('pending'), states.count('later')
+    return {'pending': pending, 'later': later, 'open': pending + later}
+
+
 def reminder():
     """The line the status strip keeps for an App Admin while a question is open, or None. Never raises: a reminder is not worth a failed page."""
     try:
-        n = snapshot()['open']
+        n = counts()['open']
     except Exception:  # noqa: BLE001
         return None
     if not n:
@@ -435,7 +449,7 @@ def should_redirect(request):
     if request.method != 'GET' or not (user.is_authenticated and user.is_superuser) or request.GET.get('skip') == '1':
         return False
     try:
-        if request.session.get(SESSION_KEY) or not snapshot()['pending']:
+        if request.session.get(SESSION_KEY) or not counts()['pending']:
             return False
         request.session[SESSION_KEY] = True
     except Exception:  # noqa: BLE001 - the dashboard always opens

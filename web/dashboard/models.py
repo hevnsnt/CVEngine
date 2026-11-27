@@ -1,7 +1,7 @@
-from reNgine.ai_profiles import PROFILES
-from reNgine.crypto_fields import ENCRYPTED_COLUMN_LENGTH, EncryptedCharField, EncryptedJSONField
+from cvengine.ai_profiles import PROFILES
+from cvengine.crypto_fields import ENCRYPTED_COLUMN_LENGTH, EncryptedCharField, EncryptedJSONField
 from django.db import models
-from reNgine.definitions import *
+from cvengine.definitions import *
 from django.contrib.auth.models import User
 
 
@@ -45,11 +45,11 @@ class Project(models.Model):
 
 
 class AIProviderSettings(models.Model):
-	"""Single-row config for the model-agnostic AI layer (see reNgine/ai_providers.py).
+	"""Single-row config for the model-agnostic AI layer (see cvengine/ai_providers.py).
 
 	The API key lives here (Postgres), set via the settings UI, never in git or .env.
 	"""
-	PROVIDER_CHOICES = [(profile.id, profile.label) for profile in PROFILES.values()]  # the provider table (reNgine/ai_profiles.py)
+	PROVIDER_CHOICES = [(profile.id, profile.label) for profile in PROFILES.values()]  # the provider table (cvengine/ai_profiles.py)
 	id = models.AutoField(primary_key=True)
 	provider = models.CharField(max_length=32, choices=PROVIDER_CHOICES, default='anthropic')
 	model = models.CharField(max_length=200, blank=True, default='')
@@ -66,7 +66,7 @@ class AIProviderSettings(models.Model):
 	# How many CVEs a day the model may write or revise guidance for (each is a paid request); the catalogue is covered in this many days.
 	cve_guidance_daily = models.PositiveIntegerField(default=25, db_default=25)
 	# How a request is made. Empty (NULL or '') means "not set here": the request then follows the environment variable of the same name
-	# (CVENGINE_AI_TIMEOUT and the others) and then the provider's own default (reNgine/ai_profiles.py), so an install that never touches
+	# (CVENGINE_AI_TIMEOUT and the others) and then the provider's own default (cvengine/ai_profiles.py), so an install that never touches
 	# these sends exactly what it did before. The ranges are in ai_profiles.NUMBER_SETTINGS and are enforced by the settings API.
 	request_timeout = models.PositiveIntegerField(null=True, blank=True)  # seconds to wait for an answer
 	connect_timeout = models.PositiveIntegerField(null=True, blank=True)  # seconds to reach the server
@@ -76,8 +76,14 @@ class AIProviderSettings(models.Model):
 	reasoning = models.CharField(max_length=8, blank=True, default='', db_default='')  # '', default, off, low, medium, high, max
 	keep_alive = models.CharField(max_length=8, blank=True, default='', db_default='')  # Ollama: 30m, 1h, 0, -1
 	# The model for the nuclei tag choice (stages nuclei_tag_selection and nuclei_targeting). '' = the default, resolved when it is read: the
-	# cheapest haiku the provider lists as available, else the model above (reNgine/ai_nuclei_model.py). Never written by a migration.
+	# cheapest haiku the provider lists as available, else the model above (cvengine/ai_nuclei_model.py). Never written by a migration.
 	nuclei_model = models.CharField(max_length=200, blank=True, default='', db_default='')
+	# The bulk model of the high-volume stages (cvengine/ai_routing.py STAGE_MODEL). '' = the provider's cheapest current model.
+	bulk_model = models.CharField(max_length=200, blank=True, default='', db_default='')
+	use_bulk_model = models.BooleanField(default=True, db_default=True)  # off: every stage uses the model above, as before
+	# The AI money budget in USD (cveFeed/ai_budget.py). NULL = not set here: CVENGINE_AI_MONTHLY_BUDGET_USD / _DAILY_ then apply, else no limit.
+	monthly_budget_usd = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+	daily_budget_usd = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
 	verified_at = models.DateTimeField(null=True, blank=True)
 	verified_provider = models.CharField(max_length=32, blank=True, default='')
 	verified_model = models.CharField(max_length=200, blank=True, default='')
@@ -182,6 +188,8 @@ class SystemTimings(models.Model):
 	cve_sync_minutes = models.PositiveIntegerField(default=30)       # how often the cve.now feed is read
 	hygiene_hour_utc = models.PositiveSmallIntegerField(default=3)   # daily certificate/TLS/email sweep
 	ct_watch_minutes = models.PositiveIntegerField(default=20)       # how often every target is re-checked against crt.sh
+	# a lookup crt.sh cannot answer asks Cert Spotter instead (cveFeed.ctmonitor); CVENGINE_CT_FALLBACK=0 turns it off whatever this says
+	ct_fallback_source = models.BooleanField(default=True, db_default=True)
 	discovery_timeout_hours = models.PositiveSmallIntegerField(default=6)
 	nuclei_timeout_hours = models.PositiveSmallIntegerField(default=4)
 
@@ -242,7 +250,8 @@ class IpAllowlistEntry(models.Model):
 
 class AbuseStrike(models.Model):
 	"""One rejected request that carried an attack payload (command or SQL injection, path traversal, ...).
-	Strikes add up per user and per IP; enough of them inside the window trigger an automatic ban."""
+	Strikes add up per user and per IP; enough of them inside the window trigger an automatic action (cvengine.input_guard). A strike of weight 0
+	was a navigation a link can start (Sec-Fetch-Site none or same-origin on a GET): rejected and kept for the record, never counted."""
 	user = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
 	username = models.CharField(max_length=150, blank=True, default='')
 	ip = models.CharField(max_length=64, blank=True, default='')
@@ -258,8 +267,8 @@ class AbuseStrike(models.Model):
 
 
 class AbuseBan(models.Model):
-	"""An automatic (or manual) block of an IP address. An account ban is just ``User.is_active = False`` plus
-	revoked tokens, recorded here too so an admin can see why. Lift a ban by setting ``lifted`` (admin UI)."""
+	"""An automatic (or manual) block of an IP address. Lift a ban by setting ``lifted`` (admin UI). The input guard no longer disables
+	accounts (it ends the offending session and writes the audit log); rows with a user and no address are from older releases, when it did."""
 	ip = models.CharField(max_length=64, blank=True, default='', db_index=True)
 	user = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
 	username = models.CharField(max_length=150, blank=True, default='')
@@ -287,9 +296,25 @@ class AuditLog(models.Model):
 
 	class Meta:
 		ordering = ['-id']
+		# the weekly prune of the routine Sentinel rows (cveFeed.maintenance) and every lookup of one action newest or oldest first
+		indexes = [models.Index(fields=['action', 'id'], name='auditlog_action_id_idx')]
 
 	def __str__(self):
 		return f'{self.actor_name} {self.action} {self.target}'
+
+	# The routine Sentinel task lifecycle rows (about 20,000 a day on a busy host, the same actions the weekly prune removes): progress records the
+	# Sentinel re-derives, written inside the claim and expiry transactions of the busiest tables. They keep the server wide relaxed commit. Every
+	# other row (credentials, revocations, bans, secret reads, administration) commits durably, so a crash cannot lose it (usage_stamps.durable_commit).
+	RELAXED_ACTIONS = frozenset(('sentinel.task.claim', 'sentinel.task.accept', 'sentinel.task.complete', 'sentinel.task.expire',
+								 'sentinel.task.expire_sweep'))
+
+	def save(self, *args, **kwargs):
+		if self.action in self.RELAXED_ACTIONS:
+			return super().save(*args, **kwargs)
+		from django.db import router
+		from cvengine.usage_stamps import durable_commit
+		with durable_commit(using=kwargs.get('using') or router.db_for_write(type(self), instance=self)):
+			return super().save(*args, **kwargs)
 
 
 class ApiCredential(models.Model):

@@ -1,6 +1,6 @@
 from django.db import migrations
 
-# (model, the secret fields). The fields are the encrypting kind (see reNgine.crypto_fields), so re-saving a row writes its
+# (model, the secret fields). The fields are the encrypting kind (see cvengine.crypto_fields), so re-saving a row writes its
 # plaintext value encrypted; a row that is already encrypted is read, decrypted and written back the same.
 TARGETS = [('AIProviderSettings', ['api_key']), ('ApiCredential', ['value']), ('OpenAiAPIKey', ['key']), ('NetlasAPIKey', ['key']),
            ('ChaosAPIKey', ['key']), ('HackerOneAPIKey', ['key'])]

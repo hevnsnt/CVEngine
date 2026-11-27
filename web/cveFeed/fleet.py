@@ -12,10 +12,11 @@ def fleet_facts(now=None):
     """``{live_sentinels, live_remote, builtin_scanner, builtin_live, slots}``: the live, active Sentinels (heard from in the live window), how many are not the
     built-in scanner, whether this install has a built-in scanner at all (it enrolled one and it is not revoked) and whether it is live, and the slots
     (concurrent tasks) of the live ones."""
-    from agentapi import sentinel_broker
+    from agentapi import sentinel_broker, sentinel_policy
     now = now or timezone.now()
-    live = sentinel_broker._live_scanners(now)
-    own = sentinel_broker.builtin_pk()
+    with sentinel_policy.shared_lookups():  # the built-in scanner's id is read once, for the rights and for ``own``
+        live = sentinel_broker._live_scanners(now)
+        own = sentinel_broker.builtin_pk()
     return {'live_sentinels': len(live), 'live_remote': sum(1 for e in live if e.agent.pk != own), 'builtin_scanner': own is not None,
             'builtin_live': any(e.agent.pk == own for e in live), 'slots': sum(int(e.max_concurrent or 0) for e in live)}
 

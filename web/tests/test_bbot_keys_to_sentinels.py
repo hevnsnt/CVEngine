@@ -293,7 +293,9 @@ class CapacityTests(KeysBase):
     def test_the_dispatch_flags_follow_the_reference(self):
         from agentapi import sentinel_dispatch as dispatch
         self.assertEqual(dispatch.capacity_flags(self.ref), {'bbot_keys': True})
-        self.assertEqual(dispatch.capacity_flags(broker.secret_ref_for(1)), {'builtin_only': True, 'secret': True})
+        # a stored sign-in goes through its own gate (agentapi.signin_delivery): the built-in scanner, or an external Sentinel its owner allowed
+        self.assertEqual(dispatch.capacity_flags(broker.secret_ref_for(1)), {'signin': broker.secret_ref_for(1)})
+        self.assertEqual(dispatch.capacity_flags('other:1'), {'builtin_only': True, 'secret': True})  # any other reference: the built-in scanner's alone
         self.assertEqual(dispatch.capacity_flags(None), {'builtin_only': False, 'secret': False})
 
 

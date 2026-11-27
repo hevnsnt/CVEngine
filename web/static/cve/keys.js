@@ -14,6 +14,7 @@ const GO_LETTERS = {
   Hygiene: "y",
   Targets: "t",
   Scans: "s",
+  Reporting: "r",
   "Bug bounty": "b",
   "API keys": "k",
 };

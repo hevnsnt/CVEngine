@@ -1,0 +1,5 @@
+# Rendered by the nginx image at start (envsubst, /docker-entrypoint.d/20-envsubst-on-templates.sh) into /etc/nginx/conf.d/cvengine-upstream-exact.inc,
+# which the map $cvengine_upstream_secret_case in cvengine.conf includes. The plain string match in cvengine-upstream-secret.inc.template ignores
+# case (nginx compares map strings that way), so this regex makes the comparison case-sensitive. It is only consulted together with that match and
+# the shape check, so a secret holding regex characters can never widen it. An empty or unrendered secret never matches a header of the right shape.
+"~^k${CVENGINE_UPSTREAM_SECRET}$"  1;

@@ -1,0 +1,97 @@
+{% extends 'cveFeed/base.html' %}
+{% block title %}CVEngine · AI and your data{% endblock %}
+{% block content %}
+<div class="about ai-data">
+  <div class="page-head">
+    <div>
+      <h1>AI and your data</h1>
+      <p class="sub">What cvENGINE sends to an AI model, what an AI agent connected over MCP can read, and how to keep your data to yourself.</p>
+    </div>
+  </div>
+
+  <section class="card ai-now" id="now" aria-labelledby="now-h">
+    <h2 id="now-h">On this install right now</h2>
+    {% if ai.kind == 'off' %}
+    <p class="ai-now-lede"><span class="ai-dot off" aria-hidden="true"></span>No AI provider is turned on, so nothing is sent to any AI model. Scans, CVE matching and installed templates work without one.</p>
+    {% elif ai.kind == 'hosted' %}
+    <p class="ai-now-lede"><span class="ai-dot hosted" aria-hidden="true"></span>AI jobs are sent to <b>{{ ai.provider }}</b>, a hosted service{% if ai.host %} at <code>{{ ai.host }}</code>{% endif %}. What each job sends leaves your network and is kept under {{ ai.provider }}'s terms.</p>
+    {% else %}
+    <p class="ai-now-lede"><span class="ai-dot local" aria-hidden="true"></span>AI jobs are sent to a <b>{{ ai.provider }}</b> server your administrator runs{% if ai_admin and ai.host %} at <code>{{ ai.host }}</code>{% endif %}. The data goes only to that server: it stays on your network if the server is on it.</p>
+    {% endif %}
+    {% if ai.kind != 'off' and not ai.container %}<p class="note">The AI reviewer container is turned off (<code>CVENGINE_REVIEWER=0</code>), so AI jobs wait and nothing is sent.</p>{% endif %}
+    <p class="note">{{ ai_jobs_on }} of {{ ai_jobs_total }} AI jobs are on. Each one below says whether it is on here{% if ai_admin and ai_counts_ok %} and how many calls it made in the last 30 days{% endif %}.{% if ai_admin and not ai_counts_ok %} The call counts could not be read just now (the database was slow); reload in a minute.{% endif %}</p>
+  </section>
+
+  <section class="about-sec" id="where" aria-labelledby="where-h">
+    <h2 id="where-h">Where your data goes</h2>
+    <p class="about-text">cvENGINE sends AI jobs to the one provider an App Admin chooses in Settings: <b>Anthropic</b>, <b>OpenAI</b> or <b>OpenRouter</b> (hosted services: the data leaves your network), or <b>Ollama</b>, <b>vLLM</b> or <b>LM Studio</b> (a model server you run: the data goes only where that server is). The requests are made by the AI reviewer container, never by your browser.</p>
+    <p class="about-text">cvENGINE has no agreement with any provider about what they keep or whether they train on it. Read your provider's data-retention and training terms, and use an account or a plan whose terms you accept, or a model you host yourself.</p>
+    <p class="about-text">The provider's API key is stored encrypted, is never shown again after it is saved, and is sent only to that provider's address.</p>
+  </section>
+
+  <section class="about-sec" id="jobs" aria-labelledby="jobs-h">
+    <h2 id="jobs-h">What each AI job sends</h2>
+    <p class="note about-intro">Every call cvENGINE makes to a model belongs to one of these jobs. Open one to see when it runs, what it sends, what it never sends, what it can change by itself and how to turn it off.</p>
+    {% for group in ai_groups %}
+    <h3 class="ai-group-h" id="jobs-{{ group.key }}">{{ group.title }}</h3>
+    <p class="note about-group-intro">{{ group.intro }}</p>
+    {% for job in group.jobs %}
+    <details class="about-group ai-job" id="job-{{ job.id }}">
+      <summary><span class="about-group-title">{{ job.title }}</span>
+        <span class="chip ai-state {% if job.on %}on{% else %}off{% endif %}">{% if job.on %}On{% else %}Off{% endif %}</span>
+        {% if job.calls is not None %}<span class="count" title="Calls in the last 30 days">{{ job.calls }} call{{ job.calls|pluralize }} in 30 days</span>{% endif %}
+      </summary>
+      <p class="about-text">{{ job.purpose }}{% if not job.on and job.why %} <span class="note">(Off here: {{ job.why }}.)</span>{% endif %}</p>
+      <dl class="ai-facts">
+        <div><dt>When</dt><dd>{{ job.when }}</dd></div>
+        <div><dt>Sends</dt><dd><ul>{% for line in job.sends %}<li>{{ line }}</li>{% endfor %}</ul></dd></div>
+        <div><dt>Never sends</dt><dd><ul>{% for line in job.never %}<li>{{ line }}</li>{% endfor %}</ul></dd></div>
+        <div><dt>Changes by itself</dt><dd>{{ job.changes }}</dd></div>
+        <div><dt>Turn it off</dt><dd>{{ job.switch }}</dd></div>
+      </dl>
+    </details>
+    {% endfor %}
+    {% endfor %}
+  </section>
+
+  <section class="about-sec" id="host-context" aria-labelledby="host-context-h">
+    <h2 id="host-context-h">The host context</h2>
+    <p class="note about-intro">Triage of a CVE match, validation plans, host reviews and finding reviews also send what cvENGINE knows about the host, so the model can judge the finding. It is cut to 9,000 characters.</p>
+    <dl class="ai-facts">
+      <div><dt>Sends</dt><dd><ul>{% for line in host_context.sends %}<li>{{ line }}</li>{% endfor %}</ul></dd></div>
+      <div><dt>Never sends</dt><dd><ul>{% for line in host_context.never %}<li>{{ line }}</li>{% endfor %}</ul></dd></div>
+      <div><dt>Keep in mind</dt><dd>{{ host_context.caveat }}</dd></div>
+    </dl>
+  </section>
+
+  <section class="about-sec" id="protections" aria-labelledby="protections-h">
+    <h2 id="protections-h">How your data is protected</h2>
+    <ul class="ai-list">{% for line in protections %}<li>{{ line }}</li>{% endfor %}</ul>
+  </section>
+
+  <section class="about-sec" id="still-sent" aria-labelledby="still-sent-h">
+    <h2 id="still-sent-h">What can still reach a model</h2>
+    <p class="note about-intro">Masking catches known shapes of secrets and the host's own names, not everything. When a provider is on, expect these to be sent:</p>
+    <ul class="ai-list">{% for line in still_sent %}<li>{{ line }}</li>{% endfor %}</ul>
+  </section>
+
+  <section class="about-sec" id="mcp" aria-labelledby="mcp-h">
+    <h2 id="mcp-h">AI agents over MCP and the API</h2>
+    <p class="about-text">{{ mcp.intro }}</p>
+    <dl class="ai-facts">
+      <div><dt>An agent can read</dt><dd><ul>{% for line in mcp.reaches %}<li>{{ line }}</li>{% endfor %}</ul></dd></div>
+      <div><dt>An agent never gets</dt><dd><ul>{% for line in mcp.never %}<li>{{ line }}</li>{% endfor %}</ul></dd></div>
+      <div><dt>What you control</dt><dd><ul>{% for line in mcp.controls %}<li>{{ line }}</li>{% endfor %}</ul></dd></div>
+    </dl>
+    <p class="about-text"><a href="{% url 'cve_agents' %}">Manage your API keys</a></p>
+  </section>
+
+  <section class="about-sec" id="stop" aria-labelledby="stop-h">
+    <h2 id="stop-h">How to send less, or nothing</h2>
+    <dl class="ai-facts">
+      {% for title, text in how_to_stop %}<div><dt>{{ title }}</dt><dd>{{ text }}</dd></div>{% endfor %}
+    </dl>
+    <p class="about-text">{% if ai_admin %}<a href="{% url 'cve_settings' %}#ai">AI settings</a> · <a href="{% url 'cve_onboarding' %}">AI Model Usage</a> · {% endif %}<a href="https://github.com/hevnsnt/CVEngine/blob/HEAD/docs/AI-DATA.md" rel="noopener" target="_blank">The same, with the code behind each statement (docs/AI-DATA.md)</a></p>
+  </section>
+</div>
+{% endblock %}

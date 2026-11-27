@@ -146,7 +146,7 @@ def record_service_findings(scan):
     """Findings the scan's stored script output proves. Returns how many were new. Idempotent: a finding is one row per host and
     port, and a port that stopped allowing anonymous sign-in is simply no longer reported."""
     from cveFeed import db_intel
-    from reNgine.tasks import save_vulnerability
+    from cvengine.tasks import save_vulnerability
     from startScan.models import Subdomain, open_ports
     new = 0
     for sub in Subdomain.objects.filter(scan_history=scan).prefetch_related('ip_addresses__ports'):

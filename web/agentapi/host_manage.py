@@ -1,6 +1,7 @@
 """Host management: editable asset information, "Delete host data" (one project) and "Remove & exclude" (the whole organization).
 
-Both removals are destructive, so each runs in one transaction, needs write access (get_project(..., write=True): an audit
+Both removals are destructive, so each runs in one transaction (after its heavy part, a host's copies in every scan, was removed in bounded
+batches, ``_drain_host``), needs write access (get_project(..., write=True): an audit
 role or a read-only token gets 403) and only ever touches projects the caller may write to. A host is matched by its WHOLE name,
 case-insensitively: never a suffix or a substring, so ``provider.example`` leaves ``notprovider.example`` and
 ``www.provider.example`` alone.
@@ -106,7 +107,7 @@ BULK_ACTIONS = ('archive', 'restore', 'pin', 'unpin')
 def host_bulk(ctx, slug, hosts, action, reason=''):
     """Archive, restore, pin or unpin up to MAX_BULK_HOSTS hosts of one project in one call. Each host is independent (a pinned host
     that cannot be archived, or a name that is not in the project, never blocks the rest); returns {done, failed: [{host, error}]}."""
-    get_project(ctx, slug, write=True)  # the _all / audit-role / read-only-token gate comes before any body validation
+    project, _ = get_project(ctx, slug, write=True)  # the _all / audit-role / read-only-token gate comes before any body validation
     if action not in BULK_ACTIONS:
         raise ApiError(400, f'action must be one of {", ".join(BULK_ACTIONS)}')
     if not isinstance(hosts, list) or not hosts:
@@ -114,12 +115,16 @@ def host_bulk(ctx, slug, hosts, action, reason=''):
     if len(hosts) > MAX_BULK_HOSTS:
         raise ApiError(400, f'at most {MAX_BULK_HOSTS} hosts per call')
     done, failed = [], []
-    for host in dict.fromkeys(h for h in hosts if isinstance(h, str)):  # a repeated name is done once
+    wanted = list(dict.fromkeys(h for h in hosts if isinstance(h, str)))  # a repeated name is done once
+    # the project is resolved once for the call, and the newest row of every name is read in one query: each host asked both again (the access
+    # checks, and a case-insensitive name lookup that reads every host row of the project), up to 200 times
+    rows = _newest_rows(project, wanted)
+    for host in wanted:
         try:
             if action in ('pin', 'unpin'):
-                host_archive(ctx, slug, host, 'pin', pinned=action == 'pin')
+                _host_archive(ctx, project, slug, host, 'pin', pinned=action == 'pin', rows=rows)
             else:
-                host_archive(ctx, slug, host, action, reason=reason)
+                _host_archive(ctx, project, slug, host, action, reason=reason, rows=rows)
             done.append(host)
         except ApiError as e:
             failed.append({'host': host[:200], 'error': e.message})
@@ -128,13 +133,41 @@ def host_bulk(ctx, slug, hosts, action, reason=''):
 
 
 def host_archive(ctx, slug, host, action, reason='', pinned=None):
-    """Reversible project-scoped archive and owner pin; historical evidence is retained."""
+    """Reversible project-scoped archive and owner pin; historical evidence is retained. Archiving takes the host as the Hosts page shows it: the
+    other names of this project on its addresses are archived with it (``names``), and every open finding of them is closed (``findings_closed``).
+    Restoring any of the names restores them all and reopens exactly what was closed (``findings_reopened``). See ``cveFeed.archive_closure``."""
+    project, _ = get_project(ctx, slug, write=True)
+    return _host_archive(ctx, project, slug, host, action, reason=reason, pinned=pinned)
+
+
+def _newest_rows(project, hosts):
+    """``{UPPER(name): newest Subdomain row}`` of the project for the valid names among ``hosts``, in one query: the row ``_host_archive`` takes for each,
+    matched the way ``name__iexact`` matches (``UPPER(name) = UPPER(%s)``). A name that is not valid is left out (its own call refuses it)."""
+    from django.db.models.functions import Upper
+
+    from startScan.models import Subdomain
+    names = set()
+    for host in hosts:
+        try:
+            names.add(clean_host(host).upper())
+        except ApiError:
+            continue
+    out = {}
+    if names:
+        for sub in Subdomain.objects.filter(target_domain__project=project).annotate(upper_name=Upper('name')).filter(upper_name__in=sorted(names)) \
+                .select_related('target_domain').order_by('-id'):
+            out.setdefault(sub.upper_name, sub)
+    return out
+
+
+def _host_archive(ctx, project, slug, host, action, reason='', pinned=None, rows=None):
+    """``host_archive`` for a project already resolved with write access. ``rows`` (``_newest_rows``): the newest row of each name, read once for a
+    whole bulk call; a name missing from it is not in the project."""
     from cveFeed.models import HostAssessment, HostState
     from cveFeed.exclusions import is_excluded
     from startScan.models import Subdomain
     from django.utils import timezone
 
-    project, _ = get_project(ctx, slug, write=True)
     name = clean_host(host)
     if action not in ('archive', 'restore', 'pin'):
         raise ApiError(400, 'unknown archive action')
@@ -142,29 +175,45 @@ def host_archive(ctx, slug, host, action, reason='', pinned=None):
         raise ApiError(409, 'host is excluded; an organization admin must remove the exclusion first')
     if not isinstance(reason, str) or len(reason.strip()) > MAX_REASON:
         raise ApiError(400, f'reason must be text of at most {MAX_REASON} characters')
-    sub = Subdomain.objects.filter(target_domain__project=project, name__iexact=name).select_related('target_domain').order_by('-id').first()
+    if rows is not None:
+        sub = rows.get(name.upper())
+    else:
+        sub = Subdomain.objects.filter(target_domain__project=project, name__iexact=name).select_related('target_domain').order_by('-id').first()
     if not sub:
         raise ApiError(404, 'host not found in this project')
+    from cveFeed import archive_closure
     state, _ = HostState.objects.get_or_create(project=project, host=name, defaults={'domain': sub.target_domain})
+    closed = reopened = names = None
     if action == 'archive':
         if state.pinned:
             raise ApiError(409, 'host is pinned; unpin it before archiving')
         if HostAssessment.objects.filter(project=project, host=name, status__in=('queued', 'running')).exists():
             raise ApiError(409, 'a host assessment is active; stop it before archiving')
-        if not state.archived_at:
-            state.archived_at, state.archive_reason = timezone.now(), reason.strip() or 'Manually archived by an authorized project user'
-            state.archive_check_status, state.archived_by_user = '', True
-            state.save(update_fields=['archived_at', 'archive_reason', 'archive_check_status', 'archived_by_user'])
+        # The host the Hosts page shows is archived: this name and the other names on its addresses (cveFeed.archive_closure.archive_aliases), and
+        # everything open on them is closed, in one transaction. Archiving an archived host again closes what is still open, dated from the archive.
+        with transaction.atomic():
+            if not state.archived_at:
+                state.archived_at, state.archive_reason = timezone.now(), reason.strip() or 'Manually archived by an authorized project user'
+                state.archive_check_status, state.archived_by_user = '', True
+                state.save(update_fields=['archived_at', 'archive_reason', 'archive_check_status', 'archived_by_user'])
+            names = archive_closure.archive_aliases(project, name, state.archived_at) if state.archived_by_user else [name]
+            closed = archive_closure.close_host(project.pk, name, user=ctx.user, when=state.archived_at, names=names)
     elif action == 'restore':
         if state.archived_at:
-            state.archived_at, state.archive_reason, state.archived_by_user = None, '', False
-            state.inactive_first_absent_at, state.inactive_last_absent_at, state.inactive_absent_checks = None, None, 0
-            # A host archived for never resolving to a scannable IP (cveFeed.unresolved_archive) must not be
-            # immediately re-eligible on the very next daily sweep; a manual restore clears that streak too.
-            state.unresolved_first_at, state.unresolved_last_at, state.unresolved_checks = None, None, 0
-            state.save(update_fields=['archived_at', 'archive_reason', 'archived_by_user', 'inactive_first_absent_at',
-                                      'inactive_last_absent_at', 'inactive_absent_checks', 'unresolved_first_at',
-                                      'unresolved_last_at', 'unresolved_checks'])
+            primary = archive_closure.primary_of(state)  # a name archived with another host restores that host and its group
+            if primary != name and HostState.objects.filter(project=project, host=primary, archived_at__isnull=False).exists():
+                return host_archive(ctx, slug, primary, 'restore')
+            with transaction.atomic():
+                state.archived_at, state.archive_reason, state.archived_by_user = None, '', False
+                state.inactive_first_absent_at, state.inactive_last_absent_at, state.inactive_absent_checks = None, None, 0
+                # A host archived for never resolving to a scannable IP (cveFeed.unresolved_archive) must not be
+                # immediately re-eligible on the very next daily sweep; a manual restore clears that streak too.
+                state.unresolved_first_at, state.unresolved_last_at, state.unresolved_checks = None, None, 0
+                state.save(update_fields=['archived_at', 'archive_reason', 'archived_by_user', 'inactive_first_absent_at',
+                                          'inactive_last_absent_at', 'inactive_absent_checks', 'unresolved_first_at',
+                                          'unresolved_last_at', 'unresolved_checks'])
+                archive_closure.restore_aliases(project.pk, name)
+                reopened = archive_closure.reopen_host(project.pk, name, user=ctx.user)  # only what archiving it closed
     elif action == 'pin':
         if not isinstance(pinned, bool):
             raise ApiError(400, 'pinned must be true or false')
@@ -173,12 +222,14 @@ def host_archive(ctx, slug, host, action, reason='', pinned=None):
     from cveFeed import snapshot_cache
     snapshot_cache.bump_on_commit()  # archive, restore and pin change what the host lists and counts show
     from cveFeed.admin_api import audit
+    counts = {**({'findings_closed': sum(closed.values()), 'names': names} if closed is not None else {}),
+              **({'findings_reopened': sum(reopened.values())} if reopened is not None else {})}
     audit(ctx.user, f'host.{action}', f'{name} in {slug}', project.org, project=slug, host=name,
-          reason=reason.strip() if action == 'archive' else '', pinned=state.pinned)
+          reason=reason.strip() if action == 'archive' else '', pinned=state.pinned, **counts)
     return {'host': name, 'archived_at': state.archived_at.isoformat() if state.archived_at else None,
             'archive_reason': state.archive_reason, 'pinned': state.pinned,
             'last_check_at': state.archive_checked_at.isoformat() if state.archive_checked_at else None,
-            'last_check_status': state.archive_check_status, 'linked_assessment_id': state.archive_assessment_id}
+            'last_check_status': state.archive_check_status, 'linked_assessment_id': state.archive_assessment_id, **counts}
 
 
 def _url_host_pattern(name, subtree=False):
@@ -195,6 +246,12 @@ def _host_q(field, name, subtree=False):
     return Q(**{f'{field}__iexact': name})
 
 
+def _hygiene_host_q(name, subtree=False):
+    """A hygiene finding of the host ``name``: its own name, or (a certificate or TLS finding) one of its endpoints, ``name:port``."""
+    below = r'([^:]*\.)?' if subtree else ''
+    return _host_q('host', name, subtree) | Q(host__iregex=r'^' + below + re.escape(name) + r':[0-9]+$')
+
+
 def host_group_names(project, name):
     """``name`` and every other name of this project that points at the same addresses: the Hosts page shows them as ONE host, so
     removing only the name on display makes the next name take its place and the host seems not to go."""
@@ -207,11 +264,57 @@ def host_group_names(project, name):
     return sorted(names)
 
 
-def _purge(project, name, subtree=False):
+DRAIN_BATCH = 500  # host copies per transaction in _drain_host (each takes its findings, matches and endpoints with it)
+
+
+def _drain_host(project, name, subtree=False):
+    """The heavy part of ``_purge`` first, in bounded steps: the host's copies in every scan (``name``, any case; with ``subtree`` every
+    name under it too), ``DRAIN_BATCH`` at a time, each batch in its own transaction with the notes and audit trail of the findings and
+    matches it takes, exactly as ``_purge`` removes them; with ``subtree`` then the scan activity, tasks and runs of the targets it will
+    delete. A failure part way keeps what was done, and the same removal run again finishes it. Returns the counts ``_purge`` reports
+    for what it removed (hosts, findings, CVE matches, endpoints), so the caller's totals do not change."""
+    from cveFeed import bounded_delete
+    from cveFeed.models import CVEMatch, FindingAuditEvent, FindingComment
+    from startScan.models import EndPoint, ScanActivity, SubScan, Subdomain, Vulnerability
+    from agentapi.models import SentinelTask, StageRun
+    from targetApp.models import Domain
+    subs = Subdomain.objects.filter(target_domain__project=project).filter(_host_q('name', name, subtree))
+
+    def notes_first(ids):
+        # the findings _purge counts and clears the notes of: on these copies, plus the ones this batch takes through an endpoint (on
+        # a later batch's copy, or a bare-host finding _purge would find by its URL), which a later step would no longer see
+        vuln_ids = list(Vulnerability.objects.filter(
+            Q(subdomain_id__in=ids) | Q(endpoint__subdomain_id__in=ids, subdomain__in=subs)
+            | Q(endpoint__subdomain_id__in=ids, subdomain__isnull=True, target_domain__project=project,
+                http_url__iregex=_url_host_pattern(name, subtree))).values_list('id', flat=True))
+        match_ids = list(CVEMatch.objects.filter(subdomain_id__in=ids).values_list('id', flat=True))
+        endpoints = EndPoint.objects.filter(subdomain_id__in=ids).count()
+        for kind, finding_ids in (('vulnerability', vuln_ids), ('match', match_ids)):
+            for model in (FindingComment, FindingAuditEvent):
+                model.objects.filter(project=project, finding_kind=kind, finding_id__in=finding_ids).delete()
+        return {'hosts': len(ids), 'findings': len(vuln_ids), 'cve_matches': len(match_ids), 'endpoints': endpoints}
+    done = bounded_delete.drain(subs, DRAIN_BATCH, before=notes_first, attempts=PURGE_ATTEMPTS, pause=PURGE_RETRY_SECONDS)
+    if subtree:  # rows nothing counts, under the scans of the targets _purge deletes whole; the counted rows stay for _purge
+        domain_ids = list(Domain.objects.filter(project=project).filter(_host_q('name', name, True)).values_list('id', flat=True))
+        bounded_delete.drain_below(Domain, domain_ids, only=(ScanActivity, SubScan, StageRun, SentinelTask),
+                                   attempts=PURGE_ATTEMPTS, pause=PURGE_RETRY_SECONDS)
+    return {key: done.get(key, 0) for key in ('hosts', 'findings', 'cve_matches', 'endpoints')}
+
+
+def _drain_settled(drain):
+    """``drain()``, with the same answer as ``_purge_settled`` when scans kept writing through every retry of a batch."""
+    from django.db import IntegrityError
+    try:
+        return drain()
+    except IntegrityError:
+        raise ApiError(409, 'scans of this host kept writing results while it was being removed; try again in a minute') from None
+
+
+def _purge(project, name, subtree=False, drained=None):
     """Remove everything recorded for the host ``name`` in ``project`` (exact name, any case; with ``subtree`` also every name under
-    it). Returns the counts."""
+    it). Returns the counts, plus ``drained`` (what ``_drain_host`` already removed for it)."""
     from cveFeed.models import (AssetChange, CVEMatch, DiscoveryEvent, FindingAuditEvent, FindingComment, HostArchive, HostAssessment,
-                                HostInventory, HostLabel, HostProfile, HostScreenshot, HostState, HygieneFinding, JavaRuntime, ProbeObservation, RdpScreenshot,
+                                HostInventory, HostNote, HostLabel, HostProfile, HostScreenshot, HostState, HygieneFinding, JavaRuntime, ProbeObservation, RdpScreenshot,
                                 RouteAuth, ServiceFeature, TlsCertificate, Triage)
     from startScan.models import EndPoint, ScanHistory, Subdomain, Vulnerability
     from targetApp.models import Domain
@@ -223,7 +326,7 @@ def _purge(project, name, subtree=False):
     counts['hosts'] = len(sub_ids)
     vuln_ids = list(Vulnerability.objects.filter(subdomain_id__in=sub_ids).values_list('id', flat=True))
     match_ids = list(CVEMatch.objects.filter(subdomain_id__in=sub_ids).values_list('id', flat=True))
-    hygiene = HygieneFinding.objects.filter(_host_q('host', name, subtree), domain__project=project)
+    hygiene = HygieneFinding.objects.filter(_hygiene_host_q(name, subtree), domain__project=project)
     hygiene_ids = list(hygiene.values_list('id', flat=True))
     counts['findings'] = len(vuln_ids)
     counts['cve_matches'] = len(match_ids)
@@ -253,13 +356,16 @@ def _purge(project, name, subtree=False):
             ('probes', ProbeObservation, {'project': project}), ('java_runtimes', JavaRuntime, {'project': project}),
             ('archives', HostArchive, {'project': project}),
             ('screenshots', RdpScreenshot, {'project': project}), ('web_screenshots', HostScreenshot, {'project': project}),
-            ('assessments', HostAssessment, {'project': project}),
+            ('assessments', HostAssessment, {'project': project}), ('host_notes', HostNote, {'project': project}),
             ('certificates', TlsCertificate, {'domain__project': project}),
             ('service_features', ServiceFeature, {'domain__project': project}),
             ('hygiene', HygieneFinding, {'domain__project': project}),
             ('events', DiscoveryEvent, {'domain__project': project})):
-        counts[label] = model.objects.filter(_host_q('host', name, subtree), **flt).delete()[0]
+        host_q = _hygiene_host_q(name, subtree) if model is HygieneFinding else _host_q('host', name, subtree)  # a certificate finding names name:443
+        counts[label] = model.objects.filter(host_q, **flt).delete()[0]
     scan_dirs = list(shot_files)  # relative to the results root, like the scan directories
+    for key, value in (drained or {}).items():
+        counts[key] += value
     counts['target_deleted'], counts['target_kept'] = False, False
     if subtree:  # a whole domain: the targets named like it or under it go with their scans, whatever else they held
         domains = list(Domain.objects.filter(project=project).filter(_host_q('name', name, True)))
@@ -285,7 +391,7 @@ def _purge(project, name, subtree=False):
 
 
 def _remove_result_dirs(names):
-    from reNgine.common_func import SCAN_RESULTS_ROOT, safe_remove_path
+    from cvengine.common_func import SCAN_RESULTS_ROOT, safe_remove_path
     for name in names:  # exact directory names, never a prefix match
         try:
             safe_remove_path(os.path.join(SCAN_RESULTS_ROOT, name), SCAN_RESULTS_ROOT)
@@ -308,7 +414,8 @@ def delete_host(ctx, slug, host, with_aliases=False):
     project, _ = get_project(ctx, slug, write=True)
     name = clean_host(host)
     names = host_group_names(project, name) if with_aliases else [name]
-    done = _purge_settled(lambda: [_purge(project, n) for n in names])
+    drained = _drain_settled(lambda: [_drain_host(project, n) for n in names])
+    done = _purge_settled(lambda: [_purge(project, n, drained=d) for n, d in zip(names, drained)])
     counts = _sum_counts(c for c, _ in done)
     _remove_result_dirs([d for _, dirs in done for d in dirs])
     from cveFeed.admin_api import audit
@@ -489,11 +596,13 @@ def exclude_host(ctx, slug, host, reason='', include_subdomains=False, with_alia
             if n == name:
                 reason_kept = exclusion.reason
 
+    drained = _drain_settled(lambda: {(n, p.pk): _drain_host(p, n, subtree) for n in names for p in projects})
+
     def purge():
         per_project, scan_dirs = {}, []
         for n in names:
             for p in projects:
-                counts, dirs = _purge(p, n, subtree)
+                counts, dirs = _purge(p, n, subtree, drained=drained[(n, p.pk)])
                 scan_dirs += dirs
                 if any(v for v in counts.values()):
                     per_project.setdefault(p.slug, []).append(counts)
@@ -529,7 +638,8 @@ def list_excluded_addresses(ctx, slug, host=None):
     from cveFeed import exclusions
     project, _ = get_one_project(ctx, slug)
     if project.org_id is None:
-        return {'organization': None, 'results': []}
+        from cveFeed import self_exclusion
+        return {'organization': None, 'results': [], 'this_server': self_exclusion.summary()}
     out = {'organization': project.org.slug, **excluded_addresses.list_rows(project.org_id)}
     if host:
         if not isinstance(host, str) or len(host) > 500:

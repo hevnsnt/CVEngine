@@ -56,6 +56,7 @@ test('the pages that were reported (AI usage, Sentinels) and the other polled re
 const UNKEYED_DISCLOSURES = {
   'admin.js': 'an administration list row, drawn once per page load',
   'app.js': 'the confirm dialogs (a dialog is not redrawn by a poll)',
+  'confirm-guide.js': 'the folded command list of a finding\'s confirm guide (confirm-more), drawn when the finding is opened, as it was in app.js',
   'explorer.js': 'the CVE explorer detail pane, drawn when a CVE is opened',
   'finding-glance.js': 'a fold inside a finding row; its summary is a fixed phrase and keep-state.js matches it by that text and position',
   'score-detail.js': 'the score detail pane, drawn when a finding is opened',

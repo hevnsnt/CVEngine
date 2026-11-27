@@ -144,7 +144,7 @@ def check_lanes(ctx):
     status = snapshot.lane_status(snap)
     silent = [p for p, lane in status.items() if lane['present'] is False]
     try:
-        from reNgine import lane_memory
+        from cvengine import lane_memory
         finished = lane_memory.recent_progress()
         running = lane_memory.in_flight()
         beating = lane_memory.alive()
@@ -207,7 +207,7 @@ def _lane_signs(absent):
     """What the silent lanes' own records say, for the log: the age of each one's liveness record, what it had in flight, the worst garbage collection it published."""
     out = {'beat': {}, 'gc_worst_s': {}}
     try:
-        from reNgine import lane_memory
+        from cvengine import lane_memory
         now = time.time()
         beats = lane_memory.beats(now)
         for p in absent:
@@ -282,7 +282,7 @@ def check_hung(ctx, state=None):
     windows = dict((state.data or {}).get('windows') or {}) if state else {}
     hung, busy, notes = [], [], []
     try:
-        from reNgine import lane_memory
+        from cvengine import lane_memory
         # the record of a task counts only when the worker that wrote it is the one answering now (a restarted worker has another process id)
         pids = {p.removesuffix('_worker'): {work[n]['pid'] for n in lane['workers'] if n in (work or {}) and work[n].get('pid')} for p, lane in status.items()}
         running = lane_memory.in_flight(pids={k: v for k, v in pids.items() if v})
@@ -393,8 +393,8 @@ def release_pool_override(ctx, force_text=''):
             scan_concurrency.update({key: None}, SystemActor())  # the saved layer is cleared: the auto-tuner (or .env) decides again
             try:
                 scan_concurrency.apply_discovery()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception:  # noqa: BLE001 - the 30 second check resizes the worker later
+                logger.warning('watchdog: the discovery worker could not be resized after its pool override ended', exc_info=True)
     if not why:
         return None
     state.data = {k: v for k, v in (state.data or {}).items() if k != 'override'}
@@ -555,7 +555,7 @@ def held_task_ids(lanes=None):
     its messages, so a partial list is never a list of what nobody holds."""
     if not lanes:
         return None
-    from reNgine.celery import app
+    from cvengine.celery import app
     held = set()
     for call in ('active', 'reserved', 'scheduled'):
         found = getattr(app.control.inspect(timeout=snapshot.PING_SECONDS), call)()
@@ -761,12 +761,21 @@ def sentinel_watchdog_notice(now):
         return 0
 
 
+def _save_state(state):
+    """Write what a tick changes on a state row: every column but the rule's name and its switch, which only a person sets (``set_enabled``), so a
+    tick that read the row before a person switched the rule never writes the old switch back."""
+    state.save(update_fields=[f.name for f in state._meta.concrete_fields if f.name not in ('id', 'rule', 'enabled')])
+
+
 def _states():
+    """The state row of the watchdog and of each rule, read in one query (a row that does not exist yet is created)."""
     from cveFeed.models import WatchdogState
-    out = {}
-    for code in [ALL] + [r.code for r in RULES]:
-        out[code], _ = WatchdogState.objects.get_or_create(rule=code)
-    return out
+    codes = [ALL] + [r.code for r in RULES]
+    out = WatchdogState.objects.in_bulk(codes, field_name='rule')
+    for code in codes:
+        if code not in out:
+            out[code], _ = WatchdogState.objects.get_or_create(rule=code)
+    return {code: out[code] for code in codes}
 
 
 def event(rule, level, observation='', action='', result='', **detail):
@@ -784,22 +793,29 @@ def event(rule, level, observation='', action='', result='', **detail):
 
 
 def notice(rule, severity, title, detail, **facts):
-    """Open (or update) the one notice of this rule for App Admins (an AdminAlert, code ``watchdog_<rule>``). Never raises."""
+    """Open (or update) the one notice of this rule for App Admins (an AdminAlert, code ``watchdog_<rule>``). Never raises. Its digest is the
+    severity and the title without the numbers and times in it (``reviewer.plain_text``), and a dismissal is kept as the operations alerts keep
+    theirs (``reviewer.dismissal_holds``, ``reviewer.carried_dismissal``)."""
     try:
         import hashlib
 
+        from cveFeed import reviewer
         from cveFeed.models import AdminAlert
         code = 'watchdog_' + rule.lower()
-        digest = hashlib.sha1(f'{severity}|{title}'.encode()).hexdigest()[:20]
+        digest = hashlib.sha1(f'{severity}|{reviewer.plain_text(title)}'.encode()).hexdigest()[:20]
         now = timezone.now()
         alert = AdminAlert.objects.filter(code=code, resolved_at__isnull=True).first()
         if alert is None:
-            AdminAlert.objects.create(code=code, severity=severity, title=title[:200], detail=detail[:4000], facts=facts, digest=digest, first_seen=now, last_seen=now)
+            AdminAlert.objects.create(code=code, severity=severity, title=title[:200], detail=detail[:4000], facts=facts, digest=digest, first_seen=now, last_seen=now,
+                                      **reviewer.carried_dismissal(code, digest, severity, now))
         else:
+            fields = ['severity', 'title', 'detail', 'facts', 'digest', 'last_seen']
+            if reviewer.restamp_dismissal(alert, digest, hashlib.sha1(f'{severity}|{title}'.encode()).hexdigest()[:20]):
+                fields.append('dismissed_digest')
             alert.severity, alert.title, alert.detail, alert.facts, alert.last_seen = severity, title[:200], detail[:4000], facts, now
             if alert.digest != digest:
                 alert.digest = digest  # a dismissed notice returns when what it says changes
-            alert.save(update_fields=['severity', 'title', 'detail', 'facts', 'digest', 'last_seen'])
+            alert.save(update_fields=fields)
     except Exception:  # noqa: BLE001
         logger.warning('watchdog: could not write a notice', exc_info=True)
 
@@ -831,7 +847,8 @@ def prune_events(now):
 
 def _home():
     """The directory the web container shares with the host (``web/`` on the host): where every request file lives."""
-    return getattr(settings, 'BASE_DIR', '') or ''
+    from cveFeed.updater import host_dir
+    return host_dir() or ''
 
 
 def request_host_action(action, rule, now=None, home=None):
@@ -1093,7 +1110,7 @@ def _process_host_result(ctx):
                 state.actions = list(state.actions or [])[:-1]
                 event(rule.code, 'info', action=result.get('action', ''), result='The host stood aside: ' + detail + ' It is asked again when the stack is free.', request=result['id'])
                 _set(state, 'standing_down', 'The host stood aside: ' + detail)
-                state.save()
+                _save_state(state)
                 continue
             limit = host_limit(result)
             if limit:  # the host's own limit said no: nothing was tried, so nothing failed and nothing counts
@@ -1106,7 +1123,7 @@ def _process_host_result(ctx):
                 event(rule.code, 'info', action=result.get('action', ''), result='The host did not carry it out because of its own limit: ' + detail + ' Held, not a failed fix.', request=result['id'])
                 _set(state, 'held', text)
                 _hold_notice(rule, ctx, text)
-                state.save()
+                _save_state(state)
                 continue
             v = {**v, 'host_id': '', 'host_done_at': done.isoformat()}
             state.verify = v
@@ -1116,13 +1133,13 @@ def _process_host_result(ctx):
                     r5 = ctx.states['R5']
                     requested = datetime.fromisoformat(v['requested_at']).timestamp() if v.get('requested_at') else done.timestamp()
                     r5.data = {**(r5.data or {}), 'workers_recreated_before': max(requested, (r5.data or {}).get('workers_recreated_before') or 0)}
-                    r5.save()
+                    _save_state(r5)
                 state.verify_due = done + timedelta(seconds=rule.verify)
                 event(rule.code, 'action', action=result.get('action', ''), result='The host carried it out. ' + detail, request=result['id'])
             else:
                 state.verify_due = ctx.now  # check at once: the host refused or failed
                 event(rule.code, 'problem', action=result.get('action', ''), result='The host did not carry it out: ' + detail, request=result['id'])
-            state.save()
+            _save_state(state)
     clear_request_if_done(result)
 
 
@@ -1238,8 +1255,8 @@ def _expire_open_problem_notice(rule):
     try:
         from cveFeed.models import AdminAlert
         AdminAlert.objects.filter(code='watchdog_' + rule.code.lower(), resolved_at__isnull=True, severity__in=('warning', 'critical')).update(resolved_at=timezone.now())
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception:  # noqa: BLE001 - the next tick tries again; the notice stays open until then
+        logger.warning('watchdog: the open notice of rule %s could not be closed', rule.code, exc_info=True)
 
 
 def _alarm(signum, frame):
@@ -1296,8 +1313,8 @@ def tick(now=None, probes=None, limit=TICK_SECONDS, alarm=True):
 
 
 def _tick(now, probes, out):
-    try:  # the web container cannot publish its own memory from a Celery task: this tick runs in it (reNgine/container_signals.py); it only measures
-        from reNgine import container_signals
+    try:  # the web container cannot publish its own memory from a Celery task: this tick runs in it (cvengine/container_signals.py); it only measures
+        from cvengine import container_signals
         container_signals.publish('web', client=probes.redis() if probes else None, force=True)
     except Exception:  # noqa: BLE001
         logger.debug('watchdog: could not publish the web container memory', exc_info=True)
@@ -1308,8 +1325,8 @@ def _tick(now, probes, out):
     if killed() or all_state.enabled is False:
         for rule in RULES:
             _set(states[rule.code], 'off', 'Switched off.' + (' (CVENGINE_WATCHDOG=0)' if killed() else ''))
-            states[rule.code].save()
-        all_state.save()
+            _save_state(states[rule.code])
+        _save_state(all_state)
         out['skipped'] = 'switched off'
         return out
     snap = snapshot.collect(probes)
@@ -1328,11 +1345,11 @@ def _tick(now, probes, out):
             _set(states[rule.code], 'unknown', 'The rule failed to run (see the web log).')
         if (states[rule.code].verify or {}) != before and states[rule.code].verify:
             out['acted'].append(rule.code)
-        states[rule.code].save()
+        _save_state(states[rule.code])
     snap['stand_down'] = stand
     all_state.data = {**(all_state.data or {}), 'snapshot': json.loads(snapshot.dumps(snap))}
     all_state.status, all_state.status_text = 'ok', 'Ticking.'
-    all_state.save()
+    _save_state(all_state)
     try:
         client = probes.redis() if probes else snapshot.Probes().redis()
         client.set('cvengine:watchdog:snapshot', snapshot.dumps(snap), ex=300)

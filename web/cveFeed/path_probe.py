@@ -116,7 +116,7 @@ def check():
     are judged apart and kept as that Sentinel's own verdict (``os_detection.record_sentinel_path``): ``vantage`` ``sentinels``, ``sentinels``
     ``{agent id: state}``, and the install-wide verdict is left alone. It never runs here."""
     from agentapi import sentinel_dispatch
-    from reNgine.resources import ScannerUnavailable
+    from cvengine.resources import ScannerUnavailable
     targets = candidates()
     if len(targets) < MIN_HOSTS:
         return {'state': 'unknown', 'why': 'too few fingerprinted hosts to measure with', 'hosts': len(targets)}

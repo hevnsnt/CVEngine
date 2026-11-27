@@ -534,3 +534,50 @@ class OrgAllProjectsTests(AllProjectsBase):
 	def test_it_never_widens_what_the_caller_may_see(self):
 		c = client_for(self.ann)  # Acme Corp only
 		self.assertEqual(self.hosts(c, '?org=widgets-inc'), {'acme', 'widgets'})
+
+
+class SearchByNamesTests(AllProjectsBase):
+	"""``names`` on search_hosts (the Overview's threat links): exactly the hosts listed, by exact name in any case, never past what the caller may read."""
+
+	def hosts(self, user, slug, **params):
+		page = svc.search_hosts(self.ctx(user), slug, params)
+		return page['count'], sorted((h.get('project', slug), h['host']) for h in page['results'])
+
+	def test_an_exact_name_in_any_case_and_never_a_part_of_one(self):
+		self.assertEqual(self.hosts(self.solo, 'acme', names='ONLY.Acme.example.com'), (1, [('acme', 'only.acme.example.com')]))
+		self.assertEqual(self.hosts(self.solo, 'acme', names='acme.example.com')[0], 0)  # host: finds both hosts that contain it; names is exact
+		self.assertEqual(self.hosts(self.solo, 'acme', names=f'only.acme.example.com, {SHARED}')[0], 2)
+
+	def test_a_bare_name_in_all_projects_is_that_name_in_every_project_the_caller_reads(self):
+		self.assertEqual(self.hosts(self.ann, '_all', names=SHARED), (2, [('acme', SHARED), ('widgets', SHARED)]))
+		self.assertEqual(self.hosts(self.solo, '_all', names=SHARED), (1, [('acme', SHARED)]))
+
+	def test_a_project_and_a_name_is_that_projects_host_only(self):
+		self.assertEqual(self.hosts(self.ann, '_all', names=f'widgets/{SHARED},acme/only.acme.example.com'),
+						 (2, [('acme', 'only.acme.example.com'), ('widgets', SHARED)]))
+
+	def test_a_project_the_caller_cannot_read_matches_nothing(self):
+		self.assertEqual(self.hosts(self.solo, '_all', names=f'widgets/{SHARED},gadgets/only.gadgets.example.com')[0], 0)
+		self.assertEqual(self.hosts(self.ann, '_all', names=f'gadgets/{SHARED},acme/{SHARED}'), (1, [('acme', SHARED)]))
+		self.assertEqual(self.hosts(self.solo, 'acme', names=f'widgets/{SHARED}')[0], 0)  # in one project's view, another project's host is nothing
+		self.assertEqual(self.hosts(self.solo, 'acme', names=f'acme/{SHARED}')[0], 1)
+		with self.assertRaises(ApiError) as cm:
+			svc.search_hosts(self.ctx(self.solo), 'widgets', {'names': SHARED})
+		self.assertEqual(cm.exception.status, 404)
+
+	def test_names_and_the_search_both_apply_and_the_counts_follow(self):
+		self.assertEqual(self.hosts(self.ann, '_all', names=f'acme/{SHARED},acme/only.acme.example.com', q='port:443'), (1, [('acme', SHARED)]))
+		everything = svc.search_hosts(self.ctx(self.ann), '_all', {})  # first: the shared heat counts of the unfiltered search are built and kept
+		page = svc.search_hosts(self.ctx(self.ann), '_all', {'names': f'acme/{SHARED},widgets/{SHARED}'})
+		self.assertEqual((sum(everything['facets']['heat'].values()), sum(page['facets']['heat'].values())), (4, 2))  # the listed hosts' counts, never the kept ones
+		self.assertEqual(svc.search_hosts(self.ctx(self.ann), '_all', {'names': f'acme/{SHARED}', 'page_size': 0})['count'], 1)
+
+	def test_the_cap_and_what_is_not_a_name(self):
+		too_many = ','.join(f'h{i}.example.com' for i in range(svc.MAX_HOST_NAMES + 1))
+		for bad in (too_many, 'bad slug!/x.example.com', 'acme/', 'acme/' + 'x' * 300):
+			with self.assertRaises(ApiError) as cm:
+				svc.search_hosts(self.ctx(self.ann), '_all', {'names': bad})
+			self.assertEqual(cm.exception.status, 400, bad[:40])
+		at_cap = ','.join([SHARED] + [f'h{i}.example.com' for i in range(svc.MAX_HOST_NAMES - 1)])
+		self.assertEqual(self.hosts(self.ann, 'acme', names=at_cap)[0], 1)
+		self.assertEqual(self.hosts(self.ann, 'acme', names=' , ')[0], 2)  # no name at all is no filter

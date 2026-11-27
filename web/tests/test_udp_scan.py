@@ -12,7 +12,7 @@ from agentapi.auth import create_token
 from cveFeed import hygiene, ledger, port_inventory, udp_scan
 from cveFeed.models import AgentActivity, HostExclusion, HygieneFinding, ScanControl, ServiceRun
 from dashboard.models import Org, Project, ProjectMembership
-from reNgine import resources
+from cvengine import resources
 from scanEngine.models import EngineType
 from startScan.models import OPEN_PORT_STATES, IpAddress, Port, ScanHistory, Subdomain, open_ports, open_services
 from targetApp.models import Domain
@@ -221,7 +221,7 @@ class PortKeyTests(UdpBase):
 		self.assertEqual(ip.ports.get(number=11211, protocol='udp').state, 'open')
 
 	def test_update_or_create_port_finds_the_tcp_row(self):
-		from reNgine.common_func import update_or_create_port
+		from cvengine.common_func import update_or_create_port
 		ip = self.ip('192.0.2.10')
 		udp_scan.record_run(ip, self.host_of(ANSWERED, '192.0.2.10'))
 		port, created = update_or_create_port(161, service_name='http', ip=ip)
@@ -611,7 +611,7 @@ class GatingTests(UdpBase):
 		self.ip('192.0.2.1', cdn=True)
 		self.ip('192.0.2.2', name=False)  # attached to no host
 		self.ip('10.1.2.3')  # private
-		self.ip('127.0.0.1')  # always blocked
+		self.ip('127.0.0.1', name='lo.udp.test')  # always blocked (its own host: h1 is taken, a host is one row per scan)
 		self.ip('198.51.100.7', name='gone.udp.test')
 		HostExclusion.objects.create(org=self.org, host='gone.udp.test')
 		orphan = Domain.objects.create(name='orphan.test', insert_date=timezone.now())  # no project
@@ -620,6 +620,15 @@ class GatingTests(UdpBase):
 		self.assertIsNone(udp_scan.pick())
 		with mock.patch.dict(os.environ, {'CVENGINE_ALLOW_PRIVATE_TARGETS': '1'}):
 			self.assertEqual(udp_scan.pick().address, '10.1.2.3')
+
+	def test_an_address_past_the_first_page_is_reached_when_the_first_page_was_all_swept_lately(self):
+		first = [self.ip(f'192.0.2.{n}', name=f'h{n}.udp.test') for n in range(10, 13)]
+		for ip in first:
+			ledger.record(udp_scan.SERVICE, [udp_scan.asset_of(ip)])  # swept just now: not due
+		last = self.ip('192.0.2.40', name='late.udp.test')
+		with mock.patch.object(udp_scan, 'MAX_ELIGIBLE', 2):
+			self.assertEqual([ip.pk for ip in udp_scan.due(limit=2)], [last.pk])  # two per page: the due one is on the second page
+			self.assertEqual([ip.pk for ip in udp_scan.due(limit=2, want=0)], [])  # nothing wanted past the first page: it stops there
 
 	def test_a_project_whose_bounty_engagement_has_not_confirmed_automated_testing_is_not_scanned(self):
 		from cveFeed.models import BountyAsset, BountyEngagement, BountyProgram
@@ -713,3 +722,17 @@ class RetestTests(UdpBase):
 		with mock.patch('cveFeed.tasks.retest_hosts.delay') as delay:
 			udp_scan.queue_retests(ip, [123], self.project.id)
 		delay.assert_called_once_with(self.domain.id, ['edge.udp.test'])
+
+	def test_the_ledger_is_read_once_per_target_not_once_per_name(self):
+		"""Hosts sharing the address are judged against one read of the retest ledger; a host re-tested today is still left out."""
+		from cveFeed import retest
+		ip = self.ip('192.0.2.10', name='a.udp.test')
+		for name in ('b.udp.test', 'c.udp.test', 'd.udp.test'):
+			Subdomain.objects.create(scan_history=self.scan, target_domain=self.domain, name=name).ip_addresses.add(ip)
+		ledger.record(retest.RETEST_SERVICE, ['c.udp.test'], self.project.id)
+		seen = []
+		with mock.patch.object(ledger, 'fresh', wraps=ledger.fresh) as fresh:
+			queued = udp_scan.queue_retests(ip, [123], self.project.id, pipeline=lambda d, n: seen.append((d, n)))
+		self.assertEqual(fresh.call_count, 1)
+		self.assertEqual(queued, ['a.udp.test', 'b.udp.test', 'd.udp.test'])
+		self.assertEqual(seen, [(self.domain.id, ['a.udp.test', 'b.udp.test', 'd.udp.test'])])

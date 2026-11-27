@@ -134,7 +134,7 @@ log_once() {
   log "$*"
 }
 
-# The maintenance page (see config/nginx/rengine.conf): the proxy answers 503 with web/static/cve/maintenance.html, from its own container, for as
+# The maintenance page (see config/nginx/cvengine.conf): the proxy answers 503 with web/static/cve/maintenance.html, from its own container, for as
 # long as config/nginx/state/maintenance exists, and says "the update did not finish" when config/nginx/state/maintenance-failed exists too.
 # Set BEFORE anything the running containers can read is changed, because ./web is a bind mount: the old image would run the new code. A
 # flag that cannot be written stops the update before anything changes (a page that cannot be shown is not a safe window to change files in).
@@ -321,13 +321,19 @@ deploy_builtin() {
   if listed=$("${compose[@]}" config --services 2>/dev/null); then
     if grep -qx proxy <<<"$listed"; then services+=(proxy); fi
   else
+    listed=''
     services+=(proxy)
   fi
   DEPLOY_STAGE=build
   phase applying "$DEPLOY_STAGE"
-  SENTINEL_SHA=$(scripts/sentinel-ref.sh 2>/dev/null) || SENTINEL_SHA=''  # the newest Sentinel library, resolved now (docs/UPDATES.md)
-  export SENTINEL_SHA
   "${compose[@]}" build web celery celery-beat || return 1
+  # a checkout whose image runs as its own account hands it its files first (scripts/app-ownership.sh); older checkouts have no such service
+  if grep -qx ownership <<<"$listed" && [ -f scripts/app-ownership.sh ]; then
+    . scripts/app-ownership.sh
+    local owned
+    owned=$(cvengine_app_ownership "${compose[@]}") || { log "$owned"; return 1; }
+    log "$owned"
+  fi
   DEPLOY_STAGE=datastores
   phase applying "$DEPLOY_STAGE"
   if [ -f scripts/redis-password.sh ] && . scripts/redis-password.sh && cvengine_ensure_redis_password "$(cvengine_compose_env_file "${compose[@]}")"; then
@@ -344,10 +350,17 @@ deploy_builtin() {
   for _ in $(seq 1 60); do "${compose[@]}" exec -T db pg_isready -q >/dev/null 2>&1 && break; sleep 1; done
   DEPLOY_STAGE=migrate
   phase applying "$DEPLOY_STAGE"
-  "${compose[@]}" run --rm --no-deps --entrypoint python3 web manage.py migrate --noinput || return 1
+  # as the database's owner role: in the one-off migrate service where the checkout has one (the only container with the owner's password), else
+  # in a one-off web container, as the checkouts older than scripts/update-deploy.sh did
+  if grep -qx migrate <<<"$listed"; then
+    "${compose[@]}" run --rm --no-deps migrate python3 manage.py migrate --noinput || return 1
+  else
+    "${compose[@]}" run --rm --no-deps -e CVENGINE_DB_ROLE=owner --entrypoint python3 web manage.py migrate --noinput || return 1
+  fi
   DEPLOY_STAGE=migrated
   phase applying "$DEPLOY_STAGE"
-  "${compose[@]}" run --rm --no-deps --entrypoint python3 web manage.py collectstatic --noinput || return 1
+  # in celery: it writes the static volume in every layout (web mounts it read-only where the image runs as its own account)
+  "${compose[@]}" run --rm --no-deps --entrypoint python3 celery manage.py collectstatic --noinput || return 1
   "${compose[@]}" up -d --no-deps --force-recreate "${services[@]}" || return 1
   verify_running "${services[@]}" || return 1
   # The built-in scanner (scripts/scanner.sh) where the checkout has it: its pinned image, recreated on its own network with the Tailscale sidecar
@@ -549,6 +562,15 @@ if [ "$SWITCH" = 0 ] && ! git merge-base --is-ancestor HEAD "$SHA" && ! git merg
   clear_approval
   exit 1
 fi
+# A tracked file changed on this server to exactly what the approved commit has (a fix applied by hand before it was released, such as one line of
+# the proxy configuration) is no local change to keep: it is put back to this checkout's version, and the fast-forward brings the same content.
+# Anything else stays a local change, and the update refuses it below.
+while IFS= read -r changed; do
+  [ -n "$changed" ] && [ -f "$changed" ] && [ ! -L "$changed" ] || continue
+  if git cat-file -e "$SHA:$changed" 2>/dev/null && [ "$(git hash-object -- "$changed")" = "$(git rev-parse "$SHA:$changed")" ]; then
+    git checkout -q -- "$changed" && log "$changed was changed on this server to what $SHA has; it is put back so the update brings the same content"
+  fi
+done < <(git diff --name-only 2>/dev/null)
 DIRTY=$(git status --porcelain --untracked-files=no | grep -vE '^.. "?\.env"?$' || true)
 if [ -n "$DIRTY" ]; then
   names=$(printf '%s\n' "$DIRTY" | sed 's/^...//' | head -n 5 | paste -sd, -)

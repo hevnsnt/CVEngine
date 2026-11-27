@@ -8,13 +8,17 @@ from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.db import transaction
 from django.http import JsonResponse
+from cvengine.usage_stamps import durable_commit
 from django.http.response import HttpResponseBase
 
 from agentapi import agent_broker as broker
 from agentapi import db_timeout, storage_safe
 from agentapi import host_manage as hosts
 from agentapi import host_export
+from agentapi import host_export_one
 from agentapi import host_review_api as hostreview
+from agentapi import host_notes
+from agentapi import report_subscriptions as subscriptions
 from agentapi import saved_search as saved
 from agentapi import inventory
 from agentapi import sentinel_broker as sentinels
@@ -33,12 +37,17 @@ from agentapi import secrets_api
 from agentapi import internal_ranges, sentinel_settings, tailscale
 from agentapi import auth
 from tenancy import roles
-from reNgine import schema_guard
+from cvengine import schema_guard
 from agentapi.auth import create_token
 from tenancy import audit
 from agentapi.services import ApiError, Ctx
 
 logger = logging.getLogger(__name__)
+
+
+def _source(ctx):
+    """Where a note written through this API came from: 'rest' with an API token, 'ui' for the signed-in web interface (cveFeed.notes)."""
+    return 'rest' if ctx.token is not None else 'ui'
 
 
 def _body(request):
@@ -115,7 +124,8 @@ def tokens_create(request, ctx, **_):
 
 def tokens_revoke(request, ctx, token_id, **_):
     _session_only(request)
-    updated = ctx.user.api_tokens.filter(id=token_id).update(revoked=True)
+    with durable_commit():  # a revocation a crash could undo would let the token in again
+        updated = ctx.user.api_tokens.filter(id=token_id).update(revoked=True)
     if not updated:
         raise ApiError(404, 'token not found')
     broker.release_for_tokens([token_id])
@@ -164,7 +174,7 @@ def _sentinel_instance_enroll(request, ctx, **_):
 
 
 def _sentinel_bootstrap(request, ctx, **_):
-    from reNgine.client_ip import client_ip
+    from cvengine.client_ip import client_ip
     sentinels.limit_address(client_ip(request))  # before the body is read: this call has no token, so the address is what is counted
     out = sentinels.bootstrap(_body(request))
     return out, 201
@@ -196,7 +206,7 @@ def _revise_generated(request, ctx, generated_id):
 
 ROUTES = [
     ('GET', r'me', 'Who am I: user, projects and roles, token info', lambda r, c, **k: svc.me(c)),
-    ('GET', r'system/status', 'Instance status: overall health with problems and notes, scanning pause, update phase, inventory counts per project (targets, hosts, exposed hosts, scans running/queued, open findings), and for an App Admin the database and broker, queue depths, workers, schedules, memory, disk, CVE feed, AI budget and auto-tuning (mode, last run, last decisions, why each setting was not raised)',
+    ('GET', r'system/status', 'Instance status: overall health with problems and notes, scanning pause, update phase, inventory counts per project (targets, hosts, hosts with open findings, scans running/queued, open findings), and for an App Admin the database and broker, queue depths, workers, schedules, memory, disk, CVE feed, AI budget and auto-tuning (mode, last run, last decisions, why each setting was not raised)',
      lambda r, c, **k: system_status.system_status(c)),
     ('GET', r'projects', 'Projects visible to the caller', lambda r, c, **k: svc.list_projects(c)),
     ('GET', r'engines', 'Scan engines (legacy labels: every scan runs the same fixed pipeline)', lambda r, c, **k: svc.list_engines(c)),
@@ -240,7 +250,7 @@ ROUTES = [
      'Scan specific hosts of a target now (nmap, exposure check, nuclei, CVE correlation) without a bbot run; body {hosts: [...]}',
      lambda r, c, slug, target_id, **k: (svc.rescan_hosts(c, slug, int(target_id), _body(r).get('hosts')), 202)),
     ('POST', r'projects/(?P<slug>[-\w]+)/targets/(?P<target_id>\d+)/scope',
-     'Set a target\'s scope_mode: auto (shared-domain list decides), host (exactly this host: no parent, no subdomains) or parent (parent domain is owned); body {scope_mode}',
+     'Set a target\'s scope_mode: auto (shared-domain list decides), host (exactly this host: no parent, no subdomains) or parent (parent domain is owned); body {scope_mode}. A token (any API token or MCP call) may only narrow it to host',
      lambda r, c, slug, target_id, **k: svc.set_target_scope(c, slug, int(target_id), _need(_body(r), 'scope_mode')[0])),
     ('POST', r'projects/(?P<slug>[-\w]+)/targets/(?P<target_id>\d+)/profile',
      'Set a target\'s alias (a short display name, up to 60 characters, one line) and/or note (free text, up to 1000 characters); body {alias, note}, any subset, an empty one clears it. Display only: the target\'s name is what is scanned',
@@ -251,14 +261,14 @@ ROUTES = [
      'Say whether a target\'s devices use their vendor\'s own private CA: when true an untrusted or self-signed chain on it is rated information; body {expect_private_ca: true|false}',
      lambda r, c, slug, target_id, **k: svc.set_target_private_ca(c, slug, int(target_id), _body(r).get('expect_private_ca'))),
     ('POST', r'projects/(?P<slug>[-\w]+)/targets/(?P<target_id>\d+)/discovery-mode',
-     'Set the mode discovery runs in whenever it starts on its own for a target: standard, deep, passive, or manual (never started automatically); body {discovery_mode}',
+     'Set the mode discovery runs in whenever it starts on its own for a target: standard, deep, passive, or manual (never started automatically); body {discovery_mode}. A token (any API token or MCP call) may only lower it (deep, standard, passive, manual)',
      lambda r, c, slug, target_id, **k: svc.set_target_discovery_mode(c, slug, int(target_id), _need(_body(r), 'discovery_mode')[0])),
     ('GET', r'projects/(?P<slug>[-\w]+)/targets/(?P<target_id>\d+)', 'One target',
      lambda r, c, slug, target_id, **k: svc.get_target(c, slug, int(target_id))),
     ('GET', r'projects/(?P<slug>[-\w]+)/scans', 'List scans (?status=running|queued|active|stalled|failed|finished|aborted; active is running and queued together)', lambda r, c, slug, **k: svc.list_scans(c, slug, r.GET)),
     ('POST', r'projects/(?P<slug>[-\w]+)/scans', 'Start a scan on a target (bbot discovery, then nmap and nuclei; engine_id is optional)',
-     lambda r, c, slug, **k: (svc.start_scan(c, slug, int(_need(_body(r), 'target_id')[0]),
-                                             int(_body(r)['engine_id']) if _body(r).get('engine_id') not in (None, '') else None), 202)),
+     lambda r, c, slug, **k: (svc.start_scan(c, slug, svc._int_param(_need(_body(r), 'target_id')[0], 'target_id'),
+                                             svc._int_param(_body(r)['engine_id'], 'engine_id') if _body(r).get('engine_id') not in (None, '') else None), 202)),
     ('POST', r'projects/(?P<slug>[-\w]+)/scans/stop', 'Stop every running and queued scan of the project',
      lambda r, c, slug, **k: svc.stop_scans(c, slug)),
     ('POST', r'projects/(?P<slug>[-\w]+)/scans/(?P<scan_id>\d+)/stop', 'Stop one running or queued scan',
@@ -273,7 +283,7 @@ ROUTES = [
      lambda r, c, slug, scan_id, **k: svc.list_scan_vulnerabilities(c, slug, int(scan_id), r.GET)),
     ('GET', r'projects/(?P<slug>[-\w]+)/scans/(?P<scan_id>\d+)/activity', 'Task timeline of a scan',
      lambda r, c, slug, scan_id, **k: svc.scan_activity(c, slug, int(scan_id), r.GET)),
-    ('GET', r'projects/(?P<slug>[-\w]+)/hosts', 'Inventory: hosts with IPs, ports, product/version, a score, highest score first (sort=name), and check_coverage (which of the checks that apply to the host have run)',
+    ('GET', r'projects/(?P<slug>[-\w]+)/hosts', 'Inventory: hosts with IPs, ports, product/version, a score, highest score first (sort=name), and check_coverage (which of the checks that apply to the host have run); archived hosts are left out unless archived=1 (include them) or archived=only',
      lambda r, c, slug, **k: svc.list_hosts(c, slug, r.GET)),
     ('POST', r'projects/(?P<slug>[-\w]+)/host-assessments', 'Queue a full, fresh assessment of one inventoried host; body {host_id}',
      lambda r, c, slug, **k: (svc.request_host_assessment(c, slug, _body(r).get('host_id')), 202)),
@@ -283,6 +293,11 @@ ROUTES = [
      lambda r, c, slug, assessment_id, **k: svc.get_host_assessment(c, slug, int(assessment_id))),
     ('POST', r'projects/(?P<slug>[-\w]+)/host-assessments/(?P<assessment_id>\d+)/stop', 'Stop a queued or running host assessment',
      lambda r, c, slug, assessment_id, **k: svc.stop_host_assessment(c, slug, int(assessment_id))),
+    ('GET', r'projects/(?P<slug>[-\w]+)/hosts/(?P<host_id>\d+)/notes', 'The notes on one stored host, oldest first, a page at a time',
+     lambda r, c, slug, host_id, **k: host_notes.list_host_notes(c, slug, host_id, r.GET)),
+    ('POST', r'projects/(?P<slug>[-\w]+)/hosts/(?P<host_id>\d+)/notes', 'Add a note to one stored host; body {text, observation (optional), evidence (optional)}',
+     lambda r, c, slug, host_id, **k: (host_notes.add_host_note(c, slug, host_id, _body(r).get('text'), _body(r).get('observation'),
+                                                                _body(r).get('evidence'), _source(c)), 201)),
     ('GET', r'projects/(?P<slug>[-\w]+)/hosts/(?P<host_id>\d+)/review', 'The newest AI review of one host: a verdict for each finding, the next step and its state, why a review failed or a step was held',
      lambda r, c, slug, host_id, **k: hostreview.get_host_review(c, slug, host_id)),
     ('POST', r'projects/(?P<slug>[-\w]+)/hosts/(?P<host_id>\d+)/review', 'Review now: queue the AI review of one host (409 while one is open, 429 at the daily limit, 503 with no AI provider)',
@@ -295,14 +310,16 @@ ROUTES = [
      lambda r, c, slug, host_id, **k: (svc.request_host_screenshot(c, slug, host_id), 202)),
     ('GET', r'projects/(?P<slug>[-\w]+)/hosts/(?P<host_id>\d+)/screenshots', 'The browser captures of one host: each page\'s outcome, reason, final URL, status and title, and what is queued',
      lambda r, c, slug, host_id, **k: svc.host_screenshots(c, slug, host_id)),
+    ('GET', r'projects/(?P<slug>[-\w]+)/hosts/(?P<host_id>\d+)/export', 'Export one host: a ZIP (host-<name>-<date>.zip, streamed) with host.json (the complete record: identity, services, web data, every finding with its triage, assignment and retest state, masked secrets, the full change history, inventory, probes and check coverage, the scans that saw it, screenshots manifest; versioned by its schema field), findings.csv, services.csv, history.csv, certificates.csv, inventory.csv, README.txt and screenshots/ (at most 60 images and 64 MB). Any role that can read the project; a host of another project is a 404. Never a secret value. Written to the audit log',
+     lambda r, c, slug, host_id, **k: host_export_one.response(c, slug, host_id)),
     ('POST', r'projects/(?P<slug>[-\w]+)/hosts/(?P<host>[^/]+)/profile', 'Set a host\'s asset information: body {owner, purpose, criticality: unknown|low|medium|high|critical, alias (a short display name, up to 60 characters, one line), note (free text, up to 1000 characters)}, any subset; an empty alias or note clears it',
      lambda r, c, slug, host, **k: hosts.update_host_profile(c, slug, host, owner=_body(r).get('owner'), purpose=_body(r).get('purpose'),
                                                              criticality=_body(r).get('criticality'), alias=_body(r).get('alias'), note=_body(r).get('note'))),
     ('POST', r'projects/(?P<slug>[-\w]+)/hosts/bulk', 'Archive, restore, pin or unpin many hosts; body {hosts: [names], action: archive|restore|pin|unpin, reason}. Up to 200; each host is independent',
      lambda r, c, slug, **k: hosts.host_bulk(c, slug, _body(r).get('hosts'), _body(r).get('action'), reason=_body(r).get('reason', ''))),
-    ('POST', r'projects/(?P<slug>[-\w]+)/hosts/(?P<host>[^/]+)/archive', 'Reversibly archive an inventoried host; body {reason}',
+    ('POST', r'projects/(?P<slug>[-\w]+)/hosts/(?P<host>[^/]+)/archive', 'Reversibly archive an inventoried host; body {reason}. Closes every open finding of the host and its other names in the project as fixed (findings_closed)',
      lambda r, c, slug, host, **k: hosts.host_archive(c, slug, host, 'archive', reason=_body(r).get('reason', ''))),
-    ('POST', r'projects/(?P<slug>[-\w]+)/hosts/(?P<host>[^/]+)/restore', 'Restore an archived host to active scheduling',
+    ('POST', r'projects/(?P<slug>[-\w]+)/hosts/(?P<host>[^/]+)/restore', 'Restore an archived host to active scheduling; reopens the findings archiving closed (findings_reopened)',
      lambda r, c, slug, host, **k: hosts.host_archive(c, slug, host, 'restore')),
     ('POST', r'projects/(?P<slug>[-\w]+)/hosts/(?P<host>[^/]+)/pin', 'Pin a host against archival; body {pinned: boolean}',
      lambda r, c, slug, host, **k: hosts.host_archive(c, slug, host, 'pin', pinned=_body(r).get('pinned'))),
@@ -321,7 +338,7 @@ ROUTES = [
      lambda r, c, slug, **k: hosts.list_exclusions(c, slug)),
     ('GET', r'projects/(?P<slug>[-\w]+)/excluded-addresses', 'The organization\'s do-not-scan address list (IPv4/IPv6 addresses and CIDR networks, stored normalised, with note, who and when): no Sentinel task is created, leased or kept for an address inside one, nor for a host that resolves into one. Read only; organization admins edit it in Administration. Add ?host=<name or address> to ask whether one is covered ({host, excluded, reason})',
      lambda r, c, slug, **k: hosts.list_excluded_addresses(c, slug, r.GET.get('host'))),
-    ('DELETE', r'projects/(?P<slug>[-\w]+)/exclusions/(?P<host>[^/]+)', 'Lift an exclusion so the organization can scan the host again (organization admin)',
+    ('DELETE', r'projects/(?P<slug>[-\w]+)/exclusions/(?P<host>[^/]+)', 'Lift an exclusion so the organization can scan the host again (organization admin, a person only: an API token is refused with 403, because a person excluded the host)',
      lambda r, c, slug, host, **k: hosts.remove_exclusion(c, slug, host)),
     ('POST', r'projects/(?P<slug>[-\w]+)/inventory', 'Post a host inventory report (inventory v1 JSON from scripts/inventory; the only route a reporter token can call). 201 for a machine\'s first report, 200 after; the answer says matched, created or unmatched, never which host',
      lambda r, c, slug, **k: inventory.post_report(c, slug, r)),
@@ -337,7 +354,7 @@ ROUTES = [
      lambda r, c, slug, inventory_id, **k: inventory.delete_inventory(c, slug, int(inventory_id))),
     ('GET', r'projects/(?P<slug>[-\w]+)/hosts/(?P<host>[^/]+)/inventory', 'The host inventory report tied to a host (newest if several): OS, packages, patches, listening services, with its age and whether it is stale',
      lambda r, c, slug, host, **k: inventory.get_inventory(c, slug, host=host, params=r.GET)),
-    ('GET', r'projects/(?P<slug>[-\w]+)/search', 'Search hosts: words, tech: (which hosts run a product, from every source and under any of its names, a platform through what runs on it; @unknown, @known or a release after @: tech:php@unknown, tech:wordpress@7.1), port:, product:, service:, os:, cve:, ip: (CIDR), host:, vuln:, sev:, auth:, sensitive:, secret:, zombie:, country:, java: (java:17, java:17.0.9, java:8u392, a vendor or a source; any and unknown are tech:java and tech:java@unknown), component:, runtime: and vsource: (what the version sources of the host state: component:grafana, runtime:python@3.8, vsource:prometheus-metrics), comma for OR within one filter (port:80,443), -negation; sorted by score (sort=name); heat=fire|smoke|ice|clean|unscanned narrows the page, facets.heat always counts every value; facets=port,product,tech,os,country (facet_size=10) adds the same whole-match counts for those',
+    ('GET', r'projects/(?P<slug>[-\w]+)/search', 'Search hosts: words, tech: (which hosts run a product, from every source and under any of its names, a platform through what runs on it; @unknown, @known or a release after @: tech:php@unknown, tech:wordpress@7.1), port:, product:, service:, os:, cve:, ip: (CIDR), host:, vuln:, sev:, auth:, sensitive:, secret:, zombie:, country:, java: (java:17, java:17.0.9, java:8u392, a vendor or a source; any and unknown are tech:java and tech:java@unknown), component:, runtime: and vsource: (what the version sources of the host state: component:grafana, runtime:python@3.8, vsource:prometheus-metrics), comma for OR within one filter (port:80,443), -negation; sorted by score (sort=name); heat=fire|smoke|ice|clean|unscanned narrows the page, facets.heat always counts every value; facets=port,product,tech,os,country (facet_size=10) adds the same whole-match counts for those; names=a.example,b.example (or acme/a.example in _all) keeps only those hosts, by exact name, at most 200; archived hosts are left out unless archived=1 (include them) or archived=only (the archived hosts alone)',
      lambda r, c, slug, **k: svc.search_hosts(c, slug, r.GET)),
     ('GET', r'projects/(?P<slug>[-\w]+)/hosts/export', 'Download every discovered host of the project as a file to hand to a penetration testing company, streamed with no row cap: ?format=csv|txt (default csv: host, IP addresses, open TCP and UDP ports, services, web URLs, project, organization, target, first and last seen; no findings, notes or owners. txt: every host name then every IP address, unique and sorted, for nmap -iL), ?scope=external|all (default external: leaves out hosts and addresses that are internal or private), ?archived=0|1 (default 0). Hosts the organization removed and excluded are never listed. The answer carries X-Export-Hosts (the number of hosts) and is written to the audit log',
      lambda r, c, slug, **k: host_export.response(c, r.GET, slug=slug)),
@@ -367,15 +384,15 @@ ROUTES = [
      lambda r, c, slug, **k: svc.list_changes(c, slug, r.GET)),
     ('GET', r'projects/(?P<slug>[-\w]+)/activity-days', 'Exact per-day counts for the dashboard Activity card: new findings (status=all rules of the findings list) by heat tier and type, and inventory changes, for the last days (default 90, at most 366) in tz (IANA name, default UTC); series=findings,changes,scans picks which (scans: started per day, for the Scans page); totals are the sum of the days shown',
      lambda r, c, slug, **k: svc.activity_days(c, slug, r.GET)),
-    ('GET', r'projects/(?P<slug>[-\w]+)/stats/history', 'Daily snapshots of hosts, exposed hosts, open findings by severity, CVE matches by heat, fixed count and mean days to fix, oldest first (?days=90, capped at 365)',
+    ('GET', r'projects/(?P<slug>[-\w]+)/stats/history', 'Daily snapshots of hosts, hosts with open findings, open findings by severity, CVE matches by heat, fixed count and mean days to fix, oldest first (?days=90, capped at 365)',
      lambda r, c, slug, **k: svc.stats_history(c, slug, r.GET)),
-    ('GET', r'projects/(?P<slug>[-\w]+)/activity', 'What the AI engine did, newest first: this project plus system-wide entries (?kind=). Each entry has a status: running, done, failed, waiting (back-pressure), notice (said once, nothing wrong), skipped (refused on purpose) or deferred (put off and retried); only failed is a failure',
+    ('GET', r'projects/(?P<slug>[-\w]+)/activity', 'What the AI engine did, newest first: this project, plus the system-wide entries (no project) for an App Admin only (?kind=). Each entry has a status: running, done, failed, waiting (back-pressure), notice (said once, nothing wrong), skipped (refused on purpose) or deferred (put off and retried); only failed is a failure',
      lambda r, c, slug, **k: svc.list_activity(c, slug, r.GET)),
     ('GET', r'projects/(?P<slug>[-\w]+)/secrets', 'Exposed secrets, worst first, masked: never a value (status=open|quiet|all|<status>, class=P|S|I, provider=, severity=, host=, q=, paged)',
      lambda r, c, slug, **k: secrets_api.list_secrets(c, slug, r.GET)),
     ('GET', r'projects/(?P<slug>[-\w]+)/secrets/settings', 'The project\'s secret validation switch: {validation: {enabled, blocked_reason, bounty_project, can_switch, by, at, attestation, rules}}',
      lambda r, c, slug, **k: secrets_api.secrets_settings(c, slug)),
-    ('PUT', r'projects/(?P<slug>[-\w]+)/secrets/settings', 'Org Admin or App Admin: switch secret validation on ({validation: {enabled: true, attestation}}: the attestation word for word) or off; never on for a bug bounty project. Audited',
+    ('PUT', r'projects/(?P<slug>[-\w]+)/secrets/settings', 'Org Admin or App Admin: switch secret validation on ({validation: {enabled: true, attestation}}: the attestation word for word) or off; never on for a bug bounty project. Audited. A token (any API token or MCP call) may switch validation off, never on',
      lambda r, c, slug, **k: secrets_api.set_secrets_settings(c, slug, _body(r))),
     ('GET', r'projects/(?P<slug>[-\w]+)/secrets/(?P<secret_id>\d+)', 'One secret: where it was seen, why it is rated as it is, how to fix it, the findings it came from. Never the value',
      lambda r, c, slug, secret_id, **k: secrets_api.get_secret(c, slug, secret_id)),
@@ -389,13 +406,13 @@ ROUTES = [
      lambda r, c, slug, **k: (svc.run_hygiene_checks(c, slug, _body(r).get('target_id')), 202)),
     ('GET', r'projects/(?P<slug>[-\w]+)/api-keys', 'External-service API keys configured for this project (never the secrets)',
      lambda r, c, slug, **k: svc.list_api_credentials(c, slug)),
-    ('PUT', r'projects/(?P<slug>[-\w]+)/api-keys/(?P<service>[-\w]+)', "Set this project's own key for a service",
+    ('PUT', r'projects/(?P<slug>[-\w]+)/api-keys/(?P<service>[-\w]+)', "Set this project's own key for a service; a person only: a token (any API token or MCP call) is refused with 403, removing a key stays open to it",
      lambda r, c, slug, service, **k: svc.set_api_credential(c, slug, service, _body(r))),
     ('DELETE', r'projects/(?P<slug>[-\w]+)/api-keys/(?P<service>[-\w]+)', "Remove this project's own key (its org's still applies)",
      lambda r, c, slug, service, **k: svc.delete_api_credential(c, slug, service)),
     ('GET', r'projects/(?P<slug>[-\w]+)/runzero', "runZero sync status: token saved, import on/off and its search, last sync, counts, last error (organization admin or App Admin)",
      lambda r, c, slug, **k: svc.get_runzero(c, slug)),
-    ('PUT', r'projects/(?P<slug>[-\w]+)/runzero', 'Set import_enabled (add unknown runZero addresses as targets) and/or search (runZero search limiting the import)',
+    ('PUT', r'projects/(?P<slug>[-\w]+)/runzero', 'Set import_enabled (add unknown runZero addresses as targets) and/or search (runZero search limiting the import). A token (any API token or MCP call) cannot switch the import on, or change the search while it is on',
      lambda r, c, slug, **k: svc.set_runzero(c, slug, _body(r))),
     ('POST', r'projects/(?P<slug>[-\w]+)/runzero/sync', 'Queue a runZero sync of this project now',
      lambda r, c, slug, **k: (svc.run_runzero_sync(c, slug), 202)),
@@ -417,13 +434,13 @@ ROUTES = [
      lambda r, c, slug, supplier_id, **k: suppliers.remove_supplier(c, slug, supplier_id)),
     ('GET', r'projects/(?P<slug>[-\w]+)/auth-credentials', 'Stored sign-ins (headers and cookie the scanners send) of the project, masked: names only, never a value (App Admin or organization admin; target_id=)',
      lambda r, c, slug, **k: authcheck.list_credentials(c, slug, r.GET)),
-    ('PUT', r'projects/(?P<slug>[-\w]+)/targets/(?P<target_id>\d+)/auth-credential', 'Create or replace the stored sign-in of a target or of one host of it: {label, scope: host|target, host? (with scope host), expires: 30|90|120|never, headers: [{name, secret}], cookie_secret?, clear_cookie?, origins?, allow_untrusted_certificate? (send the sign-in over a certificate that does not verify; off by default)}; values are write-only (App Admin or organization admin)',
+    ('PUT', r'projects/(?P<slug>[-\w]+)/targets/(?P<target_id>\d+)/auth-credential', 'Create or replace the stored sign-in of a target or of one host of it: {label, scope: host|target, host? (with scope host), expires: 30|90|120|never, headers: [{name, secret}], cookie_secret?, clear_cookie?, origins?, allow_untrusted_certificate? (send the sign-in over a certificate that does not verify; off by default), allow_external_sentinels? (also let an external Sentinel read it for a signed-in task; off by default)}; values are write-only (App Admin or organization admin). A person only: a token (any API token or MCP call) is refused with 403; deleting one stays open to it',
      lambda r, c, slug, target_id, **k: authcheck.set_credential(c, slug, target_id, _body(r))),
     ('DELETE', r'projects/(?P<slug>[-\w]+)/auth-credentials/(?P<credential_id>\d+)', 'Remove a stored sign-in (App Admin or organization admin)',
      lambda r, c, slug, credential_id, **k: authcheck.delete_credential(c, slug, credential_id)),
     ('GET', r'projects/(?P<slug>[-\w]+)/internal-ranges', 'The private networks this project declared internal: only a Sentinel inside one scans its addresses, this server never does (project administrators only)',
      lambda r, c, slug, **k: internal_ranges.list_ranges(c, slug)),
-    ('POST', r'projects/(?P<slug>[-\w]+)/internal-ranges', 'Declare a private network (CIDR inside 10/8, 172.16/12, 192.168/16, 100.64/10 or fc00::/7, at most a /16) as internal to this project: {cidr, description}; its addresses may then be added as targets (project administrators only)',
+    ('POST', r'projects/(?P<slug>[-\w]+)/internal-ranges', 'Declare a private network (CIDR inside 10/8, 172.16/12, 192.168/16, 100.64/10 or fc00::/7, at most a /16) as internal to this project: {cidr, description}; its addresses may then be added as targets (project administrators only). A person only: a token (any API token or MCP call) is refused with 403; removing a range stays open to it',
      lambda r, c, slug, **k: (internal_ranges.add_range(c, slug, _body(r)), 201)),
     ('POST', r'projects/(?P<slug>[-\w]+)/internal-ranges/(?P<range_id>\d+)/discover', 'Sweep a declared internal range for live hosts now (it is also swept weekly): a Sentinel inside the network that declares network:internal and discover reports what answered, and each live address becomes a target (project administrators only)',
      lambda r, c, slug, range_id, **k: (internal_ranges.discover_now(c, slug, int(range_id)), 202)),
@@ -439,8 +456,8 @@ ROUTES = [
      'group=none|cve: cve folds the same client-side JavaScript library file on sibling hosts of one site into one row with its member ids and statuses; '
      'servers and other products never group; the default none is one row per host)',
      lambda r, c, slug, **k: svc.list_findings(c, slug, r.GET)),
-    ('GET', r'projects/(?P<slug>[-\w]+)/situations', 'What needs you, one host at a time, ranked: each row is a host with a plain narrative, counts (proven, likely, exposure, minor), the first action, '
-     'the reason for its rank and its top findings with links (q= part of a host name, tier=all|exposure|likely|proven keeps the situations whose worst tier is at least that, page, page_size; state is attention, clear or unscanned)',
+    ('GET', r'projects/(?P<slug>[-\w]+)/situations', 'What needs you, one host at a time, ranked: each row is a host with a plain narrative, counts (proven, likely, hygiene, exposure, minor), the lead tier, the first action, '
+     'the reason for its rank and its top findings with links (q= part of a host name, tier=all|exposure|hygiene|likely|proven keeps the situations whose worst tier is at least that, page, page_size; state is attention, clear or unscanned)',
      lambda r, c, slug, **k: svc.list_situations(c, slug, r.GET)),
     ('GET', r'projects/(?P<slug>[-\w]+)/situations/(?P<host>[^/]+)', 'One situation in full: the narrative and up to 200 findings of the host, each with its link (404 when nothing open there needs a person)',
      lambda r, c, slug, host, **k: svc.get_situation(c, slug, host)),
@@ -496,22 +513,58 @@ ROUTES = [
      'Every comment on one finding, oldest first',
      lambda r, c, slug, kind, finding_id, **k: svc.list_finding_comments(c, slug, kind, int(finding_id), r.GET)),
     ('POST', r'projects/(?P<slug>[-\w]+)/findings/(?P<kind>match|vulnerability|hygiene)/(?P<finding_id>\d+)/comments',
-     'Add a comment to one finding; body {text}',
+     'Add a comment or a note to one finding; body {text, observation (optional: confirmed, not_reproduced, false_positive, fixed_verified, '
+     'needs_more_info or info), evidence (optional text, at most 4,000 characters)}',
      # text's own validation happens inside add_finding_comment, after its project gate: a body-shaped _need() here would
      # run before that gate and 400 on a missing field before an _all/unknown-project caller ever gets its own real error.
-     lambda r, c, slug, kind, finding_id, **k: (svc.add_finding_comment(c, slug, kind, int(finding_id), _body(r).get('text')), 201)),
+     lambda r, c, slug, kind, finding_id, **k: (svc.add_finding_comment(c, slug, kind, int(finding_id), _body(r).get('text'), _body(r).get('observation'),
+                                                                         _body(r).get('evidence'), _source(c)), 201)),
     ('GET', r'projects/(?P<slug>[-\w]+)/findings/(?P<kind>match|vulnerability|hygiene)/(?P<finding_id>\d+)/audit',
      "One finding's audit trail (status, assignee and comment events, newest first), each with who, when, and before/after",
      lambda r, c, slug, kind, finding_id, **k: svc.finding_audit(c, slug, kind, int(finding_id), r.GET)),
-    ('POST', r'projects/(?P<slug>[-\w]+)/reports', 'Queue a PDF report of the project, or of one host; body {host, include_closed}. Open findings only unless include_closed. Answers 202 with the report id and a status_url to poll; a read, so a read-only token may ask',
+    ('POST', r'projects/(?P<slug>[-\w]+)/reports', 'Queue a report of the project, or of one host; body {kind: findings (default) or hosts, format: pdf (default) or csv, host (findings reports only), include_closed}. Open findings only unless include_closed. Answers 202 with the report id and a status_url to poll; a read, so a read-only token may ask',
      lambda r, c, slug, **k: reports.export_report(c, slug, _body(r))),
     ('GET', r'projects/(?P<slug>[-\w]+)/reports/(?P<token>[-\w]+)', 'The state of a report you asked for: queued, running, done (with download_url), failed or expired',
      lambda r, c, slug, token, **k: reports.report_status(c, slug, token)),
-    ('GET', r'projects/(?P<slug>[-\w]+)/reports/(?P<token>[-\w]+)/download', 'Download a finished report as application/pdf (only the user who asked, until it expires, 24 hours by default)',
+    ('GET', r'projects/(?P<slug>[-\w]+)/reports/(?P<token>[-\w]+)/download', 'Download a finished report as application/pdf or text/csv (only the user who asked, until it expires, 24 hours by default)',
      lambda r, c, slug, token, **k: reports.report_download(c, slug, token)),
+    ('POST', r'orgs/(?P<org>[-\w]+)/reports', 'Queue a report of every project of the organization that you can read; body {kind: findings (default) or hosts, format: pdf (default) or csv, include_closed}. A person added to only some of its projects gets a report of those, and the cover says so. Answers 202 with the report id and a status_url to poll (200 when the same report is already being made); a read, so a read-only token may ask',
+     lambda r, c, org, **k: reports.export_org_report(c, org, _body(r))),
+    ('GET', r'orgs/(?P<org>[-\w]+)/reports/(?P<token>[-\w]+)', 'The state of an organization report you asked for: queued, running, done (with download_url), failed or expired',
+     lambda r, c, org, token, **k: reports.report_status(c, None, token, org=org)),
+    ('GET', r'orgs/(?P<org>[-\w]+)/reports/(?P<token>[-\w]+)/download', 'Download a finished organization report as application/pdf or text/csv (only the user who asked, until it expires)',
+     lambda r, c, org, token, **k: reports.report_download(c, None, token, org=org)),
+    ('GET', r'reporting/scopes', 'What the Reporting page offers: every organization and project you can report on ({kind, slug, name, projects, whole for an organization; org, role for a project}, each with can_subscribe and can_view_subscriptions), your account email, whether outgoing mail is set up (mail_ready) and the email report limits',
+     lambda r, c, **k: reports.list_report_scopes(c, r.GET)),
+    ('GET', r'report-subscriptions', 'Email reports you can see, optionally for one scope (?project=slug or ?org=slug): name, scope, recipients, schedule, next send, last result. With a scope named, can_create says whether you may add one. Also the limits and whether outgoing mail is set up',
+     lambda r, c, **k: subscriptions.list_subscriptions(c, r.GET)),
+    ('POST', r'report-subscriptions', 'Create an email report of a project (project) or a whole organization (org): {name, recipients (1 to 10), cadence: weekly|monthly, weekday 0-6, day_of_month 1-28, send_time HH:MM on the quarter hour, timezone, attach: none|pdf|csv, enabled}. A project needs a write role; an organization an Org Admin or App Admin',
+     lambda r, c, **k: subscriptions.create_subscription(c, _body(r))),
+    ('GET', r'report-subscriptions/(?P<subscription_id>\d+)', 'One email report',
+     lambda r, c, subscription_id, **k: subscriptions.get_subscription(c, int(subscription_id))),
+    ('PATCH', r'report-subscriptions/(?P<subscription_id>\d+)', 'Change an email report (any subset of the create fields except the scope; enabled false pauses it; confirm_opted_out adds back an address that unsubscribed). Saving makes you the owner: it then runs with your access',
+     lambda r, c, subscription_id, **k: subscriptions.update_subscription(c, int(subscription_id), _body(r))),
+    ('DELETE', r'report-subscriptions/(?P<subscription_id>\d+)', 'Delete an email report and its delivery history',
+     lambda r, c, subscription_id, **k: subscriptions.delete_subscription(c, int(subscription_id))),
+    ('POST', r'report-subscriptions/(?P<subscription_id>\d+)/test', 'Queue one test email of the report to your own address (at most one a minute per report and ten an hour); 409 when outgoing mail is not set up',
+     lambda r, c, subscription_id, **k: subscriptions.test_subscription(c, int(subscription_id))),
+    ('GET', r'report-subscriptions/(?P<subscription_id>\d+)/preview', 'The email as it would be made now (?format=html, text or json): html is a page with its own policy for framing; text and json give {subject, text, digest}',
+     lambda r, c, subscription_id, **k: subscriptions.preview_subscription(c, int(subscription_id), r.GET)),
+    ('GET', r'report-subscriptions/(?P<subscription_id>\d+)/deliveries', 'The last 20 emails of the report: period, status, per-recipient result, attachment',
+     lambda r, c, subscription_id, **k: subscriptions.list_deliveries(c, int(subscription_id))),
+    ('GET', r'reporting/digest-preview', 'The email for unsaved settings: ?project= or ?org=, ?cadence=weekly|monthly, ?timezone=, ?format=html|text|json',
+     lambda r, c, **k: subscriptions.digest_preview(c, r.GET)),
+    ('GET', r'reporting/threats', "This period's most important vulnerabilities for ?project=slug or ?org=slug, as the email reports show them: Zero Wire briefings first, then CISA KEV additions and new critical CVEs, each with {source: zero_wire|kev|critical, title, summary, link, badges, cve_ids, impact_line, matched, confirmed, product_only} (host counts are distinct machines). ?days=1..31 (default 7) or ?cadence=weekly|monthly sets the period ending now",
+     lambda r, c, **k: reports.get_threats(c, r.GET)),
+    ('GET', r'reporting/zero-wire', 'Whether the Zero Wire briefings are on; for an App Admin also when they were last read and why a read failed',
+     lambda r, c, **k: reports.get_zero_wire(c, r.GET)),
+    ('PUT', r'reporting/zero-wire', 'An App Admin switches the Zero Wire briefings on or off ({enabled: boolean}) in the web interface; a token is refused',
+     lambda r, c, **k: reports.set_zero_wire(c, _body(r))),
+    ('GET', r'reporting/reports', 'The reports you asked for that have not expired, newest first (at most 20), each as the state of GET projects/{slug}/reports/{id}',
+     lambda r, c, **k: reports.list_my_reports(c, r.GET)),
     ('GET', r'projects/(?P<slug>[-\w]+)/settings', "The project's settings: sla_days (days to fix per severity: critical, high, medium, low) and the defaults",
      lambda r, c, slug, **k: svc.get_project_settings(c, slug)),
-    ('PUT', r'projects/(?P<slug>[-\w]+)/settings', "Change the project's settings; sla_days is a partial update, a severity set to null goes back to its default",
+    ('PUT', r'projects/(?P<slug>[-\w]+)/settings', "Change the project's settings; sla_days is a partial update, a severity set to null goes back to its default; host_review_mode; inventory {create_hosts, stale_days}. A token (any API token or MCP call) may only lower host_review_mode and cannot switch create_hosts on",
      lambda r, c, slug, **k: svc.set_project_settings(c, slug, _body(r))),
     ('GET', r'projects/(?P<slug>[-\w]+)/members', "The project's members, for an assignee picker",
      lambda r, c, slug, **k: svc.list_members(c, slug, r.GET)),
@@ -536,13 +589,13 @@ ROUTES = [
      lambda r, c, task_id, **k: broker.release_task(c, task_id, _body(r).get('reason', ''))),
     ('GET', r'agents', 'Agents of your users and your own (administrators see their organizations\' agents); a Sentinel row carries slots {max, in_use, free, by_kind}', lambda r, c, **k: broker.list_agents(c, r.GET)),
     ('GET', r'agents/(?P<agent_id>\d+)', 'One agent with its recent tasks; a Sentinel also has kinds {kind: {declared, effective, mode, source, cap, held, state, note}}, the capability policy per task kind', lambda r, c, agent_id, **k: broker.get_agent(c, agent_id)),
-    ('PATCH', r'agents/(?P<agent_id>\d+)', 'Administrator: set status (active, suspended, revoked), note and/or limits {capabilities, projects, max_concurrent}; for a Sentinel also settings {name, network, profile, kinds: {kind: {mode: allow|deny|prefer, max_concurrent: 1-10|null}|null} (the capability policy, merged per kind; only a kind the Sentinel declares can be allowed or preferred), disabled_kinds (the older list: each kind is deny), max_concurrent, self_update: off|manual|automatic, discovery_keys: true|false (false: never send this Sentinel a project\'s discovery API keys; set from here only)} (null restores the provisioned grant for network and hands other settings back to the Sentinel) and update: "now" (refused while self_update is off)',
+    ('PATCH', r'agents/(?P<agent_id>\d+)', 'Administrator: set status (active, suspended, revoked), note and/or limits {capabilities, projects, max_concurrent}; for a Sentinel also settings {name, network, profile, kinds: {kind: {mode: allow|deny|prefer, max_concurrent: 1-10|null}|null} (the capability policy, merged per kind; only a kind the Sentinel declares can be allowed or preferred), disabled_kinds (the older list: each kind is deny), max_concurrent, self_update: off|manual|automatic, discovery_keys: true|false (false: never send this Sentinel a project\'s discovery API keys; set from here only)} (null restores the provisioned grant for network and hands other settings back to the Sentinel) and update: "now" (refused while self_update is off). A token (any API token or MCP call) may suspend, revoke and narrow, never approve, reinstate or widen',
      lambda r, c, agent_id, **k: broker.update_agent(c, agent_id, _body(r))),
     ('DELETE', r'agents/(?P<agent_id>\d+)', 'Administrator: delete a revoked agent and revoke its API token, so it no longer holds back its user\'s new agents; {deleted, id, token_revoked, released_tasks, still_held: [{id, name}]} (agents it held stay suspended until reinstated); 409 unless revoked',
      lambda r, c, agent_id, **k: broker.delete_agent(c, agent_id)),
     ('GET', r'sentinels/defaults', 'Instance-wide Sentinel defaults: {self_update: off|manual|automatic|null, effective_self_update, follows_instance, builtin_kinds, builtin_kinds_is_shipped, external_kinds, changed_by, changed_at}; each applies to every Sentinel with no value of its own (self_update null follows the instance\'s Automatic or Manual update choice; builtin_kinds and external_kinds are the capability policy {kind: {mode, max_concurrent}} for the built-in scanner and for every other Sentinel, OpenVAS denied on the built-in one until changed)',
      lambda r, c, **k: sentinel_settings.get_defaults()),
-    ('PUT', r'sentinels/defaults', 'App Admin: set any of the instance-wide Sentinel defaults {self_update: off|manual|automatic|null, builtin_kinds: {kind: {mode: allow|deny|prefer, max_concurrent}}|null (null restores the shipped one), external_kinds: {...}|null}; the two kind maps replace the whole map',
+    ('PUT', r'sentinels/defaults', 'App Admin: set any of the instance-wide Sentinel defaults {self_update: off|manual|automatic|null, builtin_kinds: {kind: {mode: allow|deny|prefer, max_concurrent}}|null (null restores the shipped one), external_kinds: {...}|null}; the two kind maps replace the whole map. A token (any API token or MCP call) may only narrow: self_update off or manual, a kind denied or its cap lowered',
      lambda r, c, **k: (svc.require_write_token(c), sentinel_settings.set_defaults(c.user, _body(r), via_agent=c.token is not None))[1]),
     ('GET', r'tuning', 'App Admin: auto-tuning of the configMaxxing throughput settings: mode (off|suggest|auto, default auto) and effective_mode (off when CVENGINE_AUTOTUNE=0), the AI advisor (enabled, provider, used_today, cap), the tuned numbers, the pinned settings (saved by a person) with who saved them, the managed settings with their range and step, the last run (per setting: value and why_not_raised) and the last ten decisions',
      lambda r, c, **k: tuning.get_status(c)),
@@ -552,7 +605,7 @@ ROUTES = [
      lambda r, c, **k: tuning.get_maintainer_report(c)),
     ('GET', r'technology-coverage', 'App Admin, read-only: how the technology names on the current hosts connect to the CVE catalogue (cveFeed.tech_coverage): unmatched names with their hosts and near products, unversioned names ranked by CVE count, ambiguous names that reach more than one vendor, and services (CDN, hosting, analytics names that are not software); ?project= narrows to one project, ?limit= (default 50, at most 500) caps each list',
      lambda r, c, **k: tech_coverage_api.technology_coverage(c, r.GET)),
-    ('PUT', r'tuning/mode', 'App Admin: {mode: off|suggest|auto} and/or {advisor: true|false}; leaving auto drops the tuned numbers at once (saved, environment or default values apply again)',
+    ('PUT', r'tuning/mode', 'App Admin: {mode: off|suggest|auto} and/or {advisor: true|false}; leaving auto drops the tuned numbers at once (saved, environment or default values apply again). A token (any API token or MCP call) may only lower the mode and switch the advisor off',
      lambda r, c, **k: tuning.set_mode(c, _body(r))),
     ('POST', r'tuning/decisions/(?P<decision_id>\d+)/apply', 'App Admin, signed in as a person (an API token is refused with 403): apply a recommendation (mode auto: it becomes the tuned number; otherwise it is saved as your value, which pins the setting); 409 when the setting changed since',
      lambda r, c, decision_id, **k: tuning.apply_decision(c, decision_id)),
@@ -612,23 +665,23 @@ ROUTES = [
      lambda r, c, task_id, **k: sentinels.report_result(c, task_id, _body(r))),
     ('POST', r'sentinel/tasks/(?P<task_id>\d+)/partial', 'One numbered batch of partial results of a streamed SentinelTask it is running (bbot_discovery, contract version 3): {seq, ...the lists of $defs/partials/<kind>}. Answers {accepted, duplicate, seq}: a batch at or below the last one taken is a duplicate and stored once, any other seq than the next is a 409. A 409 also means stop the run (cancelled, expired or its scan stopped); a 429 means send it again shortly',
      lambda r, c, task_id, **k: sentinel_stream.report_partial(c, task_id, _body(r))),
-    ('POST', r'sentinel/tasks/(?P<task_id>\d+)/secret', 'The built-in scanner (stored sign-ins) or, for a bbot_discovery task only, an own Sentinel that reports info.features bbot_keys, has not opted out and is allowed by the instance setting (403 for any other caller): the decrypted stored credential of one signed-in SentinelTask it holds (claimed or running), once: {credential: {headers, cookie, target, host, origins, allow_untrusted_certificate, expires_at, revision}, task_id}, or for a bbot_discovery task {bbot_config: {modules: {...}}, task_id} (the project\'s API keys for bbot modules), Cache-Control: no-store. A second read is a 409. Audited as sentinel.secret.read',
+    ('POST', r'sentinel/tasks/(?P<task_id>\d+)/secret', 'The built-in scanner (stored sign-ins); for a signed-in nuclei or route_probe_signed task, an external Sentinel that reports info.features secret_read_external, whose enrolling user is an App Admin or the project\'s organization admin, for a stored sign-in whose owner switched allow_external_sentinels on; or, for a bbot_discovery task only, an own Sentinel that reports info.features bbot_keys, has not opted out and is allowed by the instance setting (403 for any other caller): the decrypted stored credential of one signed-in SentinelTask it holds (claimed or running), once: {credential: {headers, cookie, target, host, origins, allow_untrusted_certificate, expires_at, revision}, task_id}, or for a bbot_discovery task {bbot_config: {modules: {...}}, task_id} (the project\'s API keys for bbot modules), Cache-Control: no-store. A second read is a 409. Audited as sentinel.secret.read',
      lambda r, c, task_id, **k: sentinels.read_secret(c, task_id)),
     ('POST', r'sentinel/tasks/(?P<task_id>\d+)/release', 'Give a SentinelTask back to the queue; body {reason}',
      lambda r, c, task_id, **k: sentinels.release_task(c, task_id, _body(r).get('reason', ''))),
     ('GET', r'projects/(?P<slug>[-\w]+)/sentinels/enroll', 'An org admin or App Admin generates a one-time enrollment secret scoped to this project, for a Sentinel\'s first bootstrap call: {enrollment_token, server_url, expires_at, scope: "project"}. ?format=blob also returns the same payload base64-packaged as one opaque {blob} string for CVENGINE_SENTINEL_BLOB, with ready-to-run setup steps; &network=external|internal and &profile=full|light (default external, full) choose the .env lines in them',
      _sentinel_enroll),
-    ('POST', r'projects/(?P<slug>[-\w]+)/sentinels/enroll', 'Same as GET: generates a fresh one-time enrollment secret for this project',
+    ('POST', r'projects/(?P<slug>[-\w]+)/sentinels/enroll', 'Same as GET: generates a fresh one-time enrollment secret for this project. A token (any API token or MCP call) may only make an external one (network internal is for a person)',
      _sentinel_enroll),
     ('GET', r'orgs/(?P<org>[-\w]+)/sentinels/enroll', 'An admin of this organization, or an App Admin, generates a one-time enrollment secret that scopes a Sentinel to every project of the organization, present and future: {enrollment_token, server_url, expires_at, scope: "org"}. ?format=blob also returns {blob} for CVENGINE_SENTINEL_BLOB',
      _sentinel_org_enroll),
-    ('POST', r'orgs/(?P<org>[-\w]+)/sentinels/enroll', 'Same as GET: generates a fresh one-time enrollment secret for this organization',
+    ('POST', r'orgs/(?P<org>[-\w]+)/sentinels/enroll', 'Same as GET: generates a fresh one-time enrollment secret for this organization. A token (any API token or MCP call) may only make an external one (network internal is for a person)',
      _sentinel_org_enroll),
     ('GET', r'sentinels/live', 'What every Sentinel you manage is doing right now: {server_time, queued, results: [{name, builtin, state: working|idle|offline|pending|suspended, last_seen, current: [task], recent: [task], stats}]}',
      lambda r, c, **k: sentinels.live_overview(c)),
     ('GET', r'sentinels/enroll', 'App Admin only: a one-time enrollment secret that scopes a Sentinel to every organization and project on this instance, present and future: {enrollment_token, server_url, expires_at, scope: "instance"}. ?format=blob also returns {blob} for CVENGINE_SENTINEL_BLOB',
      _sentinel_instance_enroll),
-    ('POST', r'sentinels/enroll', 'Same as GET: generates a fresh instance-wide one-time enrollment secret',
+    ('POST', r'sentinels/enroll', 'Same as GET: generates a fresh instance-wide one-time enrollment secret. A token (any API token or MCP call) may only make an external one (network internal is for a person)',
      _sentinel_instance_enroll),
     ('GET', r'projects/(?P<slug>[-\w]+)/sentinels', 'The Sentinels whose scope covers this project (direct, via its organization or instance-wide) with status, liveness, capabilities and this project\'s task counts; {project, results: [...]}',
      lambda r, c, slug, **k: (svc.get_one_project(c, slug), sentinels.list_project_sentinels(c, slug))[1]),  # one project: _all is a 400
@@ -642,7 +695,7 @@ ROUTES = [
 ]
 NO_TOKEN_ROUTES = ('sentinels/bootstrap',)  # authenticated by their own one-time secret, not a bearer token
 MAX_ID_DIGITS = 18  # an id in a path longer than this cannot exist (the keys are 64-bit)
-READ_ONLY_POSTS =re.compile(r'^projects/[-\w]+/reports$')  # asking for a report changes nothing a read-only token protects
+READ_ONLY_POSTS =re.compile(r'^(projects|orgs)/[-\w]+/reports$')  # asking for a report changes nothing a read-only token protects
 SELF_GATED_POSTS = re.compile(r'^sentinel/tasks/\d+/secret$')  # refuses a read-only token itself, so that the refusal is audited (sentinel_broker.read_secret)
 COMPILED = [(m, re.compile(f'^{pat}/?$'), summary, fn) for m, pat, summary, fn in ROUTES]
 

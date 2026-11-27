@@ -18,7 +18,7 @@ class AboutPageTests(TestCase):
 		from django.conf import settings
 		r = self.page()
 		self.assertContains(r, '<h1>About</h1>', html=True)  # one name per page: the menu says About, so the title does (it was About CVEngine)
-		self.assertContains(r, settings.RENGINE_CURRENT_VERSION)
+		self.assertContains(r, settings.CVENGINE_CURRENT_VERSION)
 
 	def test_page_names_its_contributors(self):
 		html = self.page().content.decode()
@@ -48,13 +48,13 @@ class AboutPageTests(TestCase):
 
 	def test_a_named_release_shows_its_edition_beside_the_version(self):
 		from django.test import override_settings
-		with override_settings(RENGINE_EDITION='camstork edition'):
+		with override_settings(CVENGINE_EDITION='camstork edition'):
 			self.assertContains(self.page(), ', camstork edition')
-		with override_settings(RENGINE_EDITION=''):
+		with override_settings(CVENGINE_EDITION=''):
 			self.assertNotContains(self.page(), 'edition')
 
 	def test_only_a_plain_name_is_accepted_as_an_edition(self):
-		# reNgine/settings.py reads .edition with this pattern: letters, digits, spaces, dots and hyphens, at most 40 characters
+		# cvengine/settings.py reads .edition with this pattern: letters, digits, spaces, dots and hyphens, at most 40 characters
 		pattern = re.compile(r'[A-Za-z0-9][A-Za-z0-9 .-]{0,39}')
 		for good in ('camstork edition', 'Winter 2026'):
 			self.assertTrue(pattern.fullmatch(good))
@@ -137,8 +137,8 @@ class SoftwareListTests(TestCase):
 	def _uncovered(self, dockerfile_key, text):
 		from cveFeed import software
 		covered = ' '.join(pattern for item in software.TOOLS for path, pattern in item['pins'] if path == dockerfile_key)
-		# checksums and the toolchain's per-architecture hashes are not tools of their own, and the SENTINEL_* build arguments say which Sentinel library to install (the About page names the commit it read)
-		return [name for name in self._args(text) if not re.search(r'_SHA256|^TZDATA_VERSION$|^PYSOCKS_VERSION$|^NUCLEI_TEMPLATES_SHA|^SENTINEL_(REPO|REF|SHA)$', name) and f'ARG {name}=' not in covered]
+		# checksums, the toolchain's per-architecture hashes and the Go module floor list (GO_DEPENDENCY_FLOOR, minimum versions of libraries the Go tools are built with) are not tools of their own, and the SENTINEL_* build arguments say which Sentinel library to install (the About page names the commit it read)
+		return [name for name in self._args(text) if not re.search(r'_SHA256|^TZDATA_VERSION$|^PYSOCKS_VERSION$|^NUCLEI_TEMPLATES_SHA|^SENTINEL_(REPO|REF|SHA)$|^GO_DEPENDENCY_FLOOR$', name) and f'ARG {name}=' not in covered]
 
 	def test_a_tool_pinned_in_the_server_image_is_on_the_list(self):
 		self.assertEqual(self._uncovered('web/Dockerfile', (ROOT / 'web' / 'Dockerfile').read_text()), [])
@@ -180,9 +180,9 @@ class SoftwareListTests(TestCase):
 			                f'the Greenbone image {part} is not on the About page list')
 
 
-# ---- the page's shape: order, the reNgine credit last, a complete inventory, no scanner banner -------------------------------------------------------
+# ---- the page's shape: order, the upstream credit last, a complete inventory, no scanner banner -------------------------------------------------------
 
-RENGINE_TEXT = ("CVEngine is a fork of reNgine 2.x by Yogesh Ojha, and still uses its code. Thanks to everyone who built it, including "
+UPSTREAM_CREDIT = ("CVEngine is a fork of reNgine 2.x by Yogesh Ojha, and still uses its code. Thanks to everyone who built it, including "
                 "Aju100, d1pakda5, subha7595, Suprita-25, TheBinitGhimire, Vinay Leo and Erdem Ozgen. "
                 "The full list is on reNgine's contributors page.")
 
@@ -202,14 +202,14 @@ class AboutPageShapeTests(TestCase):
 
 	def test_sections_come_in_the_planned_order(self):
 		ids = re.findall(r'<section[^>]*\bid="([^"]+)"', self.main())
-		self.assertEqual(ids, ['product', 'where', 'software', 'sources', 'licenses', 'contributors', 'built-on-rengine'])
+		self.assertEqual(ids, ['product', 'where', 'software', 'sources', 'licenses', 'contributors', 'built-on-upstream'])
 
-	def test_the_rengine_credit_is_the_last_element_of_the_page_with_its_text_unchanged(self):
+	def test_the_upstream_credit_is_the_last_element_of_the_page_with_its_text_unchanged(self):
 		main = self.main()
 		last = re.findall(r'<section[^>]*\bid="([^"]+)"[^>]*>(.*?)</section>', main, flags=re.S)[-1]
-		self.assertEqual(last[0], 'built-on-rengine')
+		self.assertEqual(last[0], 'built-on-upstream')
 		self.assertEqual(re.findall(r'<h2[^>]*>(.*?)</h2>', last[1], flags=re.S), ['Built on reNgine'])
-		self.assertEqual(_text(re.sub(r'<h2[^>]*>.*?</h2>', '', last[1], flags=re.S)), RENGINE_TEXT)
+		self.assertEqual(_text(re.sub(r'<h2[^>]*>.*?</h2>', '', last[1], flags=re.S)), UPSTREAM_CREDIT)
 		# the last heading of the page is that one, and after its section nothing but closing tags is left in <main>
 		self.assertEqual(_text(re.findall(r'<h2[^>]*>(.*?)</h2>', main, flags=re.S)[-1]), 'Built on reNgine')
 		tail = main.rsplit('</section>', 1)[1]

@@ -1,12 +1,53 @@
+# Every container's log rotates: Docker's json-file driver keeps at most CVENGINE_LOG_MAX_FILE files of CVENGINE_LOG_MAX_SIZE each per container
+# (default 5 x 50 MB), instead of one file that grows until the disk is full. The database writes its connection log here too (log_connections).
+# A change recreates the containers once (an update does that for the application anyway; db and redis once, on the update that brings it).
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "${CVENGINE_LOG_MAX_SIZE:-50m}"
+    max-file: "${CVENGINE_LOG_MAX_FILE:-5}"
+
+# web, celery, celery-beat and the one-off migrate service run as the image's unprivileged account (uid 10002, web/Dockerfile), with every Linux
+# capability dropped (none is needed: the server listens on 8000 and runs no scan tool, so not even NET_BIND_SERVICE or NET_RAW) and no way to
+# gain privileges (no-new-privileges: a setuid binary does not raise them). They run the image's own copy of the source: ./web is NOT mounted over
+# it, so nothing they could write is ever imported. The host's web/ folder is mounted at /var/lib/cvengine/web for what the host and the
+# application exchange (the Django secret, the update channel: docs/UPDATES.md); its folder has the sticky bit and the application owns only its
+# own requests in it (web/ownership.sh). docs/DEPLOYMENT.md, "Who the containers run as".
+x-app-hardening: &app-hardening
+  user: "10002:10002"
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+
 services:
   db:
     restart: always
-    image: "postgres:18-alpine"
+    image: "postgres:18-alpine@sha256:0115267ab5a509022df9319c77be365cef335adb71556c75f60f5360ee247e71"
     # Every worker task holds a database connection while it runs (gevent greenlets, no pooling), and the discovery worker alone may run up to 32
     # at once: PostgreSQL's default of 100 connections is too few. An update recreates this container once when this line changes (scripts/update.sh).
+    # The memory settings default to what this file always used (work_mem 4MB and no preloaded library are PostgreSQL's own defaults); a bigger host
+    # raises them in .env (docs/DEPLOYMENT.md, Sizing the database). POSTGRES_SHARED_PRELOAD_LIBRARIES=pg_stat_statements turns on query statistics.
+    # POSTGRES_TRACK_IO_TIMING (off) and POSTGRES_LOG_MIN_DURATION_STATEMENT (-1, no slow query log) are diagnostics, PostgreSQL's own defaults when unset.
+    # Two diagnostics are on by default (POSTGRES_LOG_LOCK_WAITS, POSTGRES_TRACK_WAL_IO_TIMING; off turns either off): a statement that waits longer
+    # than deadlock_timeout (1s) for a lock is logged with the process that holds it, and the time spent writing and flushing WAL is counted (pg_stat_io).
+    # Every login and logout is logged (POSTGRES_LOG_CONNECTIONS, POSTGRES_LOG_DISCONNECTIONS, default on; off turns either off): who connected, from
+    # where, as which role. A setting given here wins over one made with ALTER SYSTEM.
+    # Commits do not wait for their WAL flush (synchronous_commit=off, POSTGRES_SYNCHRONOUS_COMMIT): on a disk that stalls, every commit used to
+    # queue behind the flushes of the others. The trade: a crash of the server or the host can lose the last writes acknowledged in about 0.6 s
+    # (three times wal_writer_delay, left at its 200 ms default), never corrupt anything. This application can accept that: progress, heartbeats
+    # and task leases are re-derived or retried by the Sentinel, and scan results are written in their own transactions and a lost last write is
+    # sent again. The writes that must survive a crash (audit rows, token revocations, address bans, validation budget) still commit durably
+    # (usage_stamps.durable_commit). POSTGRES_SYNCHRONOUS_COMMIT=on in .env turns it back on (docs/CONFIGURATION.md); the update also removes an
+    # ALTER SYSTEM value of it, so this line is the one source (scripts/update-deploy.sh).
     command: ["postgres", "-c", "max_connections=${POSTGRES_MAX_CONNECTIONS:-300}", "-c", "shared_buffers=${POSTGRES_SHARED_BUFFERS:-256MB}",
               "-c", "effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-768MB}", "-c", "maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM:-64MB}",
-              "-c", "random_page_cost=${POSTGRES_RANDOM_PAGE_COST:-1.1}"]
+              "-c", "random_page_cost=${POSTGRES_RANDOM_PAGE_COST:-1.1}", "-c", "work_mem=${POSTGRES_WORK_MEM:-4MB}",
+              "-c", "shared_preload_libraries=${POSTGRES_SHARED_PRELOAD_LIBRARIES:-}", "-c", "track_io_timing=${POSTGRES_TRACK_IO_TIMING:-off}",
+              "-c", "log_min_duration_statement=${POSTGRES_LOG_MIN_DURATION_STATEMENT:--1}",
+              "-c", "log_connections=${POSTGRES_LOG_CONNECTIONS:-on}", "-c", "log_disconnections=${POSTGRES_LOG_DISCONNECTIONS:-on}",
+              "-c", "log_lock_waits=${POSTGRES_LOG_LOCK_WAITS:-on}", "-c", "track_wal_io_timing=${POSTGRES_TRACK_WAL_IO_TIMING:-on}",
+              "-c", "synchronous_commit=${POSTGRES_SYNCHRONOUS_COMMIT:-off}"]
     environment:
       - POSTGRES_DB=${POSTGRES_DB}
       - POSTGRES_USER=${POSTGRES_USER}
@@ -18,12 +59,14 @@ services:
       # PostgreSQL 18 images keep PGDATA in a version directory under /var/lib/postgresql, so mount there.
       # A new volume: the old PostgreSQL 12 data cannot be opened by 18 (see scripts/upgrade-postgres.sh).
       - postgres18_data:/var/lib/postgresql
+    # Only the services that hold its password are on data_network (web, celery, celery-beat): not the proxy, the AI reviewer or the scanner.
     networks:
-      - rengine_network
+      - data_network
+    logging: *default-logging
 
   redis:
     restart: always
-    image: "redis:alpine"
+    image: "redis:alpine@sha256:5af80107c1eeecb484a2269b80a26d12bfa6521787da4663bd9f19f60a163483"
     hostname: redis
     environment:
       - REDIS_PASSWORD=${REDIS_PASSWORD:-}
@@ -31,18 +74,99 @@ services:
     # on the Docker network who does not have it. Without one it is open, as it always was.
     command: ["sh", "-c", "if [ -n \"$$REDIS_PASSWORD\" ]; then exec redis-server --requirepass \"$$REDIS_PASSWORD\"; else exec redis-server; fi"]
     networks:
-      - rengine_network
+      - data_network  # as the database: only web, celery and celery-beat reach it
+    logging: *default-logging
+
+  # The one-off ownership service (web/ownership.sh): hands the paths the application writes (its volumes, the Django secret and its own update
+  # requests in the host's web/ folder) to the application's account, uid 10002, once and idempotently: an install from before this release
+  # has them as root's. It runs and exits, as root with only the three capabilities chown needs, no network and no environment file. The update
+  # scripts and `make up` run it after the build and before the migrate service; `docker compose up` runs it through depends_on.
+  ownership:
+    build:  # the same image as web (cvengine/web:latest), built with it
+      context: ./web
+    image: cvengine/web:latest
+    entrypoint: /usr/src/app/ownership.sh
+    user: "0:0"
+    restart: "no"
+    network_mode: none
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - FOWNER
+      - DAC_OVERRIDE
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      - CVENGINE_HOST_DIR=/var/lib/cvengine/web
+    volumes:
+      - ./web:/var/lib/cvengine/web
+      - scan_results:/usr/src/scan_results
+      - generated_templates:/root/cvengine-generated-templates
+      - tool_config:/home/cvengine/.config
+      - db_owner_fallback:/var/lib/cvengine-db-owner
+      - static_volume:/usr/src/app/staticfiles
+      - scanner_bootstrap:/var/lib/cvengine-scanner
+      - reviewer_bootstrap:/var/lib/cvengine-reviewer
+    logging: *default-logging
+
+  # The one-off database owner service. It is the ONLY container that gets the owner role's password (POSTGRES_PASSWORD: the role the
+  # database image created, a superuser on a stock install) and DJANGO_SUPERUSER_PASSWORD (from .env). It runs, then exits (web/migrate-entrypoint.sh): the
+  # migrations, then `manage.py db_app_role gate`, which creates or updates the least privilege app role web, celery and celery-beat connect as,
+  # grants it, and checks that it logs in. `docker compose up` runs it before them (their depends_on), and the update scripts and `make up` run
+  # it before they start them. Other owner commands run here too: `docker compose run --rm migrate python3 manage.py createsuperuser` (make
+  # username, make admin, make migrate, make test). When the app role cannot be used the gate exits 1 with the one-line fix and the application
+  # is not started: it is never given the owner password by accident. CVENGINE_DB_ALLOW_OWNER_FALLBACK=1 in .env is the explicit way to run it
+  # on the owner role: the gate then writes the owner password to the db_owner_fallback volume, which web, celery and celery-beat mount
+  # read-only, and removes it again once the app role works (docs/CONFIGURATION.md, Database roles). Not long running: restart "no".
+  migrate:
+    build:  # the same image as web (cvengine/web:latest), built with it
+      context: ./web
+    image: cvengine/web:latest
+    entrypoint: /usr/src/app/migrate-entrypoint.sh
+    restart: "no"
+    <<: *app-hardening
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      - DEBUG=0
+      - CELERY_BROKER=redis://:${REDIS_PASSWORD:-}@redis:6379/0
+      - CELERY_BACKEND=redis://:${REDIS_PASSWORD:-}@redis:6379/0
+      - DOMAIN_NAME=${DOMAIN_NAME}
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_PORT=${POSTGRES_PORT}
+      - POSTGRES_HOST=${POSTGRES_HOST}
+      - CVENGINE_DB_ROLE=owner
+      - CVENGINE_DB_APP_USER=${CVENGINE_DB_APP_USER-cvengine_app}
+      - CVENGINE_DB_APP_PASSWORD=${CVENGINE_DB_APP_PASSWORD:-}
+      - CVENGINE_DB_OWNER_FALLBACK_FILE=/var/lib/cvengine-db-owner/password
+      - CVENGINE_HOME=/var/lib/cvengine/web  # the Django secret (web/secret) is read from the host's web/ folder
+      - CVENGINE_HOST_DIR=/var/lib/cvengine/web
+    volumes:
+      - ./web:/var/lib/cvengine/web:ro  # the Django secret only; the ownership service creates it on a first start
+      - db_owner_fallback:/var/lib/cvengine-db-owner
+    depends_on:
+      ownership:
+        condition: service_completed_successfully
+      db:
+        condition: service_started
+      redis:
+        condition: service_started
+    networks:
+      - data_network  # the database (and Redis, which Django's settings name), nothing else
+    logging: *default-logging
 
   celery:
-    mem_limit: "${CELERY_MEM_LIMIT:-4g}"  # container ceiling; heavy scanner jobs queue inside it (reNgine/resources.py)
+    mem_limit: "${CELERY_MEM_LIMIT:-4g}"  # container ceiling; heavy scanner jobs queue inside it (cvengine/resources.py)
     extra_hosts:
-      - "host.docker.internal:host-gateway"  # lets "localhost" in Settings > AI model mean this server (see reNgine/ai_providers.py reachable_url)
+      - "host.docker.internal:host-gateway"  # lets "localhost" in Settings > AI model mean this server (see cvengine/ai_providers.py reachable_url)
     build:
-      context: ./web
-      args:  # the Sentinel library the image installs (web/Dockerfile): the newest build of SENTINEL_REF (default main), resolved to SENTINEL_SHA by scripts/sentinel-ref.sh at build time
-        SENTINEL_REF: "${SENTINEL_REF:-main}"
-        SENTINEL_SHA: "${SENTINEL_SHA:-}"
+      context: ./web  # the Sentinel library is the commit web/requirements.txt pins (web/Dockerfile)
     restart: always
+    <<: *app-hardening
     # An init process (tini) as PID 1 reaps the scanners' children and passes SIGTERM on to the entrypoint, which turns it into a warm shutdown of
     # the workers and exits when any one of them dies, so `restart: always` brings back all four. 60 s matches the update scripts' stop timeout.
     init: true
@@ -58,11 +182,12 @@ services:
       retries: 3
       start_period: 10m
     volumes:
-      - ./web:/usr/src/app
+      - ./web:/var/lib/cvengine/web  # the host's web/ folder: the Django secret and the update channel (the watchdog's and the scanner's requests), NOT the source
       - scan_results:/usr/src/scan_results
       - generated_templates:/root/cvengine-generated-templates  # validated AI-written templates survive an update
-      - tool_config:/root/.config
-      - static_volume:/usr/src/app/staticfiles/
+      - tool_config:/home/cvengine/.config  # HOME's .config: the CVE seed folder (cveFeed/seed_admin.py)
+      - db_owner_fallback:/var/lib/cvengine-db-owner:ro  # empty unless CVENGINE_DB_ALLOW_OWNER_FALLBACK=1 (the migrate service writes it)
+      - static_volume:/usr/src/app/staticfiles/  # the ONLY service that writes it (collectstatic at start and in the update); the proxy serves it, web reads it
       - tailscale_status:/var/run/tailscale-status:ro  # the optional tailscale profile's published node status, read-only (docs/TAILSCALE.md); empty without it
       - scanner_bootstrap:/var/lib/cvengine-scanner  # where the server leaves the built-in scanner's one-time enrollment (agentapi/builtin_scanner.py); empty unless CVENGINE_BUILTIN_SCANNER=1
       - reviewer_bootstrap:/var/lib/cvengine-reviewer  # where the server leaves the AI reviewer container's token (agentapi/builtin_reviewer.py)
@@ -74,28 +199,41 @@ services:
     environment:
       - DEBUG=0
       - CVENGINE_ALLOW_PRIVATE_TARGETS=${CVENGINE_ALLOW_PRIVATE_TARGETS:-0}
-      - CVENGINE_TRUSTED_PROXIES=${CVENGINE_TRUSTED_PROXIES:-172.16.0.0/12}
+      - CVENGINE_TRUSTED_PROXIES=${CVENGINE_TRUSTED_PROXIES:-${CVENGINE_PROXY_ADDRESS:-172.16.238.10}}  # the bundled proxy alone (its fixed address, networks below)
       - CELERY_BROKER=redis://:${REDIS_PASSWORD:-}@redis:6379/0
       - DISCOVERY_CONCURRENCY=${DISCOVERY_CONCURRENCY:-8}
       - CELERY_BACKEND=redis://:${REDIS_PASSWORD:-}@redis:6379/0
       - DOMAIN_NAME=${DOMAIN_NAME}
       - POSTGRES_DB=${POSTGRES_DB}
       - POSTGRES_USER=${POSTGRES_USER}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_PASSWORD=  # empty on purpose: the owner password is only in the one-off migrate service (this also blanks the one .env would pass)
       - POSTGRES_PORT=${POSTGRES_PORT}
       - POSTGRES_HOST=${POSTGRES_HOST}
+      - CVENGINE_DB_APP_USER=${CVENGINE_DB_APP_USER-cvengine_app}  # the least privilege role the server runs as (docs/CONFIGURATION.md, Database roles)
+      - CVENGINE_DB_APP_PASSWORD=${CVENGINE_DB_APP_PASSWORD:-}  # generated by the update and make up (scripts/db-app-role.sh)
+      - DJANGO_SUPERUSER_PASSWORD=  # empty: only make admin needs it, and that runs in the migrate service
+      - CVENGINE_DB_OWNER_FALLBACK_FILE=/var/lib/cvengine-db-owner/password  # absent unless CVENGINE_DB_ALLOW_OWNER_FALLBACK=1 (docs/CONFIGURATION.md)
+      - CVENGINE_HOME=/var/lib/cvengine/web  # the Django secret and the update lock, in the host's web/ folder
+      - CVENGINE_HOST_DIR=/var/lib/cvengine/web  # the update channel's files (cveFeed/updater.py host_dir)
     depends_on:
-      - db
-      - redis
+      migrate:  # the one-off owner service: migrations, the app role and its check; nothing starts when it fails
+        condition: service_completed_successfully
+      db:
+        condition: service_started
+      redis:
+        condition: service_started
     networks:
-      - rengine_network
+      - cvengine_network
+      - data_network  # the database and Redis
+    logging: *default-logging
 
   celery-beat:
-    mem_limit: "${BEAT_MEM_LIMIT:-512m}"  # container ceiling; heavy scanner jobs queue inside it (reNgine/resources.py)
+    mem_limit: "${BEAT_MEM_LIMIT:-512m}"  # container ceiling; heavy scanner jobs queue inside it (cvengine/resources.py)
     restart: always
     build: ./web
+    <<: *app-hardening
     entrypoint: /usr/src/app/beat-entrypoint.sh
-    command: celery -A reNgine beat -l INFO --scheduler cveFeed.scan_control:PauseAwareScheduler
+    command: celery -A cvengine beat -l INFO --scheduler cveFeed.scan_control:PauseAwareScheduler
     # every variable in .env reaches the container (the explicit entries below win, so the internal
     # settings compose sets on purpose, such as the broker URLs and DEBUG, cannot be overridden from .env)
     env_file:
@@ -108,29 +246,40 @@ services:
       - CELERY_BACKEND=redis://:${REDIS_PASSWORD:-}@redis:6379/0
       - POSTGRES_DB=${POSTGRES_DB}
       - POSTGRES_USER=${POSTGRES_USER}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_PASSWORD=  # empty on purpose: the owner password is only in the one-off migrate service (this also blanks the one .env would pass)
       - POSTGRES_PORT=${POSTGRES_PORT}
       - POSTGRES_HOST=${POSTGRES_HOST}
+      - CVENGINE_DB_APP_USER=${CVENGINE_DB_APP_USER-cvengine_app}  # the least privilege role the server runs as (docs/CONFIGURATION.md, Database roles)
+      - CVENGINE_DB_APP_PASSWORD=${CVENGINE_DB_APP_PASSWORD:-}  # generated by the update and make up (scripts/db-app-role.sh)
+      - DJANGO_SUPERUSER_PASSWORD=  # empty: only make admin needs it, and that runs in the migrate service
+      - CVENGINE_DB_OWNER_FALLBACK_FILE=/var/lib/cvengine-db-owner/password  # absent unless CVENGINE_DB_ALLOW_OWNER_FALLBACK=1 (docs/CONFIGURATION.md)
+      - CVENGINE_HOME=/var/lib/cvengine/web  # the Django secret and the update lock, in the host's web/ folder
+      - CVENGINE_HOST_DIR=/var/lib/cvengine/web  # the update channel's files (cveFeed/updater.py host_dir)
     depends_on:
-      - celery
-      - db
+      migrate:  # the one-off owner service: migrations, the app role and its check; nothing starts when it fails
+        condition: service_completed_successfully
+      celery:
+        condition: service_started
+      db:
+        condition: service_started
     volumes:
-      - ./web:/usr/src/app
-      - scan_results:/usr/src/scan_results
-      - generated_templates:/root/cvengine-generated-templates  # validated AI-written templates survive an update
-      - tool_config:/root/.config
+      - ./web:/var/lib/cvengine/web:ro  # the Django secret; Beat only schedules (its schedule is in the database) and writes none of these
+      - scan_results:/usr/src/scan_results:ro
+      - generated_templates:/root/cvengine-generated-templates:ro
+      - tool_config:/home/cvengine/.config:ro
+      - db_owner_fallback:/var/lib/cvengine-db-owner:ro  # empty unless CVENGINE_DB_ALLOW_OWNER_FALLBACK=1 (the migrate service writes it)
     networks:
-      - rengine_network
+      - cvengine_network
+      - data_network  # the database and Redis
+    logging: *default-logging
 
   web:
-    mem_limit: "${WEB_MEM_LIMIT:-1g}"  # container ceiling; heavy scanner jobs queue inside it (reNgine/resources.py)
+    mem_limit: "${WEB_MEM_LIMIT:-1g}"  # container ceiling; heavy scanner jobs queue inside it (cvengine/resources.py)
     extra_hosts:
-      - "host.docker.internal:host-gateway"  # lets "localhost" in Settings > AI model mean this server (see reNgine/ai_providers.py reachable_url)
+      - "host.docker.internal:host-gateway"  # lets "localhost" in Settings > AI model mean this server (see cvengine/ai_providers.py reachable_url)
     build:
-      context: ./web
-      args:  # the Sentinel library the image installs (web/Dockerfile): the newest build of SENTINEL_REF (default main), resolved to SENTINEL_SHA by scripts/sentinel-ref.sh at build time
-        SENTINEL_REF: "${SENTINEL_REF:-main}"
-        SENTINEL_SHA: "${SENTINEL_SHA:-}"
+      context: ./web  # the Sentinel library is the commit web/requirements.txt pins (web/Dockerfile)
+    <<: *app-hardening
     entrypoint: /usr/src/app/entrypoint.sh
     # GUNICORN_WORKERS is pinned below (not read from .env): the lockout counters are in the shared Redis cache, so two workers is safe,
     # and a stray value in .env cannot change it
@@ -144,7 +293,7 @@ services:
     environment:
       - DEBUG=0
       - CVENGINE_ALLOW_PRIVATE_TARGETS=${CVENGINE_ALLOW_PRIVATE_TARGETS:-0}
-      - CVENGINE_TRUSTED_PROXIES=${CVENGINE_TRUSTED_PROXIES:-172.16.0.0/12}
+      - CVENGINE_TRUSTED_PROXIES=${CVENGINE_TRUSTED_PROXIES:-${CVENGINE_PROXY_ADDRESS:-172.16.238.10}}  # the bundled proxy alone (its fixed address, networks below)
       - CELERY_BROKER=redis://:${REDIS_PASSWORD:-}@redis:6379/0
       - DISCOVERY_CONCURRENCY=${DISCOVERY_CONCURRENCY:-8}
       - CELERY_BACKEND=redis://:${REDIS_PASSWORD:-}@redis:6379/0
@@ -153,31 +302,46 @@ services:
       - DOMAIN_NAME=${DOMAIN_NAME}
       - POSTGRES_DB=${POSTGRES_DB}
       - POSTGRES_USER=${POSTGRES_USER}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_PASSWORD=  # empty on purpose: the owner password is only in the one-off migrate service (this also blanks the one .env would pass)
       - POSTGRES_PORT=${POSTGRES_PORT}
       - POSTGRES_HOST=${POSTGRES_HOST}
-      - DJANGO_SUPERUSER_PASSWORD=${DJANGO_SUPERUSER_PASSWORD}
+      - CVENGINE_DB_APP_USER=${CVENGINE_DB_APP_USER-cvengine_app}  # the least privilege role the server runs as (docs/CONFIGURATION.md, Database roles)
+      - CVENGINE_DB_APP_PASSWORD=${CVENGINE_DB_APP_PASSWORD:-}  # generated by the update and make up (scripts/db-app-role.sh)
+      - DJANGO_SUPERUSER_PASSWORD=  # empty: only make admin needs it, and that runs in the migrate service
+      - CVENGINE_DB_OWNER_FALLBACK_FILE=/var/lib/cvengine-db-owner/password  # absent unless CVENGINE_DB_ALLOW_OWNER_FALLBACK=1 (docs/CONFIGURATION.md)
+      - CVENGINE_HOME=/var/lib/cvengine/web  # the Django secret and the update lock, in the host's web/ folder
+      - CVENGINE_HOST_DIR=/var/lib/cvengine/web  # the update channel's files (cveFeed/updater.py host_dir)
     volumes:
-      - ./web:/usr/src/app
+      - ./web:/var/lib/cvengine/web  # the host's web/ folder: the Django secret and the update channel (Settings > Updates writes its requests here), NOT the source
       - scan_results:/usr/src/scan_results
       - generated_templates:/root/cvengine-generated-templates  # validated AI-written templates survive an update
-      - tool_config:/root/.config
-      - static_volume:/usr/src/app/staticfiles/
-    ports:
-      - "127.0.0.1:8000:8000"
+      - tool_config:/home/cvengine/.config
+      - db_owner_fallback:/var/lib/cvengine-db-owner:ro  # empty unless CVENGINE_DB_ALLOW_OWNER_FALLBACK=1 (the migrate service writes it)
+      - static_volume:/usr/src/app/staticfiles/:ro  # read only: only celery writes the static files the proxy serves
+    # No published port: the bundled proxy is the way in, and the built-in scanner and the AI reviewer reach http://web:8000 on their own networks. A
+    # port on 127.0.0.1 let any local process reach the server from the Docker gateway, past the proxy. Opt in with docker-compose.webport.yml (your
+    # own reverse proxy on this host, docs/DEPLOYMENT.md); docker-compose.hostnet.yml publishes it for the scanner it moves to the host network.
     depends_on:
-      - db
-      - celery
-      - celery-beat
+      migrate:  # the one-off owner service: migrations, the app role and its check; nothing starts when it fails
+        condition: service_completed_successfully
+      db:
+        condition: service_started
+      celery:
+        condition: service_started
+      celery-beat:
+        condition: service_started
     networks:
-      rengine_network:
+      cvengine_network: {}
+      proxy_network:  # the bundled proxy reaches it here, as "cvengine" (config/nginx/cvengine.conf): the name exists on this network only (see proxy)
         aliases:
-          - rengine
+          - cvengine
       scanner_network: {}  # the built-in scanner reaches the server here (http://web:8000), and nothing else of the stack
+      data_network: {}  # the database and Redis (the proxy, the AI reviewer and the scanner are not on it)
+    logging: *default-logging
 
   proxy:
     restart: always
-    image: nginx:alpine
+    image: nginx:alpine@sha256:7fc0fb4af7bf006aeb31aea88069976060f8f0a0a86b667126742cc17f4e31ae
     # A stock image is only as new as the day it was first pulled. The update scripts pull it before they build, while nothing is stopped, and
     # keep the image on the host when the registry cannot be reached: `pull_policy: always` made the pull part of `up`, which runs after the
     # database migration, so a registry outage failed an update that was otherwise done and an offline host could never update.
@@ -190,20 +354,31 @@ services:
       - redis
     secrets:
       - source: proxy.ca
-        target: /etc/nginx/certs/rengine_chain.pem
+        target: /etc/nginx/certs/cvengine_chain.pem
       - source: proxy.cert
-        target: /etc/nginx/certs/rengine.pem
+        target: /etc/nginx/certs/cvengine.pem
       - source: proxy.key
-        target: /etc/nginx/certs/rengine_rsa.key
+        target: /etc/nginx/certs/cvengine_rsa.key
     volumes:
-      - ./config/nginx/rengine.conf:/etc/nginx/conf.d/rengine.conf:ro
+      - ./config/nginx/cvengine.conf:/etc/nginx/conf.d/cvengine.conf:ro
       - ./web/static/cve/maintenance.html:/usr/share/nginx/maintenance/maintenance.html:ro
       - ./config/nginx/state:/etc/nginx/state:ro  # holds the maintenance flag while an update runs
       - ./config/nginx/trusted-upstreams.conf:/etc/nginx/trusted-upstreams.conf:ro  # empty: no peer is believed to have set X-Forwarded-For (HOSTING-ONLINE.md, Cloudflare Tunnel)
-      - static_volume:/usr/src/app/staticfiles/
+      # rendered at start into conf.d/cvengine-upstream-secret.inc: the secret a host nginx sends to have its X-Forwarded-For believed on 443
+      - ./config/nginx/templates:/etc/nginx/templates:ro
+      - static_volume:/usr/src/app/staticfiles/:ro
       - scan_results:/usr/src/scan_results:ro
+    environment:
+      # Empty (the default until an update or make up generates it): no X-Forwarded-For is believed on 443 (config/nginx/cvengine.conf, "Client addresses")
+      CVENGINE_UPSTREAM_SECRET: "${CVENGINE_UPSTREAM_SECRET:-}"
     networks:
-      - rengine_network
+      cvengine_network: {}  # as before, for anything an install's overlay puts beside it (a cloudflared container); not used to reach web
+      proxy_network:
+        # A fixed address: the web service believes X-Forwarded-For from this one address and no other (CVENGINE_TRUSTED_PROXIES above). It must lie
+        # in CVENGINE_PROXY_SUBNET and outside CVENGINE_PROXY_RANGE, where Docker places the web container. The proxy reaches web by the name
+        # "cvengine" (config/nginx/cvengine.conf), which web carries on this network only, so its requests always come from this address.
+        ipv4_address: "${CVENGINE_PROXY_ADDRESS:-172.16.238.10}"
+    logging: *default-logging
 
   # Optional: attach this install to a Tailscale tailnet so Settings > Tailscale can scan its devices. Off unless COMPOSE_PROFILES=tailscale is
   # in .env (or `docker compose --profile tailscale up -d`); the rest of the stack is the same either way. docs/TAILSCALE.md has the steps.
@@ -263,6 +438,7 @@ services:
     volumes:
       - tailscale_state:/var/lib/tailscale
       - tailscale_status:/status
+    logging: *default-logging
 
   # The built-in scanner ("CVEngine Scanner", docs/BUILTIN-SCANNER.md): the cvENGINE Sentinel image running next to the server, enrolled by it with nobody
   # typing a secret, and where every scan tool runs (docs/SCANNER-ARCHITECTURE.md). On by default; CVENGINE_BUILTIN_SCANNER=0 in .env turns it off (the
@@ -283,7 +459,7 @@ services:
   # else of the stack (not PostgreSQL, not Redis). The Tailscale sidecar joins this container's namespace, and the host network and macvlan overlays
   # (docker-compose.hostnet.yml, docker-compose.macvlan.yml) move this container, not celery. Nothing connects to it.
   scanner:
-    image: "${CVENGINE_SCANNER_IMAGE:-${CVENGINE_SCANNER_ROLLBACK_IMAGE:-ghcr.io/hevnsnt/cvengine-sentinel:main}}"
+    image: "${CVENGINE_SCANNER_IMAGE:-${CVENGINE_SCANNER_ROLLBACK_IMAGE:-ghcr.io/hevnsnt/cvengine-sentinel@sha256:5fa3998d3d93c6b70942ea87b53502b19f40bf0c5163b2c201f996776c4618c7}}"
     pull_policy: "${CVENGINE_SCANNER_PULL_POLICY:-missing}"
     restart: unless-stopped
     init: true
@@ -335,11 +511,16 @@ services:
       HTTPS_PROXY: "${HTTPS_PROXY:-}"
       HTTP_PROXY: "${HTTP_PROXY:-}"
       NO_PROXY: "${NO_PROXY:-},web,localhost,127.0.0.1"  # the server is never reached through a host proxy
+    # The image's own user (sentinel, uid 10001) plus group 10002, the server's: the enrollment blob is 0640 and group 10002 in a folder of mode
+    # 2751 (agentapi/builtin_scanner.py, web/ownership.sh), so the scanner reads it and nobody else does.
+    group_add:
+      - "10002"
     volumes:
       - scanner_bootstrap:/bootstrap:ro
       - scanner_state:/var/lib/cvengine-sentinel
     depends_on:
       - web
+    logging: *default-logging
 
   # The AI reviewer (docs/AI-REVIEWER.md): reviews every open finding once and checks the server's operations a few times a day, with the
   # provider and models chosen in Settings > AI model. It is boxed in on purpose: its own small image (./reviewer) with no cvENGINE source,
@@ -374,15 +555,31 @@ services:
       - reviewer_bootstrap:/bootstrap:ro
     depends_on:
       - web
+    # web only (http://web:8000) and the AI provider: it is not on data_network, so it cannot even reach the database's or Redis's login.
     networks:
-      - rengine_network
+      - cvengine_network
+    logging: *default-logging
 
 networks:
-  rengine_network:
+  cvengine_network:
+  # The bundled proxy and the web service only, on a fixed subnet so the proxy has a fixed address (see proxy). 172.16.0.0/16 is outside Docker's
+  # default pools (172.17 to 172.31, then 192.168), so it does not collide with the networks Docker hands out; move the three values together
+  # (CVENGINE_PROXY_SUBNET, CVENGINE_PROXY_RANGE, CVENGINE_PROXY_ADDRESS, docs/CONFIGURATION.md) when it collides with your LAN or another network.
+  # A network of its own rather than a fixed subnet on cvengine_network: an existing network cannot change its subnet while containers are on it,
+  # so an update would have had to take the whole stack off it first. A plain bridge, not `internal: true`: the proxy publishes ports.
+  proxy_network:
+    ipam:
+      config:
+        - subnet: "${CVENGINE_PROXY_SUBNET:-172.16.238.0/24}"
+          ip_range: "${CVENGINE_PROXY_RANGE:-172.16.238.128/25}"
   scanner_network:  # the built-in scanner and the web service only (see scanner above)
+  # The database and Redis, and the three services that hold their passwords (web, celery, celery-beat). A plain bridge, not `internal: true`:
+  # the database's published port (127.0.0.1:5432) needs a network with a gateway, and an internal one would drop it.
+  data_network:
 
 volumes:
   tool_config:
+  db_owner_fallback:  # the owner password, only while CVENGINE_DB_ALLOW_OWNER_FALLBACK=1 needs it (see migrate above)
   postgres18_data:
   generated_templates:
   scan_results:
@@ -395,8 +592,8 @@ volumes:
 
 secrets:
   proxy.ca:
-    file: ./secrets/certs/rengine_chain.pem
+    file: ./secrets/certs/cvengine_chain.pem
   proxy.key:
-    file: ./secrets/certs/rengine_rsa.key
+    file: ./secrets/certs/cvengine_rsa.key
   proxy.cert:
-    file: ./secrets/certs/rengine.pem
+    file: ./secrets/certs/cvengine.pem

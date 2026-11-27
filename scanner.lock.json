@@ -2,10 +2,10 @@
   "image": "ghcr.io/hevnsnt/cvengine-sentinel",
   "tag": "main",
   "floor": {
-    "commit": "a918bc89cd7a4c5710e0f2566634556444dfe551",
-    "version": "a918bc89cd7a",
+    "commit": "29d1613f88bc6106209b2a5365210fa8a6153795",
+    "version": "29d1613f88bc",
     "contract_version": 11,
-    "digest": null
+    "digest": "sha256:5fa3998d3d93c6b70942ea87b53502b19f40bf0c5163b2c201f996776c4618c7"
   },
   "source": {
     "repository": "https://github.com/hevnsnt/cvENGINE-sentinel.git"

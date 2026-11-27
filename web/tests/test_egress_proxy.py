@@ -19,7 +19,7 @@ from django.test import SimpleTestCase, TestCase
 from cvengine_scanner.probes import egress_proxy as lib_proxy
 
 from cveFeed import egress_proxy
-from reNgine import crypto_fields
+from cvengine import crypto_fields
 from scanEngine.models import Proxy
 from tests import library_http
 from tests.library_http import transport

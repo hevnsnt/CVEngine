@@ -6,7 +6,7 @@ from django.shortcuts import render
 from django.shortcuts import redirect
 from django.urls import reverse
 
-from tenancy import membership_cache, roles, scope
+from tenancy import membership_cache, roles, scope, snapshot
 
 PROJECT_PARAMS = ('slug', 'project_slug', 'project')
 
@@ -19,11 +19,13 @@ class TenancyMiddleware:
         user = getattr(request, 'user', None)
         if not (user and user.is_authenticated):
             return self.get_response(request)
-        tokens = scope.set_scope(membership_cache.allowed_for_request(request, user), user)
-        try:
-            return self.get_response(request)
-        finally:
-            scope.reset_scope(tokens)
+        # One read of the user's memberships answers the allowed set, the MFA policy and the role for this request (tenancy.snapshot)
+        with snapshot.activate(user):
+            tokens = scope.set_scope(membership_cache.allowed_for_request(request, user), user)
+            try:
+                return self.get_response(request)
+            finally:
+                scope.reset_scope(tokens)
 
     def process_view(self, request, view_func, view_args, view_kwargs):
         user = request.user
@@ -89,7 +91,7 @@ class TenancyMiddleware:
 
 
 class RetireClassicUiMiddleware:
-    """The reNgine screens are gone. Their addresses forward to the matching CVEngine page; anything that
+    """The inherited classic screens are gone. Their addresses forward to the matching CVEngine page; anything that
     would have changed data through them is refused. Downloads (exports, reports), /api/ and /admin/ stay."""
 
     KEEP = re.compile(r'^/(cve/|api/|mcp/|mfa/|login/|logout/|staticfiles/|admin/|swagger|favicon)|/export/|/create_report')

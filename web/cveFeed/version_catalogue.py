@@ -47,7 +47,7 @@ DIGEST_KIND = 'version_digest'  # the Sentinel kind of an entry with a digest re
 ROWS_KIND = 'version_rows'      # the Sentinel kind of an entry with a rows read (contract 9): only the named version rows of a status page
 
 _VERSION = re.compile(r'^v?(\d{1,4}(?:\.\d{1,9}){1,3})(?:[-+_.~]([0-9A-Za-z][0-9A-Za-z.+~_-]{0,40}))?$')
-_CONTROL = re.compile(r'[\x00-\x1f\x7f-\x9f  ​-‏‪-‮﻿]+')
+_CONTROL = re.compile(r'[\x00-\x1f\x7f-\x9f\u2028\u2029\u200b-\u200f\u202a-\u202e\ufeff]+')
 
 
 def clip(text, limit=MAX_EVIDENCE):
@@ -61,12 +61,6 @@ def version_of(text, keep_suffix=True):
     if not found:
         return ''
     return found.group(1) + (f'-{found.group(2)}' if keep_suffix and found.group(2) else '')
-
-
-def base_version(text):
-    """Only the dotted numbers of a version (``1.27.3-eks-a5565ad`` -> ``1.27.3``)."""
-    found = _VERSION.match(clip(text, 80))
-    return found.group(1) if found else ''
 
 
 @dataclass(frozen=True)

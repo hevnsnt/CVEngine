@@ -29,7 +29,8 @@ from importlib import import_module
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
-from reNgine.state_machines import AI_ANSWERED, AI_APPLIED, AI_APPLYING, AI_EXPIRED, AI_FAILED, AI_JOB, AI_LEASED, AI_QUEUED
+from cveFeed import ai_pause
+from cvengine.state_machines import AI_ANSWERED, AI_APPLIED, AI_APPLYING, AI_EXPIRED, AI_FAILED, AI_JOB, AI_LEASED, AI_QUEUED
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +107,7 @@ def provider_row():
     """The configured AI provider, or None when AI is off or its settings cannot make a request (no key where one is needed, no server
     address for a self-hosted one): the stages then behave as they always did without AI."""
     from dashboard.models import AIProviderSettings
-    from reNgine.ai_profiles import PROFILES
+    from cvengine.ai_profiles import PROFILES
     row = AIProviderSettings.objects.filter(enabled=True).first()
     profile = PROFILES.get(getattr(row, 'provider', None))
     if row is None or profile is None:
@@ -133,14 +134,18 @@ def serving(row=None):
         return False, 'no AI provider is configured'
     if reviewer.paused():
         return False, 'scanning is paused'
+    from cveFeed import ai_budget
+    spent, why = ai_budget.blocked(row=row)
+    if spent:  # the money budget is spent: nothing is handed out, the jobs stay queued until the next UTC day or month
+        return False, why
     return True, ''
 
 
 def runtime_block(row):
     """The operator's request settings as one request needs them, every layer resolved here (the Settings page, then the CVENGINE_AI_*
     variables of this server's .env, then nothing: the container falls back to the provider's own default)."""
-    from reNgine.ai_profiles import AIRuntime
-    from reNgine.ai_providers import _layered, reasoning_level, structured_mode
+    from cvengine.ai_profiles import AIRuntime
+    from cvengine.ai_providers import _layered, reasoning_level, structured_mode
     runtime = AIRuntime.from_row(row)
     out = {name: _layered(name, runtime)[0] for name in ('request_timeout', 'connect_timeout', 'max_tokens', 'context_tokens')}
     out.update(structured_mode=structured_mode(runtime), reasoning=reasoning_level(runtime), keep_alive=runtime.keep_alive or '')
@@ -150,7 +155,7 @@ def runtime_block(row):
 def provider_block(row):
     """The job block of the reviewer's configuration: the provider, its address and key, the model chosen (empty: the container picks the
     provider's default as the server used to), and the request settings."""
-    from reNgine.ai_providers import reachable_url
+    from cvengine.ai_providers import reachable_url
     return {'provider': row.provider, 'base_url': reachable_url(row.base_url) if row.base_url else '', 'api_key': row.api_key or '',
             'model': row.model or '', 'runtime': runtime_block(row)}
 
@@ -191,7 +196,7 @@ def enqueue(kind, stage, *, system, parts, schema=None, options=None, image=None
     from cveFeed.models import AIJob
     if kind not in HANDLERS:
         raise ValueError(f'unknown AI job kind {kind!r}')
-    from reNgine.ai_profiles import STAGE_ANSWER_CAPS, stage_cache_ttl
+    from cvengine.ai_profiles import STAGE_ANSWER_CAPS, stage_cache_ttl
     if stage not in STAGE_ANSWER_CAPS:  # tests/test_ai_truncation.py fails for a stage that is not in the table: a new stage must name its room
         logger.warning('AI job stage %r has no answer room in ai_profiles.STAGE_ANSWER_CAPS: it gets the default', stage)
     # every stage is sent with its own answer room and the one automatic retry of a cut-off reply (a stage may say ``retry_truncated: False``)
@@ -220,10 +225,18 @@ def enqueue(kind, stage, *, system, parts, schema=None, options=None, image=None
         return found
 
 
-def _for_container(job):
+def _for_container(job, row=None):
+    """The job as the container gets it. A high-volume stage is sent with the bulk model (``cvengine.ai_routing``), decided at hand-out so a
+    change on the Settings page applies to the jobs already queued; a model the stage chose itself (the tag choice model) is kept."""
+    from cvengine import ai_routing
+    options = dict(job.packet.get('options') or {})
+    if row is not None and not options.get('model'):
+        routed = ai_routing.model_for_stage(job.stage, row)
+        if routed:
+            options['model'] = routed
     out = {'id': job.pk, 'kind': job.kind, 'stage': job.stage, 'attempt': job.attempt, 'lease': job.lease,
            'system': job.packet.get('system') or '', 'parts': job.packet.get('parts') or [], 'schema': job.packet.get('schema'),
-           'options': job.packet.get('options') or {}}
+           'options': options}
     if job.packet.get('image'):
         out['image'] = job.packet['image']
     return out
@@ -278,7 +291,7 @@ def next_jobs(limit=8, now=None):
                 continue
             job.status, job.lease, job.lease_until, job.leases = 'leased', secrets.token_hex(12), now + timedelta(seconds=seconds), job.leases + 1
             job.save(update_fields=['status', 'lease', 'lease_until', 'leases', 'updated_at'])
-            packet = _for_container(job)
+            packet = _for_container(job, row)
             size += len(json.dumps(packet, default=str))
             out.append(packet)
     return out
@@ -341,7 +354,7 @@ def submit(job_id, body, now=None):
     Refused (JobError) for an unknown job (404), a lease that is not the job's current one (409) or a malformed body (400). Returns
     ``{accepted: true}``; the stage continues in a Celery task."""
     from cveFeed.models import AIJob
-    from reNgine.ai_profiles import PROFILES
+    from cvengine.ai_profiles import PROFILES
     if not isinstance(body, dict):
         raise JobError('body must be a JSON object')
     has_text, error = isinstance(body.get('text'), str), body.get('error')
@@ -367,7 +380,9 @@ def submit(job_id, body, now=None):
         if has_text:
             job.result = {'text': body['text']}
         else:
-            job.result = {'error': error, **({'http_status': body['http_status']} if _count(body.get('http_status'), 999) else {}),
+            message = str(body.get('provider_message') or '')[:300]
+            usage_limit = bool(message) and ai_pause.is_usage_limit(message)
+            job.result = {'error': error, **({'provider_message': message} if usage_limit else {}), **({'http_status': body['http_status']} if _count(body.get('http_status'), 999) else {}),
                           **({'stop_reason': str(body['stop_reason'])[:40]} if isinstance(body.get('stop_reason'), str) else {})}
             job.error_category = error
         job.status, job.lease, job.lease_until, job.answered_at = 'answered', '', None, now
@@ -377,6 +392,10 @@ def submit(job_id, body, now=None):
         job.save()
         pk = job.pk
         transaction.on_commit(lambda: _schedule(pk))
+    if has_text:
+        ai_pause.resolve_alert(now)
+    elif usage_limit:
+        ai_pause.raise_alert(message, now)
     return {'accepted': True}
 
 

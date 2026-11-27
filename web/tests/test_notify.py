@@ -27,7 +27,7 @@ class NotifyTests(TestCase):
 		self.engine = EngineType.objects.create(engine_name='e', yaml_configuration='x', default_engine=True)
 		# every network path is patched: a sender that slipped through would be a test failure, not a request
 		self.sent = []
-		self.patches = [mock.patch(f'reNgine.common_func.{name}', side_effect=lambda text, n=name: self.sent.append((n, text)))
+		self.patches = [mock.patch(f'cvengine.common_func.{name}', side_effect=lambda text, n=name: self.sent.append((n, text)))
 		                for name in SENDERS]
 		self.patches += [mock.patch('requests.post', side_effect=AssertionError('network')),
 		                 mock.patch('requests.get', side_effect=AssertionError('network'))]
@@ -48,7 +48,7 @@ class NotifyTests(TestCase):
 		fields.update(cve)
 		entry = CVEEntry.objects.create(**fields)
 		for i in range(count):
-			sub = Subdomain.objects.create(scan_history=scan, target_domain=self.domain, name=f'h{i}_x.example.test')
+			sub = Subdomain.objects.get_or_create(scan_history=scan, target_domain=self.domain, name=f'h{i}_x.example.test')[0]  # one row per scan
 			# a template hit: since 1.3.2 a match on its version alone is smoke on the host, never paged as fire
 			CVEMatch.objects.create(cve_entry=entry, subdomain=sub, scan_history=scan, confidence=0.9, version_in_range=True,
 									template_result='vulnerable')
@@ -59,13 +59,13 @@ class NotifyTests(TestCase):
 		self.assertIs(notify._send('x', 'send_interesting_notif'), True)
 		self.assertFalse(notify._send('x', 'send_vuln_notif'))  # this kind of event is switched off: nothing was tried
 		with mock.patch.object(notify, 'CHANNEL_SENDERS', {'slack': 'send_slack_message'}), \
-				mock.patch('reNgine.common_func.send_slack_message', side_effect=RuntimeError('down')):
+				mock.patch('cvengine.common_func.send_slack_message', side_effect=RuntimeError('down')):
 			self.assertIsNone(notify._send('x', 'send_interesting_notif'))  # tried, and every channel failed
 
 	def test_a_failing_only_channel_is_a_failure_even_though_the_other_senders_are_silent(self):
 		# the real channel table: the three switched-off senders return silently and must not count as delivered
 		self.enable(send_interesting_notif=True)
-		with mock.patch('reNgine.common_func.send_slack_message', side_effect=RuntimeError('down')):
+		with mock.patch('cvengine.common_func.send_slack_message', side_effect=RuntimeError('down')):
 			self.assertIsNone(notify._send('x', 'send_interesting_notif'))
 		self.assertIs(notify._send('x', 'send_interesting_notif'), True)
 		# switched on but with no address: nothing can be tried
@@ -178,7 +178,7 @@ class NotifyTests(TestCase):
 		from cveFeed.tasks import template_test_for_cve
 		self.enable()
 		entry = CVEEntry.objects.create(cve_id='CVE-2099-5', kev=True, published_at=timezone.now())
-		no_ai = mock.patch('reNgine.ai_settings.get_configured_provider', side_effect=RuntimeError('none'))
+		no_ai = mock.patch('cvengine.ai_settings.get_configured_provider', side_effect=RuntimeError('none'))
 		results = [{'host': f'h{i}.example.test', 'vulnerable': True} for i in range(6)] + [{'host': 'ok.example.test', 'vulnerable': False}]
 		with mock.patch('cveFeed.templategen.run_cve_tests', return_value={'source': 'installed', 'results': results}), no_ai:
 			template_test_for_cve(entry.pk, [r['host'] for r in results])
@@ -224,7 +224,7 @@ class NotifyTests(TestCase):
 		self.enable(send_to_discord=True, discord_hook_url='https://hooks.invalid/d', send_to_lark=True, lark_hook_url='https://hooks.invalid/l',
 		            send_to_telegram=True, telegram_bot_token='123:T', telegram_bot_chat_id='1')
 		secret = 'https://api.telegram.org/bot123:SECRET/sendMessage'
-		with mock.patch('reNgine.common_func.send_discord_message', side_effect=RuntimeError(secret)):
+		with mock.patch('cvengine.common_func.send_discord_message', side_effect=RuntimeError(secret)):
 			with self.assertLogs('cveFeed.notify', level=logging.WARNING) as logs:
 				self.assertTrue(notify.scan_finished(self.scan(), {}))
 		self.assertEqual([n for n, _ in self.sent], ['send_slack_message', 'send_lark_message', 'send_telegram_message'])  # the rest still ran
@@ -237,10 +237,16 @@ class NotifyTests(TestCase):
 
 
 class SenderHelperTests(TestCase):
-	"""The reNgine helpers behind the messages: bounded in time, and silent for a channel that is off."""
+	"""The inherited helpers behind the messages: bounded in time, and silent for a channel that is off."""
+
+	def setUp(self):
+		# The hooks here are fixture names that do not resolve in the rig; the send time address rule has its own tests (test_notification_hook_url).
+		dns = mock.patch('cvengine.hook_guard.socket.getaddrinfo', return_value=[(2, 1, 6, '', ('8.8.4.4', 0))])
+		dns.start()
+		self.addCleanup(dns.stop)
 
 	def test_slack_and_lark_posts_have_a_timeout_and_off_channels_send_nothing(self):
-		from reNgine import common_func
+		from cvengine import common_func
 		with mock.patch('requests.post') as post, mock.patch('requests.get') as get:
 			common_func.send_slack_message('x')
 			common_func.send_lark_message('x')

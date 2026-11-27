@@ -11,6 +11,8 @@ cd "$(dirname "$0")/.."
 
 created=0
 [ -f .env ] || { (umask 077; cp .env.example .env); echo "Created .env from .env.example."; created=1; }
+# an install made before 1.5.0 (install.sh run again): its .env and certificates get the new names beside the old ones (scripts/legacy_names.py)
+if [ "$created" != 1 ] && [ -f scripts/legacy_names.py ]; then python3 scripts/legacy_names.py migrate; fi
 
 # letters and digits only: a `$` or `#` in .env breaks Make and Compose parsing
 random() { head -c 256 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 24; }
@@ -38,23 +40,23 @@ fill() {
 }
 
 # The Compose project name of a NEW installation (an existing .env keeps its own: volumes, networks and the update scripts are named by it). The example
-# says "rengine". A name given for this run (COMPOSE_PROJECT_NAME=... ./install.sh) is used; else, when another checkout on this host already runs the
-# project "rengine", this one gets a name of its own made from its directory, so a second stack never shares the first one's volumes and network.
-if [ "$created" = 1 ] && grep -q '^COMPOSE_PROJECT_NAME=rengine$' .env; then
+# says "cvengine". A name given for this run (COMPOSE_PROJECT_NAME=... ./install.sh) is used; else, when another checkout on this host already runs the
+# project "cvengine", this one gets a name of its own made from its directory, so a second stack never shares the first one's volumes and network.
+if [ "$created" = 1 ] && grep -q '^COMPOSE_PROJECT_NAME=cvengine$' .env; then
   chosen=${COMPOSE_PROJECT_NAME:-}
   if ! [[ $chosen =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
     chosen=''
     if command -v docker >/dev/null 2>&1; then
-      elsewhere=$(docker ps -a --filter 'label=com.docker.compose.project=rengine' --format '{{.Label "com.docker.compose.project.working_dir"}}' 2>/dev/null | grep -vxF -e "$(pwd)" -e "$(pwd -P)" | head -n 1) || elsewhere=''
+      elsewhere=$(docker ps -a --filter 'label=com.docker.compose.project=cvengine' --format '{{.Label "com.docker.compose.project.working_dir"}}' 2>/dev/null | grep -vxF -e "$(pwd)" -e "$(pwd -P)" | head -n 1) || elsewhere=''
       if [ -n "$elsewhere" ]; then
-        chosen=rengine-$(basename "$(pwd -P)" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-*//; s/-*$//' | cut -c1-30)
-        [[ $chosen =~ ^rengine-[a-z0-9][a-z0-9-]*$ ]] || chosen=rengine-$(random | tr 'A-Z' 'a-z' | head -c 6)
+        chosen=cvengine-$(basename "$(pwd -P)" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-*//; s/-*$//' | cut -c1-30)
+        [[ $chosen =~ ^cvengine-[a-z0-9][a-z0-9-]*$ ]] || chosen=cvengine-$(random | tr 'A-Z' 'a-z' | head -c 6)
       fi
     fi
   fi
-  if [ -n "$chosen" ] && [ "$chosen" != rengine ]; then
+  if [ -n "$chosen" ] && [ "$chosen" != cvengine ]; then
     set_value COMPOSE_PROJECT_NAME "$chosen"
-    echo "Compose project name: $chosen (another checkout on this host already uses \"rengine\")."
+    echo "Compose project name: $chosen (another checkout on this host already uses \"cvengine\")."
   fi
 fi
 
@@ -141,7 +143,14 @@ apply_sentinel_plan() {
 }
 
 fill POSTGRES_PASSWORD
+# The password of the least privilege database role the server runs as (CVENGINE_DB_APP_USER, default cvengine_app; docs/CONFIGURATION.md,
+# Database roles): the first migrate creates the role with it. POSTGRES_USER stays the owner, used for migrations and backups only.
+grep -q '^CVENGINE_DB_APP_PASSWORD=' .env || echo 'CVENGINE_DB_APP_PASSWORD=' >> .env
+grep -qE '^CVENGINE_DB_APP_USER=[[:space:]]*$' .env || fill CVENGINE_DB_APP_PASSWORD
 fill AUTHORITY_PASSWORD
+# The secret a host nginx in front of the bundled proxy sends so its X-Forwarded-For is believed (scripts/client-address.sh, docs/DEPLOYMENT.md).
+# shellcheck source=client-address.sh
+. scripts/client-address.sh && cvengine_ensure_upstream_secret >/dev/null && echo "Generated CVENGINE_UPSTREAM_SECRET." || true
 fill_domain "${1:-}"
 [ "${CVENGINE_ENABLE_BUILTIN_SCANNER:-}" != 0 ] || disable_builtin_scanner
 apply_sentinel_plan

@@ -127,8 +127,11 @@ def task_queued(task):
             row = SentinelTask._base_manager.select_related('project__org').filter(pk=task_id, status='queued').first()
             if row is None:
                 return
-            eligible = sentinel_broker.eligible_sentinels(row.project, row.kind, live_only=True, builtin_only=bool(row.secret_ref))
-            _push([agent_key(e.agent.pk) for e in eligible])
+            from agentapi import signin_delivery
+            signin = row.secret_ref if signin_delivery.is_ref(row.secret_ref) else None  # a stored sign-in: also the external Sentinels its owner allowed
+            eligible = sentinel_broker.eligible_sentinels(row.project, row.kind, live_only=True, builtin_only=bool(row.secret_ref) and not signin, signin=signin)
+            nets = {}  # a Sentinel inside a private network is woken only for internal work (``sentinel_broker.internal_work_refusal``)
+            _push([agent_key(e.agent.pk) for e in eligible if not e.internal_only or not sentinel_broker.internal_work_refusal(row, nets)])
         except Exception as exc:  # noqa: BLE001
             _warn('queued', exc)
     _after_commit(wake)  # the lookup too: nothing is asked inside the transaction that queued it

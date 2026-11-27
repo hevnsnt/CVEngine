@@ -33,9 +33,20 @@ def _errors(response):
     return re.sub(r"\s+", " ", "; ".join(p for p in parts if p))[:300]
 
 
+def _plain(*values):
+    """Whether each credential is text HTTP basic auth can carry. HackerOne usernames and API tokens are ASCII; anything else made
+    ``requests`` fail with a ``UnicodeEncodeError`` (a 500) while building the header, before anything was sent."""
+    return all(isinstance(v, str) and v.isascii() for v in values)
+
+
+NOT_PLAIN = "The HackerOne username or API token holds characters a HackerOne credential never has. Paste them again."
+
+
 def submit_hackerone(payload, username, token, post=None):
     """POST the payload; returns ``{"id", "url"}``. Raises SubmitError. ``post`` is injectable for tests."""
     import requests
+    if not _plain(username, token):
+        raise SubmitError(NOT_PLAIN + " Nothing was sent.")
     try:
         resp = (post or requests.post)(HACKERONE_REPORTS, auth=(username, token), json=payload, timeout=TIMEOUT, allow_redirects=False,
                                        headers={"Accept": "application/json", "Content-Type": "application/json"})
@@ -78,6 +89,8 @@ def verify_hackerone(username, token, get=None):
     """``{"verified": True | False | None, "reason": ""}``: a one-item read of the user's own reports. False is a refusal (the
     reason says which kind), None means HackerOne could not be asked."""
     import requests
+    if not _plain(username, token):
+        return {"verified": False, "reason": NOT_PLAIN}
     try:
         resp = (get or requests.get)(HACKERONE_ME, auth=(username, token), params={"page[size]": 1}, timeout=TIMEOUT, allow_redirects=False,
                                      headers={"Accept": "application/json"})
@@ -90,6 +103,3 @@ def verify_hackerone(username, token, get=None):
     return {"verified": None, "reason": f"HackerOne answered HTTP {resp.status_code}; try again later."}
 
 
-def check_hackerone(username, token, get=None):
-    """True when the credentials are accepted, False when refused, None when unreachable."""
-    return verify_hackerone(username, token, get=get)["verified"]

@@ -1,9 +1,13 @@
-// "Export all hosts": a button in the Hosts page head and the small dialog behind it. The server writes the file (agentapi/host_export.py);
-// this fetches it with the page's own sign-in and saves it. Not the CSV button of the list: that one exports the current filter, with the internal columns.
+// "Export all hosts" and "Export host": a button in the Hosts page head and the small dialog behind it. The server writes the file
+// (agentapi/host_export.py for every host, agentapi/host_export_one.py for one); this fetches it with the page's own sign-in and saves it.
+// Not the CSV button of the list: that one exports the current filter, with the internal columns.
 import { api, dialog, el, field, selectOf, toast } from "/staticfiles/cve/ui.js";
-import { CONTAINS, DEFAULTS, FORMATS, SCOPES, canExport, countsFrom, doneMessage, exportPath, exportQuery, filenameFrom, organizationsOf } from "/staticfiles/cve/host-export-logic.js";
+import {
+  CONTAINS, DEFAULTS, FORMATS, HOST_CONTAINS, HOST_NOTE, SCOPES, buttonLabel, buttonTitle, canExport, countsFrom, doneMessage, exportPath, exportQuery,
+  filenameFrom, hostCountsFrom, hostDoneMessage, hostExportPath, hostIdFromHash, organizationsOf,
+} from "/staticfiles/cve/host-export-logic.js";
 
-async function save(url, fallbackName) {
+async function save(url, fallbackName, counts = countsFrom) {
   const res = await fetch(url, { credentials: "same-origin" });
   if (!res.ok) {
     let message = `Export failed (${res.status})`;
@@ -21,7 +25,7 @@ async function save(url, fallbackName) {
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(href), 5000);
-  return countsFrom(res.headers);
+  return counts(res.headers);
 }
 
 /**
@@ -99,12 +103,82 @@ export function openHostExport({ slug, all = false }) {
   });
 }
 
-/** The page-head button of the Hosts page. */
-export function hostExportButton({ slug, all = false }) {
-  const b = el("button", "btn sm head-action", "Export all hosts", {
-    type: "button",
-    title: "Download every discovered host as a file to hand to a penetration testing company (no findings or notes in it)",
+/**
+ * The dialog of one host: no choices, only what the file holds and Download. Same dialog, keys and focus as Export all hosts.
+ * @param {{slug: string, id: number, name?: string}} options
+ */
+export function openSingleHostExport({ slug, id, name = "" }) {
+  dialog("Export host", (body, close) => {
+    body.append(el("p", "note", name ? `Everything cvENGINE knows about ${name}, as one ZIP file.` : "Everything cvENGINE knows about this host, as one ZIP file."));
+    const list = el("ul", "note");
+    HOST_CONTAINS.forEach((line) => list.append(el("li", "", line)));
+    body.append(list, el("p", "note", HOST_NOTE));
+    const status = el("p", "note", "", { role: "status", "aria-live": "polite" });
+    const actions = el("div", "actions");
+    const cancel = el("button", "btn ghost", "Cancel", { type: "button" });
+    cancel.onclick = close;
+    const go = el("button", "btn", "Download", { type: "button" });
+    actions.append(cancel, go);
+    body.append(status, actions);
+    go.onclick = async () => {
+      go.disabled = true;
+      go.textContent = "Exporting…";
+      status.textContent = "";
+      try {
+        const counts = await save(hostExportPath({ slug, id }), `host-${id}.zip`, hostCountsFrom);
+        toast(hostDoneMessage({ ...counts, name }));
+        close();
+      } catch (err) {
+        status.textContent = err.message;
+        toast(err.message, true);
+        go.textContent = "Download";
+        go.disabled = false;
+      }
+    };
   });
-  b.onclick = () => openHostExport({ slug, all });
+}
+
+/**
+ * The page-head button of the Hosts page. It reads "Export host" while the address selects a host (#40413) and "Export all hosts" on the list;
+ * ``sync()`` repaints it (the page calls it whenever it shows or leaves a host, since history.replaceState fires no event), and a hash change or a
+ * back or forward step repaints it on its own. ``hostOf(id)`` gives the loaded host ({host, project}) for the dialog's words and, in All projects,
+ * its project.
+ * @param {{slug: string, all?: boolean, hostOf?: (id: number) => any}} options
+ */
+export function hostExportButton({ slug, all = false, hostOf = () => null }) {
+  const b = el("button", "btn sm head-action", buttonLabel(null), { type: "button", title: buttonTitle(null) });
+  b.sync = () => {
+    const id = hostIdFromHash(location.hash);
+    b.textContent = buttonLabel(id);
+    b.setAttribute("title", buttonTitle(id));
+    return id;
+  };
+  const follow = () => {
+    if (b.isConnected === false) {
+      window.removeEventListener("hashchange", follow);
+      window.removeEventListener("popstate", follow);
+      return;
+    }
+    b.sync();
+  };
+  if (typeof window !== "undefined" && window.addEventListener) {
+    window.addEventListener("hashchange", follow);
+    window.addEventListener("popstate", follow);
+  }
+  b.onclick = () => {
+    const id = b.sync();
+    if (!id) {
+      openHostExport({ slug, all });
+      return;
+    }
+    const host = hostOf(id) || null;
+    const project = all ? host && host.project : slug;
+    if (!project) {
+      toast("The host is still loading: try again in a moment", true);
+      return;
+    }
+    openSingleHostExport({ slug: project, id, name: host ? host.host : "" });
+  };
+  b.sync();
   return b;
 }

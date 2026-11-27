@@ -17,7 +17,7 @@ from startScan.models import IpAddress, ScanHistory, Subdomain, Vulnerability
 from targetApp.models import Domain
 from tests.test_live_cache import World, steady_caches
 
-NUMBERS = ('targets', 'certs_expiring', 'certs_total', 'hygiene_open', 'hosts', 'hosts_live', 'tiers', 'cves', 'matches', 'match_groups', 'scanner_findings',
+NUMBERS = ('targets', 'certs_expiring', 'certs_total', 'hygiene_open', 'hosts', 'hosts_live', 'tiers', 'cves', 'matches', 'match_groups', 'match_issues', 'scanner_findings',
            'exposed_hosts', 'oldest_open_days', 'oldest_open_kind', 'scans_running', 'autofire_runs', 'templates')
 
 

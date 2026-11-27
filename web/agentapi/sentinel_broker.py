@@ -27,7 +27,7 @@ from datetime import timedelta
 
 from django.core.cache import cache
 from django.db import connection, transaction
-from django.db.models import Avg, CharField, Count, DurationField, Exists, F, Q, Value
+from django.db.models import Avg, CharField, Count, DurationField, Exists, F, OuterRef, Q, Value
 from django.db.models.functions import Cast, Coalesce, Concat, Greatest
 from django.http import JsonResponse
 from django.utils import timezone
@@ -42,6 +42,7 @@ from agentapi import sentinel_settings
 from agentapi import sentinel_contract
 from agentapi import sentinel_machine
 from agentapi import sentinel_stream
+from agentapi import signin_delivery
 from agentapi import sentinel_autoupdate
 from agentapi import sentinel_tools
 from agentapi import sentinel_version
@@ -52,7 +53,7 @@ from agentapi.auth import SCOPE_SENTINEL, create_token
 from agentapi.models import SENTINEL_ACTIVE_STATUSES, Agent, SentinelEnrollment, SentinelTask
 from agentapi.services import ApiError, AssetFilter
 from dashboard.models import AuditLog
-from reNgine.state_machines import SENTINEL_TASK
+from cvengine.state_machines import SENTINEL_TASK
 from tenancy import audit, roles
 
 logger = logging.getLogger(__name__)
@@ -65,6 +66,9 @@ RUN_LEASE = broker.RUN_LEASE
 MAX_WAIT = broker.MAX_WAIT
 CANDIDATES = broker.CANDIDATES
 INTERNAL_CAPABILITY = 'network:internal'  # declared by a Sentinel deployed inside a private network; the only kind that may claim work for an address of a declared internal range
+# A Sentinel inside a private network takes internal work only (``internal_work_refusal``): never a public address, a name that resolves outside the
+# declared ranges, or a domain discovery. It sits in someone's office or home, and external work sent from there scans the internet from that network.
+INTERNAL_ONLY = 'internal only'  # the refusal code of external work offered to such a Sentinel (``SentinelEff.refusal``)
 RATES = {'claim': broker.RATES['claim'], 'report': broker.RATES['report'], 'release': broker.RATES['release'],
          'heartbeat': broker.RATES['heartbeat'], 'register': broker.RATES['register'],
          'secret': (6, 60),  # a stored credential is read once per signed-in task; more than a few a minute is a caller gone wrong, or guessing ids
@@ -145,6 +149,8 @@ def _heartbeat(ctx, body=None):
     running = _clean_running(body)  # refused before anything is stored
     out = broker.heartbeat(ctx, body)
     _renew_token(ctx.token)
+    from cveFeed import reviewer
+    reviewer.sentinel_heard()  # a "no live Sentinel" alert ends with the first heartbeat, not at the next half-hourly check (a cache gate: one query a minute at most)
     if running is not None:
         ended = _end_unreported(out['agent']['id'], running)
         if ended:
@@ -221,7 +227,7 @@ def _limit(token, action, limit=None):
 
 def limit_address(address, action='bootstrap'):
     """Count one call of ``action`` against the caller's address (``agent_broker._hit``: every call counts, a refused or failed one too), 429 with ``Retry-After`` past it.
-    For the call that has no token to count against. ``address`` is ``reNgine.client_ip.client_ip`` (behind a trusted proxy, the real client)."""
+    For the call that has no token to count against. ``address`` is ``cvengine.client_ip.client_ip`` (behind a trusted proxy, the real client)."""
     limit, window = RATES[action]
     name = f'agentapi:{action}:addr:{address or "unknown"}'
     if not broker._hit(name, limit, window):
@@ -369,6 +375,7 @@ def _env_int(name, default):
 
 # A failure the scanned host caused, not the Sentinel: a task that failed with one of these says nothing about whether the Sentinel can do the kind, so it
 # neither adds to a streak nor breaks one. (A Sentinel that has the nmap_full tarpit handling reports such a host as a result; this is for one that does not.)
+FAIL_RECENT = 200  # a Sentinel's latest finished tasks the failure streaks are read from (``failing_kinds``, ``failing_kinds_many``)
 TARGET_CAUSED_ERRORS = ('bytes of output; the run was stopped',)
 
 
@@ -385,7 +392,7 @@ def failing_kinds(agent, now=None):
     now = now or timezone.now()
     window = timedelta(minutes=cooldown)
     recent = list(SentinelTask.objects.filter(agent=agent, status__in=('done', 'failed'), finished_at__gte=now - 4 * window)
-                  .order_by('-finished_at').values_list('kind', 'status', 'finished_at', 'error')[:200])
+                  .order_by('-finished_at').values_list('kind', 'status', 'finished_at', 'error')[:FAIL_RECENT])
     by_kind = {}
     for kind, status, finished, error in recent:
         if status == 'failed' and any(marker in (error or '') for marker in TARGET_CAUSED_ERRORS):
@@ -408,8 +415,9 @@ def _streaks(by_kind, streak, window, now):
 
 
 def failing_kinds_many(agents, now=None):
-    """``{agent id: failing_kinds(agent)}`` for a page of Sentinels in one query (the last ``FAIL_STREAK`` finished tasks of each kind of each Sentinel, a
-    failure the scanned host caused left out), where ``failing_kinds`` is one query per Sentinel."""
+    """``{agent id: failing_kinds(agent)}`` for many Sentinels in one query, where ``failing_kinds`` is one query per Sentinel. The same answer: each
+    Sentinel's 200 latest finished tasks of the window (``FAIL_RECENT``), a failure the scanned host caused left out after that cut, then the last
+    ``FAIL_STREAK`` of each kind. The rights of many Sentinels (the claim's peers, a capacity answer, the pages) are built with it."""
     from django.db.models import Window
     from django.db.models.functions import RowNumber
     streak, cooldown = _fail_settings()
@@ -418,16 +426,22 @@ def failing_kinds_many(agents, now=None):
         return {a.pk: {} for a in agents}
     now = now or timezone.now()
     window = timedelta(minutes=cooldown)
-    caused = Q()
-    for marker in TARGET_CAUSED_ERRORS:
-        caused |= Q(error__contains=marker)
-    rows = (SentinelTask.objects.filter(agent_id__in=ids, status__in=('done', 'failed'), finished_at__gte=now - 4 * window).exclude(Q(status='failed') & caused)
-            .annotate(rank=Window(RowNumber(), partition_by=[F('agent_id'), F('kind')], order_by=F('finished_at').desc()))
-            .values_list('agent_id', 'kind', 'status', 'finished_at', 'rank'))
+    rows = (SentinelTask.objects.filter(agent_id__in=ids, status__in=('done', 'failed'), finished_at__gte=now - 4 * window)
+            .annotate(rank=Window(RowNumber(), partition_by=[F('agent_id')], order_by=F('finished_at').desc()))
+            .filter(rank__lte=FAIL_RECENT).values_list('agent_id', 'kind', 'status', 'finished_at', 'error', 'rank'))
     by_agent = {}
-    for agent_id, kind, status, finished, rank in sorted((r for r in rows if r[4] <= streak), key=lambda r: (r[0], r[1], r[4])):
+    for agent_id, kind, status, finished, error, _rank in sorted(rows, key=lambda r: (r[0], r[5])):
+        if status == 'failed' and any(marker in (error or '') for marker in TARGET_CAUSED_ERRORS):
+            continue
         by_agent.setdefault(agent_id, {}).setdefault(kind, []).append((status, finished))
     return {a.pk: _streaks(by_agent.get(a.pk, {}), streak, window, now) for a in agents}
+
+
+def _rights(agents, now):
+    """``SentinelEff`` of each of ``agents``, their failure streaks read in one query (``failing_kinds_many``) instead of one each."""
+    agents = list(agents)
+    withheld = failing_kinds_many(agents, now) if agents else {}
+    return [SentinelEff(a, now, withheld.get(a.pk)) for a in agents]
 
 
 def prefer_defer_seconds():
@@ -559,7 +573,7 @@ def generate_org_enrollment(ctx, slug, network='external'):
     no new enrollment needed."""
     from dashboard.models import Org
     org = Org.objects.filter(slug=slug).first()
-    if org is None:
+    if org is None or not svc._visible_org(ctx.user, org):  # one answer for missing and not yours: an outsider cannot probe organization slugs
         raise ApiError(404, 'organization not found')
     if not roles.can_manage_org(ctx.user, org.pk):
         raise ApiError(403, 'generating an organization-wide Sentinel enrollment needs the admin role in this organization')
@@ -874,7 +888,7 @@ SECRET_FEATURE = 'secret_read'  # the built-in scanner image's ``info.features``
 def secret_refusal(eff, task):
     """``None`` when ``eff`` (the rights of one Sentinel) may be given ``task`` whatever secret it names, else why not: ``SIGNED_IN`` for a stored sign-in it may not read,
     or the reason of ``sentinel_stream.key_delivery_decision`` for a discovery's keys (``bbotkeys:`` references go through that one gate, for every Sentinel; any
-    other reference is the built-in scanner's alone, as always). A module function, not only a method, so that ``refusal`` needs nothing of ``eff`` for a task with
+    other reference is the built-in scanner's, or an external Sentinel's that ``signin_delivery.decision`` allows for a stored sign-in). A module function, not only a method, so that ``refusal`` needs nothing of ``eff`` for a task with
     no secret."""
     ref = task.secret_ref
     if not ref:
@@ -882,7 +896,18 @@ def secret_refusal(eff, task):
     if ref.startswith(sentinel_stream.KEYS_REF_PREFIX):
         ok, why = sentinel_stream.key_delivery_decision(eff, task.kind, ref, task.project_id)
         return None if ok else why
-    return None if eff.reads_secrets else SIGNED_IN
+    if eff.reads_secrets:
+        return None
+    if signin_delivery.is_ref(ref) and signin_delivery.decision(eff, task.kind, ref, task.project_id, eff.now)[0]:
+        return None  # an external Sentinel the owner allowed for this sign-in (``signin_delivery.decision``, the one gate for a stored sign-in)
+    return SIGNED_IN
+
+
+def _projects_in_scope(user, scope, limit_projects):
+    """``agent_scope.project_slugs_in_scope``, inside ``sentinel_policy.shared_lookups`` read once per owner, scope and project limit (the Sentinels of one
+    owner with one scope, the usual fleet, share one answer for the call). Each caller gets its own copy."""
+    key = ('project-slugs', user.pk, json.dumps(scope, sort_keys=True, default=str), json.dumps(limit_projects, sort_keys=True, default=str))
+    return set(sentinel_policy.shared(key, lambda: scope_lib.project_slugs_in_scope(user, scope, limit_projects)))
 
 
 class SentinelEff:
@@ -906,7 +931,7 @@ class SentinelEff:
         if agent.kind == 'scanner':  # the per-kind slots auto-tuning chose for this Sentinel, for the kinds no administrator capped (sentinel_machine)
             self.kind_caps.update(sentinel_machine.tuned_kind_caps(agent, self.policy))
         self.preferred = {k for k, p in self.policy.items() if p['mode'] == 'prefer'}
-        self.projects = scope_lib.project_slugs_in_scope(token.user, agent.scope or {}, limits.get('projects')) if not self.problem else set()
+        self.projects = _projects_in_scope(token.user, agent.scope or {}, limits.get('projects')) if not self.problem else set()
         patterns = (agent.scope or {}).get('hosts') or []
         self.hosts = AssetFilter(patterns) if patterns else None
         self.max_concurrent = min(agent.max_concurrent, limits.get('max_concurrent') or broker.MAX_CONCURRENT_CAP)
@@ -914,6 +939,8 @@ class SentinelEff:
         if tuned:  # auto-tuning's number for this Sentinel holds from the next claim, before the client registers it (never above its own setting, never over a pin)
             self.max_concurrent = min(self.max_concurrent, tuned)
         self._internal_nets = {}
+        # inside a private network (the server's grant, ``sentinel_settings.effective_network``): it is handed internal work only, whatever it declares
+        self.internal_only = agent.kind == 'scanner' and sentinel_settings.effective_network(agent) == 'internal'
 
     @property
     def builtin(self):
@@ -949,10 +976,13 @@ class SentinelEff:
         reference is its own project's keys; everything for a built-in scanner that reads secrets (``refusal`` then checks each task by itself)."""
         if self.reads_secrets:
             return queued
-        none = Q(secret_ref__isnull=True)
+        allowed = Q(secret_ref__isnull=True)
         if sentinel_stream.KIND in self.caps and self.can_receive_keys():
-            return queued.filter(none | Q(kind=sentinel_stream.KIND, secret_ref=Concat(Value(sentinel_stream.KEYS_REF_PREFIX), Cast('project_id', CharField()))))
-        return queued.filter(none)
+            allowed |= Q(kind=sentinel_stream.KIND, secret_ref=Concat(Value(sentinel_stream.KEYS_REF_PREFIX), Cast('project_id', CharField())))
+        signins = signin_delivery.offer_q(self)  # a stored sign-in its owner allowed on external Sentinels (``refusal`` checks each one where it is taken)
+        if signins is not None:
+            allowed |= signins
+        return queued.filter(allowed)
 
     def can_receive_keys(self):
         """Whether this Sentinel, as such, may be sent a discovery's keys (not yet for a given task): the part of the gate that does not depend on the task."""
@@ -970,7 +1000,7 @@ class SentinelEff:
             return 'scope', "the target is outside this Sentinel's scope"
         if task.kind not in self.caps:
             return 'capability', task.kind
-        if not self.builtin and builtin_only_kind(task.kind):
+        if not self.builtin and builtin_only_kind(task.kind) and not gated_signin_kind(task):
             return 'capability', BUILTIN  # a kind only the built-in scanner takes now (route_probe_signed; path_probe and nuclei_validate while it is in use)
         if task.kind == AI_CHECK and not self.builtin:
             from agentapi import ai_checks
@@ -984,6 +1014,9 @@ class SentinelEff:
             return 'capability', VALIDATING  # opt-in secret validation is the built-in scanner's alone (cveFeed.secrets_validation)
         if INTERNAL_CAPABILITY not in self.caps and self._internal(task):
             return 'capability', INTERNAL_CAPABILITY  # a Sentinel outside the network cannot reach it and would report an empty result as clean
+        why = self.external_refusal(task)
+        if why:
+            return INTERNAL_ONLY, why  # a Sentinel inside a private network scans only hosts inside the declared internal ranges
         if credential_work(task.kind) and not self.credential_filter:
             return 'capability', CREDENTIAL_FILTER  # an older client would run default-login and brute-force templates while credential checks are off
         if network_detection_task(task) and not self.network_detection:
@@ -999,6 +1032,13 @@ class SentinelEff:
         names, ips = task_hosts(task)
         return not (names or ips) or self.hosts.matches(names, ips)
 
+    def external_refusal(self, task):
+        """``None`` when this Sentinel may be given ``task`` as far as its network goes: always for one outside a private network, and for one inside
+        only internal work (``internal_work_refusal``). Else why not."""
+        if not self.internal_only:
+            return None
+        return internal_work_refusal(task, self._internal_nets)
+
     def _internal(self, task):
         """Whether any address of ``task`` (its ``ips`` or those inside its ``target``) is inside a network its project declared internal."""
         from targetApp.target_types import in_internal_range, internal_networks
@@ -1013,6 +1053,61 @@ class SentinelEff:
 
 def effective(agent, now=None):
     return SentinelEff(agent, now or timezone.now())
+
+
+def internal_work_refusal(task, nets_cache=None):
+    """``None`` when ``task`` is internal work, else why not: the rule for what a Sentinel inside a private network may be handed, taken from the task's
+    own addresses and names (``address_guard.task_values``, the same reading as the do-not-scan list), never from its kind or from who queued it.
+    Internal work names at least one host, and every one of them lies inside a range its project declared internal (``InternalRange``): an address
+    inside one, a network (a ``discover`` sweep) wholly inside one, a name whose addresses on record (``exclusions.stored_addresses``, what the
+    inventory resolved it to) are all inside one. A public address, a name with no address on record or with one outside every range, and a task
+    that names no host at all are not. Fails closed: a range list or inventory that cannot be read refuses. ``nets_cache`` is ``{project_id: networks}``."""
+    import ipaddress
+    from agentapi import address_guard
+    from cveFeed.exclusions import as_address, normalize, stored_addresses
+    from targetApp.target_types import in_internal_range, internal_networks
+    nets_cache = {} if nets_cache is None else nets_cache
+    nets = nets_cache.get(task.project_id)
+    if nets is None:
+        nets = nets_cache[task.project_id] = internal_networks(task.project_id)
+    if not nets:
+        return 'its project declares no internal range'
+    values = address_guard.task_values(task.kind, task.target, task.host, task.ips)
+    if not values:
+        return 'it names no host inside a declared internal range'
+    names = {}
+    for value in values:
+        if '/' in value and '://' not in value:
+            try:
+                wanted = ipaddress.ip_network(value.strip(), strict=False)
+            except ValueError:
+                wanted = None
+            if wanted is not None:
+                if not any(n.version == wanted.version and wanted.subnet_of(n) for n in nets) or not in_internal_range(wanted.network_address, nets):
+                    return f'{wanted} is not inside a declared internal range'
+                continue
+        ip = as_address(value)
+        if ip is not None:
+            if not in_internal_range(ip, nets):
+                return f'{ip} is outside the declared internal ranges'
+            continue
+        name = normalize(value)
+        if not name:
+            return f'{value[:80]} is not a host inside a declared internal range'
+        names[name] = value
+    if names:
+        try:
+            known = stored_addresses(task.project_id, names)
+        except Exception:  # noqa: BLE001 - fail closed: nothing tells where the names point
+            return 'the addresses of its hosts could not be read'
+        for name in names:
+            addresses = known.get(name) or []
+            if not addresses:
+                return f'{name[:80]} has no address on record inside a declared internal range'
+            outside = next((a for a in addresses if not in_internal_range(a, nets)), None)
+            if outside is not None:
+                return f'{name[:80]} resolves to {outside}, outside the declared internal ranges'
+    return None
 
 
 NETWORK_DETECTION = 'too old to run the network detection pass (contract 10)'  # the refusal reason of such a task offered to an older Sentinel
@@ -1058,7 +1153,8 @@ def network_detection_task(task):
 
 def network_detection_scanner(project, internal=False, now=None):
     """Whether a live, eligible Sentinel that covers ``project`` and takes ``nuclei_light`` runs the network detection pass: the stage sends nothing otherwise."""
-    return any(e.network_detection and e.live for e in eligible_sentinels(project, 'nuclei_light', now=now, internal=internal, live_only=True))
+    return any(e.network_detection and e.live and (internal or not e.internal_only)
+               for e in eligible_sentinels(project, 'nuclei_light', now=now, internal=internal, live_only=True))
 
 
 CREDENTIAL_FEATURE = 'credential_filter'  # ``info.features`` entry of a client that leaves checks that send credentials out of a nuclei web run (sentinel_settings.FEATURES)
@@ -1110,6 +1206,12 @@ def is_builtin(agent):
     return pk is not None and pk == agent.pk
 
 
+def gated_signin_kind(task):
+    """Whether ``task`` is of a built-in only kind that the stored sign-in gate (``signin_delivery``) may open to an external Sentinel: a signed-in route
+    check that names a stored sign-in. ``secret_refusal`` then decides; a task of the kind with no sign-in stays the built-in scanner's."""
+    return task.kind in signin_delivery.BUILTIN_ONLY_UNLESS_GATED and signin_delivery.is_ref(task.secret_ref)
+
+
 def builtin_only_kind(kind):
     """Whether only the built-in scanner may be offered ``kind`` right now: a kind of ``BUILTIN_KINDS`` that is never offered outside (no
     ``external_since``: ``route_probe_signed``), or one that is while the install has no built-in scanner in use (``ai_checks.builtin_in_use``)."""
@@ -1133,15 +1235,16 @@ def _declares_cover(scope, project_slug, org_slug):
     return bool(scope.get('instance') or project_slug in (scope.get('projects') or []) or (org_slug and org_slug in (scope.get('orgs') or [])))
 
 
-def eligible_sentinels(project, kind, now=None, internal=False, live_only=False, builtin_only=False):
+def eligible_sentinels(project, kind, now=None, internal=False, live_only=False, builtin_only=False, signin=None):
     """Live, active Sentinels whose scope covers ``project`` and who declare capability ``kind``: candidates for dispatch, or
     to claim a queued task. Found in SQL first (same pattern as ``agent_broker._effs_for``), so a call never builds the
     rights of every Sentinel on the instance. ``internal`` keeps only Sentinels that declare ``network:internal``: the work is
     for an address inside a private network, which no other Sentinel can reach. ``live_only`` leaves out the Sentinels not heard from within
     the live window already in SQL, so a caller that only wants those never builds the rights of the silent ones. ``builtin_only`` keeps only the
-    built-in scanner: the candidates for signed-in work, which no other Sentinel may be offered."""
+    built-in scanner. ``signin`` (a ``secret_ref`` naming a stored sign-in): the candidates for that signed-in work, the built-in scanner and the external
+    Sentinels ``signin_delivery.decision`` allows for it."""
     now = now or timezone.now()
-    builtin_only = builtin_only or builtin_only_kind(kind)
+    builtin_only = not signin and (builtin_only or builtin_only_kind(kind))
     agents = Agent.objects.filter(_covers(project.slug, project.org.slug if project.org_id else None), kind='scanner', status='active',
                                   token__revoked=False)
     if builtin_only:
@@ -1150,8 +1253,11 @@ def eligible_sentinels(project, kind, now=None, internal=False, live_only=False,
         agents = agents.filter(last_seen__gte=now - LIVE_WINDOW)
     agents = agents.select_related('token__user')[:CANDIDATES]
     with sentinel_policy.shared_lookups():
-        return [e for e in (SentinelEff(a, now) for a in agents)
-                if not e.problem and kind in e.caps and (not internal or INTERNAL_CAPABILITY in e.caps) and (e.credential_filter or not credential_work(kind))]
+        found = [e for e in _rights(agents, now)
+                 if not e.problem and kind in e.caps and (not internal or INTERNAL_CAPABILITY in e.caps) and (e.credential_filter or not credential_work(kind))]
+    if signin:
+        found = [e for e in found if signin_delivery.decision(e, kind, signin, project.pk, now)[0]]
+    return found
 
 
 def has_sentinels(project_slug, org_slug):
@@ -1188,7 +1294,7 @@ def _live_scanners(now):
     agents = (Agent.objects.filter(kind='scanner', status='active', token__revoked=False, last_seen__gte=now - LIVE_WINDOW)
               .select_related('token__user')[:CANDIDATES])
     with sentinel_policy.shared_lookups():
-        live = [e for e in (SentinelEff(a, now) for a in agents) if not e.problem and e.live]
+        live = [e for e in _rights(agents, now) if not e.problem and e.live]
     if memo is not None:
         memo['live'] = live
     return live
@@ -1201,7 +1307,7 @@ def _live_for(project, now):
         agents = (Agent.objects.filter(_covers(project.slug, project.org.slug if project.org_id else None), kind='scanner', status='active',
                                        token__revoked=False, last_seen__gte=now - LIVE_WINDOW).select_related('token__user')[:CANDIDATES])
         with sentinel_policy.shared_lookups():
-            return [e for e in (SentinelEff(a, now) for a in agents) if not e.problem and e.live]
+            return [e for e in _rights(agents, now) if not e.problem and e.live]
     key = ('project', project.pk)
     if key not in memo:
         org = project.org.slug if project.org_id else None
@@ -1219,7 +1325,7 @@ def queued_ttl(kind):
     return timedelta(seconds=max(sentinel_dispatch._queue_timeout(kind), sentinel_dispatch._claim_timeout())) + QUEUE_GRACE
 
 
-def capacity_state(project, kind, internal=False, now=None, exclude=None, builtin_only=False, why=False, secret=False, bbot_keys=False):
+def capacity_state(project, kind, internal=False, now=None, exclude=None, builtin_only=False, why=False, secret=False, bbot_keys=False, signin=None):
     """``{'state': 'none'|'free'|'busy', 'live': n, 'slots': n, 'free': n}`` for ``kind`` work in ``project``: ``none`` when no live, eligible Sentinel
     exists (the work cannot go to one), ``free`` when at least one has a slot to take it now, ``busy`` when live eligible Sentinels exist and every
     one is at its concurrency limit (the work should wait for a slot, not run somewhere else). A Sentinel's slots are its ``max_concurrent``, and
@@ -1227,7 +1333,9 @@ def capacity_state(project, kind, internal=False, now=None, exclude=None, builti
     may use there (``slots`` and ``free`` of the kind are the sum over the eligible Sentinels of the smaller of its free slots and its headroom under that
     cap). ``bbot_keys``: a discovery task that carries a project's discovery API keys by reference: only the built-in scanner (when its image reads secrets) and the
     Sentinels ``sentinel_stream.key_delivery_decision`` allows count, and a ``none`` says which of the three plain reasons (``keys_setting_off``, ``keys_sentinel_opt_out``,
-    ``keys_client_outdated``) keeps the Sentinels that are live for the kind from taking it. A task already queued for ``kind`` in this project is promised
+    ``keys_client_outdated``) keeps the Sentinels that are live for the kind from taking it. ``signin`` (a ``secret_ref`` naming a stored sign-in): only the
+    Sentinels ``signin_delivery.decision`` allows for it count (the built-in scanner when its image reads secrets, an external one the owner allowed), every
+    queued task of the kind waits for their slots, and a ``none`` says why the live external ones were refused (``signin_delivery.REASONS``). A task already queued for ``kind`` in this project is promised
     one of the free slots too, so ``free`` is what is left after the queue (``exclude`` leaves out one queued task, or an iterable of them: a dispatcher's own). Work that needs a
     stored credential asks with ``builtin_only``: only the built-in scanner counts, and every queued task of the kind (signed-in or not) is waiting for
     its slots; for any other work the signed-in tasks in the queue are not counted, as no one else's slot will take them.
@@ -1236,8 +1344,11 @@ def capacity_state(project, kind, internal=False, now=None, exclude=None, builti
     kind and its policy denies it), ``offline`` (an active one has it and none is live), ``withheld`` (a live one has it and keeps failing it, or is too old
     to run it), ``inactive`` (one has it but is pending or suspended) or ``never`` (none ever declared it). Left off, the cheap answer a dispatch gate needs."""
     now = now or timezone.now()
-    builtin_only = builtin_only or builtin_only_kind(kind)  # a kind only the built-in scanner takes has no other slots
-    live = [e for e in (_live_for(project, now) if kind else []) if kind in e.caps and (not internal or INTERNAL_CAPABILITY in e.caps)]
+    if signin:
+        builtin_only = False  # the gate below decides who may take signed-in work, the built-in scanner included
+    else:
+        builtin_only = builtin_only or builtin_only_kind(kind)  # a kind only the built-in scanner takes has no other slots
+    live = [e for e in (_live_for(project, now) if kind else []) if kind in e.caps and (INTERNAL_CAPABILITY in e.caps if internal else not e.internal_only)]
     if live and credential_work(kind):
         live = [e for e in live if e.credential_filter]  # an older client is not given nuclei web work while credential checks are off: it stays due for one that is not
     if builtin_only:
@@ -1249,10 +1360,20 @@ def capacity_state(project, kind, internal=False, now=None, exclude=None, builti
         verdicts = [(e, sentinel_stream.key_delivery_decision(e, kind, ref, project.pk)) for e in live]
         keys_why = [v[1] for _e, v in verdicts if not v[0]]
         live = [e for e, v in verdicts if v[0]]
+    signin_why = None
+    if signin:
+        verdicts = [(e, signin_delivery.decision(e, kind, signin, project.pk, now)) for e in live]
+        signin_why = signin_delivery.none_answer(v[1] for e, v in verdicts if not v[0] and not e.builtin)
+        live = [e for e, v in verdicts if v[0]]
     if not live:
         out = {'state': 'none', 'live': 0, 'slots': 0, 'free': 0}
         if why:
-            out.update(keys_none_answer(keys_why) if keys_why else explain_none(project, kind, internal, now, builtin_only))
+            if keys_why:
+                out.update(keys_none_answer(keys_why))
+            elif signin_why:
+                out.update(signin_why)
+            else:
+                out.update(explain_none(project, kind, internal, now, builtin_only or bool(signin)))
         return out
     fallback, externals = 0, 0
     if not builtin_only:
@@ -1278,7 +1399,7 @@ def capacity_state(project, kind, internal=False, now=None, exclude=None, builti
         free += room
     if free:
         waiting = SentinelTask.objects.filter(project=project, kind=kind, status='queued', created_at__gte=now - queued_ttl(kind))
-        if not builtin_only and not bbot_keys:
+        if not builtin_only and not bbot_keys and not signin:
             waiting = waiting.filter(secret_ref__isnull=True).exclude(VALIDATING_Q)
         if exclude is not None:
             waiting = waiting.exclude(pk__in=[exclude] if isinstance(exclude, int) else list(exclude))
@@ -1319,8 +1440,8 @@ def _explain(kind, agents, live, internal=False, only=None, load=None, builtin_o
         veto = kind in sentinel_policy.machine_denied(a)
         if kind not in (a.capabilities or []) and not veto:
             continue  # it does not have it: nothing to say about it here
-        if internal and sentinel_settings.effective_network(a) != 'internal':
-            continue
+        if (sentinel_settings.effective_network(a) == 'internal') != internal:
+            continue  # internal work is for a Sentinel inside the network, and every other work for one outside it
         e = live.get(a.pk)
         if a.status != 'active':
             reasons.add('inactive')
@@ -1537,13 +1658,14 @@ def waiting_tasks(now=None, planner=True):
     return (rows if planner else rows.exclude(priority=PLANNER_PRIORITY)).count()
 
 
-def planner_capacity(kinds, now=None):
+def planner_capacity(kinds, now=None, queued=True):
     """What the work planner needs to know about the Sentinels, in a fixed number of queries: ``{'live', 'free_total', 'held_total', 'queued_total',
     'queued_planner', 'queued': {kind: n}, 'agents': [...], 'kinds': {kind: {'sentinels', 'slots', 'free'}}}``. A kind's ``sentinels`` are the live
     Sentinels that may take it (``SentinelEff.caps``: declared, not denied by policy, not withheld after repeated failures, and a contract version that can
     run it, ``sentinel_contract.can_run``); ``slots`` their concurrency for it (a per-kind cap narrows it) and ``free`` the part of it not held now. The built-in
     scanner is the last resort: while an external Sentinel can take a kind it adds nothing to that kind (as ``capacity_state`` counts). Call it inside
-    ``memoised_rights`` when several answers are wanted together."""
+    ``memoised_rights`` when several answers are wanted together. ``queued=False`` leaves the queue out (two queries fewer: ``queued_total``, ``queued_planner``
+    and ``queued`` are then 0, 0 and empty), for a caller that only says what is live and busy (the Overview's Sentinel line)."""
     now = now or timezone.now()
     live = _live_scanners(now)
     held, held_kind = {}, {}
@@ -1551,10 +1673,10 @@ def planner_capacity(kinds, now=None):
                                    .values_list('agent_id', 'kind').annotate(n=Count('id'))):
         held[agent_id] = held.get(agent_id, 0) + n
         held_kind[(agent_id, task_kind)] = n
-    queued = {}
+    queued_by_kind = {}
     fresh = SentinelTask.objects.filter(status='queued', created_at__gte=now - max(queued_ttl(k) for k in SentinelTask.KINDS))
-    for task_kind, n in fresh.order_by().values_list('kind').annotate(n=Count('id')):
-        queued[task_kind] = n
+    for task_kind, n in (fresh.order_by().values_list('kind').annotate(n=Count('id')) if queued else ()):
+        queued_by_kind[task_kind] = n
     out_kinds = {}
     for kind in kinds:
         able = [e for e in live if kind in e.caps and not (builtin_only_kind(kind) and not e.builtin)]
@@ -1573,7 +1695,7 @@ def planner_capacity(kinds, now=None):
             free += room
         out_kinds[kind] = {'sentinels': len(able), 'slots': slots, 'free': free}
     return {'live': len(live), 'free_total': sum(max(0, e.max_concurrent - held.get(e.agent.pk, 0)) for e in live), 'held_total': sum(held.values()),
-            'queued_total': sum(queued.values()), 'queued_planner': fresh.filter(priority=PLANNER_PRIORITY).count(), 'queued': queued,
+            'queued_total': sum(queued_by_kind.values()), 'queued_planner': fresh.filter(priority=PLANNER_PRIORITY).count() if queued else 0, 'queued': queued_by_kind,
             'agents': [{'id': e.agent.pk, 'name': e.agent.name, 'slots': e.max_concurrent, 'held': held.get(e.agent.pk, 0), 'builtin': e.builtin} for e in live],
             'kinds': out_kinds}
 
@@ -1702,7 +1824,9 @@ def kind_report(agent, now=None, eff=None):
         row = {'declared': kind in declared, 'effective': kind in eff.caps, 'mode': p['mode'], 'source': p['source'], 'cap': p['cap'],
                'held': held.get(kind, 0), 'by': p['by'], 'at': p['at'], 'retry_at': None}
         if p['mode'] == 'deny':
-            state, note = ('machine_off', 'turned off on the machine; only a change there lifts it') if p['source'] == 'machine' else ('denied', '')
+            state, note = (('machine_off', 'turned off on the machine; only a change there lifts it') if p['source'] == 'machine'
+                           else ('denied', 'off on this hosted install (CVENGINE_HOSTED_LICENSE_SAFE): WPScan needs a commercial license for hosted use')
+                           if p['source'] == 'hosted license' else ('denied', ''))
         elif kind not in declared:
             state, note = 'unavailable', 'not available on this Sentinel (tool missing or off on the machine)'
         elif kind in eff.withheld:
@@ -1862,6 +1986,7 @@ def reap_expired(now=None):
     _ended_many(batch)
     _audit_sweep(ended)
     scrub_stale_values(now)
+    scrub_stale_images(now)
     return sum(len(v) for v in ended.values())
 
 
@@ -1907,6 +2032,40 @@ def scrub_stale_values(now=None):
     return sum(1 for task_id in ids if scrub_values(task_id))
 
 
+STALE_IMAGES_AFTER = timedelta(minutes=10)  # a finished web_screenshot result keeps its pictures this long at most (the step that files them has long run)
+STALE_IMAGES_BATCH = 100
+
+
+def scrub_images(task_id):
+    """Drop the pictures from the stored result of a finished ``web_screenshot`` task. Each page of the result carries its PNG as base64 (up to about 6 MB a
+    task); ``cveFeed.web_shot`` writes the picture to the screenshot store and its row when the result arrives, and nothing reads the copy in the task again,
+    but it was kept for the 30 days a finished task is kept: 1.4 GB of a 3 GB database. The page's outcome, size and reasons stay; the result says so
+    (``images_scrubbed``). Returns whether a result was scrubbed."""
+    task = SentinelTask.objects.filter(pk=task_id).only('id', 'kind', 'result').first()
+    if task is None or task.kind != 'web_screenshot' or not isinstance(task.result, dict) or task.result.get('images_scrubbed'):
+        return False
+    result = dict(task.result)
+    result['pages'] = [{k: v for k, v in page.items() if k != 'image'} if isinstance(page, dict) else page for page in result.get('pages') or []]
+    result['images_scrubbed'] = True
+    SentinelTask.objects.filter(pk=task.pk, status='done').update(result=result)
+    return True
+
+
+def scrub_stale_images(now=None):
+    """``scrub_images`` for any finished ``web_screenshot`` result older than ``STALE_IMAGES_AFTER`` that still has its pictures, ``STALE_IMAGES_BATCH`` rows
+    at a time, at most once a minute (every broker entry point calls the reaper). Returns the number scrubbed."""
+    from django.core.cache import cache
+    now = now or timezone.now()
+    try:
+        if not cache.add('sentinel:scrub-stale-images', 1, 60):
+            return 0
+    except Exception:  # noqa: BLE001 - without the cache it runs every call, bounded by the batch
+        pass
+    ids = list(SentinelTask._base_manager.filter(kind='web_screenshot', status='done', finished_at__lt=now - STALE_IMAGES_AFTER)
+               .exclude(result__has_key='images_scrubbed').order_by('id').values_list('id', flat=True)[:STALE_IMAGES_BATCH])
+    return sum(1 for task_id in ids if scrub_images(task_id))
+
+
 SWEEP_SAMPLE = 20  # task ids named in a sweep's summary row: enough to find the tasks, never a row the size of the sweep
 
 
@@ -1933,8 +2092,47 @@ def release_agent_tasks(agent, reason, actor=None):
 
 def release_ineligible(agent):
     eff = effective(agent)
+    handed = hand_back_external(eff) if eff.internal_only and not eff.problem else 0
     held = SentinelTask._base_manager.filter(agent=agent, status__in=SENTINEL_ACTIVE_STATUSES).select_related('project')
-    return sum(bool(expire(t, 'the agent no longer covers this work')) for t in list(held) if eff.problem or eff.refusal(t))
+    return handed + sum(bool(expire(t, 'the agent no longer covers this work')) for t in list(held) if eff.problem or eff.refusal(t))
+
+
+INTERNAL_HANDED_BACK = 'handed back: a Sentinel inside a private network scans only hosts inside the declared internal ranges'
+
+
+def take_back_external(task, why, actor=None):
+    """Take ``task`` (claimed or running) from a Sentinel inside a private network that may not run it (``internal_work_refusal``: ``why``). Back to the
+    queue for an external Sentinel, so the stage that waits for it is not left waiting; a streamed task that is already running (its batches are on
+    record) is ended instead, as any task taken back is, and its stage goes on without it. Returns whether the task moved."""
+    agent_id = task.agent_id
+    reason = f'{INTERNAL_HANDED_BACK} ({why})'[:300]
+    if task.status == 'running' and task.kind in sentinel_contract.STREAMED:
+        if not _end_as_expired(task, reason, timezone.now()):
+            return False
+        audit.record(actor, 'sentinel.task.expire', _target(task), org=task.project.org_id, task_id=task.pk, agent_id=agent_id, trace_id=task.trace_id, reason=reason)
+        return True
+    moved = _move_task(SentinelTask._base_manager.filter(pk=task.pk, agent_id=agent_id), 'queued', only_from=('claimed', 'running'), agent=None,
+                       lease_expires_at=None, claimed_at=None, accepted_at=None, error=reason)
+    if not moved:
+        return False
+    audit.record(actor, 'sentinel.task.requeue', _target(task), org=task.project.org_id, task_id=task.pk, agent_id=agent_id, trace_id=task.trace_id, reason=reason)
+    from agentapi import sentinel_notify
+    task.refresh_from_db()
+    sentinel_notify.task_changed(task, agent_id)  # its stage, and the slot it held
+    sentinel_notify.task_queued(task)  # the external Sentinels that may take it now
+    return True
+
+
+def hand_back_external(eff):
+    """Every task the Sentinel ``eff`` (inside a private network) holds that is not internal work goes back (``take_back_external``): work it was
+    handed before the rule held, or that stopped being internal since. Returns how many moved."""
+    held = SentinelTask._base_manager.filter(agent=eff.agent, status__in=('claimed', 'running')).select_related('project__org')
+    moved = 0
+    for task in list(held):
+        why = eff.external_refusal(task)
+        if why and take_back_external(task, why):
+            moved += 1
+    return moved
 
 
 def max_runtime(task):
@@ -2012,6 +2210,9 @@ def _claimable(eff, kinds, now):
     if not eff.builtin:
         queued = queued.exclude(VALIDATING_Q)  # a task that validates found secrets is never offered to any Sentinel but the built-in one
     queued = queued.exclude(avoid_agent=eff.agent.pk)  # a confirming lookup is never offered to the Sentinel whose answer it checks (agentapi.dns_crosscheck)
+    if eff.internal_only:  # inside a private network: only a project that declared an internal range can have work for it (``internal_work_refusal`` checks each task)
+        from cveFeed.models import InternalRange
+        queued = queued.filter(Exists(InternalRange.objects.filter(project_id=OuterRef('project_id'))))
     return queued.select_related('project__org').order_by('-priority', 'created_at', 'id')
 
 
@@ -2057,9 +2258,7 @@ def _preferring(task, exclude_pk, now, memo):
                       .select_related('token__user')[:CANDIDATES])
         preferring = [a for a in candidates if task.kind in (a.capabilities or []) and sentinel_policy.prefers(a, task.kind, builtin=(a.pk == pk))]
         effs = memo.setdefault('effs', {})
-        for a in preferring:
-            if a.pk not in effs:
-                effs[a.pk] = SentinelEff(a, now)
+        effs.update((e.agent.pk, e) for e in _rights([a for a in preferring if a.pk not in effs], now))
         held = _holders([a.pk for a in preferring]) if preferring else ({}, {})
         memo[key] = [(effs[a.pk], held) for a in preferring]
     return memo[key]
@@ -2116,9 +2315,7 @@ def _peers(task, exclude_pk, now, memo):
                                                        status='active', token__revoked=False, last_seen__gte=now - LIVE_WINDOW).exclude(pk=exclude_pk)
                                   .select_related('token__user')[:CANDIDATES]) if task.kind in (a.capabilities or [])]
         effs = memo.setdefault('effs', {})
-        for a in candidates:
-            if a.pk not in effs:
-                effs[a.pk] = SentinelEff(a, now)
+        effs.update((e.agent.pk, e) for e in _rights([a for a in candidates if a.pk not in effs], now))
         held = _holders([a.pk for a in candidates]) if candidates else ({}, {})
         memo[key] = [(effs[a.pk], held) for a in candidates]
     return memo[key]
@@ -2180,6 +2377,8 @@ def _claim(agent, kinds, now):
         status = Agent.objects.select_for_update().values_list('status', flat=True).get(pk=agent.pk)
         if status != 'active':  # suspended or revoked after the check above: re-read under the lock, so the check holds for this claim
             raise broker.blocked(f'the agent is {status}')
+        if eff.internal_only:
+            hand_back_external(eff)  # external work it was handed before the rule held goes back to the queue for an external Sentinel
         held_by_kind = _holders([agent.pk])[1]
         held = sum(n for (_, _kind), n in held_by_kind.items())
         if held >= eff.max_concurrent:
@@ -2192,12 +2391,14 @@ def _claim(agent, kinds, now):
         for task in list(_claimable(eff, kinds, now)[:CANDIDATES]):
             if not eff._in_hosts(task):
                 continue
+            if eff.external_refusal(task):
+                continue  # a Sentinel inside a private network takes internal work only: left for an external Sentinel
             if INTERNAL_CAPABILITY not in eff.caps and eff._internal(task):
                 continue  # only a Sentinel inside the private network can reach it
             if eff.secret_refusal(task) or (validating(task) and not eff.builtin):
                 continue  # (the query already left it out; this is the same rule where the task is actually taken)
-            if not eff.builtin and builtin_only_kind(task.kind):
-                continue  # the built-in scanner's while it is in use
+            if not eff.builtin and builtin_only_kind(task.kind) and not gated_signin_kind(task):
+                continue  # the built-in scanner's while it is in use (a signed-in route check: unless the sign-in gate allowed it above)
             if credential_work(task.kind) and not eff.credential_filter:
                 continue  # (the query already left it out; this is the same rule where the task is actually taken)
             if network_detection_task(task) and not eff.network_detection:
@@ -2284,10 +2485,14 @@ def next_task(ctx, body=None):
     with broker._waiter_slot(wait > 0, agent.token, exempt_instance=wait > 0 and is_builtin(agent)) as slot:
         deadline = deadline if slot else 0
         held = wait > 0 and not slot
+        first = True
         while True:
             now = timezone.now()
             broker._touch(agent, now)
-            reap_expired(now)
+            due = broker.poll_reap_due('sentinel:poll-reap')  # asked every round, so the first one's reaping holds the later ones off too
+            if due or first:  # the first round reaps as every call does; a later one at most every few seconds fleet wide
+                reap_expired(now)
+            first = False
             claimed, why = _try_claim(agent, kinds, now)
             if claimed or time.monotonic() >= deadline:
                 break
@@ -2334,6 +2539,10 @@ def _ensure_eligible(agent, task):
     if task.status not in ('claimed', 'running'):
         return
     eff = effective(agent)
+    why = None if eff.problem else eff.external_refusal(task)
+    if why:
+        take_back_external(task, why)
+        raise ApiError(409, f'the task was taken back: this Sentinel is inside a private network and scans only hosts inside the declared internal ranges ({why})')
     if eff.problem or eff.refusal(task):
         expire(task, 'the Sentinel no longer covers this work')
         raise ApiError(409, 'the task was taken back: this Sentinel no longer covers it')
@@ -2430,12 +2639,17 @@ def _stored_credential(credential_id, task, now):
     return None
 
 
-def _credential_payload(credential_id, project_id, now):
+def _credential_payload(credential_id, project_id, now, external=False):
     """The decrypted credential of one task, in the shape the authenticated scanner pass consumes: the header
-    pairs and the cookie, plus where they may be sent. Decrypted by the encrypted field itself (``reNgine.crypto_fields``, the field-key ring)."""
+    pairs and the cookie, plus where they may be sent. Decrypted by the encrypted field itself (``cvengine.crypto_fields``, the field-key ring).
+    ``external``: for a Sentinel that is not the built-in scanner, so the owner's switch is read again in the same query that decrypts (an owner who
+    turned it off after the gate passed is not overtaken)."""
     from cveFeed import auth_checks
     from cveFeed.models import AuthCredential
-    cred = AuthCredential.objects.select_related('domain').filter(pk=credential_id, project_id=project_id).first()
+    rows = AuthCredential.objects.select_related('domain').filter(pk=credential_id, project_id=project_id)
+    if external:
+        rows = rows.filter(allow_external_sentinels=True)
+    cred = rows.first()
     if cred is None or auth_checks.is_expired(cred, now):
         return None
     headers = [list(pair) for pair in auth_checks.stored_headers(cred)]
@@ -2484,12 +2698,24 @@ def read_secret(ctx, task_id):
     if agent is None or agent.kind != 'scanner':
         refuse(403, 'the token has no Sentinel', 'this is for the built-in scanner only')
     seen['agent_id'] = agent.pk
-    if not is_builtin(agent):
-        # An external Sentinel may read only the keys of ITS OWN bbot discovery task (``bbotkeys:<its project>``) and only where ``refusal`` (the one gate,
-        # ``sentinel_stream.key_delivery_decision``) allows it; for anything else it gets the same 403 as always, before it learns whether a task exists.
+    external = not is_builtin(agent)
+    if external:
+        # An external Sentinel may read only the keys of ITS OWN bbot discovery task (``bbotkeys:<its project>``), or the stored sign-in of ITS OWN signed-in
+        # task, and only where ``refusal`` (the one gates, ``sentinel_stream.key_delivery_decision`` and ``signin_delivery.decision``) allows it; for
+        # anything else it gets the same 403 as always, before it learns whether a task exists.
         own = SentinelTask.objects.filter(pk=task_pk, agent=agent).values('kind', 'secret_ref', 'project_id').first()
-        if not own or own['kind'] != sentinel_stream.KIND or sentinel_stream.keys_ref_project(own['secret_ref']) != own['project_id']:
+        keys_task = bool(own) and own['kind'] == sentinel_stream.KIND and sentinel_stream.keys_ref_project(own['secret_ref']) == own['project_id']
+        signin_task = bool(own) and own['kind'] in signin_delivery.KINDS and signin_delivery.credential_id(own['secret_ref']) is not None
+        if signin_task:  # a client that never said it reads a sign-in safely is answered exactly as before: not the built-in scanner
+            agent_eff = effective(agent, timezone.now())
+            signin_task = signin_delivery.sentinel_ready(agent_eff)[0]
+        if not keys_task and not signin_task:
             refuse(403, 'not the built-in scanner', 'this is for the built-in scanner only')
+        if signin_task:
+            ok, why = signin_delivery.decision(agent_eff, own['kind'], own['secret_ref'], own['project_id'])
+            if not ok:
+                seen['ref'] = own['secret_ref']
+                refuse(403, f'the stored sign-in is not sent to this Sentinel ({why})', 'this Sentinel may not read that stored sign-in')
     now = timezone.now()
     eff = effective(agent, now)
     if eff.problem:
@@ -2504,7 +2730,7 @@ def read_secret(ctx, task_id):
         refuse(409, f'the task is {task.status}', 'the task is not in progress on this Sentinel')
     if eff.refusal(task):
         refusal = eff.refusal(task)
-        refuse(403, "the task is outside the built-in scanner's rights" if eff.builtin else f'discovery keys are not sent to this Sentinel ({refusal[1]})',
+        refuse(403, "the task is outside the built-in scanner's rights" if eff.builtin else f'the secret is not sent to this Sentinel ({refusal[1]})',
                'this Sentinel does not cover that task')
     keys_project = sentinel_stream.keys_ref_project(task.secret_ref)  # a bbot discovery's module keys (bbotkeys:<project id>), not an AuthCredential
     if keys_project is not None:
@@ -2526,7 +2752,7 @@ def read_secret(ctx, task_id):
             config, withheld = sentinel_stream.keys_payload(task, agent)  # only the levels its enrolling user administers, only the modules its mode runs
             body = {'bbot_config': config} if config else None
         else:
-            credential = _credential_payload(credential_id, task.project_id, now)
+            credential = _credential_payload(credential_id, task.project_id, now, external=external)
             body = {'credential': credential} if credential is not None else None
     except Exception as exc:  # noqa: BLE001 - nothing of the credential may reach a log or a message: the type is all that is kept
         body = None
@@ -2539,6 +2765,9 @@ def read_secret(ctx, task_id):
     if body is None:
         refuse(410, 'the stored credential could not be read', 'the stored credential is not available for this task')
     _secret_audit(ctx, 'granted', task.pk, agent_id=agent.pk, ref=task.secret_ref, org=seen['org'])
+    if external and credential_id is not None:  # a stored sign-in left this server for a machine it does not run: said where, never what
+        audit.record(ctx.user, 'sentinel.signin.delivered', f'stored sign-in #{credential_id} delivered to {agent.name} for {task.project.name}',
+                     org=seen['org'], task_id=task.pk, agent_id=agent.pk, project_id=task.project_id, credential_id=credential_id, kind=task.kind)
     if keys_project is not None:  # what left the server and where: provider names only, never an option or a value
         providers = sentinel_stream.provider_names(body.get('bbot_config'))
         audit.record(ctx.user, 'sentinel.discovery_keys.delivered',
@@ -2918,7 +3147,7 @@ MAX_DISCOVER_HOSTS = 512  # one discover task sweeps a /24 (at most 254 hosts); 
 
 
 def _clean_discover_result(body):
-    """The live addresses a Sentinel found in the one chunk of an internal range it was asked to sweep: ``{ip, hostnames}`` entries,
+    """The live addresses a Sentinel found in the one chunk of an internal range it was asked to sweep: ``{ip, hostnames, names}`` entries,
     nothing else. Whether each address is really inside the chunk, and inside a range the project declared, is decided by the server
     when it stores them (``cveFeed.internal_discovery``), never trusted from here."""
     raw = body.get('hosts')
@@ -2933,7 +3162,13 @@ def _clean_discover_result(body):
             continue
         seen.add(ip)
         names = item.get('hostnames') if isinstance(item.get('hostnames'), list) else []
-        hosts.append({'ip': ip, 'hostnames': [_clip(n, 'host') for n in names[:5] if isinstance(n, str) and n.strip()]})
+        row = {'ip': ip, 'hostnames': [_clip(n, 'host') for n in names[:5] if isinstance(n, str) and n.strip()]}
+        # the names the host gave itself (contract: ``names``, mDNS and NetBIOS), each one line of host name text at most; read by cveFeed.host_names
+        own = item.get('names') if isinstance(item.get('names'), dict) else {}
+        kept = {key: _text(own[key], limit) for key, limit in (('mdns', 253), ('netbios', 15)) if isinstance(own.get(key), str) and _text(own[key], limit)}
+        if kept:
+            row['names'] = kept
+        hosts.append(row)
         result_cuts.add(cuts, 'names', 5, len([n for n in names[5:] if isinstance(n, str) and n.strip()]), target=ip)
     return {'hosts': hosts, **({'cuts': cuts} if cuts else {})}
 
@@ -3098,7 +3333,7 @@ MAX_TEMPLATE_OUTCOMES = 64  # matches sentinel_dispatch.MAX_ADDRESSES: the most 
 
 
 def _clean_hit(hit):
-    """The first result line of a host, cut to the fields ``reNgine.tasks.parse_nuclei_result``
+    """The first result line of a host, cut to the fields ``cvengine.tasks.parse_nuclei_result``
     and the validation record read. Anything else is dropped."""
     if not isinstance(hit, dict):
         return None
@@ -3352,6 +3587,22 @@ def _record_late(ctx, agent, task):
                  f'stopped waiting ({reason[:150]})', project=task.project, status='expired', scan_id=task.scan_id, sentinel_task_id=task.pk)
 
 
+def _refuse_external_report(ctx, agent, task_id):
+    """A Sentinel inside a private network never files a result for work that is not internal (``internal_work_refusal``), even one it held before the
+    rule held and reports late: 409, audited, and nothing is stored."""
+    eff = effective(agent)
+    if not eff.internal_only:
+        return
+    task = SentinelTask._base_manager.select_related('project').filter(pk=task_id).first()
+    if task is None or (task.agent_id != agent.pk and task.last_holder != agent.pk):
+        return  # not its task: the usual 404 follows
+    why = eff.external_refusal(task)
+    if why:
+        audit.record(ctx.user, 'sentinel.task.complete', _target(task), org=task.project.org_id, task_id=task.pk, trace_id=task.trace_id,
+                     agent_id=agent.pk, agent=agent.name, outcome='refused', reason=f'{INTERNAL_HANDED_BACK} ({why})'[:300])
+        raise ApiError(409, f'this Sentinel is inside a private network and scans only hosts inside the declared internal ranges; the result is not filed ({why})')
+
+
 def report_result(ctx, task_id, body):
     agent = _sentinel_agent(ctx)
     broker._limit(agent.token, 'report')
@@ -3361,6 +3612,7 @@ def report_result(ctx, task_id, body):
     held = SentinelTask.objects.select_related('project').filter(pk=_int(task_id), agent=agent).first()
     if held is not None:
         _ensure_eligible(agent, held)
+    _refuse_external_report(ctx, agent, _int(task_id))
     rejected = None
     adopted = None
     with transaction.atomic():
@@ -3583,20 +3835,70 @@ def result_notes(result):
 
 
 def task_brief(task):
+    return _brief(task, task.result, result_notes(task.result))
+
+
+def _brief(task, result, notes):
     agent = task.agent
     return {'id': task.pk, 'project': task.project.slug, 'scan_id': task.scan_id, 'kind': task.kind, 'status': task.status,
             'host': task.host, 'priority': task.priority, 'agent': {'id': agent.pk, 'name': agent.name} if agent else None,
             'attempts': task.attempts, 'max_attempts': task.max_attempts, 'lease_expires_at': svc._iso(task.lease_expires_at),
             'created': svc._iso(task.created_at), 'finished': svc._iso(task.finished_at), 'error': task.error,
-            'result': task.result or None, **result_notes(task.result)}
+            'result': result or None, **notes}
 
 
 LISTED_RESULT_MAX = 8192  # bytes of one task's result a list shows inline; a screenshot or a raw report is far larger (one web_screenshot result was 2.4 MB)
+LISTED_LOAD_MAX = 2 * LISTED_RESULT_MAX  # a listed result whose stored text is at most this is read and measured as before; a larger one is never read
+NOTE_KEYS = ('cuts', 'dropped_findings', 'dropped', 'templates_release', 'partial')  # the keys of a result ``result_notes`` and ``task_outcome`` read
+
+
+def _light(queryset, size=False):
+    """``queryset`` without the ``result`` column (megabytes for a screenshot, a raw report or nuclei evidence), with the keys of it a list shows
+    (``NOTE_KEYS``) read in SQL instead, and with ``size`` the length in bytes of its stored text. ``_noted`` gives a row's result back for those keys."""
+    from django.db.models import Func, IntegerField, TextField
+    from django.db.models.fields.json import KeyTransform
+    extra = {f'result_key_{key}': KeyTransform(key, 'result') for key in NOTE_KEYS}
+    if size:
+        extra['result_size'] = Func(Cast('result', TextField()), function='octet_length', output_field=IntegerField())
+    return queryset.defer('result').annotate(result_kind=Func('result', function='jsonb_typeof', output_field=CharField()), **extra)
+
+
+def _is_light(task):
+    return hasattr(task, 'result_kind') and 'result' in task.get_deferred_fields()
+
+
+def _noted(task):
+    """``task.result``, or for a row read through ``_light`` (its result not loaded) the part of it ``result_notes`` and ``task_outcome`` read."""
+    if not _is_light(task):
+        return task.result
+    if task.result_kind != 'object':
+        return None
+    keys = ((key, getattr(task, f'result_key_{key}')) for key in NOTE_KEYS)
+    return {key: value for key, value in keys if value is not None}
+
+
+def _listed(tasks):
+    """The rows of a task list read through ``_light(..., size=True)``, with the result of each one small enough to show (``LISTED_LOAD_MAX``) read in one
+    query; a larger one stays unread (``task_row`` says it was left out)."""
+    tasks = list(tasks)
+    small = [t.pk for t in tasks if t.result_size is not None and t.result_size <= LISTED_LOAD_MAX]
+    results = dict(SentinelTask._base_manager.filter(pk__in=small).values_list('id', 'result')) if small else {}
+    for task in tasks:
+        if task.result_size is None:
+            task.result = None
+        elif task.pk in results:
+            task.result = results[task.pk]
+    return tasks
 
 
 def task_row(task):
     """``task_brief`` for a list (a Sentinel's recent tasks, a project's task page): a result larger than ``LISTED_RESULT_MAX`` is left out and
-    said to be, so twenty rows stay a page and not megabytes; the task's own read (``get_sentinel_task``) still returns it whole."""
+    said to be, so twenty rows stay a page and not megabytes; the task's own read (``get_sentinel_task``) still returns it whole. A row read through
+    ``_listed`` whose stored result is larger than ``LISTED_LOAD_MAX`` was never loaded: it is left out with the size of its stored text."""
+    if _is_light(task):
+        row = _brief(task, None, result_notes(_noted(task)))
+        row['result'] = {'omitted': True, 'bytes': task.result_size, 'why': f'larger than {LISTED_RESULT_MAX} bytes; read the task itself for it'}
+        return row
     row = task_brief(task)
     if row['result'] is not None:
         size = len(json.dumps(row['result'], default=str))
@@ -3628,7 +3930,9 @@ def list_tasks(ctx, slug, params):
         qs = qs.filter(agent_id=svc._int_param(params['agent_id'], 'agent_id'))
     if params.get('scan_id'):
         qs = qs.filter(scan_id=svc._int_param(params['scan_id'], 'scan_id'))
-    return svc.paginate(qs.select_related('project__org', 'agent').order_by('-id'), params, task_row)
+    page = svc.paginate(_light(qs, size=True).select_related('project__org', 'agent').order_by('-id'), params, lambda task: task)
+    page['results'] = [task_row(t) for t in _listed(page['results'])]
+    return page
 
 
 def list_project_sentinels(ctx, slug):
@@ -3717,7 +4021,7 @@ def _live_task(task, allowed, **fields):
     row = {'id': task.pk, 'kind': task.kind, 'status': task.status, **fields}
     if allowed is not None and task.project_id not in allowed:
         return {**row, 'hidden': True, 'host': '', 'label': '', 'project': '', 'project_name': '', 'scan_id': None, 'error': ''}
-    notes = result_notes(task.result) if task.status == 'done' else {}
+    notes = result_notes(_noted(task)) if task.status == 'done' else {}
     return {**row, 'host': task.host, 'label': task_label(task), 'project': task.project.slug, 'project_name': task.project.name,
             'scan_id': task.scan_id, 'error': task.error, 'cut_notes': notes.get('cut_notes') or [], 'templates_release': notes.get('templates_release')}
 
@@ -3741,7 +4045,7 @@ def _live_overview(ctx):
     # unscoped on purpose: a Sentinel busy for another tenant is shown busy, its tasks redacted by _live_task rather than left out
     tasks = SentinelTask._base_manager.filter(agent_id__in=ids).select_related('project', 'agent')
     held, finished = {}, {}
-    for t in tasks.filter(status__in=SENTINEL_ACTIVE_STATUSES).order_by('claimed_at', 'id'):
+    for t in _light(tasks.filter(status__in=SENTINEL_ACTIVE_STATUSES)).order_by('claimed_at', 'id'):  # never the results: a card shows a few keys of them
         held.setdefault(t.agent_id, []).append(t)
     day = now - timedelta(hours=24)
     hour = now - timedelta(hours=1)
@@ -3760,7 +4064,7 @@ def _live_overview(ctx):
     from django.db.models import OuterRef
     newest = (SentinelTask._base_manager.filter(agent_id=OuterRef('pk'), status__in=('done', 'failed')).order_by('-finished_at', '-id').values('id')[:5])
     latest = {pk: got for pk, got in Agent.objects.filter(pk__in=ids).annotate(latest=ArraySubquery(newest)).values_list('pk', 'latest')}
-    by_id = {t.pk: t for t in tasks.filter(pk__in=[i for got in latest.values() for i in got])}
+    by_id = {t.pk: t for t in _light(tasks.filter(pk__in=[i for got in latest.values() for i in got]))}
     for agent_id, got in latest.items():
         finished[agent_id] = [by_id[i] for i in got if i in by_id]
     queued = _for_viewer(SentinelTask.objects.filter(status='queued'), ctx.user, allowed).count()
@@ -3891,7 +4195,7 @@ def task_outcome(task):
     stopped answering)`` or ``failed``."""
     error = (task.error or '').lower()
     if task.status == 'done':
-        return 'completed at its time budget (partial)' if (task.result or {}).get('partial') else 'completed'
+        return 'completed at its time budget (partial)' if (_noted(task) or {}).get('partial') else 'completed'
     if task.status == 'expired' and error.startswith(RELEASED.lower()):
         return 'released by the Sentinel'  # first: what follows is the Sentinel's own text, never read for anything else
     if 'cancelled by a person' in error:
@@ -3920,8 +4224,8 @@ def task_status_counts(agent_ids):
 def recent_tasks(agent, viewer=None):
     """The last 20 tasks of ``agent``, those of projects ``viewer`` may read when one is given."""
     rows = SentinelTask.objects.filter(agent=agent)
-    rows = (_for_viewer(rows, viewer) if viewer is not None else rows).select_related('project__org', 'agent').order_by('-id')[:20]
-    return [task_row(t) for t in rows]
+    rows = _light(_for_viewer(rows, viewer) if viewer is not None else rows, size=True).select_related('project__org', 'agent').order_by('-id')[:20]
+    return [task_row(t) for t in _listed(rows)]
 
 
 def cancel_task(ctx, slug, task_id):

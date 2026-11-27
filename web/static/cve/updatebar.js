@@ -72,7 +72,7 @@ function watchUpdate(first) {
     try {
       const r = await fetch("/cve/api/settings/updates", { credentials: "same-origin", cache: "no-store" });
       // while the update runs the proxy answers every request with its maintenance page (503, from its own container), so this poll is
-      // expected to fail: that is "down", not an error. The page says when the update did not finish (header set by config/nginx/rengine.conf).
+      // expected to fail: that is "down", not an error. The page says when the update did not finish (header set by config/nginx/cvengine.conf).
       if (!r.ok) {
         didNotFinish = r.status === 503 && r.headers.get("X-CVE-Maintenance") === "failed";
         throw new Error(String(r.status));

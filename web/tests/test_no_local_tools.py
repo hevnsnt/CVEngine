@@ -2,7 +2,7 @@
 
 The scan tools are leaving the server image: every tool run moves to the Sentinel-based scanner, and phase 8 drops the binaries
 from the server. Until then this test stops the server from growing new local scan-tool usage. It walks the non-test code of
-`cveFeed`, `reNgine` and `agentapi` (Python and shell), the three entrypoint scripts and `web/Dockerfile`, and records every
+`cveFeed`, `cvengine` and `agentapi` (Python and shell), the three entrypoint scripts and `web/Dockerfile`, and records every
 (tool, file) pair where the file mentions a scan tool or a way of running one: `subprocess`, `heavy_process.run`, a `*_BIN`
 name, or one of the tool names as a whole word (case-insensitive: nmap, nuclei, naabu, wpscan, testssl, bbot, wafw00f,
 gowitness, aardwolf).
@@ -33,7 +33,7 @@ PATTERNS['subprocess'] = re.compile(r'\bsubprocess\b')
 PATTERNS['heavy_process.run'] = re.compile(r'\bheavy_process\.run')
 PATTERNS['_BIN'] = re.compile(r'_BIN\b')
 
-SCAN_DIRS = ('cveFeed', 'reNgine', 'agentapi', 'targetApp', 'startScan', 'scanEngine', 'dashboard')
+SCAN_DIRS = ('cveFeed', 'cvengine', 'agentapi', 'targetApp', 'startScan', 'scanEngine', 'dashboard')
 SCAN_SUFFIXES = ('.py', '.sh')
 EXTRA_FILES = ('entrypoint.sh', 'celery-entrypoint.sh', 'beat-entrypoint.sh', 'Dockerfile')
 SKIP_DIRS = {'__pycache__', 'tests'}
@@ -65,6 +65,7 @@ ALLOWED = {
         'cveFeed/discovery.py',
         'cveFeed/distro.py',
         'cveFeed/distro_releases.py',  # distro release inference: mentions nmap's stored OS CPE in a docstring, runs nothing
+        'cveFeed/finding_confirm.py',  # Confirm it yourself guides for scanner and hygiene findings: the read-only commands a person runs, as text; runs nothing
         'cveFeed/host_assessment.py',  # 1.3.2 assessment batches (develop): comments about the dispatched stages, runs nothing
         'cveFeed/host_context.py',
         'cveFeed/host_inventory.py',
@@ -98,6 +99,7 @@ ALLOWED = {
         'cveFeed/source_versions.py',  # reads the versions stored results already state (the port scan's CPEs and scripts, the TLS audit's banners, the WordPress scan's headers, a discovery's CPEs) and names them as reading sources, runs nothing
         'cveFeed/tailscale_sync.py',
         'cveFeed/tasks.py',
+        'cveFeed/tls_catalogue.py',  # TLS audit catalogue: the read-only nmap and testssl.sh commands a person runs to confirm a finding, as text; runs nothing
         'cveFeed/triage.py',  # 1.3.3 triage (develop): docstring naming evidence sources, runs nothing
         'cveFeed/tunables.py',  # 1.3.2 tunables registry (develop): setting names and help text, runs nothing
         'cveFeed/udp_scan.py',
@@ -105,11 +107,11 @@ ALLOWED = {
         'cveFeed/validation_plan.py',
         'cveFeed/windows_builds.py',  # reads the NTLM and SMB script output the port scan stored (the Windows build) and says nmap's OS guess is never read, runs nothing
         'cveFeed/work_planner.py',  # 1.4 work planner: the check-to-tool table of the coverage rules, queues Sentinel tasks, runs nothing
-        'reNgine/ai_providers.py',
-        'reNgine/common_func.py',
-        'reNgine/definitions.py',
-        'reNgine/input_guard.py',
-        'reNgine/resources.py',
+        'cvengine/ai_providers.py',
+        'cvengine/common_func.py',
+        'cvengine/definitions.py',
+        'cvengine/input_guard.py',
+        'cvengine/resources.py',
         'startScan/migrations/0003_shodan_service_fields.py',  # widened guard (targetApp, startScan, scanEngine, dashboard): an old migration: field help about the fingerprint pass, runs nothing
         'startScan/migrations/0007_deshare_ports.py',  # widened guard (targetApp, startScan, scanEngine, dashboard): an old data migration: names the tools whose rows it moved, runs nothing
         'startScan/migrations/0016_scrub_unreviewed_nse_scripts.py',  # widened guard (targetApp, startScan, scanEngine, dashboard): an old data migration: scrubs stored script output, runs nothing
@@ -126,6 +128,7 @@ ALLOWED = {
         'agentapi/sentinel_tools.py',  # 1.4 contract 5: the names of the tools whose versions a Sentinel reports, compared with the shipped ones; runs nothing
         'agentapi/services.py',
         'agentapi/system_status.py',
+        'cveFeed/ai_disclosure.py',  # AI and your data page: says in words which AI job picks nuclei templates and what it is sent; runs nothing
         'cveFeed/apps.py',
         'cveFeed/auth_checks.py',
         'cveFeed/auth_nuclei.py',  # T8 nuclei: ledger service keys (nuclei-auth, nuclei-auth-refused) are stored data, plus activity text; runs nothing, the signed-in pass is the built-in scanner's
@@ -139,6 +142,7 @@ ALLOWED = {
         'cveFeed/detection_commands.py',
         'cveFeed/diagnostics.py',
         'cveFeed/discovery.py',
+        'cveFeed/finding_confirm.py',  # Confirm it yourself guides for scanner and hygiene findings: the read-only commands a person runs, as text; runs nothing
         'cveFeed/fullscan.py',
         'cveFeed/internal_scan.py',
         'cveFeed/js_libraries.py',  # 1.3.3 JS library evidence (develop): a docstring naming evidence sources, runs nothing
@@ -185,13 +189,13 @@ ALLOWED = {
         'cveFeed/validation.py',  # T8 nuclei: help text and the policy docstring naming the template policy; the nuclei_template check kind is a data value; runs nothing
         'cveFeed/views.py',
         'cveFeed/work_planner.py',  # 1.4 work planner: the check-to-tool table of the coverage rules, queues Sentinel tasks, runs nothing
+        'cvengine/ai_nuclei_model.py',  # the model of the nuclei tag choice (an AI call about tag names, the stages nuclei_targeting and nuclei_tag_selection): names the tool, runs nothing
+        'cvengine/ai_providers.py',
+        'cvengine/definitions.py',
+        'cvengine/input_guard.py',
+        'cvengine/resources.py',
+        'cvengine/tasks.py',
         'dashboard/models.py',  # widened guard (targetApp, startScan, scanEngine, dashboard): the template policy settings: field help, runs nothing
-        'reNgine/ai_nuclei_model.py',  # the model of the nuclei tag choice (an AI call about tag names, the stages nuclei_targeting and nuclei_tag_selection): names the tool, runs nothing
-        'reNgine/ai_providers.py',
-        'reNgine/definitions.py',
-        'reNgine/input_guard.py',
-        'reNgine/resources.py',
-        'reNgine/tasks.py',
         'scanEngine/migrations/0007_delete_installedexternaltool.py',  # widened guard (targetApp, startScan, scanEngine, dashboard): drops the old installed-tool table, runs nothing
         'startScan/models.py',  # widened guard (targetApp, startScan, scanEngine, dashboard): stored results: names the tool a finding came from, runs nothing
         'targetApp/target_types.py',  # widened guard (targetApp, startScan, scanEngine, dashboard): target classification: names the tools in comments about what a Sentinel takes, runs nothing
@@ -226,6 +230,7 @@ ALLOWED = {
         'cveFeed/check_coverage.py',  # ledger kinds and the check id are data values, runs nothing
         'cveFeed/confirm_guide.py',  # matches the finding source stored in the database, runs nothing
         'cveFeed/discovery.py',  # the pipeline stage name and its result key are data values, runs nothing
+        'cveFeed/finding_confirm.py',  # Confirm it yourself guides for scanner and hygiene findings: the read-only commands a person runs, as text; runs nothing
         'cveFeed/finding_lifecycle.py',  # finding source and template id prefix stored in the database, runs nothing
         'cveFeed/host_context.py',  # reads the stored probe name, runs nothing
         'cveFeed/ledger.py',  # ledger kind names (freshness windows) are data values, runs nothing
@@ -248,10 +253,12 @@ ALLOWED = {
         'agentapi/sentinel_broker.py',
         'agentapi/sentinel_dispatch.py',
         'agentapi/sentinel_tools.py',  # 1.4 contract 5: the names of the tools whose versions a Sentinel reports, compared with the shipped ones; runs nothing
+        'agentapi/services.py',  # a TLS audit finding's page: the tool's raw result is labelled "testssl.sh output" (an excerpt key and a label), runs nothing
         'cveFeed/check_coverage.py',
         'cveFeed/confirm_guide.py',  # 1.3.3 confirmation guide (develop): tells a person how to check a finding by hand, runs nothing
         'cveFeed/internal_scan.py',
         'cveFeed/ledger.py',
+        'cveFeed/management/commands/rewrite_tls_findings.py',  # the update step that rewrites stored TLS audit findings from their evidence: names the tool in its help, runs nothing
         'cveFeed/match_explain.py',  # explains a match to a person: reads the stored finding source 'testssl' and writes a sentence, runs nothing
         'cveFeed/migrations/0094_testssl_schedule.py',
         'cveFeed/report_data.py',
@@ -259,6 +266,9 @@ ALLOWED = {
         'cveFeed/software.py',  # the About page list of the tools of both images (names, versions, licenses), runs nothing
         'cveFeed/source_versions.py',  # reads the versions stored results already state (the port scan's CPEs and scripts, the TLS audit's banners, the WordPress scan's headers, a discovery's CPEs) and names them as reading sources, runs nothing
         'cveFeed/tls_audit.py',  # 1.4 TLS audit on a Sentinel: the kind name, the ledger key and the finding source are stored data values, runs nothing
+        'cveFeed/tls_catalogue.py',  # TLS audit catalogue: what each test means and the read-only commands a person runs to confirm it, as text; runs nothing
+        'cveFeed/triage.py',  # reads the stored confidence of a TLS audit finding (confirmed or unconfirmed) as a triage fact, runs nothing
+        'cveFeed/upgrade_backfills.py',  # names the update step that rewrites stored TLS audit findings, runs nothing
         'cveFeed/work_planner.py',  # 1.4 work planner: the check-to-tool table of the coverage rules, queues Sentinel tasks, runs nothing
     ],
     'bbot': [
@@ -273,6 +283,7 @@ ALLOWED = {
         'cveFeed/check_coverage.py',  # 1.4 T8: ledger service keys 'bbot' and 'bbot-deep' and the check label (stored data values), runs nothing
         'cveFeed/diagnostics.py',  # 1.4 T8: finding kind 'bbot' (a stored data value), runs nothing
         'cveFeed/discovery.py',  # 1.4 T8: ledger service keys 'bbot' and 'bbot-deep' and the activity title (stored data values), runs nothing
+        'cveFeed/host_resolver.py',  # gone grace: reads the ledger TTL of the service key 'bbot-deep' (a stored data value) and names its env var, runs nothing
         'cveFeed/js_libraries.py',  # 1.3.3 JS library evidence (develop): a docstring naming evidence sources, runs nothing
         'cveFeed/labels.py',  # 1.4 T8: host label source default 'bbot' (a stored data value), runs nothing
         'cveFeed/ledger.py',  # 1.4 T8: ledger service keys 'bbot' and 'bbot-deep' (stored data values), runs nothing
@@ -297,9 +308,9 @@ ALLOWED = {
         'cveFeed/threat.py',  # 1.3.5 heat rules (develop): names the sources whose severity heat is not held back, runs nothing
         'cveFeed/triage.py',  # 1.4 T8: finding kind 'bbot' (a stored data value), runs nothing
         'cveFeed/upgrade_backfills.py',  # 1.4 secrets inventory: names the bbot findings it files and masks (rule ids, the finding's source), runs nothing
+        'cvengine/resources.py',  # 1.4 T8: heavy-job kind names 'bbot-deep', 'bbot-standard', 'bbot-passive' now unused: lead decides with the tunables that name them (one-line tables shared with other tools), runs nothing
+        'cvengine/tasks.py',  # 1.4 T8: stores a Sentinel's discovery results with source 'bbot' (a stored data value), runs nothing
         'dashboard/models.py',  # widened guard (targetApp, startScan, scanEngine, dashboard): the discovery settings: names the discovery tool in field help and choices, runs nothing
-        'reNgine/resources.py',  # 1.4 T8: heavy-job kind names 'bbot-deep', 'bbot-standard', 'bbot-passive' now unused: lead decides with the tunables that name them (one-line tables shared with other tools), runs nothing
-        'reNgine/tasks.py',  # 1.4 T8: stores a Sentinel's discovery results with source 'bbot' (a stored data value), runs nothing
         'startScan/migrations/0007_deshare_ports.py',  # widened guard (targetApp, startScan, scanEngine, dashboard): an old data migration: names the tools whose rows it moved, runs nothing
         'startScan/migrations/0011_shorten_bbot_names.py',  # widened guard (targetApp, startScan, scanEngine, dashboard): an old data migration: names the tool whose rows it shortened, runs nothing
         'startScan/migrations/0025_scanhistory_discovery_mode.py',  # widened guard (targetApp, startScan, scanEngine, dashboard): an old migration: the discovery mode field help, runs nothing
@@ -325,7 +336,7 @@ ALLOWED = {
     'subprocess': [
         'cveFeed/report_pdf.py',
         'cveFeed/templatefixture.py',  # runs a model-written regex in a time-limited child interpreter; no scan tool (review 2 F5)
-        'reNgine/time_limits.py',
+        'cvengine/time_limits.py',
     ],
 }
 
@@ -415,8 +426,10 @@ class NoLocalToolsTests(SimpleTestCase):
 LOOKUP = re.compile(r'\bgetaddrinfo\b|\bgethostbyname(?:_ex)?\b|\bdns\.resolver\b|\bdns\.query\b|\bcreate_connection\b|\bdns\.asyncresolver\b')
 LOOKUP_ALLOWED = {
     'cveFeed/openvas_scan.py': "own_addresses: this server's own DOMAIN_NAME, so OpenVAS is never pointed at the server itself",
+    'cveFeed/self_exclusion.py': "this server's own public names (DOMAIN_NAME, CVENGINE_ALLOWED_HOSTS), so no scan is ever sent at the server itself",
     'cveFeed/settings_api.py': 'the SSRF check of an outbound URL an App Admin enters (SMTP host, AI base URL), not a scan target',
-    'reNgine/ai_providers.py': "the SSRF check of the AI provider's base URL, not a scan target",
+    'cvengine/ai_providers.py': "the SSRF check of the AI provider's base URL, not a scan target",
+    'cvengine/hook_guard.py': 'the SSRF check of a notification webhook URL (Slack, Discord, Lark), at save and before each send, not a scan target',
 }
 
 

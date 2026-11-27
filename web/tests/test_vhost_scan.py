@@ -69,9 +69,6 @@ class VhostFixture:
                                       sans=['www.example.test', 'portal.example.test', '*.example.test', 'cdn.thirdparty.test'])
         RouteAuth.objects.create(project=self.project, domain=self.domain, url='https://wiki.example.test/', host='wiki.example.test', path='/',
                                  auth_state='open', http_status=200, title='Wiki', evidence={'bytes': 3010}, checked_at=now)
-        for patcher in (mock.patch('cveFeed.hosting.canonical_name', return_value=''),):
-            patcher.start()
-        self.addCleanup(mock.patch.stopall)
         self.table = {
             (self.ADDRESS, None): answer(**DEFAULT_PAGE),
             ('portal.example.test', self.ADDRESS): answer(**PORTAL_PAGE),

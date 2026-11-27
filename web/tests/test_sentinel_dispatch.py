@@ -17,7 +17,7 @@ from agentapi.models import Agent, SentinelTask
 from cveFeed import nuclei_scan, port_stage
 from cveFeed.wpscan_scan import Blocked, NotWordPress
 from dashboard.models import Org, Project
-from reNgine.resources import ScannerUnavailable
+from cvengine.resources import ScannerUnavailable
 from scanEngine.models import EngineType
 from startScan.models import IpAddress, ScanHistory, Subdomain
 from targetApp.models import Domain
@@ -88,7 +88,7 @@ class NoScannerTests(DispatchBase):
         self.assertFalse(IpAddress.objects.get(address='192.0.2.10').ports.exists())
 
     def test_the_never_local_kinds_wait_whatever_the_ignored_switch_says(self):
-        from reNgine.resources import ScannerUnavailable
+        from cvengine.resources import ScannerUnavailable
         for kind in ('nmap', 'naabu', 'nmap_udp', 'nmap_full', 'nmap_verify', 'path_probe'):
             self.assertIn(kind, dispatch.NEVER_LOCAL)
             for value in ('all', kind):
@@ -97,7 +97,7 @@ class NoScannerTests(DispatchBase):
                         dispatch.dispatch_or_none(self.project, kind, {'addresses': ['192.0.2.10']})
 
     def test_wrap_naabu_runner_try_nmap_and_dispatch_raise_scanner_unavailable(self):
-        from reNgine.resources import ScannerUnavailable
+        from cvengine.resources import ScannerUnavailable
         with self.assertRaises(ScannerUnavailable):
             dispatch.wrap_naabu_runner(self.project, self.scan)
         with self.assertRaises(ScannerUnavailable):
@@ -126,7 +126,7 @@ class NmapDispatchTests(DispatchBase):
     def test_a_host_nmap_timed_out_on_is_not_fingerprinted_and_stays_due(self):
         """nmap gave up on the host (timedout): a row with no services is not a fingerprint. Nothing is stored for it, it is not reported as covered, and the
         host that finished in the same chunk is still persisted and reported done."""
-        from reNgine.resources import ScannerUnavailable
+        from cvengine.resources import ScannerUnavailable
         IpAddress.objects.create(address='192.0.2.11')
         self.make_sentinel(['nmap'])
         result = {'outcome': 'done', 'hosts': [
@@ -140,7 +140,7 @@ class NmapDispatchTests(DispatchBase):
         self.assertFalse(IpAddress.objects.get(address='192.0.2.10').ports.exists())
 
     def test_an_omitted_sentinel_host_stays_due_and_is_never_scanned_here(self):
-        from reNgine.resources import ScannerUnavailable
+        from cvengine.resources import ScannerUnavailable
         self.make_sentinel(['nmap'])
         with mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=_answer_queued_task({'outcome': 'done', 'hosts': []})):
             with self.assertRaises(ScannerUnavailable) as caught:
@@ -148,7 +148,7 @@ class NmapDispatchTests(DispatchBase):
         self.assertEqual((caught.exception.kind, caught.exception.done), ('nmap', []))
 
     def test_what_a_sentinel_reported_is_kept_when_another_address_of_the_chunk_is_missing(self):
-        from reNgine.resources import ScannerUnavailable
+        from cvengine.resources import ScannerUnavailable
         self.make_sentinel(['nmap'])
         Subdomain.objects.get(scan_history=self.scan).ip_addresses.add(IpAddress.objects.create(address='192.0.2.11'))
         answer = {'outcome': 'done', 'hosts': [{'ip': '192.0.2.10', 'os_guess': '',
@@ -160,7 +160,7 @@ class NmapDispatchTests(DispatchBase):
         self.assertEqual(IpAddress.objects.get(address='192.0.2.10').ports.get(number=22).product, 'OpenSSH')
 
     def test_timeout_waits_and_the_task_is_marked_expired(self):
-        from reNgine.resources import ScannerUnavailable
+        from cvengine.resources import ScannerUnavailable
         self.make_sentinel(['nmap'])
         with self.assertRaises(ScannerUnavailable):
             dispatch.try_nmap(self.project, self.scan, ['192.0.2.10'], timeout=0.2)
@@ -204,20 +204,20 @@ class NmapUdpDispatchTests(DispatchBase):
         self.assertEqual(next(p for p in host['ports'] if p['number'] == 123)['product'], 'NTP')
 
     def test_no_eligible_sentinel_waits_and_creates_no_task(self):
-        from reNgine.resources import ScannerUnavailable
+        from cvengine.resources import ScannerUnavailable
         with self.assertRaises(ScannerUnavailable):
             dispatch.try_nmap_udp(self.project, '192.0.2.10', timeout=5)
         self.assertFalse(SentinelTask.objects.filter(kind='nmap_udp').exists())
 
     def test_timeout_waits_and_marks_the_task_expired(self):
-        from reNgine.resources import ScannerUnavailable
+        from cvengine.resources import ScannerUnavailable
         self.make_sentinel(['nmap_udp'])
         with self.assertRaises(ScannerUnavailable):
             dispatch.try_nmap_udp(self.project, '192.0.2.10', timeout=0.2)
         self.assertEqual(SentinelTask.objects.get(kind='nmap_udp').status, 'expired')
 
     def test_a_sentinel_reported_failure_waits(self):
-        from reNgine.resources import ScannerUnavailable
+        from cvengine.resources import ScannerUnavailable
         self.make_sentinel(['nmap_udp'])
         with mock.patch('agentapi.sentinel_dispatch.time.sleep',
                         side_effect=_answer_queued_task({'outcome': 'error', 'error': 'no raw socket'}, status='failed')):
@@ -227,7 +227,7 @@ class NmapUdpDispatchTests(DispatchBase):
     def test_a_host_absent_from_the_report_stays_due(self):
         # the Sentinel answered but named no host: the address waits for a scanner (the caller, cveFeed.udp_scan.scan_ip, reads
         # ScannerUnavailable as "stays due"); it is never scanned here
-        from reNgine.resources import ScannerUnavailable
+        from cvengine.resources import ScannerUnavailable
         self.make_sentinel(['nmap_udp'])
         other_host_xml = UDP_XML.replace('192.0.2.10', '192.0.2.99')
         with mock.patch('agentapi.sentinel_dispatch.time.sleep',
@@ -262,7 +262,7 @@ class NaabuDispatchTests(DispatchBase):
         self.assertEqual(found['192.0.2.10'], [22])
 
     def test_timeout_waits_for_a_scanner_and_never_runs_here(self):
-        from reNgine.resources import ScannerUnavailable
+        from cvengine.resources import ScannerUnavailable
         self.make_sentinel(['naabu'])
         runner = dispatch.wrap_naabu_runner(self.project, self.scan, timeout=0.2)
         with self.assertRaises(ScannerUnavailable):
@@ -390,7 +390,7 @@ class TestsslDispatchTests(DispatchBase):
     (``NEVER_LOCAL``): when no Sentinel takes it the work is unavailable, never run here."""
 
     def test_no_eligible_sentinel_is_unavailable_and_creates_no_task(self):
-        from reNgine.resources import ScannerUnavailable
+        from cvengine.resources import ScannerUnavailable
         with self.assertRaises(ScannerUnavailable):
             dispatch.try_testssl(self.project, 'www.example.test', '192.0.2.10', 443, timeout=5)
         self.assertFalse(SentinelTask.objects.exists())
@@ -413,14 +413,14 @@ class TestsslDispatchTests(DispatchBase):
         self.assertEqual(SentinelTask.objects.get().target['starttls'], 'smtp')
 
     def test_a_timeout_is_unavailable_never_a_local_run(self):
-        from reNgine.resources import ScannerUnavailable
+        from cvengine.resources import ScannerUnavailable
         self.make_sentinel(['testssl'])
         with self.assertRaises(ScannerUnavailable):
             dispatch.try_testssl(self.project, 'www.example.test', '192.0.2.10', 443, timeout=0.2)
         self.assertEqual(SentinelTask.objects.get().status, 'expired')
 
     def test_a_sentinel_reported_failure_is_unavailable_never_a_local_run(self):
-        from reNgine.resources import ScannerUnavailable
+        from cvengine.resources import ScannerUnavailable
         self.make_sentinel(['testssl'])
         with mock.patch('agentapi.sentinel_dispatch.time.sleep',
                         side_effect=_answer_queued_task({'outcome': 'error', 'error': 'the audit is not installed'}, status='failed')):
@@ -526,7 +526,7 @@ class NucleiDispatchTests(DispatchBase):
 
     def test_targeted_pass_sentinel_findings_land_in_vulnerability_rows_via_the_unchanged_local_loop(self):
         """run_targeted_nuclei's own template-group loop calls run_nuclei -> _run_nuclei, which persists through
-        reNgine.tasks.save_vulnerability for every result line; a Sentinel's reconstructed line goes through that exact,
+        cvengine.tasks.save_vulnerability for every result line; a Sentinel's reconstructed line goes through that exact,
         untouched code, so a dispatched finding becomes a Vulnerability row the same way a local one would."""
         self.make_sentinel(['nuclei_targeted'])
         result = {'outcome': 'done', 'findings': [{'template_id': 'exposed-panel', 'name': 'Exposed admin panel', 'severity': 'high',
@@ -650,7 +650,7 @@ class WpscanDispatchTests(DispatchBase):
         self.assertNotIn('secret-token', str(ctx.exception))
 
     def test_a_timeout_never_runs_locally_the_stage_waits(self):
-        from reNgine.resources import ScannerUnavailable
+        from cvengine.resources import ScannerUnavailable
         self.make_sentinel(['wpscan'])
         guard = assert_ran_nowhere_locally(self, 'wpscan')
         runner = dispatch.wrap_wpscan_runner(self.project, scan=self.scan, timeout=0.2)
@@ -659,7 +659,7 @@ class WpscanDispatchTests(DispatchBase):
         self.assertEqual(guard.calls, [])
 
     def test_no_eligible_sentinel_waits_instead_of_returning_a_local_runner(self):
-        from reNgine.resources import ScannerUnavailable
+        from cvengine.resources import ScannerUnavailable
         guard = assert_ran_nowhere_locally(self, 'wpscan')
         with self.assertRaises(ScannerUnavailable):
             dispatch.wrap_wpscan_runner(self.project, scan=self.scan)
@@ -680,7 +680,7 @@ class WpscanDispatchTests(DispatchBase):
         self.assertNotIn('secret-token', str(task.target))
 
     def test_an_expired_unclaimed_task_is_also_scrubbed_of_the_token(self):
-        from reNgine.resources import ScannerUnavailable
+        from cvengine.resources import ScannerUnavailable
         self.make_sentinel(['wpscan'])
         runner = dispatch.wrap_wpscan_runner(self.project, scan=self.scan, timeout=0.2)
         with self.assertRaises(ScannerUnavailable):

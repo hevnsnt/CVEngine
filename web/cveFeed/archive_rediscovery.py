@@ -114,6 +114,13 @@ def observe(row, resolver=None, tcp_probe=None):
     return {'status': 'rediscovered_ip', 'addresses': [host]} if answering else {'status': 'unobserved', 'addresses': []}
 
 
+# The answers a later look gives again until something about the host or its settings changes: an address this server never scans (a private
+# one), a wildcard the name cannot be told apart from, an IP with no port known to probe. A run that met only these, and no error or wait, is
+# ``completed``: they are not ``deferred`` work, which made every daily run ``partial`` for as long as one such host stayed archived.
+PERMANENT = ('blocked', 'ambiguous_wildcard', 'no_safe_liveness_probe')
+HELD = 'held'  # the outcome of a host held in its archive by such a state, by an exclusion or scope, or by the bounty gate
+
+
 def check_one(row, *, resolver=None, tcp_probe=None):
     from cveFeed.exclusions import is_excluded
     from cveFeed.host_assessment import enqueue
@@ -129,19 +136,19 @@ def check_one(row, *, resolver=None, tcp_probe=None):
             host == domain.name.lower() or (not domain.is_host_scoped() and host.endswith('.' + domain.name.lower()))):
         HostState.objects.filter(pk=row.pk, archived_at__isnull=False).update(
             archive_checked_at=timezone.now(), archive_check_status='out_of_scope', archive_check_error='')
-        return 'deferred'
+        return HELD
     from cveFeed.bounty_gate import Gate
     if Gate().refusal(row.project_id, host):  # a bug bounty program that has not confirmed automated testing, or a host outside its scope: no lookup, no probe, no assessment
         HostState.objects.filter(pk=row.pk, archived_at__isnull=False).update(
             archive_checked_at=timezone.now(), archive_check_status='bounty_gate', archive_check_error='')
-        return 'deferred'
+        return HELD
     result = observe(row, resolver=resolver, tcp_probe=tcp_probe)
     status = result['status']
     now = timezone.now()
     if status not in ('rediscovered_dns', 'rediscovered_ip'):
         HostState.objects.filter(pk=row.pk, archived_at__isnull=False).update(
             archive_checked_at=now, archive_check_status=status, archive_check_error='temporary lookup error' if status == 'error' else '')
-        return 'error' if status == 'error' else 'deferred' if status.startswith(('blocked', 'ambiguous', 'no_safe')) else 'checked'
+        return 'error' if status == 'error' else HELD if status in PERMANENT else 'checked'
     sub = Subdomain.objects.filter(target_domain=domain, name=host).order_by('-id').first()
     if sub is None:
         sub = Subdomain.objects.create(target_domain=domain, name=host)
@@ -174,9 +181,10 @@ def check_one(row, *, resolver=None, tcp_probe=None):
         inactive_first_absent_at=None, inactive_last_absent_at=None, inactive_absent_checks=0,
         unresolved_first_at=None, unresolved_last_at=None, unresolved_checks=0)
     if changed:
-        from cveFeed import activity
+        from cveFeed import activity, archive_closure
         activity.log('inventory', f'{host} rediscovered; host assessment #{job.pk} queued', project=row.project_id,
                      job_id=job.pk, evidence='DNS resolution' if status == 'rediscovered_dns' else 'known TCP port answered')
+        archive_closure.reopen_quietly(row.project_id, host)  # what archiving it closed is open again, for the assessment to confirm or close
     return 'reactivated' if changed else 'checked'
 
 
@@ -213,7 +221,7 @@ def run_page(run_id=None, *, resolver=None, tcp_probe=None):
     rows = list(HostState.objects.filter(pk__gt=run.cursor_hoststate_id, archived_at__isnull=False, archived_by_user=False)
                 .select_related('domain', 'project').order_by('pk')[:PAGE])
     if (resolver is None or tcp_probe is None) and rows:
-        from reNgine.resources import ScannerUnavailable
+        from cvengine.resources import ScannerUnavailable
         try:
             reads = Reads(rows, dns=resolver is None, tcp=tcp_probe is None)
         except ScannerUnavailable as exc:  # no Sentinel can take the reads and they never run here: nothing was asked, the page waits for the next run
@@ -248,6 +256,7 @@ def run_page(run_id=None, *, resolver=None, tcp_probe=None):
         try:
             rediscover_archived_hosts.apply_async(args=[run.pk], queue='cve_feed_queue', countdown=1)
         except Exception:
+            logger.warning('archived host rediscovery run %s: the next batch could not be queued; the run stops as partial', run.pk, exc_info=True)
             run.status = 'partial'
             run.save(update_fields=['status'])
         return {'run_id': run.pk, 'status': run.status, 'checked': run.checked, 'more': True}

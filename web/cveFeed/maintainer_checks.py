@@ -50,7 +50,7 @@ def _num(value):
 
 
 def span(seconds):
-    """``seconds`` as a plain span (no clock time: the server does not know the reader's time zone)."""
+    """Return a short English phrase for a number of seconds."""
     seconds = int(seconds or 0)
     if seconds < 90:
         return f'{seconds} seconds'
@@ -58,7 +58,10 @@ def span(seconds):
     if minutes < 120:
         return f'{minutes} minutes'
     hours, rest = divmod(minutes, 60)
-    return f'{hours} hours' + (f' {rest} minutes' if rest and hours < 10 else '')
+    phrase = f'{hours} hours'
+    if rest and hours < 10:
+        phrase += f' {rest} minutes'
+    return phrase
 
 
 def _utc(epoch):
@@ -78,10 +81,58 @@ def _plural(n, word):
 
 # --- memory ------------------------------------------------------------------------------------------------------------------------
 
-def memory(signals):
-    """Worker lanes and containers against their memory limits, kernel oom kills, lane restarts. ``signals`` is ``system.signals['signals']``."""
+def _restart_was_memory(entry, limit):
+    """True when the lane's own record says memory may have ended it: it holds at least ``MEMORY_WARN_PERCENT`` of its limit now, or did just before its last
+    restart. False when both readings are below that share. None when neither can be compared (no limit, no reading)."""
+    pct = _num(entry.get('percent_of_limit'))
+    last_rss = _num((entry.get('last_restart') or {}).get('last_rss_mb'))
+    before = round(100 * last_rss / limit, 1) if last_rss is not None and limit else None
+    readings = [p for p in (pct, before) if p is not None]
+    if not readings:
+        return None
+    return max(readings) >= MEMORY_WARN_PERCENT
+
+
+def _restart_sentences(rows, watchdog_restarts):
+    """The restart issues of the lanes whose memory was low: one sentence for lanes that restarted together (the celery container restarts all four at once),
+    with their memory, and what the watchdog says it did. ``rows`` is ``[(row, last_epoch)]``."""
+    groups = {}
+    for row, last in rows:
+        groups.setdefault(row['restarts_24h'], []).append((row, last))
+    out = []
+    for count, members in sorted(groups.items(), key=lambda g: -g[0]):
+        names = [r['lane'] for r, _ in members]
+        lasts = [last for _, last in members if last]
+        pcts = [r['percent_of_limit'] for r, _ in members if r.get('percent_of_limit') is not None]
+        limits = {r['limit_mb'] for r, _ in members if r.get('limit_mb')}
+        who = (f'all {len(names)} worker lanes' if len(names) >= 4 else 'the ' + ', '.join(names[:-1]) + (' and ' if len(names) > 1 else '') + names[-1]
+               + (' worker lanes' if len(names) > 1 else ' worker lane'))
+        text = f'{who} restarted {count} times in 24 hours' + (' together' if len(names) > 1 else '') + (f' (last at {_utc(max(lasts))})' if lasts else '')
+        if pcts and len(pcts) == len(members):
+            low, high = min(pcts), max(pcts)
+            share = f'{low:.0f}%' if round(low) == round(high) else f'{low:.0f}% to {high:.0f}%'
+            text += (f', while using {share} of {"their" if len(names) > 1 else "its"} {_mb(limits.pop()) + " " if len(limits) == 1 else ""}memory limit, '
+                     f'so memory is not what stops {"them" if len(names) > 1 else "it"}')
+        else:
+            text += ', and no memory reading against a limit points at memory'
+        out.append(text)
+    wd = watchdog_restarts if isinstance(watchdog_restarts, dict) else {}
+    n = wd.get('count')
+    if isinstance(n, int) and n > 0:
+        out.append(f"the watchdog restarted the workers {_plural(n, 'time')} in 24 hours because a lane stopped answering"
+                   + (f" (rule {', '.join(sorted(wd.get('rules') or []))})" if wd.get('rules') else '')
+                   + (f', last at {_utc(wd["last_at"])}' if wd.get('last_at') else ''))
+    return out
+
+
+def memory(signals, watchdog_restarts=None):
+    """Worker lanes and containers against their memory limits, kernel oom kills, lane restarts. ``signals`` is ``system.signals['signals']``.
+    ``watchdog_restarts`` (optional) is what the watchdog's own events say it did: ``{'count': restarts of the workers it had carried out in 24 hours, 'rules':
+    [rule codes], 'last_at': epoch}``. A lane that keeps restarting while its memory is low is not called out of memory: the title says it keeps restarting
+    and the detail gives its memory and the restarts the watchdog made, so the reader looks for the cause where it is."""
     lanes_signal, containers_signal = (signals or {}).get('lanes'), (signals or {}).get('containers')
-    issues = []          # (rank, sentence, next step, fact)
+    issues = []          # (rank, sentence, kind, fact)
+    quiet_restarts = []  # (row, last restart epoch): lanes that keep restarting with low memory, said together below
     facts = {'lanes': [], 'containers': [], 'not_read': [],
              'thresholds': {'warn_percent': MEMORY_WARN_PERCENT, 'problem_percent': MEMORY_PROBLEM_PERCENT, 'oom_kills_24h': OOM_KILLS_PROBLEM,
                             'lane_restarts_24h': LANE_RESTARTS_PROBLEM}}
@@ -104,7 +155,11 @@ def memory(signals):
         if isinstance(restarts, int) and restarts >= LANE_RESTARTS_PROBLEM:
             bad = True
             last = (entry.get('last_restart') or {}).get('at')
-            issues.append((2, f"the {entry['lane']} worker lane restarted {restarts} times in 24 hours" + (f' (last at {_utc(last)})' if last else ''), 'restarts', row))
+            row['memory_cause'] = _restart_was_memory(entry, row['limit_mb'])
+            if not row['memory_cause']:  # low memory, or nothing to compare: a restart alone is not evidence of memory
+                quiet_restarts.append((row, last))
+            else:
+                issues.append((2, f"the {entry['lane']} worker lane restarted {restarts} times in 24 hours" + (f' (last at {_utc(last)})' if last else ''), 'restarts', row))
         if bad:
             facts['lanes'].append(row)
     if not _known(lanes_signal):
@@ -132,8 +187,20 @@ def memory(signals):
     facts['not_read'] = sorted(set(facts['not_read']))
     if not read:
         return unknown('no worker lane and no container has a current memory reading, so nothing can be said about memory')
-    if not issues:
+    if quiet_restarts:
+        facts['restarts_not_memory'] = True
+        if isinstance(watchdog_restarts, dict) and watchdog_restarts.get('count') is not None:
+            facts['watchdog_restarts_24h'] = watchdog_restarts.get('count')
+    if not issues and not quiet_restarts:
         return {'state': 'ok', 'title': 'Memory is within its limits', 'detail': '', 'facts': facts}
+    if not issues:  # nothing points at memory: the lanes keep restarting for another reason, and the alert says so
+        sentences = _restart_sentences(quiet_restarts, watchdog_restarts)
+        detail = '; '.join(sentences)
+        several = len(quiet_restarts) > 1
+        step = ('Next step: the watchdog events (Status, Watchdog) say which lane stopped answering before each restart it made; `docker compose logs celery` shows '
+                'why a worker stopped on its own (a "Segmentation fault" line is a crash of the worker process, not a lack of memory).')
+        return {'state': 'problem', 'title': 'The worker lanes keep restarting' if several else 'A worker lane keeps restarting',
+                'detail': detail[0].upper() + detail[1:] + '. ' + step, 'facts': facts}
     issues.sort(key=lambda i: -i[0])
     worst = issues[0]
     state = 'problem' if worst[0] >= 2 else 'warning'
@@ -147,7 +214,9 @@ def memory(signals):
     else:
         step = (f"Next step: `docker compose logs celery` shows what the {worst[3]['lane']} lane was running before each restart; the status page lists the tasks "
                 'that left it largest.')
-    detail = '; '.join(i[1] for i in issues[:4])
+    sentences = [i[1] for i in issues[:4]] + [f"the {row['lane']} worker lane restarted {row['restarts_24h']} times in 24 hours" + (f' (last at {_utc(last)})' if last else '')
+                                              for row, last in quiet_restarts]  # beside memory evidence, a restart may well be the kill: no verdict on its cause
+    detail = '; '.join(sentences)
     return {'state': state, 'title': 'A container or worker lane is out of memory' if worst[0] >= 2 else 'Memory is getting close to its limit',
             'detail': detail[0].upper() + detail[1:] + '. ' + step, 'facts': facts}
 
@@ -156,18 +225,36 @@ def memory(signals):
 
 def queue_starvation(signals, work):
     """Work of one kind waiting far longer than its normal while the workers are busy with another kind. ``work`` is what ``ops_checks`` counted:
-    ``{paused, scans_queued, assessments_running, assessments_queued, sentinel_kinds: [{kind, queued, oldest_age_seconds, typical_wait_seconds, busy_with}]}``
-    (a number it could not count is ``None``)."""
+    ``{paused, scans_queued, scans_oldest_age_seconds, scans_stuck: {count, ids, oldest_age_seconds}, assessments_running, assessments_queued,
+    sentinel_kinds: [{kind, queued, oldest_age_seconds, typical_wait_seconds, busy_with}]}`` (a number it could not count is ``None``).
+
+    Only a scan that waits for a worker can be starved. A queued row that nothing will ever start (``counts.stuck_queued_q``: a host pipeline whose task
+    stopped before it started it, or a scan queued longer than ``counts.queued_scan_limit()``) is not waiting for the workers the assessments hold, so it
+    never makes this a problem and never yields the advice to give scans more room: lowering the assessment batch would not start it. Those rows are
+    named in the facts and the text, and the reaper closes them (``reaper.expire_stuck_queued``)."""
     work = work or {}
     queues = (signals or {}).get('queues')
     oldest = (queues.get('oldest_queued') if _known(queues) else None) or {}
     scan = oldest.get('scan') if isinstance(oldest.get('scan'), dict) and oldest['scan'].get('state') == 'known' else None
+    if 'scans_oldest_age_seconds' in work and work.get('scans_queued') is not None:  # counted with the stuck rows left out, fresher than the signal
+        scan = {'state': 'known', 'queued': bool(work['scans_queued']), 'age_seconds': work['scans_oldest_age_seconds']}
     facts = {'not_read': [], 'thresholds': {'scan_seconds': SCAN_STARVED_SECONDS, 'sentinel_seconds': SENTINEL_STARVED_SECONDS, 'sentinel_factor': SENTINEL_STARVED_FACTOR,
                                               'busy_minutes': SENTINEL_BUSY_MINUTES}}
     issues = []
     read = 0
     if work.get('paused'):
         return {'state': 'ok', 'title': 'Scanning is paused', 'detail': '', 'facts': {**facts, 'paused': True}}
+    stuck = work.get('scans_stuck') if isinstance(work.get('scans_stuck'), dict) and work['scans_stuck'].get('count') else None
+    stuck_text = ''
+    if stuck:
+        facts['stuck_scans'] = {'count': stuck['count'], 'ids': list(stuck.get('ids') or []), 'oldest_age_seconds': stuck.get('oldest_age_seconds')}
+        shown = ', '.join(f'#{i}' for i in (stuck.get('ids') or [])[:10]) + (', ...' if stuck['count'] > len(stuck.get('ids') or []) else '')
+        age = f", the oldest queued {span(stuck['oldest_age_seconds'])} ago" if stuck.get('oldest_age_seconds') is not None else ''
+        stuck_text = (f"{_plural(stuck['count'], 'queued scan')} ({shown}{age}) {'are rows' if stuck['count'] != 1 else 'is a row'} that nothing will start "
+                      '(a host pipeline whose worker stopped before starting it, or a scan queued longer than any real wait), not scans waiting for a worker, '
+                      'so they are not counted here and giving scans more room would not start them. The reaper marks such a row failed with the reason '
+                      'every 15 minutes once the broker confirms that no task holds it; if they stay, the broker or the workers could not be asked '
+                      '(`docker compose logs celery` shows the reap_stuck_jobs runs)')
     running, queued = work.get('assessments_running'), work.get('assessments_queued')
     if scan is None or running is None or queued is None:
         facts['not_read'].append('scan queue')
@@ -204,9 +291,13 @@ def queue_starvation(signals, work):
     if not read:
         return unknown('neither the scan queue nor the Sentinel queue could be read, so nothing can be said about work waiting')
     if not issues:
-        return {'state': 'ok', 'title': 'No work is starved', 'detail': '', 'facts': facts}
-    text = '. '.join(i[0].upper() + i[1:] for i in issues[:3])
-    return {'state': 'problem', 'title': 'Work of one kind is waiting while workers do another', 'detail': text + '.', 'facts': facts}
+        # stuck rows alone are not starvation: an ok verdict (an open starvation alert would let the tuning lower the assessment share for them), with the
+        # rows named so the text is still true
+        return {'state': 'ok', 'title': 'No work is starved', 'detail': (stuck_text[0].upper() + stuck_text[1:] + '.') if stuck_text else '', 'facts': facts}
+    text = '. '.join(i[0].upper() + i[1:] for i in issues[:3]) + '.'
+    if stuck_text:
+        text += ' Apart from these, ' + stuck_text + '.'
+    return {'state': 'problem', 'title': 'Work of one kind is waiting while workers do another', 'detail': text, 'facts': facts}
 
 
 # --- claims refused by the rate limiter ----------------------------------------------------------------------------------------------

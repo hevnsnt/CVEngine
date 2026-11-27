@@ -36,8 +36,12 @@ def check_rules(text):
         raise RulesError(f'the rules are larger than {MAX_BYTES // 1024} KB')
     if not text.strip():
         return []
+    from cveFeed.safeyaml import unbuildable
     try:
-        doc = yaml.safe_load(text)
+        try:
+            doc = yaml.safe_load(text)
+        except (ValueError, TypeError, OverflowError) as exc:  # a date such as 2026-13-45: parsed, but not a date
+            raise unbuildable(exc) from None
     except yaml.YAMLError as exc:
         raise RulesError(f'not valid YAML: {str(exc).splitlines()[0][:200]}') from None
     if not isinstance(doc, dict) or set(doc) != {'rules'} or not isinstance(doc['rules'], list):

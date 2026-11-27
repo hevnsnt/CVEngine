@@ -82,10 +82,42 @@ backup_database() {
   return 0
 }
 
+# The database owner's commands (migrate, showmigrations, the app role's check) run in a one-off container of the migrate service
+# (docker-compose.yml, web/migrate-entrypoint.sh): the only container with the owner's password; web, celery and celery-beat do not have it.
+# A Compose layout without that service (an install's own file that replaces docker-compose.yml) keeps the old way: a one-off web container
+# with CVENGINE_DB_ROLE=owner. deploy_steps sets CV_OWNER_SERVICE from the services the layout defines.
+CV_OWNER_SERVICE=migrate
+owner_run() {  # owner_run [-T] manage.py ARGS...
+  local tty=()
+  if [ "${1:-}" = -T ]; then tty=(-T); shift; fi
+  if [ "$CV_OWNER_SERVICE" = migrate ]; then
+    "${COMPOSE[@]}" run --rm --no-deps ${tty[@]+"${tty[@]}"} migrate python3 "$@"
+  else
+    "${COMPOSE[@]}" run --rm --no-deps ${tty[@]+"${tty[@]}"} -e CVENGINE_DB_ROLE=owner --entrypoint python3 web "$@"
+  fi
+}
+
+# Before anything is migrated or restarted: the application must be able to run without the owner's password. cvengine_owner_password_check
+# refuses a layout that still hands it to another service (an overlay's environment); cvengine_db_gate creates and grants the app role in the
+# migrate service and checks that it logs in, and fails with the one-line fix when it does not (unless CVENGINE_DB_ALLOW_OWNER_FALLBACK=1).
+# Still DEPLOY_STAGE=datastores, so a failure here puts the previous version back on the unchanged database.
+check_db_roles() {
+  local out status=0 line
+  [ "$CV_OWNER_SERVICE" = migrate ] && [ -f scripts/db-app-role.sh ] || return 0
+  . scripts/db-app-role.sh
+  out=$(cvengine_owner_password_check "${COMPOSE[@]}" 2>&1) || status=$?
+  if [ "$status" = 0 ]; then out=$(cvengine_db_gate "${COMPOSE[@]}" 2>&1) || status=$?; fi
+  while IFS= read -r line; do [ -z "$line" ] || log "$line"; done <<<"$out"
+  [ "$status" = 0 ] && return 0
+  line=$(grep -m1 '^Fix:' <<<"$out" || true)
+  DEPLOY_WHY="The update stopped before migrating: the server would have to run with the database owner's password. ${line:-See the update log.}"
+  return 1
+}
+
 # How many migrations the database has applied; fails when that cannot be read.
 applied_migrations() {
   local plan
-  plan=$("${COMPOSE[@]}" run --rm --no-deps -T --entrypoint python3 web manage.py showmigrations --plan 2>/dev/null) || return 1
+  plan=$(owner_run -T manage.py showmigrations --plan 2>/dev/null) || return 1
   grep -c '^\[X\]' <<<"$plan" || true
 }
 
@@ -95,7 +127,8 @@ applied_migrations() {
 run_migrations() {
   local before after
   before=$(applied_migrations) || before=''
-  "${COMPOSE[@]}" run --rm --no-deps --entrypoint python3 web manage.py migrate --noinput && return 0
+  # as the database's owner role, in the migrate service; the migrate also creates or updates the app role and grants it (web/cvengine/db_roles.py)
+  owner_run manage.py migrate --noinput && return 0
   after=$(applied_migrations) || after=''
   if [ -z "$before" ] || [ "$before" != "$after" ]; then
     DEPLOY_STAGE=migrated
@@ -129,6 +162,18 @@ warn_discovery_pin() {
 deploy_steps() {
   python3 "$STATE_HELPER" commit "$(git rev-parse HEAD)" || return 1
   local compose=("${COMPOSE[@]}")
+  # An install made before 1.5.0 has the old names in its own files (.env, an overlay, its certificates): the new ones are added beside them
+  # before Compose reads anything (scripts/legacy_names.py); the old ones go only after the updated site answered, below.
+  if [ -f scripts/legacy_names.py ]; then
+    local names_out
+    if ! names_out=$(python3 scripts/legacy_names.py migrate -- "${compose[@]}" 2>&1); then
+      names_out=$(tail -n 1 <<<"$names_out")
+      DEPLOY_WHY="The update stopped before the build: ${names_out:0:140}"
+      log "$DEPLOY_WHY"
+      return 1
+    fi
+    while IFS= read -r line; do [ -z "$line" ] || log "$line"; done <<<"$names_out"
+  fi
   local services=(web celery celery-beat) listed=''
   # the dev compose file has no proxy service; recreate it only where it exists (keep it if the list cannot be read)
   if listed=$("${compose[@]}" config --services 2>/dev/null); then
@@ -137,25 +182,35 @@ deploy_steps() {
     listed=''
     services+=(proxy)
   fi
+  # where the owner's commands run (owner_run): the migrate service, unless the layout lacks it (and when the list cannot be read, it is there)
+  CV_OWNER_SERVICE=migrate
+  if [ -n "$listed" ] && ! grep -qx migrate <<<"$listed"; then CV_OWNER_SERVICE=web; fi
   DEPLOY_STAGE=build
   phase applying "$DEPLOY_STAGE"
   cv_status step build
   check_disk || return 1
-  # The proxy image is a moving tag and is meant to move with every update (nginx's security releases). It is fetched here, before anything is
-  # stopped, and an unreachable registry only keeps the image already on the host: a pull that failed inside `up` after the migration (as
-  # `pull_policy: always` did) failed an update that was otherwise done, and an offline host could never update at all.
+  # proxy_network's fixed subnet must be free before anything is stopped or migrated (scripts/client-address.sh); a clash would stop `up` half way
+  if [ -f scripts/client-address.sh ] && . scripts/client-address.sh; then
+    local clash
+    if ! clash=$(cvengine_proxy_network_check "${compose[@]}"); then
+      DEPLOY_WHY="The update stopped before changing anything: $clash"
+      log "$DEPLOY_WHY"
+      return 1
+    fi
+  fi
+  # The proxy image is pinned by digest (scripts/image_pins.py): a new nginx release arrives with the commit that moved the pin. It is fetched here,
+  # before anything is stopped, and an unreachable registry only keeps the image already on the host: a pull that failed inside `up` after the
+  # migration (as `pull_policy: always` did) failed an update that was otherwise done, and an offline host could never update at all.
   if grep -qx proxy <<<"$listed"; then
     "${compose[@]}" pull --quiet proxy || log "could not pull the newest proxy image (offline, or the registry is limiting pulls); the one on this host is kept"
   fi
-  # Redis and Postgres are moving tags too (redis:alpine, postgres:18-alpine: security and bug-fix releases inside one major version, never a
-  # new major). Fetched here with the proxy, before anything is stopped; the datastores step below recreates each one only when its image moved.
-  # Without this an install kept the Redis and Postgres it was installed with forever. A failed pull keeps the images on this host.
+  # Redis and Postgres are pinned by digest too (redis:alpine, postgres:18-alpine at the digest scripts/image_pins.py wrote). Fetched here with the
+  # proxy, before anything is stopped; the datastores step below recreates each one only when its pin moved. A failed pull keeps the images on this host.
   if grep -qx proxy <<<"$listed"; then  # the production stack, as for the proxy: the dev stack pulls nothing
     "${compose[@]}" pull --quiet db redis || log "could not pull the newest Redis and Postgres images (offline, or the registry is limiting pulls); the ones on this host are kept"
   fi
   build_free_memory
-  SENTINEL_SHA=$(scripts/sentinel-ref.sh 2>/dev/null) || SENTINEL_SHA=''  # the newest Sentinel library, resolved now (docs/UPDATES.md)
-  export SENTINEL_SHA
+  # the Sentinel library is the commit web/requirements.txt pins: nothing is resolved at build time (docs/UPDATES.md)
   if ! "${compose[@]}" build web celery celery-beat; then
     build_restore_memory
     DEPLOY_WHY="The new version could not be built (see the update log). Nothing was changed: the version that was running is still running."
@@ -168,6 +223,15 @@ deploy_steps() {
     "${compose[@]}" build reviewer || log "could not build the AI reviewer image; scanning is not affected (the next update tries again)"
   fi
   build_restore_memory
+  # an install made before 1.5.0: the running database and Redis, still on the old network, are attached to the new one for the one-off
+  # containers of the new images until they are recreated (scripts/legacy_names.py bridge; never fails the update)
+  if [ -f scripts/legacy_names.py ]; then
+    while IFS= read -r line; do [ -z "$line" ] || log "$line"; done < <(python3 scripts/legacy_names.py bridge -- "${compose[@]}" 2>&1)
+  fi
+  # The application runs as its own account (uid 10002) from this image on: the paths it writes (the volumes, the Django secret, its own update
+  # requests in web/) are handed to it before anything of the new image runs (the host-fit count below, the migrate service, the application).
+  # Idempotent: an install that has it already changes nothing (scripts/app-ownership.sh, web/ownership.sh).
+  app_ownership || return 1
   # Which scanners run, decided before anything is stopped and before the scanner's image is fetched (it removes the scanner when the answer is external)
   # (scripts/host-fit.sh, the rules scripts/update.sh and install.sh use too; after the build, because the count of Sentinels is read with the new image).
   # The answer the Update button's dialog collected comes with the approval (web/.update-sentinels, read without following a link); without one (the button
@@ -194,28 +258,54 @@ deploy_steps() {
   else
     "${compose[@]}" up -d --no-recreate db redis || return 1
   fi
+  # The least privilege database role the server runs as (scripts/db-app-role.sh): an installation without its password gets one now, in .env and
+  # the Compose env file. The migrate below creates the role with it and grants it; web, celery and celery-beat, recreated after that, run as it.
+  if [ -f scripts/db-app-role.sh ] && . scripts/db-app-role.sh && cvengine_ensure_db_app_password "$(cvengine_compose_env_file "${compose[@]}")"; then
+    log "the server had no database role of its own: generated its password (CVENGINE_DB_APP_PASSWORD in .env); the migration creates the role and the server runs as it from this update on"
+  fi
+  # The upstream secret a host nginx sends so the proxy believes its X-Forwarded-For (scripts/client-address.sh): generated when there is none, in .env
+  # and the Compose env file; the proxy recreated below loads it. Until the host nginx sends it nothing changes (docs/DEPLOYMENT.md).
+  if [ -f scripts/client-address.sh ] && . scripts/client-address.sh && cvengine_ensure_upstream_secret "$(cvengine_compose_env_file "${compose[@]}")"; then
+    log "generated the upstream secret (CVENGINE_UPSTREAM_SECRET in .env); a host nginx in front of the proxy needs it to pass on the client address: scripts/client-address-check.sh --snippet"
+  fi
+  # This server's own public addresses for the self exclusion (scripts/self-addresses.sh): written to .env as a managed line when nobody set them, and
+  # replaced when a managed value is stale; an operator's own value is kept. web, celery and celery-beat, recreated below, read .env. Never fails.
+  if [ -f scripts/self-addresses.sh ] && . scripts/self-addresses.sh; then
+    cvengine_ensure_self_addresses || true
+  fi
+  # nginx must accept the proxy configuration it will start with (the new files, the secret just written) before anything is changed for good
+  proxy_preflight || return 1
   # The database's own settings are in the compose file (max_connections). `up -d --no-deps db` recreates the db container only when its
   # definition changed since it was created (once, on the update that brings the change: a restart of a few seconds), and is a no-op otherwise.
   "${compose[@]}" up -d --no-deps db || return 1
   # the same for Redis: recreated only when a newer image was pulled above (dispatch is paused and the queues drained by now), else a no-op
   "${compose[@]}" up -d --no-deps redis || return 1
   for _ in $(seq 1 60); do "${compose[@]}" exec -T db pg_isready -q >/dev/null 2>&1 && break; sleep 1; done
+  # One source for the database's settings: an ALTER SYSTEM value of a setting the compose files now pass (synchronous_commit, set by hand on a
+  # host before POSTGRES_SYNCHRONOUS_COMMIT existed) is removed (scripts/db-settings.sh; idempotent, never fails the update)
+  if [ -f scripts/db-settings.sh ] && . scripts/db-settings.sh; then
+    while IFS= read -r line; do [ -z "$line" ] || log "$line"; done < <(cvengine_db_settings_one_source "${compose[@]}")
+  fi
   phase applying backup
   cv_status step backup
   backup_database || return 1
+  check_db_roles || return 1
   DEPLOY_STAGE=migrate
   phase applying "$DEPLOY_STAGE"
   cv_status step migrating
   run_migrations || return 1
   DEPLOY_STAGE=migrated
   phase applying "$DEPLOY_STAGE"
-  "${compose[@]}" run --rm --no-deps --entrypoint python3 web manage.py collectstatic --noinput || return 1
+  # in celery, the one service that writes the static volume (web and the proxy mount it read-only)
+  "${compose[@]}" run --rm --no-deps --entrypoint python3 celery manage.py collectstatic --noinput || return 1
   # The web interface certificate is renewed here when its check is due, so the proxy recreated below starts with the new one (a host with
   # neither the update watcher nor cron has no other trigger). A failure is logged and never stops the update.
   if [ -f scripts/renew-certs.sh ]; then
     scripts/renew-certs.sh --if-due --no-reload >/dev/null 2>&1 || log "the certificate check failed (see the Settings > Updates page); the update goes on"
   fi
   cv_status step starting
+  # again, for what the old containers (which ran as root) wrote since the first pass; nothing to do on a second update
+  app_ownership || return 1
   "${compose[@]}" up -d --no-deps --force-recreate "${services[@]}" || return 1
   # The Tailscale sidecar (tailscale profile) is not recreated here: it runs in the built-in scanner's network namespace, not celery's, and is put
   # back into it when the scanner is started below (scripts/scanner.sh, cvengine_scanner_sidecar), including on an install that had it in celery's.
@@ -236,6 +326,26 @@ deploy_steps() {
   phase applying verifying
   cv_status step verifying
   verify_serving || return 1
+  # The proxy is what visitors reach, and a proxy whose configuration nginx refuses restarts over and over while `ps` calls it running.
+  if printf '%s\n' "${services[@]}" | grep -qx proxy; then verify_proxy || return 1; fi
+  # the names used before 1.5.0, now that the update is verified (scripts/legacy_names.py): never fails the update
+  if [ -f scripts/legacy_names.py ]; then
+    while IFS= read -r line; do [ -z "$line" ] || log "$line"; done < <(python3 scripts/legacy_names.py cleanup -- "${compose[@]}" 2>&1)
+  fi
+  # Which database role web, celery and celery-beat run as; a warning when any still uses the owner role (never fails the update).
+  if declare -F cvengine_db_role_report >/dev/null; then
+    while IFS= read -r line; do [ -z "$line" ] || log "$line"; done < <(cvengine_db_role_report "${compose[@]}")
+  fi
+  # Whether the real client address reaches the server (scripts/client-address.sh): one probe through the public name, compared with what
+  # Cloudflare saw. A report in the update log, never a failure; the probe route passes the maintenance page (config/nginx/cvengine.conf).
+  if declare -F cvengine_client_address_report >/dev/null; then
+    while IFS= read -r line; do [ -z "$line" ] || log "$line"; done < <(cvengine_client_address_report "${compose[@]}" 2>/dev/null)
+  fi
+  # Accounts the abuse guard of releases before 1.5.0 disabled are enabled again (web/cveFeed/guard_reenable.py: only those; their revoked API tokens
+  # stay revoked and are listed). Its last line counts them for the update log. It is also an update step (cveFeed/upgrade_backfills.py), so an
+  # install updated another way gets it too; a second run finds nothing to change. Never a failure.
+  while IFS= read -r line; do [ -z "$line" ] || log "guard accounts: $line"; done \
+    < <("${compose[@]}" exec -T web python3 manage.py reenable_guard_disabled_users --apply 2>/dev/null | tail -n 50)
   # The built-in scanner, once the server answers: recreated on its own network (the Tailscale sidecar follows it), kept on the new image only once a
   # heartbeat of it reaches the server, else put back on the previous one. Never a failed update: until it runs, the scans that need it wait.
   if declare -F cvengine_scanner_start >/dev/null; then
@@ -245,6 +355,20 @@ deploy_steps() {
   fi
   if declare -F cvengine_fit_budget >/dev/null; then cvengine_fit_budget "${compose[@]}" || true; fi
   prune_old_images
+}
+
+# The one-off ownership service (scripts/app-ownership.sh): one log line; a failure stops the deploy before the application is recreated.
+app_ownership() {
+  local out
+  [ -f scripts/app-ownership.sh ] || return 0
+  . scripts/app-ownership.sh
+  if out=$(cvengine_app_ownership "${COMPOSE[@]}"); then
+    log "$out"
+    return 0
+  fi
+  log "$out"
+  DEPLOY_WHY="The application's files could not be handed to its own account (docker compose run --rm ownership; see the update log)."
+  return 1
 }
 
 # `up -d` can leave a service created but not started (a published port that is already taken, for one): that is a failed update, not a done one.
@@ -261,11 +385,43 @@ verify_running() {
   return 1
 }
 
+# The bundled proxy after the restart (scripts/proxy-check.sh): verify_running saw it "running", which is also what Docker says between two restarts
+# of a proxy nginx refuses (the 1.5 upstream secret did that: its map key did not fit nginx's hash bucket), and verify_serving asks the web service
+# directly, not through the proxy, so the update said "done" and took the page down while no visitor got an answer. A proxy that fails here is a
+# failed update after the migration: the new code is kept and the deploy retried, and the page says the update did not finish.
+verify_proxy() {
+  local out
+  [ -f scripts/proxy-check.sh ] || return 0
+  . scripts/proxy-check.sh
+  if out=$(cvengine_proxy_verify "${COMPOSE[@]}"); then
+    log "$out"
+    return 0
+  fi
+  log "$out"
+  DEPLOY_WHY="The new version started, but the proxy does not answer for the site (see the update log). The maintenance page stays up."
+  return 1
+}
+
+# Before anything is migrated or recreated: nginx must accept the proxy configuration the new files and .env give it (scripts/proxy-check.sh).
+# Still DEPLOY_STAGE=datastores, so a refusal puts the previous version back on the unchanged database and its proxy keeps serving.
+proxy_preflight() {
+  local out
+  [ -f scripts/proxy-check.sh ] || return 0
+  . scripts/proxy-check.sh
+  if out=$(cvengine_proxy_preflight "${COMPOSE[@]}"); then
+    [ -z "$out" ] || log "$out"
+    return 0
+  fi
+  log "$out"
+  DEPLOY_WHY="The update stopped before migrating: nginx refuses the new proxy configuration (see the update log). The previous version was put back."
+  return 1
+}
+
 # "Running" is what Docker says about a container that may be restarting over and over, and an update that only checked that reported "done"
 # for a web service that never came up, or one whose database lacked what its code needs. After the restart the web service must ANSWER (any
 # status under 500: the redirect to the login page counts, and so does a 400 for a host name it does not allow) and no migration may be
-# waiting. The web entrypoint migrates when it starts, so a migration still waiting here means something else went wrong: it is applied
-# once, and if it still cannot be the update fails visibly instead of reporting success on an install that returns errors.
+# waiting. The migrate service ran before the restart, so a migration still waiting here means something else went wrong: it is applied
+# once (in the migrate service again), and if it still cannot be the update fails visibly instead of reporting success on an install that returns errors.
 verify_serving() {
   local compose=("${COMPOSE[@]}") attempt served=0
   for attempt in $(seq 1 "${CVENGINE_VERIFY_WEB_TRIES:-90}"); do
@@ -278,7 +434,7 @@ verify_serving() {
   fi
   if ! "${compose[@]}" exec -T web python3 manage.py migrate --check >/dev/null 2>&1; then
     log "the web service answers but the database has migrations waiting; applying them"
-    "${compose[@]}" exec -T web python3 manage.py migrate --noinput || return 1
+    owner_run -T manage.py migrate --noinput || return 1
     if ! "${compose[@]}" exec -T web python3 manage.py migrate --check >/dev/null 2>&1; then
       log "migrations are still waiting after migrate; the update is not complete"
       return 1

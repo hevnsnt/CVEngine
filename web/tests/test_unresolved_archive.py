@@ -111,6 +111,18 @@ class UnresolvedArchiveTests(TestCase):
         self.assertEqual(result['archived'], 3)
         self.assertEqual(UnresolvedArchiveReview.objects.get(pk=result['run_id']).status, 'completed')
 
+    def test_a_continuation_the_broker_refuses_is_logged_and_the_run_stops_partial(self):
+        old = self.now - timedelta(days=6)
+        for i in range(27):
+            self.state(f'b{i}.unresolved.example', unresolved_first_at=old, unresolved_checks=2)
+        with mock.patch('cveFeed.scan_control.pause_requested', return_value=False), \
+             mock.patch('cveFeed.tasks.review_unresolved_hosts.apply_async', side_effect=RuntimeError('broker gone')), \
+             self.assertLogs('cveFeed.unresolved_archive', 'WARNING') as logs:
+            out = run_page()
+        self.assertEqual((out['status'], out['more']), ('partial', True))
+        self.assertEqual(UnresolvedArchiveReview.objects.get(pk=out['run_id']).status, 'partial')
+        self.assertIn('broker gone', '\n'.join(logs.output))
+
     def test_archived_this_way_is_picked_up_restored_and_reassessed_by_the_existing_rediscovery_sweep(self):
         host = 'comesback.unresolved.example'
         old = self.now - timedelta(days=6)

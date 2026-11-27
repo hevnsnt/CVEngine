@@ -56,6 +56,7 @@ STATUS_TTL = 30 * 24 * 3600
 RUN_BUDGET_SECONDS = 8 * 60  # a firing starts no new IP after this, so it ends before the next one
 MAX_ELIGIBLE = 5000  # in-scope addresses looked at per pick
 MAX_CHECKED = 50  # scope checks (they resolve names) per pick
+MAX_PAGES = 40  # pages of MAX_ELIGIBLE addresses one pick may read while it looks for due ones (200,000 addresses)
 MAX_EMPTY_PER_DAY = 3  # times in 24 hours a scanner may return an unusable report for one address before it is asked again tomorrow
 EMPTY_TTL = 24 * 3600
 EMPTY_KEY = 'cvengine:udpscan:empty:'
@@ -138,7 +139,7 @@ def ports():
 
 
 def _store():
-    from reNgine import resources
+    from cvengine import resources
     return getattr(resources.get_store(), 'r', None)
 
 
@@ -195,24 +196,35 @@ def asset_of(ip):
     return f'{address}@{ip.org_id}' if ip.org_id else address
 
 
-def due(limit=MAX_ELIGIBLE):
+def due(limit=MAX_ELIGIBLE, want=MAX_CHECKED):
     """In-scope addresses whose last sweep is older than the TTL, never-swept first, then the longest waiting, minus the ones that
     failed recently. In scope is the TCP sweep's: attached to an active host of a project, not a CDN. A project whose bug bounty
     engagement has not confirmed automated testing does not count (the helper the conductor and the bucket sweep use), so an address
-    reached only through such a project is never scanned."""
+    reached only through such a project is never scanned.
+
+    The addresses are read ``limit`` at a time in id order and the next page is read only while fewer than ``want`` due addresses have been
+    found, so an install whose first ``limit`` addresses are all freshly swept still reaches the ones after them (a single page cut the list
+    at the first ``limit`` ids for good), and one whose first page has enough stops after it."""
     from django.db.models import Exists, OuterRef
     from cveFeed import fullscan, ledger
     from cveFeed.conductor import bounty_blocked_projects
     from startScan.models import IpAddress
     attached = fullscan.active_attached(OuterRef('pk')).exclude(target_domain__project_id__in=bounty_blocked_projects())
-    rows = list(IpAddress.objects.filter(Exists(attached), is_cdn=False, address__isnull=False)
-                .exclude(address='').order_by('id')[:limit])
-    assets = {asset_of(ip): ip for ip in rows}
-    fresh = ledger.fresh(SERVICE, assets)
-    failed = ledger.fresh(FAILED_SERVICE, assets) | ledger.fresh(NO_IPV6_SERVICE, assets)  # an IPv6 address a Sentinel had no route to waits out its day too
-    last = ledger.last_run(SERVICE, assets)
+    base = IpAddress.objects.filter(Exists(attached), is_cdn=False, address__isnull=False).exclude(address='')
     epoch = timezone.now() - timedelta(days=36500)
-    wanted = [(last.get(asset) or epoch, ip.id, ip) for asset, ip in assets.items() if asset not in fresh and asset not in failed]
+    wanted, after = [], 0
+    for _page in range(MAX_PAGES):
+        rows = list(base.filter(id__gt=after).order_by('id')[:limit])  # keyset, not OFFSET: each page starts where the last ended
+        if not rows:
+            break
+        after = rows[-1].id
+        assets = {asset_of(ip): ip for ip in rows}
+        fresh = ledger.fresh(SERVICE, assets)
+        failed = ledger.fresh(FAILED_SERVICE, assets) | ledger.fresh(NO_IPV6_SERVICE, assets)  # an IPv6 address a Sentinel had no route to waits out its day too
+        last = ledger.last_run(SERVICE, assets)
+        wanted += [(last.get(asset) or epoch, ip.id, ip) for asset, ip in assets.items() if asset not in fresh and asset not in failed]
+        if len(wanted) >= want or len(rows) < limit:
+            break
     return [ip for _when, _pk, ip in sorted(wanted, key=lambda item: item[:2])]
 
 
@@ -298,7 +310,7 @@ def host_from_report(xml_text, address):
     - an empty, cut short, or other-addresses-only report: ``ScannerReportedNothing`` (counted, see ``MAX_EMPTY_PER_DAY``).
     """
     from cveFeed.port_inventory import parse_xml
-    from reNgine.resources import ScannerReportedNothing
+    from cvengine.resources import ScannerReportedNothing
     want = normalize_address(address)
     hosts = parse_xml(xml_text or '')
     host = next((h for h in hosts if normalize_address(h.get('ip')) == want), None)
@@ -684,7 +696,8 @@ def queue_retests(ip, numbers, project, pipeline=None):
     for domain_id, name, project_id in fullscan.active_attached(ip).values_list('target_domain_id', 'name', 'target_domain__project_id'):
         by_domain.setdefault((domain_id, project_id), set()).add(name.lower())
     for (domain_id, project_id), names in list(by_domain.items())[:retest.max_hosts()]:
-        names = [n for n in sorted(names) if n not in ledger.fresh(retest.RETEST_SERVICE, names, project_id)][:retest.max_hosts()]
+        fresh = ledger.fresh(retest.RETEST_SERVICE, names, project_id)  # one ledger read for the names, not one per name
+        names = [n for n in sorted(names) if n not in fresh][:retest.max_hosts()]
         if not names:
             continue
         try:
@@ -705,7 +718,7 @@ def scan_ip(ip, pipeline=None):
     """Scan one IpAddress on a scanner and record it. Returns the result dict (``ok`` False with an ``error`` when the scan failed).
     ``pipeline(domain_id, names)`` runs the re-test inline. Nothing runs on this server: with no scanner able to take it the address stays due."""
     from cveFeed import activity, fullscan, ledger
-    from reNgine.resources import MemoryBusy, ScanAborted, ScannerReportedNothing, ScannerUnavailable
+    from cvengine.resources import MemoryBusy, ScanAborted, ScannerReportedNothing, ScannerUnavailable
     address, asset = ip.address, asset_of(ip)
     from cveFeed.conductor import bounty_blocked_projects
     project = fullscan.active_attached(ip).exclude(target_domain__project_id__in=bounty_blocked_projects()).values_list(
@@ -808,7 +821,7 @@ def run(pipeline=None, clock=time.monotonic):
     one address gets a UDP exposure sweep. The next firing checks again.
     """
     from cveFeed import coverage_topup
-    from reNgine import resources
+    from cvengine import resources
     if not enabled():
         return {'skipped': 'CVENGINE_UDPSCAN is off'}
     from agentapi import scanner_state
@@ -835,7 +848,7 @@ def _resume_sweep(context):
 
 def _sweep(pipeline, clock):
     from agentapi import stage_runs
-    from reNgine import resources
+    from cvengine import resources
     from startScan.models import IpAddress
     in_run = stage_runs.current() is not None
     if in_run:  # the passes of one firing share its time budget, its place and the addresses it found no scanner for

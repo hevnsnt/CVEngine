@@ -10,7 +10,7 @@ from django.utils import timezone
 from agentapi import sentinel_dispatch as dispatch
 from cveFeed import discovery, ledger, nuclei_scan, performance_review, port_stage, tls_audit, udp_scan, wpscan_scan
 from cveFeed.models import AgentActivity, BackgroundCursor, ServiceRun
-from reNgine import resources
+from cvengine import resources
 from startScan.models import ScanActivity, ScanHistory, Subdomain, Technology
 from tests.fake_scanner import assert_ran_nowhere_locally
 from tests.test_route_auth import RouteFixture
@@ -239,7 +239,7 @@ class TestsslTests(WaitsMixin, RouteFixture, TestCase):
         super().setUp()
         self.scan_obj = self.scan(names=('www.rt.test',), ports=((443, 'https'),))
         self.reach_the_stage_handler()
-        mock.patch('reNgine.resources.global_pause_requested', return_value=False).start()
+        mock.patch('cvengine.resources.global_pause_requested', return_value=False).start()
         self.addCleanup(mock.patch.stopall)
 
     def test_the_sweep_waits_names_the_scanner_and_records_nothing(self):

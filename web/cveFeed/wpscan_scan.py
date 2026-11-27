@@ -1,7 +1,9 @@
 """The WordPress assessment: what the server does around a Sentinel's WordPress scan.
 
 Every host that shows any sign of WordPress is checked: a technology tag, a header or page signature, the login page, the REST API,
-the web archive's memory of the host, plugin or theme paths in crawled URLs, an earlier probe. A cheap read-only probe
+the web archive's memory of the host, plugin or theme paths in crawled URLs, an earlier probe. A product Shodan's InternetDB named
+(``cveFeed.source_versions.wordpress_leads``) is a lead, not a sign: it only moves the host to the front of the probe, and the probe's answer rules
+it in or out (``not_wordpress`` ends the lead). A cheap read-only probe
 (``cveFeed.probes``, probe ``wordpress-detect``) confirms the signature with browser-like requests, follows apex and www redirects, and
 records an edge that challenged the scanner instead of concluding "not WordPress". Then a Sentinel scans every candidate and every name of
 a grouped host that probes positive (task kind ``wpscan``, ``agentapi.sentinel_dispatch.wrap_wpscan_runner``): this server never runs the scan
@@ -44,6 +46,9 @@ THOROUGH_PROBE = 'wpscan-thorough'
 THOROUGH_SERVICE = 'wpscan-thorough'
 THOROUGH_QUEUE = QUEUE
 THOROUGH_KIND = 'wpscan_thorough'
+LICENSED_KINDS = (SERVICE, THOROUGH_KIND)  # the task kinds a hosted license-safe install denies (cveFeed.license_safe): the license asks for a commercial one for hosted use
+WPSCAN_OFF = ('WPScan is off on this hosted install (CVENGINE_HOSTED_LICENSE_SAFE): it needs a commercial license for hosted use. '
+              'WordPress detection and the WordPress templates of the template scan still run')
 DEFAULT_THOROUGH_TIMEOUT = 12 * 60 * 60
 MIN_THOROUGH_TIMEOUT = 600
 MAX_THOROUGH_TIMEOUT = 24 * 60 * 60  # what the contract and the Sentinel accept: a longer budget is held to this
@@ -139,8 +144,12 @@ def max_probe_hosts():
 
 
 def api_token(project):
-    """The project's (or its organization's) WordPress vulnerability API token, or ''."""
+    """The project's (or its organization's) WordPress vulnerability API token, or ''. Always '' on a hosted license-safe install
+    (``cveFeed.license_safe``): the WPScan vulnerability database needs an Enterprise plan for use in a service."""
+    from cveFeed import license_safe
     from cveFeed.api_credentials import resolve_for_project
+    if license_safe.enabled():
+        return ''
     return (resolve_for_project(project).get('wpscan') or {}).get('api_key') or ''
 
 
@@ -210,16 +219,6 @@ def siblings_of(subs, hosts):
         if names & hosts:
             out |= names
     return out - hosts
-
-
-def wordpress_sites(scan):
-    """``[(Subdomain, base URL)]`` for this scan's hosts with any sign of WordPress, excluded and blocked names removed."""
-    from startScan.models import Subdomain
-    allowed, _ips, _ports = _scan_targets(scan)
-    subs = list(Subdomain.objects.filter(scan_history=scan, name__in=allowed).prefetch_related('technologies', 'ip_addresses'))
-    found = candidate_signals(scan, subs)
-    by_name = {s.name.lower(): s for s in subs}
-    return [(by_name[name], _base_of(by_name[name])) for name in sorted(found)]
 
 
 def _base_of(sub):
@@ -421,7 +420,7 @@ def persist_report(scan, sub, url, report):
     """Save one site's report; returns ``(new findings, technologies added)``. The open rows of this host that the versions it read are past
     the fix of are closed as fixed (cveFeed.finding_lifecycle.close_fixed_wpscan_rows)."""
     from cveFeed import finding_lifecycle, tech_rows
-    from reNgine.tasks import save_vulnerability
+    from cvengine.tasks import save_vulnerability
     new, seen = 0, {}
     for name, severity, description, cves, refs, component in _vuln_rows(report, url):
         vuln, created = save_vulnerability(
@@ -456,7 +455,7 @@ def plugin_titles(scan, sub, base, report):
     Sentinel could take it): ``record_components`` keeps the titles it already holds. A title is an enrichment, not a verdict, so an unanswered read
     never discards the scan that was just made, and never turns into \"this plugin has no title\"."""
     from agentapi import probe_dispatch
-    from reNgine.resources import ScannerUnavailable
+    from cvengine.resources import ScannerUnavailable
     slugs = [re.sub(r'[^A-Za-z0-9._-]', '', str(slug))[:80] for slug in sorted((report.get('plugins') or {}))[:MAX_TITLE_LOOKUPS]]
     slugs = [slug for slug in dict.fromkeys(slugs) if slug and slug[0].isalnum() and '..' not in slug]
     if not slugs:
@@ -648,7 +647,7 @@ def _ask_wordpress(scan, chosen):
     when no Sentinel can take the work or a task ended with no result: nothing was asked, nothing is recorded."""
     from agentapi import probe_dispatch
     from cveFeed import probes
-    from reNgine import resources
+    from cvengine import resources
     pending = {sub.name.lower(): (sub, list(bases)) for sub, bases in chosen}
     results = {}
     while pending:
@@ -674,7 +673,7 @@ def _ask_wordpress(scan, chosen):
     return results
 
 
-def detect(scan, subs, candidates, force=False, only=None):
+def detect(scan, subs, candidates, force=False, only=None, leads=()):
     """Run the read-only WordPress probe on the candidates, their grouped names and, within the cap, the other web hosts; record each result.
     The probe is a Sentinel's (``http_probe``, probe ``wordpress-detect``): this server sends nothing to a site. Returns ``{host: first observation}``
     for the hosts probed now. ``ScannerUnavailable`` (no Sentinel can take it) propagates: nothing is recorded and every site stays due."""
@@ -683,7 +682,10 @@ def detect(scan, subs, candidates, force=False, only=None):
     by_name = {s.name.lower(): s for s in subs}
     siblings = siblings_of(subs, set(candidates))
     web = {name for name, s in by_name.items() if route_auth.web_bases(s)}
-    order = list(dict.fromkeys(sorted(set(candidates) & web) + sorted(siblings & web) + sorted(web)))[:max_probe_hosts()]
+    # a host Shodan's InternetDB named WordPress on (``source_versions.wordpress_leads``: not on a shared edge, not already ruled out by an earlier
+    # probe) is asked right after the hosts with a sign of WordPress of our own: a lead for this probe, never a candidate to scan unless the probe
+    # reads WordPress there
+    order = list(dict.fromkeys(sorted(set(candidates) & web) + sorted(set(leads) & web) + sorted(siblings & web) + sorted(web)))[:max_probe_hosts()]
     if only is not None:
         order = [h for h in order if h in only]
     covered = set() if force else ledger.fresh(PROBE_SERVICE, order, project)
@@ -722,7 +724,7 @@ def run_wpscan(scan_id, runner=None, force=False, internal=False, only=None, att
     scan: it is queued as its own background job (``queue_quick``), which asks again a little later, up to ``QUICK_ATTEMPTS`` times. ``only``
     limits the run to those hosts (that job's call); ``attempt`` counts its retries. The summary's ``deferred`` lists the hosts queued."""
     from cveFeed import activity, ledger, wp_correlation
-    from reNgine import resources
+    from cvengine import resources
     from startScan.models import ScanHistory, Subdomain
     scan = ScanHistory.objects.select_related('domain').get(pk=scan_id)
     project, domain = scan.domain.project_id, scan.domain
@@ -745,7 +747,8 @@ def run_wpscan(scan_id, runner=None, force=False, internal=False, only=None, att
     probed, probe_waiting = {}, None
     if not internal:
         try:
-            probed = detect(scan, subs, signals, force=force, only=only)
+            from cveFeed import source_versions
+            probed = detect(scan, subs, signals, force=force, only=only, leads=source_versions.wordpress_leads(subs))
         except resources.ScannerUnavailable as exc:  # no Sentinel can ask the sites: nothing is recorded, they stay due, and none is read as not WordPress
             probe_waiting = exc
             logger.warning('WordPress detection of scan %s is waiting for a scanner: %s', scan_id, exc)
@@ -758,6 +761,9 @@ def run_wpscan(scan_id, runner=None, force=False, internal=False, only=None, att
     if probe_waiting is not None:  # the sites with a sign of WordPress are still scanned below; the ones only the probe could name wait for it
         summary['probe_waiting'] = probe_waiting.kind
     wp_correlation.carry_forward(scan)
+    from cveFeed import license_safe
+    if real_runner and license_safe.enabled():  # a hosted install sends no WPScan task: detection above ran, the sites are not marked waiting
+        return {**summary, 'skipped': WPSCAN_OFF, 'license_safe': True}
     if not wanted:
         if probe_waiting is not None:  # nothing could be asked: not 'no WordPress here', and every site stays due
             return {**summary, 'skipped': f'no scanner could take this work ({probe_waiting.kind}); the sites stay due until one can'}
@@ -949,7 +955,7 @@ def run_quick(scan_id, hosts, attempt=1, runner=None):
     """The queued quick pass: the stage's WordPress scan run for just these hosts, under the same checks (exclusions, bug bounty confirmation, ledger
     freshness, memory), one run per project at a time. Whatever it still cannot reach is queued again by ``run_wpscan`` until the attempts are
     spent. Returns the run's summary, or ``{'skipped': why}``."""
-    from reNgine import resources
+    from cvengine import resources
     from startScan.models import ScanHistory
     scan = ScanHistory.objects.select_related('domain').filter(pk=scan_id).first()
     if scan is None:
@@ -981,7 +987,7 @@ def _resume_quick(context):
 
 def _quick(scan, only, attempt, runner=None):
     from agentapi import stage_runs
-    from reNgine import resources
+    from cvengine import resources
     claim = stage_runs.claim_kwargs('wpscan-quick', f'quick-{os.getpid()}')
     with resources.redis_claim(f'cvengine:wpscan:quick:{scan.domain.project_id}', claim.pop('owner'), 600, **claim) as holder:
         if holder is not True:
@@ -1036,9 +1042,11 @@ def run_thorough(project_id, runner=None):
     one that did not finish it in time, the host stays ``pending`` and nothing is recorded as done, so a later pass asks again. The report is
     classified by ``_classify`` and stored exactly like the quick pass's, nothing in it is trusted or executed. ``runner`` is the seam the tests use
     (``runner(url, token, timeout) -> report``)."""
-    from cveFeed import activity, exclusions, ledger, wp_correlation
-    from reNgine import resources
+    from cveFeed import activity, exclusions, ledger, license_safe, wp_correlation
+    from cvengine import resources
     summary = {'done': 0, 'partial': 0, 'blocked': 0, 'failed': 0}
+    if runner is None and license_safe.enabled():  # a hosted install sends no WPScan task
+        return {**summary, 'skipped': WPSCAN_OFF}
     owner = f'thorough-{os.getpid()}'
     with resources.redis_claim(f'cvengine:wpscan:thorough:{project_id}', owner, 300) as holder:
         if holder is not True:

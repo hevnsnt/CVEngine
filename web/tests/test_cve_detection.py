@@ -64,10 +64,10 @@ class SchemaTests(SimpleTestCase):
 
 	def test_text_is_cleaned_and_capped(self):
 		data = json.loads(good_ai())
-		data['summary'] = 'x‮' + 'y' * 5000
+		data['summary'] = 'x\u202e' + 'y' * 5000
 		strategy, _ = detection.validate_strategy(data)
 		self.assertLessEqual(len(strategy['summary']), 400)
-		self.assertNotIn('‮', strategy['summary'])
+		self.assertNotIn('\u202e', strategy['summary'])
 
 
 class RulesTests(TestCase):
@@ -212,7 +212,7 @@ class CommandAndTaskTests(TestCase):
 		self.assertIn('1 detection record(s) written', out.getvalue())
 		self.assertTrue(PeriodicTask.objects.filter(name='cvengine-cve-detections', task='author_cve_detections', enabled=True).exists())
 		from cveFeed.tasks import author_cve_detections
-		with mock.patch('reNgine.ai_settings.get_configured_provider', return_value=None):
+		with mock.patch('cvengine.ai_settings.get_configured_provider', return_value=None):
 			self.assertEqual(author_cve_detections()['rules'], 0)
 
 

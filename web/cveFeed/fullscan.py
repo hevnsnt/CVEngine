@@ -31,7 +31,6 @@ IN_FLIGHT_SECONDS = WAIT_SECONDS + 3600  # a sweep whose start is more recent th
 # never pick that IP again (this, not the global claim, is what stops the same host being swept twice if the claim lapses)
 MAX_CANDIDATES = 500  # IPs looked at per pick: the scope checks resolve names, so they are bounded
 MAX_NAMES_CHECKED = 5  # hostnames of one IP resolved to see that none points somewhere a scanner must not touch
-DEFAULT_INTERVAL_MIN = 10
 FAILURE_BACKOFF_HOURS = 6  # after the first failed sweep; doubles per further failure
 MAX_BACKOFF_HOURS = 7 * 24
 DEFAULT_INVESTIGATE_MAX = 50
@@ -55,10 +54,6 @@ def _int_env(name, default, low=1, high=1000):
         return min(high, max(low, int(os.environ.get(name, default))))
     except ValueError:
         return default
-
-
-def interval_minutes():
-    return _int_env('CVENGINE_FULLSCAN_INTERVAL_MIN', DEFAULT_INTERVAL_MIN, 1, 1440)
 
 
 def batch_size():
@@ -152,14 +147,6 @@ def pick():
     return None
 
 
-def queue_depth():
-    """IPs in scope never swept, and the newest sweep, for a status line."""
-    from startScan.models import IpAddress
-    waiting = candidates().filter(full_scanned_at__isnull=True).count()
-    last = IpAddress.objects.filter(full_scanned_at__isnull=False).order_by('-full_scanned_at').first()
-    return {'never_swept': waiting, 'last_ip': last.address if last else None, 'last_at': last.full_scanned_at if last else None}
-
-
 # ----------------------------------------------------------------------------- the sweep
 
 def _open_tcp(host):
@@ -193,7 +180,7 @@ def sweep_ip(ip, pipeline=None):
     Nothing runs on this server: with no scanner able to take the sweep it waits and the address is swept later."""
     from agentapi import sentinel_dispatch
     from cveFeed import activity, port_inventory, port_stage
-    from reNgine.resources import ScannerUnavailable
+    from cvengine.resources import ScannerUnavailable
     address = ip.address
     project = _project_of(ip)
     before = set(port_stage.known_open_ports([address], ip.org_id).get(address, []))
@@ -206,7 +193,7 @@ def sweep_ip(ip, pipeline=None):
         activity.settle(running, 'done', message=f'Background full port scan of {address} is waiting: no scanner could take this work ({exc.kind})')
         return {'ip': address, 'ok': False, 'error': 'ScannerUnavailable'}
     except Exception as exc:  # noqa: BLE001 - failure remains visible and retryable after the in-flight lease or the backoff
-        from reNgine.resources import MemoryBusy, ScanAborted
+        from cvengine.resources import MemoryBusy, ScanAborted
         logger.warning('background full scan of %s failed', address, exc_info=True)
         retry = None if isinstance(exc, (MemoryBusy, ScanAborted)) else _back_off(ip)
         activity.settle(running, 'failed', message=activity.diagnostic(f'Background full port scan of {address}',
@@ -361,7 +348,7 @@ def run(pipeline=None):
     address gets a full 65,535-port sweep. The next firing checks again.
     """
     from cveFeed import coverage_topup
-    from reNgine import resources
+    from cvengine import resources
     if not enabled():
         return {'skipped': 'CVENGINE_FULLSCAN is off'}
     if coverage_topup.backlog_exists():

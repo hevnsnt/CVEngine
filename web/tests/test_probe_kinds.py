@@ -1065,6 +1065,13 @@ class SupplierCheckPolicyTests(SupplierFixture, TestCase):
         with self.assertRaises(ApiError):
             probe_results.clean_supplier_check({'domains': [{}] * 26})
 
+    def test_a_supplier_never_gets_a_direct_send_finding_even_with_test_evidence(self):
+        row = {'domain': 'vendor.test', 'postures': [
+            {'check': 'mx_direct_send', 'severity': 2, 'title': 't', 'detail': 'd', 'category': 'email', 'evidence': {'tested': True, 'reply': '250 ok'}},
+            {'check': 'dmarc_none', 'severity': 2, 'title': 't', 'detail': 'd', 'category': 'email', 'evidence': {}}]}
+        got = probe_results.clean_supplier_check({'domains': [row], 'touched': [], 'refused': []})
+        self.assertEqual([p['check'] for p in got['domains'][0]['postures']], ['dmarc_none'])
+
     def test_the_fixture_goes_through_unchanged_and_the_hosts_of_a_batch_are_its_names(self):
         sent = fixture('supplier_check')
         self.assertEqual(broker.clean_result('supplier_check', sent), sent)
@@ -1142,6 +1149,10 @@ class IdentityCheckStageTests(DispatchBase):
         self.addCleanup(mock.patch.stopall)
         self.guard = assert_ran_nowhere_locally(self, 'identity_check')
         self.asked = []
+        # hosting keeps each CNAME a scanner read for an hour in a process dict: a test that has one read ('www.example.test' is an alias of
+        # Netlify) must not leave it, or every later test in the process sees 192.0.2.10 as a shared hosting address and sends it no probe
+        hosting._canon.clear()
+        self.addCleanup(hosting._canon.clear)
 
     def responder(self, dns=None, certs=None):
         def answer(task):
@@ -1366,11 +1377,21 @@ class HygieneResultTests(SimpleTestCase):
             return {'check': check, 'severity': severity, 'title': 't' * 500, 'detail': 'd', 'host': host, 'evidence': evidence if evidence is not None else {}}
         out = probe_results.clean_hygiene_check(self.body(mail=[{'name': 'example.test', 'has_mx': True, 'findings': [
             f('spf_softfail'), f('tls_expired'), f('cleartext_telnet'), f('ts_exposed'), f('DMARC_NONE'), f('dmarc_none', severity=5), f('dmarc_none', severity=True),
-            f('dmarc_none', host='bad host'), f('dkim_weak_key', evidence={'bits': 512}), f('mx_direct_send', evidence={'x': 'y' * 40000})]}]))
+            f('dmarc_none', host='bad host'), f('dkim_weak_key', evidence={'bits': 512}), f('mta_sts_missing', evidence={'x': 'y' * 40000})]}]))
         kept = out['mail'][0]['findings']
-        self.assertEqual([x['check'] for x in kept], ['spf_softfail', 'dkim_weak_key', 'mx_direct_send'])
+        self.assertEqual([x['check'] for x in kept], ['spf_softfail', 'dkim_weak_key', 'mta_sts_missing'])
         self.assertEqual(len(kept[0]['title']), 300)
         self.assertEqual((kept[1]['evidence'], kept[2]['evidence']), ({'bits': 512}, {}))  # oversize evidence is dropped
+
+    def test_direct_send_is_kept_only_when_the_sentinel_tested_it_and_the_tenant_accepted(self):
+        def f(evidence):
+            return {'check': 'mx_direct_send', 'severity': 2, 'title': 't', 'detail': 'd', 'host': 'example.test', 'evidence': evidence}
+        tested = {'tested': True, 'mx': 'example-test.mail.protection.outlook.com', 'reply': '250 2.1.5 Recipient OK', 'transcript': ['220 ready']}
+        out = probe_results.clean_hygiene_check(self.body(mail=[{'name': 'example.test', 'has_mx': True, 'findings': [
+            f({'mx': ['example-test.mail.protection.outlook.com']}), f({**tested, 'tested': 'yes'}), f({**tested, 'reply': '550 5.7.68 no'}), f(tested)]}]))
+        kept = out['mail'][0]['findings']
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(kept[0]['evidence']['reply'], '250 2.1.5 Recipient OK')
 
     def test_a_result_past_its_bounds_is_refused_and_rows_the_task_did_not_ask_for_are_dropped(self):
         with self.assertRaises(ApiError):

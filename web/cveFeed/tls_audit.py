@@ -23,7 +23,18 @@ What it records:
   is a ``CVEMatch`` (source ``testssl``, ``template_result`` ``vulnerable``) for each CVE the test names. A later test that finds it
   gone closes it; a rescan's new host row gets it back from the stored observation until then.
 
-Tests that could not run or came back inconclusive change nothing."""
+Tests that could not run or came back inconclusive change nothing.
+
+How a finding reads (``build_finding``, with ``tls_catalogue`` holding what each test means, how to confirm it and how to fix it):
+
+* A result is **proven** when the test answered plainly VULNERABLE (or a configuration result states a direct observation); its title reads
+  "OpenSSL CCS injection (CVE-2014-0224) confirmed on host:port". A "likely", "probably", "seems" or "potentially" result is a heuristic: its title
+  reads "Possible OpenSSL CCS injection (CVE-2014-0224) on host:port, not confirmed", its confidence is ``unconfirmed``, its severity is at most
+  Medium whatever testssl.sh rated it (kept in ``evidence['testssl_severity']``), and it is never hard evidence for the AI triage.
+* The description is one plain sentence; testssl.sh's own string is evidence (``evidence['result']``, shown as "testssl.sh output").
+* A proven result is rated at testssl.sh's severity held to a ceiling per test (``tls_catalogue.CATALOGUE[...].ceiling``): Heartbleed Critical,
+  CCS injection, ROBOT, FREAK, DROWN, Logjam and Ticketbleed High, the rest Medium or Low.
+* ``rewrite_open`` says the same about the findings already stored (the upgrade backfill ``rewrite_tls_findings``)."""
 import logging
 import os
 import re
@@ -31,6 +42,8 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 
 from django.utils import timezone
+
+from cveFeed import tls_catalogue
 
 logger = logging.getLogger(__name__)
 
@@ -123,30 +136,58 @@ def evaluate(items, where):
             continue
         result.tested = True
         if test_id in VULNS:
-            label, hard = VULNS[test_id]
+            _, hard = VULNS[test_id]
             if GOOD.match(text) and sev == 0:
                 result.cleared.add(test_id)
                 continue
             if sev == 0:
                 result.inconclusive.add(name)
                 continue
-            cves = _cves(item)
-            proven = hard and text.lower().startswith('vulnerable') and 'mitigated' not in text.lower() and sev >= 2
-            if proven:
-                result.vulnerable[test_id] = {'cves': cves, 'finding': text[:300], 'severity': sev}
-            title = f'{where}: {label} {"is exploitable" if proven else "may apply"}'
-            result.findings.append({'check': name, 'severity': sev, 'title': title, 'detail': text[:600],
-                                    'evidence': {'source': 'testssl.sh', 'test': test_id, 'result': text[:300], 'cve': cves[:20]}})
+            finding = build_finding(test_id, level, text, where, _cves(item))
+            if finding['evidence']['proven']:
+                result.vulnerable[test_id] = {'cves': finding['evidence']['cve'], 'finding': text[:300], 'severity': finding['severity']}
+            result.findings.append(finding)
         else:
             if sev == 0:
                 continue
             if test_id == 'fallback_SCSV' and FALLBACK_REFUSED.search(text):
                 continue  # the downgraded handshake never completed: the server refuses the downgrade, only without the standard alert
-            result.findings.append({'check': name, 'severity': sev, 'title': f'{where} {CONFIG[test_id]}', 'detail': text[:600],
-                                    'evidence': {'source': 'testssl.sh', 'test': test_id, 'result': text[:300]}})
+            result.findings.append(build_finding(test_id, level, text, where, _cves(item)))
     if negotiates_nothing(result):
         _no_handshake(result, where)
     return result
+
+
+def build_finding(test_id, level, text, where, cves):
+    """The finding of one testssl.sh result that is a problem (``level`` its own severity word, ``text`` its result string, ``where`` ``host:port``):
+    ``{'check', 'severity', 'title', 'detail', 'evidence'}``. Used for a fresh report and to rewrite a stored finding (``rewrite_open``), so both say
+    the same thing.
+
+    * The title says how sure it is: "... confirmed on host:port" for a proven result, "Possible ... on host:port, not confirmed" for a heuristic.
+    * The detail is one plain sentence (``tls_catalogue.describe_result``); testssl.sh's own string is kept in ``evidence['result']``.
+    * A result that is not proven is never above Medium. testssl.sh's own severity stays in ``evidence['testssl_severity']``.
+    * A configuration result (a protocol or cipher category offered) is a direct observation: it keeps testssl.sh's severity, held to the test's
+      ceiling (insecure renegotiation is Medium, not the Critical testssl.sh gives it)."""
+    name = check_name(test_id)
+    sev = SEVERITY.get(str(level).upper(), 0)
+    text = ' '.join(str(text or '').split())
+    host, port = tls_catalogue.split_where(where)
+    base = {'source': 'testssl.sh', 'test': test_id, 'result': text[:300], 'testssl_severity': tls_catalogue.SEVERITY_WORDS.get(sev, 'info'),
+            'host': host, 'port': port}
+    if test_id in VULNS:
+        _, hard = VULNS[test_id]
+        state, severity = tls_catalogue.assess(test_id, text, sev, hard)
+        proven = state == tls_catalogue.PROVEN
+        title = tls_catalogue.title_for(test_id, state, where)
+        base.update(cve=list(cves)[:20], proven=proven, state=state, confidence=tls_catalogue.confidence_of(state))
+    else:
+        entry = tls_catalogue.CATALOGUE[test_id]
+        severity = min(sev, entry.ceiling)
+        title = f'{where} {CONFIG[test_id]}'
+        base.update(proven=True, state=tls_catalogue.PROVEN, confidence=tls_catalogue.CONFIRMED)
+        if entry.cves:
+            base['cve'] = list(entry.cves)[:20]
+    return {'check': name, 'severity': severity, 'title': title, 'detail': tls_catalogue.describe_result(test_id, text), 'evidence': base}
 
 
 def negotiates_nothing(result):
@@ -177,20 +218,21 @@ def _no_handshake(result, where):
 
 def record_observations(project_id, domain_id, host, port, result, ip):
     """The durable record of one tested port: one observation per vulnerability test (found or absent) and one summary."""
-    from cveFeed.models import ProbeObservation
+    from cveFeed import probes
     now = timezone.now()
     host = host.lower()
+    rows = []
 
     def upsert(kind, product, outcome, evidence):
-        ProbeObservation.objects.update_or_create(
-            project_id=project_id, host=host, probe=PROBE, port=port, kind=kind, product=product,
-            defaults={'domain_id': domain_id, 'outcome': outcome, 'confidence': 0.95 if outcome == 'found' else 0.0, 'source': 'testssl.sh',
-                      'evidence': evidence, 'observed_at': now})
+        rows.append(({'project_id': project_id, 'host': host, 'probe': PROBE, 'port': port, 'kind': kind, 'product': product},
+                     {'domain_id': domain_id, 'outcome': outcome, 'confidence': 0.95 if outcome == 'found' else 0.0, 'source': 'testssl.sh',
+                      'evidence': evidence, 'observed_at': now}))
     for test_id, found in result.vulnerable.items():
         upsert(OBS_VULN, test_id, 'found', {'cves': found['cves'][:20], 'finding': found['finding'], 'ip': ip})
     for test_id in result.cleared:
         upsert(OBS_VULN, test_id, 'absent', {'ip': ip})
     upsert(OBS_AUDIT, '', 'found', {'protocols': result.protocols, 'issues': len(result.findings), 'ip': ip})
+    probes.upsert_many(rows)  # one read and batched writes; a test found again unchanged only has its observed_at moved
 
 
 def store_banners(sub, port, items):
@@ -210,6 +252,81 @@ def store(domain, host, port, result, where):
     found = [Finding(f['check'], f['severity'], f['title'], f['detail'], where, f['evidence']) for f in result.findings]
     skip = result.inconclusive
     return store_findings(domain, found, hosts={where}, owns=lambda check: check.startswith('tlsa_') and check not in skip, live_cnames=True)
+
+
+# ----------------------------------------------------------------------------- rewriting what is stored
+
+REWRITE_LIMIT = 20000  # rows one run reads: the open TLS audit findings of an install are a few thousand at most
+
+
+def confidence_of(check, evidence, severity=0):
+    """``'confirmed'``, ``'unconfirmed'`` or ``''`` (not a testssl.sh finding) for a stored ``tlsa_*`` hygiene finding. The finding's own record
+    says (``evidence['confidence']``); one stored before that was recorded is judged again from its test and result string, so the triage rule
+    (``triage.hard_evidence``) holds for it before the rewrite has run."""
+    ev = evidence if isinstance(evidence, dict) else {}
+    if not str(check or '').startswith('tlsa_') or ev.get('source') != 'testssl.sh':
+        return ''
+    if ev.get('confidence') in (tls_catalogue.CONFIRMED, tls_catalogue.UNCONFIRMED):
+        return ev['confidence']
+    test_id = ev.get('test')
+    if test_id in VULNS:
+        rating = ev.get('rating') if isinstance(ev.get('rating'), dict) else {}
+        sev = rating.get('from') if isinstance(rating.get('from'), int) else severity
+        state, _ = tls_catalogue.assess(test_id, str(ev.get('result') or ''), sev, VULNS[test_id][1])
+        return tls_catalogue.confidence_of(state)
+    return tls_catalogue.CONFIRMED if test_id in CONFIG else ''
+
+
+def rebuilt(row):
+    """What an open ``tlsa_*`` finding says now, from the evidence it stored: ``(severity, title, detail, evidence)``, or None when it holds no
+    testssl.sh result to rebuild from. testssl.sh's own severity is the one it recorded (``evidence['testssl_severity']``), else the one the
+    finding was rated from before an endpoint rule lowered it (``rating.from``), else the stored one; a severity an endpoint rule lowered
+    (``hygiene_rating``) stays lowered."""
+    ev = row.evidence if isinstance(row.evidence, dict) else {}
+    test_id, text = ev.get('test'), str(ev.get('result') or '')
+    if ev.get('source') != 'testssl.sh' or (test_id not in VULNS and test_id not in CONFIG) or not text:
+        return None
+    rating = ev.get('rating') if isinstance(ev.get('rating'), dict) else {}
+    if ev.get('testssl_severity') in LEVELS:
+        sev = LEVELS.index(ev['testssl_severity'])
+    else:
+        sev = rating['from'] if isinstance(rating.get('from'), int) else row.severity
+    cves = ev.get('cve') if isinstance(ev.get('cve'), list) else []
+    new = build_finding(test_id, LEVELS[min(max(sev, 0), 4)].upper(), text, row.host, [str(c) for c in cves])
+    severity = min(new['severity'], row.severity) if rating else new['severity']
+    return severity, new['title'][:300], new['detail'], {**ev, **new['evidence']}
+
+
+def rewrite_open(apply=False, limit=REWRITE_LIMIT):
+    """Say the open TLS audit findings the way ``evaluate`` does now (plain detail, a title that states the confidence, the severity cap, the
+    confidence in the evidence), from their stored evidence and with no new test. Idempotent: a finding already worded this way is not touched.
+    Bounded: at most ``limit`` open rows are read, in id order. A resolved finding is left as it was; so are a person's status, assignee and
+    notes. Nothing is written unless ``apply``. Returns ``{'rows', 'changed', 'lowered'}``; the touched hosts are rescored."""
+    from cveFeed import scoring
+    from cveFeed.models import HygieneFinding
+    out = {'rows': 0, 'changed': 0, 'lowered': 0}
+    touched = {}
+    rows = (HygieneFinding.objects.filter(status='open', check_name__startswith='tlsa_').exclude(check_name=NO_HANDSHAKE)
+            .select_related('domain').order_by('id')[:max(1, int(limit))])
+    for row in rows:
+        out['rows'] += 1
+        new = rebuilt(row)
+        if new is None:
+            continue
+        severity, title, detail, evidence = new
+        if (row.severity, row.title, row.detail, row.evidence) == (severity, title, detail, evidence):
+            continue
+        out['changed'] += 1
+        out['lowered'] += severity < row.severity
+        if apply:
+            HygieneFinding.objects.filter(pk=row.pk, status='open').update(severity=severity, title=title, detail=detail, evidence=evidence)
+            touched.setdefault(row.domain.project_id, set()).add(row.host.lower())
+    if apply:
+        for project_id, hosts in touched.items():
+            hosts = sorted(hosts)
+            for i in range(0, len(hosts), scoring.CHUNK):
+                scoring.rescore_quietly(project_id, hosts[i:i + scoring.CHUNK])
+    return out
 
 
 # ----------------------------------------------------------------------------- CVE evidence
@@ -379,7 +496,7 @@ def sweep(project_id, resolve=None):
     """Audit the due targets of one project on a Sentinel, one at a time. Returns ``{'tested', 'failed', 'issues', 'proven'}`` (and ``skipped``
     with the reason when nothing ran). Nothing runs on this server: with no scanner able to take a target it stays due."""
     from cveFeed import activity, exclusions, ledger
-    from reNgine import resources
+    from cvengine import resources
     summary = {'tested': 0, 'failed': 0, 'issues': 0, 'proven': 0}
     from agentapi import scanner_state
     waiting = scanner_state.skip_note('testssl')  # no scanner can run it and this server may not: no dispatch, no raise, no activity line

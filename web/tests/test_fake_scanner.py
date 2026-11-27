@@ -21,7 +21,7 @@ from agentapi import sentinel_dispatch as dispatch
 from agentapi.models import SentinelTask
 from cveFeed import discovery, ledger, nuclei_scan, port_stage, tls_audit, udp_scan, wpscan_scan
 from cveFeed.models import ProbeObservation, ServiceRun
-from reNgine import resources
+from cvengine import resources
 from startScan.models import IpAddress, ScanHistory, Subdomain, Technology, Vulnerability
 from tests import fake_scanner as fs, probe_scanner
 from tests.fake_scanner import FakeScanner, LocalFallback, LocalRunDetected, assert_ran_nowhere_locally, fixture, for_host
@@ -524,7 +524,7 @@ class TestsslServedTests(StageBase, RouteFixture, TestCase):
         super().setUp()
         self.scan_obj = self.scan(names=('www.rt.test',), ports=((443, 'https'),))
         LocalFallback('none').apply(self)
-        mock.patch('reNgine.resources.global_pause_requested', return_value=False).start()
+        mock.patch('cvengine.resources.global_pause_requested', return_value=False).start()
 
     def sweep(self, guard):
         return tls_audit.sweep(self.project.id, resolve=lambda host, port, project: '203.0.113.5')
@@ -662,7 +662,7 @@ class WpscanThoroughServedTests(StageBase, RouteFixture, TestCase):
         mock.patch('cveFeed.wp_correlation.run_for_host').start()
 
     def clear_claim(self):
-        from reNgine import resources
+        from cvengine import resources
         client = getattr(resources.get_store(), 'r', None)
         if client is not None:
             try:

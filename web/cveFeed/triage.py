@@ -18,7 +18,7 @@ The model never decides alone. ``apply_rules`` is the deterministic layer over i
 
 One AI call serves every finding with the same evidence signature (a hash of the evidence, never a hostname), so fifty hosts
 running the same nginx for one CVE are one question; a changed signature resets the verdict and the host is rescored. Prompts carry
-only cleaned, structured evidence (see reNgine.ai_providers.triage_parts) with the host's own names redacted.
+only cleaned, structured evidence (see cvengine.ai_providers.triage_parts) with the host's own names redacted.
 
 The question is not asked here: it is queued for the AI reviewer container (cveFeed.ai_jobs), which makes every model call. ``run_triage``
 reserves the budget and queues one job per signature; when the answer lands, ``job_answer`` checks it (``validate_triage``), queues the one
@@ -38,7 +38,7 @@ from django.utils import timezone
 
 from cveFeed import match_policy
 from cveFeed.secret_redaction import mask_extracted, redact_text
-from reNgine.ai_providers import clean_text
+from cvengine.ai_providers import clean_text
 
 logger = logging.getLogger(__name__)
 
@@ -122,7 +122,13 @@ def hard_evidence(kind, facts):
         elif facts.get('admin_path') and 200 <= (facts.get('http_status') or 0) < 300:
             raise_to('likely', 'an admin or API route answers anonymously')
     elif kind == 'hygiene':
-        raise_to('confirmed', 'a deterministic check failed')
+        tls = facts.get('testssl')
+        if tls == 'unconfirmed':
+            pass  # a heuristic result (testssl.sh's "likely" or "potentially VULNERABLE"): not proof, so no floor and the model's answer stands
+        elif tls == 'confirmed':
+            raise_to('confirmed', 'testssl.sh confirmed it on the server: the test answered plainly, not by inference')
+        else:
+            raise_to('confirmed', 'a deterministic check failed')
     return floor, found
 
 
@@ -771,6 +777,8 @@ def describe_hygiene(f):
     evidence = {_s(k, 40): _s(v if not isinstance(v, (list, dict)) else json.dumps(v, default=str), 200, names)
                 for k, v in list((f.evidence or {}).items())[:20]}
     parsed = hygiene_facts(f.host, domain_name, f.evidence, names)
+    from cveFeed import tls_audit
+    tls = tls_audit.confidence_of(f.check_name, f.evidence, f.severity)  # testssl.sh: confirmed, or unconfirmed (a heuristic is not proof)
     if parsed.get('spf'):
         # the strict cleaning keeps no "?" or "~": the record is shown as parsed, every SPF qualifier where the record has it
         evidence = {k: (parsed['spf']['record'] if k == 'record' else v) for k, v in evidence.items()}
@@ -778,8 +786,13 @@ def describe_hygiene(f):
                'detail': _prose(f.detail, 600, names), 'evidence': evidence}
     if parsed:
         payload['facts'] = parsed
-    return {'kind': 'hygiene', 'facts': {'parsed': parsed} if parsed else {}, 'payload': payload,
-            'signature_fields': {'check': f.check_name, 'severity': f.severity, 'evidence': stable(evidence, tokens=False)},
+    facts = {'parsed': parsed} if parsed else {}
+    fields = {'check': f.check_name, 'severity': f.severity, 'evidence': stable(evidence, tokens=False)}
+    if tls:
+        facts['testssl'] = tls
+        fields['testssl'] = tls  # a finding judged before this was known (its floor was "a deterministic check failed") is asked again
+    return {'kind': 'hygiene', 'facts': facts, 'payload': payload,
+            'signature_fields': fields,
             'severity': f.severity,
             'priority': (5, -f.severity)}
 
@@ -1325,6 +1338,9 @@ def _rereview_fields(d, now):
             'hard_evidence': hard_evidence(d['kind'], d['facts'])[1], 'updated_at': now}
 
 
+_REREVIEW_FIELDS = ('signature', 'evidence_key', 'status', 'attempts', 'next_attempt_at', 'hard_evidence', 'updated_at')  # what _rereview_fields sets
+
+
 def _reset_fields(d, now):
     return {'signature': d['signature'], 'evidence_key': d['evidence_key'], 'verdict': None, 'status': 'pending', 'classification': '', 'reason': '',
             'hard_evidence': hard_evidence(d['kind'], d['facts'])[1], 'validation_status': 'none', 'validation_steps': [],
@@ -1459,7 +1475,7 @@ def _track(findings):
         for fk in set(KIND_FK[d['kind']] for _, d in described):
             ids = [f.pk for f, d in described if KIND_FK[d['kind']] == fk]
             existing[fk] = _fetch(fk, ids)
-        new_rows, changed = [], []
+        new_rows, changed, rereviewed, relabelled, seen = [], [], [], [], []
         twins = _twins([(f, d) for f, d in described if existing[KIND_FK[d['kind']]].get(f.pk) is None])
         for f, d in described:
             fk = KIND_FK[d['kind']]
@@ -1475,19 +1491,26 @@ def _track(findings):
                 new_rows.append(Triage(project_id=d['project_id'], domain_id=d['domain_id'], host=d['host'][:500], kind=d['kind'],
                                        first_seen=d['first_seen'], last_seen=now, **{f'{fk}_id': f.pk}, **fields))
                 continue
+            before = (row.host, row.kind, row.evidence_key)
             row.last_seen, row.host, row.kind = now, d['host'][:500], d['kind']
             if row.signature != d['signature']:
                 if row.evidence_key and row.evidence_key == d['evidence_key']:
                     for key, value in _rereview_fields(d, now).items():
                         setattr(row, key, value)
-                else:  # the evidence the decision rested on changed (or is unknown, on a row older than evidence_key): start over
-                    for key, value in _reset_fields(d, now).items():
-                        setattr(row, key, value)
-                    if isinstance(f, CVEMatch):
-                        reset_matches.append(f)
-            elif row.evidence_key != d['evidence_key']:
+                    rereviewed.append(row)  # the record stays: only the fields a fresh review sets are written
+                    continue
+                # the evidence the decision rested on changed (or is unknown, on a row older than evidence_key): start over
+                for key, value in _reset_fields(d, now).items():
+                    setattr(row, key, value)
+                if isinstance(f, CVEMatch):
+                    reset_matches.append(f)
+                changed.append(row)
+                continue
+            if row.evidence_key != d['evidence_key']:
                 row.evidence_key = d['evidence_key']  # rows written before evidence_key existed learn it while their signature still holds
-            changed.append(row)
+            # the signature holds: only the seen time moves, and the host, kind or evidence key when they differ. Nothing else of the row is
+            # written back (rewriting it from this read would put back what a person or a check changed since)
+            (seen if (row.host, row.kind, row.evidence_key) == before else relabelled).append(row)
         if new_rows:
             carried_hits.extend(r.match_id for r in new_rows if r.match_id and r.validation_status == 'hit')
             Triage.objects.bulk_create(new_rows, ignore_conflicts=True)  # ids are not set on a conflict-tolerant insert: read back
@@ -1498,6 +1521,12 @@ def _track(findings):
                                                  'hard_evidence', 'validation_status', 'validation_steps', 'validation_evidence',
                                                  'validated_at', 'attempts', 'next_attempt_at', 'confidence_adjust', 'carried_from', 'updated_at'],
                                        batch_size=CHUNK)
+        if rereviewed:
+            Triage.objects.bulk_update(rereviewed, ['last_seen', 'host', 'kind', *_REREVIEW_FIELDS], batch_size=CHUNK)
+        if relabelled:
+            Triage.objects.bulk_update(relabelled, ['last_seen', 'host', 'kind', 'evidence_key'], batch_size=CHUNK)
+        if seen:
+            Triage.objects.filter(pk__in=[row.pk for row in seen]).update(last_seen=now)  # one statement, no CASE per column
         for f, d in described:
             row = existing[KIND_FK[d['kind']]].get(f.pk)
             if row is not None:
@@ -1510,9 +1539,12 @@ def _track(findings):
         scoring.rescore_for_matches(reset_matches)
     if carried_verdicts:
         # the same host's own verdict for the same evidence: correlation no longer seeds a closing one from the shared table (task 256)
+        groups = {}
         for f, before in carried_verdicts:
             f.ai_verdict, f.ai_reason, f.ai_model = before.ai_verdict, before.ai_reason, before.ai_model
-            CVEMatch.objects.filter(pk=f.pk).update(ai_verdict=f.ai_verdict, ai_reason=f.ai_reason, ai_model=f.ai_model, updated_at=now)
+            groups.setdefault((f.ai_verdict, f.ai_reason, f.ai_model), []).append(f.pk)
+        for (verdict, reason, model), ids in groups.items():  # one statement per distinct verdict, not one per match
+            CVEMatch.objects.filter(pk__in=ids).update(ai_verdict=verdict, ai_reason=reason, ai_model=model, updated_at=now)
         from cveFeed import scoring
         scoring.rescore_for_matches([f for f, _ in carried_verdicts])
     if carried_hits:
@@ -1717,7 +1749,7 @@ def suggest_local_checks(row, provider=False):
     if _resolve_provider(provider) is None:
         return False
     from cveFeed import ai_jobs
-    from reNgine.ai_providers import LOCAL_CHECK_SYSTEM_PROMPT, local_check_parts
+    from cvengine.ai_providers import LOCAL_CHECK_SYSTEM_PROMPT, local_check_parts
     context = {
         'cve_id': cve.cve_id, 'title': cve.title,
         'affected': [{k: item.get(k) for k in ('vendor', 'product') if isinstance(item.get(k), str) and item.get(k)}
@@ -1745,7 +1777,7 @@ def suggest_local_checks(row, provider=False):
 
 def _local_checks_answer(job, text):
     from cveFeed.models import Triage
-    from reNgine.ai_providers import parse_local_checks
+    from cvengine.ai_providers import parse_local_checks
     claim = _claim_of(job)
     if claim is not None:
         _finish_call(claim, 'succeeded')
@@ -2200,7 +2232,7 @@ def _ask(key, group, claim):
     signature it had, so a row whose evidence changes meanwhile is left for the next pass."""
     from cveFeed import ai_jobs
     from cveFeed.models import CVEMatch
-    from reNgine.ai_providers import TRIAGE_OPTIONS, TRIAGE_SYSTEM_PROMPT, triage_parts, triage_schema
+    from cvengine.ai_providers import TRIAGE_OPTIONS, TRIAGE_SYSTEM_PROMPT, triage_parts, triage_schema
     row, d = group[0]
     # the legacy verdict of each match as the question is asked: a rule that closes one before the answer comes back wins (``_apply``)
     asked = {str(pk): v for pk, v in CVEMatch.objects.filter(pk__in=[r.match_id for r, _ in group if r.match_id]).values_list('pk', 'ai_verdict')}
@@ -2310,7 +2342,7 @@ def _job_error(job, claim, group, error):
 def _triage_answer(job, text):
     from types import SimpleNamespace
     from cveFeed import ai_jobs
-    from reNgine.ai_providers import repair_parts, validate_triage
+    from cvengine.ai_providers import repair_parts, validate_triage
     ctx = job.context
     parsed, reason = validate_triage(text)
     if parsed is None and job.attempt == 1:
@@ -2394,7 +2426,7 @@ def run_triage(pairs, provider=False, scan_id=None):
     ``error`` when it comes back (the sweep retries them); rows over a cap stay ``pending`` ("queued"). Honours the stop flag of
     ``scan_id``. Never raises for one group's trouble. Returns the counts."""
     from cveFeed.models import CVEMatch, MatchVerdict, Triage, TriageVerdict
-    from reNgine import resources
+    from cvengine import resources
     stats = {'rows': len(pairs), 'asked': 0, 'cached': 0, 'queued': 0, 'not_triaged': 0, 'errors': 0, 'stopped': False}
     # A product identity that never matched the advisory is a bad correlation, not a
     # question worth charging the AI provider for. Retain a deterministic, auditable closure.
@@ -2402,12 +2434,19 @@ def run_triage(pairs, provider=False, scan_id=None):
     matches = {m.pk: m for m in CVEMatch.objects.filter(pk__in=[row.match_id for row, _ in pairs if row.match_id])
                .select_related('cve_entry', 'subdomain__target_domain', 'triage')}
     eligible = []
-    for row, described in pairs:
-        match = matches.get(row.match_id) if row.match_id else None
-        if match and correlation.invalid_identity_reason(match):
-            correlation.close_invalid_correlation(match)
-            continue
-        eligible.append((row, described))
+    from cveFeed import match_policy
+    match_policy.prime_standing(list(matches.values()))  # what invalid_identity_reason asks of each match, read for all of them at once
+    match_policy.prime_sightings(list(matches.values()))
+    try:
+        for row, described in pairs:
+            match = matches.get(row.match_id) if row.match_id else None
+            reason = correlation.invalid_identity_reason(match) if match else ''
+            if reason:
+                correlation.close_invalid_correlation(match, reason)
+                continue
+            eligible.append((row, described))
+    finally:
+        match_policy.forget_primed(matches.values())  # read for this loop only
     pairs = eligible
     invalid_ids = set(TriageVerdict.objects.filter(pk__in=[row.verdict_id for row, _ in pairs if row.verdict_id],
                                                    invalid_output=True).values_list('id', flat=True))

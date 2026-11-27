@@ -68,7 +68,7 @@ def expiry_days():
 
 
 def _system(body):
-    from reNgine import ai_prompts
+    from cvengine import ai_prompts
     return ai_prompts.compose(STAGE, body + ' ' + templategen.UNTRUSTED_NOTICE)
 
 
@@ -193,7 +193,7 @@ def _sentinel_gate(tmpl, now):
     """Static gate and the Sentinel's syntax check with the benign control. Returns the outcome string when the draft is settled or must
     wait, or None when it passes."""
     from agentapi import sentinel_dispatch
-    from reNgine.resources import ScannerUnavailable
+    from cvengine.resources import ScannerUnavailable
     ok, why = templategen.static_check(tmpl.yaml, expected_cve_id=tmpl.cve_entry.cve_id)
     if not ok:
         return reject(tmpl, f'static check: {why}')
@@ -412,7 +412,7 @@ def problem(now=None):
     old = G.objects.filter(status=G.STATUS_DRAFT).filter(validation_started_at__lte=now - STUCK_AFTER).count()
     if old:
         from agentapi import sentinel_dispatch
-        from reNgine.resources import ScannerUnavailable
+        from cvengine.resources import ScannerUnavailable
         try:
             sentinel_dispatch.nuclei_validate_ready(None)
         except ScannerUnavailable:

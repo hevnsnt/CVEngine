@@ -5,9 +5,14 @@
 # administrator wins.
 export PYTHONFAULTHANDLER="${PYTHONFAULTHANDLER:-1}"
 
-# web owns migrations; wait until they are applied (avoids concurrent-migrate race)
+# The database role this container runs as (web/db-role.sh): the least privilege app role, which the one-off migrate service created and checked
+# before this started. This container has no owner password; the owner role only when CVENGINE_DB_ALLOW_OWNER_FALLBACK=1 made the migrate service
+# hand it over and the app role cannot log in within CVENGINE_DB_ROLE_WAIT seconds, said in the log.
+. "$(dirname "$0")/db-role.sh" && cvengine_db_role "${CVENGINE_DB_ROLE_WAIT:-60}"
+
+# The migrate service owns migrations; wait until they are applied (as this container's role: migrate --check only reads django_migrations).
 until python3 manage.py migrate --check >/dev/null 2>&1; do
-    echo "Waiting for web to apply migrations..."
+    echo "Waiting for the database migrations (the one-off migrate service applies them: docker compose run --rm migrate)..."
     sleep 3
 done
 
@@ -28,12 +33,7 @@ python3 manage.py collectstatic --no-input
 # is never overwritten (this used to be `loaddata`, which rewrote every field).
 python3 manage.py load_default_fixtures fixtures/default_scan_engines.yaml
 
-# Temporary fix for whatportis bug - See https://github.com/yogeshojha/rengine/issues/984
-# (path looked up, not hard-coded: it depends on the Python version and the virtual environment)
-WHATPORTIS_CLI=$(python3 -c "import os, whatportis; print(os.path.join(os.path.dirname(whatportis.__file__), 'cli.py'))")
-sed -i 's/purge()/truncate()/g' "$WHATPORTIS_CLI"
-
-# update whatportis
+# update whatportis (its table is in HOME; the fix for upstream issue 984 is applied when the image is built, web/Dockerfile)
 yes | whatportis --update
 
 # store scan_results
@@ -41,9 +41,10 @@ if [ ! -d "/usr/src/scan_results" ]
 then
   mkdir /usr/src/scan_results
 fi
-# Only root and the bundled nginx (gid 101 in nginx:alpine; the proxy serves /protected_media/ from this volume, read-only) may enter it: no other
-# account in this container has any business with scan output, PDF reports or log archives. Applied at every start.
-chgrp 101 /usr/src/scan_results && chmod 0750 /usr/src/scan_results || echo "Could not restrict /usr/src/scan_results to root and the proxy"
+# Only this container's account (uid 10002, which owns it: web/ownership.sh) and the bundled nginx (gid 101 in nginx:alpine; the proxy serves
+# /protected_media/ from this volume, read-only) may enter it: no other account has any business with scan output, PDF reports or log archives.
+# Applied at every start (the account is a member of group 101, so it may set that group on a folder it owns).
+chgrp 101 /usr/src/scan_results && chmod 0750 /usr/src/scan_results || echo "Could not restrict /usr/src/scan_results to the application and the proxy"
 
 # the server runs no scan tool and keeps no template set: every scan, template run and template check runs on a Sentinel
 
@@ -59,8 +60,8 @@ generate_worker_command() {
     local queue=$1
     local concurrency=$2
     local worker_name=$3
-    local app=${4:-"reNgine.tasks"}
-    local directory=${5:-"/usr/src/app/reNgine/"}
+    local app=${4:-"cvengine.tasks"}
+    local directory=${5:-"/usr/src/app/cvengine/"}
     local include=$6
 
     local base_command="celery -A $app worker --pool=gevent --optimization=fair --autoscale=$concurrency,1 --loglevel=$loglevel -Q $queue -n $worker_name"

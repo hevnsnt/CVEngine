@@ -37,8 +37,8 @@ jobs:
     name: 🏷️ Publish the GitHub release
     runs-on: ubuntu-latest
     steps:
-      - name: 📥 Checkout
-        uses: actions/checkout@v4
+      - name: 📥 Checkout  # zizmor: ignore[artipacked] the token is kept in .git/config on purpose: this job pushes the release tag with it
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
 
       - name: 🔭 Every pinned tool is at its newest release
         env:

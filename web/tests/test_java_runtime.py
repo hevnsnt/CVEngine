@@ -284,7 +284,7 @@ class ReadTests(JavaFixture, TestCase):
 
     def test_no_scanner_leaves_the_reads_due_and_runs_nothing_here(self):
         scan = self.java_scan(techs=('Spring Boot',))
-        from reNgine.resources import ScannerUnavailable
+        from cvengine.resources import ScannerUnavailable
         with self.assertRaises(ScannerUnavailable):
             java_runtime.run_for_scan(scan.id)
         self.assertFalse(JavaRuntime.objects.filter(source='actuator').exists())

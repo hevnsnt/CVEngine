@@ -8,7 +8,7 @@ Two paths:
   OpenAI-compatible servers and Ollama are called with the standard library, asking for the same schema where the server supports it.
   Every answer is checked again by ``guard.parse_reply``.
 * ``complete`` serves the pipeline's AI jobs (triage, validation planning, template drafting, detection authoring, the RDP reading and the
-  rest, docs/AI-REVIEWER.md). It is the request logic the server used itself before 1.4 (web/reNgine/ai_providers.py), ported: the same
+  rest, docs/AI-REVIEWER.md). It is the request logic the server used itself before 1.4 (web/cvengine/ai_providers.py), ported: the same
   endpoints, bodies, reply limits, pinned temperature and seed for a self-hosted server, structured output with its step-down ladder, the
   reasoning setting, Ollama's context window and keep-alive, images, and the same error categories. The server checks the answer.
 
@@ -49,6 +49,22 @@ class ModelError(RuntimeError):
         self.http_status = http_status
         self.stop_reason = stop_reason
         self.hint = hint
+
+
+USAGE_LIMIT = re.compile(r'usage limit|regain access')  # the provider's refusal body is lower-cased in ``hint``
+USAGE_LIMIT_CATEGORY = 'provider_usage_limit'  # what the loop sees for it (the server is sent the call's own category, plus the message)
+
+
+def usage_limit_message(error):
+    """The provider's refusal text (cut to 300 characters) when ``error`` is the usage limit reached (an organisation's API requests paused until a
+    date or the limit raised), else ''. Only this refusal's text is ever passed on."""
+    hint = getattr(error, 'hint', '') or ''
+    return hint[:300] if USAGE_LIMIT.search(hint) else ''
+
+
+def failure_category(error):
+    """``error.category``, or ``provider_usage_limit`` for the usage limit refusal: the loop waits hours for it, not fifteen minutes."""
+    return USAGE_LIMIT_CATEGORY if usage_limit_message(error) else error.category
 
 
 PINNED = {'temperature': 0, 'seed': 20260101}  # the reviewer's own jobs on a self-hosted server: the same packet gives the same answer (the pipeline's jobs pin the same, ``complete``)
@@ -179,7 +195,7 @@ def _ollama(provider, system, user, schema, max_tokens):
 
 # ===================================================================================================== the pipeline's AI jobs: ``complete``
 #
-# Ported from the server's own provider layer (web/reNgine/ai_providers.py, as it was before 1.4), so a job asks exactly what the server
+# Ported from the server's own provider layer (web/cvengine/ai_providers.py, as it was before 1.4), so a job asks exactly what the server
 # used to ask. The server resolves the operator's settings (the Settings page, then the CVENGINE_AI_* variables of its .env) and hands
 # them over in the job block of its configuration as ``runtime``; nothing here reads the environment.
 
@@ -744,7 +760,7 @@ def complete(block, system, user, schema=None, options=None, image=None):
 
     ``model`` (a model the owner chose for this job) replaces the configured one. ``haiku``: with no ``model``, the cheapest haiku the provider
     lists is used (else the configured model); and when the job ran on another model and that model refused it or answered nothing, the haiku
-    is asked ONCE more (the server's rule for the nuclei jobs before 1.4, ``reNgine.ai_nuclei_model``). Raises ModelError, with the calls made
+    is asked ONCE more (the server's rule for the nuclei jobs before 1.4, ``cvengine.ai_nuclei_model``). Raises ModelError, with the calls made
     so far in ``error.calls``."""
     options = dict(options or {})
     calls = []

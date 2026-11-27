@@ -1,11 +1,11 @@
-"""The bundled proxy (config/nginx/rengine.conf) must follow the web container's current address.
+"""The bundled proxy (config/nginx/cvengine.conf) must follow the web container's current address.
 
 Incident: the web container was recreated on its own (docker compose up -d web) and got a new address on the compose network; the proxy container was not
-recreated, kept sending to the old address (nginx looked "rengine" up once, at start), and the site was down until the proxy was restarted. The conf now
+recreated, kept sending to the old address (nginx looked "cvengine" up once, at start), and the site was down until the proxy was restarted. The conf now
 puts the address in a variable and has a resolver (Docker's DNS, 127.0.0.11, valid=10s), so nginx looks it up again.
 
 Checked here with a real nginx (the proxy's own nginx:alpine image; in CI a missing docker is a failure, not a skip, as in test_tunnel_client_address):
-* the whole conf passes nginx -t, and the proxy starts (and answers with the maintenance page) while "rengine" does not resolve at all;
+* the whole conf passes nginx -t, and the proxy starts (and answers with the maintenance page) while "cvengine" does not resolve at all;
 * on a user-defined docker network the upstream is removed and recreated at another address and the proxy, never restarted, reaches the new one;
   the same scenario with the old conf is run as a control and does not follow;
 * each of the three proxied locations sends the upstream the same path and query as the old conf did, for a list of awkward request targets."""
@@ -26,7 +26,8 @@ from django.test import SimpleTestCase
 from tests.test_tunnel_client_address import CONF, REPO, free_port, nginx_runner
 
 # how the three routes looked before: the first with a trailing slash (and so the cleaned-up path), the other two without a URI (the raw one)
-OLD_FORMS = (('location / {', 'http://rengine:8000/'), ('location ~ ^/api/v1/sentinel/tasks', 'http://rengine:8000'), ('location = /cve/api/settings/cve_seed/import {', 'http://rengine:8000'))
+OLD_FORMS = (('location / {', 'http://cvengine:8000/'), ('location ~ ^/api/v1/sentinel/tasks', 'http://cvengine:8000'), ('location = /cve/api/settings/cve_seed/import {', 'http://cvengine:8000'),
+             ('location ^~ /client-address-probe/ {', 'http://cvengine:8000'))
 
 
 def old_conf():
@@ -60,12 +61,12 @@ class ConfShapeTests(SimpleTestCase):
     def test_the_conf_has_a_resolver_and_no_fixed_upstream_name_in_proxy_pass(self):
         self.assertRegex(CONF, r'resolver\s+127\.0\.0\.11 valid=10s ipv6=off;')
         self.assertNotRegex(CONF, r'(?m)^\s*proxy_pass\s+http://')  # a name written in proxy_pass is looked up once, at start
-        self.assertEqual(len(re.findall(r'(?m)^\s*proxy_pass\s+\$cvengine_web;', CONF)), 3)
-        self.assertEqual(len(re.findall(r'set\s+\$cvengine_web http://rengine:8000;', CONF)), 3)
+        self.assertEqual(len(re.findall(r'(?m)^\s*proxy_pass\s+\$cvengine_web;', CONF)), 4)
+        self.assertEqual(len(re.findall(r'set\s+\$cvengine_web http://cvengine:8000;', CONF)), 4)
 
     def test_the_old_form_helper_really_gives_the_old_form(self):
         old = old_conf()
-        self.assertEqual(re.findall(r'(?m)^\s*proxy_pass\s+(\S+);', old), ['http://rengine:8000/', 'http://rengine:8000', 'http://rengine:8000'])
+        self.assertEqual(re.findall(r'(?m)^\s*proxy_pass\s+(\S+);', old), ['http://cvengine:8000/', 'http://cvengine:8000', 'http://cvengine:8000', 'http://cvengine:8000'])
         code = re.sub(r'(?m)^\s*#.*$', '', old)
         self.assertNotIn('cvengine_web', code)
         self.assertNotIn('resolver', code)
@@ -137,7 +138,7 @@ class UpstreamPathTests(NeedsNginx):
         os.makedirs(scratch, exist_ok=True)
         head = conf_text[:conf_text.index('\nserver {')].replace('/etc/nginx/trusted-upstreams.conf', f'{etc}/trusted-upstreams.conf')
         server = conf_text[conf_text.index('    location / {'):conf_text.index('    location /staticfiles/')]
-        server = server.replace('http://rengine:8000', f'http://127.0.0.1:{upstream.server_port}').replace('/etc/nginx/state/', f'{etc}/state/')
+        server = server.replace('http://cvengine:8000', f'http://127.0.0.1:{upstream.server_port}').replace('/etc/nginx/state/', f'{etc}/state/')
         port = free_port()
         text = (f'daemon off; pid {scratch}/nginx.pid; error_log stderr;\nevents {{}}\nhttp {{\n'
                 f'client_body_temp_path {scratch}/b; proxy_temp_path {scratch}/p; fastcgi_temp_path {scratch}/f; uwsgi_temp_path {scratch}/u; scgi_temp_path {scratch}/s;\n'
@@ -223,15 +224,15 @@ class WholeConfTests(NeedsNginx):
     def certs(self):
         d = f'{self.tmp}/certs'
         os.makedirs(d)
-        subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', f'{d}/rengine_rsa.key', '-out', f'{d}/rengine.pem', '-subj', '/CN=rengine', '-days', '2'],
+        subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', f'{d}/cvengine_rsa.key', '-out', f'{d}/cvengine.pem', '-subj', '/CN=cvengine', '-days', '2'],
                        check=True, capture_output=True)
-        shutil.copy(f'{d}/rengine.pem', f'{d}/rengine_chain.pem')
+        shutil.copy(f'{d}/cvengine.pem', f'{d}/cvengine_chain.pem')
         for name in os.listdir(d):
             os.chmod(f'{d}/{name}', 0o644)
         return d
 
     def proxy_args(self, conf_text):
-        conf = f'{self.tmp}/rengine.conf'
+        conf = f'{self.tmp}/cvengine.conf'
         with open(conf, 'w') as f:
             f.write(conf_text)
         os.chmod(conf, 0o644)
@@ -242,7 +243,7 @@ class WholeConfTests(NeedsNginx):
         shutil.copy(os.path.join(REPO, 'config', 'nginx', 'trusted-upstreams.conf'), trusted)
         os.chmod(trusted, 0o644)
         certs = self.certs()
-        return ['-v', f'{conf}:/etc/nginx/conf.d/rengine.conf:ro', '-v', f'{certs}:/etc/nginx/certs:ro', '-v', f'{state}:/etc/nginx/state:ro',
+        return ['-v', f'{conf}:/etc/nginx/conf.d/cvengine.conf:ro', '-v', f'{certs}:/etc/nginx/certs:ro', '-v', f'{state}:/etc/nginx/state:ro',
                 '-v', f'{trusted}:/etc/nginx/trusted-upstreams.conf:ro',
                 '-v', f'{os.path.join(REPO, "web", "static", "cve", "maintenance.html")}:/usr/share/nginx/maintenance/maintenance.html:ro']
 
@@ -253,8 +254,8 @@ class WholeConfTests(NeedsNginx):
         port = int(docker('port', name, '443/tcp').stdout.split(':')[-1])
         return name, port
 
-    def start_upstream(self, label, alias='rengine'):
-        """A fake web container answering <label> on 8000 under the name "rengine" on the network. Returns its address."""
+    def start_upstream(self, label, alias='cvengine'):
+        """A fake web container answering <label> on 8000 under the name "cvengine" on the network. Returns its address."""
         conf = f'{self.tmp}/up-{label}.conf'
         with open(conf, 'w') as f:
             f.write(f'server {{ listen 8000; location / {{ return 200 "{label}"; }} }}\n')
@@ -269,7 +270,7 @@ class WholeConfTests(NeedsNginx):
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE
         try:
-            with urllib.request.urlopen(urllib.request.Request(f'https://127.0.0.1:{port}{path}', headers={'Host': 'rengine'}), timeout=timeout, context=context) as reply:
+            with urllib.request.urlopen(urllib.request.Request(f'https://127.0.0.1:{port}{path}', headers={'Host': 'cvengine'}), timeout=timeout, context=context) as reply:
                 return reply.status, reply.read().decode()
         except urllib.error.HTTPError as err:
             return err.code, err.read().decode(errors='replace')
@@ -290,7 +291,7 @@ class WholeConfTests(NeedsNginx):
         check = docker('run', '--rm', '--network', self.net, *self.proxy_args(CONF), 'nginx:alpine', 'nginx', '-t', check=False)
         self.assertEqual(check.returncode, 0, check.stderr)
 
-    def test_the_proxy_starts_while_rengine_does_not_resolve_and_serves_the_maintenance_page(self):
+    def test_the_proxy_starts_while_cvengine_does_not_resolve_and_serves_the_maintenance_page(self):
         name, port = self.start_proxy(CONF)
         deadline = time.time() + 30
         reply = (None, '')

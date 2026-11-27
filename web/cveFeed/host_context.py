@@ -12,7 +12,7 @@ import hashlib
 import json
 import re
 
-from reNgine.ai_providers import clean_text
+from cvengine.ai_providers import clean_text
 
 MAX_TECHS, MAX_PORTS, MAX_PROBES, MAX_MATCHES, MAX_STEPS, MAX_CERTS = 40, 25, 30, 10, 8, 6
 EDGE_NOTE = ('This host is fronted by a CDN, WAF or hosting edge. The Server header, X-Powered-By, error pages and TLS answers describe '
@@ -224,14 +224,14 @@ def _inventory(project_id, host, row=_UNREAD):
             'reported_at': row.reported_at.isoformat()}
 
 
-def _steps(project_id, host, rows=None):
+def _steps(project_id, host, rows=None, names=()):
     from cveFeed.models import Triage
     out = []
     if rows is None:
         rows = Triage.objects.filter(project_id=project_id, host=host).exclude(validation_steps=[]).order_by('-validated_at')[:4]
     for row in rows:
         for step in (row.validation_steps or [])[-3:]:
-            out.append({'kind': _s(step.get('kind'), 20), 'result': _s(step.get('result'), 20), 'summary': _s(step.get('summary'), 160)})
+            out.append({'kind': _s(step.get('kind'), 20), 'result': _s(step.get('result'), 20), 'summary': _s(step.get('summary'), 160, names)})
     return out[:MAX_STEPS]
 
 
@@ -313,7 +313,7 @@ def host_context(sub, project_id=None, focus=None, pre=None):
                                                       HostLabel.objects.filter(project_id=project_id, host=host).values_list('label', flat=True)[:30])}),
         'operating_system': _os(sub, names), 'tailscale': _tailscale(project_id, host, pre.get('tailscale', _UNREAD)),
         'certificates': _certificates(project_id, host, pre.get('certificates')), 'host_inventory': _inventory(project_id, host, pre.get('inventory', _UNREAD)),
-        'probe_results': _probes(rows, names), 'earlier_checks': _steps(project_id, host, pre.get('steps')), 'other_cve_matches': _matches(sub, names, pre.get('matches')),
+        'probe_results': _probes(rows, names), 'earlier_checks': _steps(project_id, host, pre.get('steps'), names), 'other_cve_matches': _matches(sub, names, pre.get('matches')),
         'wordpress': wordpress_summary(rows),
         'rules': [UNVERSIONED_NOTE] + ([EDGE_NOTE] if edge['fronted'] else []),
     }
@@ -470,6 +470,8 @@ def stable_view(context):
     - probe ``observed``, host inventory ``reported_at`` and ``packages``, Tailscale ``online``: removed;
     - the AI's ``verdict`` on the host's other matches (this match's own among them): blanked (a rescan's new row of the match starts with
       none; the verdict of another CVE flipping does not re-ask this one);
+    - ``earlier_checks`` (the last steps of the host's most recently validated findings): blanked, because a validation of any finding on the
+      host rewrote them and so re-asked every other match on it;
     - per-request and cache-state response headers (and Imperva's ``x-iinfo``): the header stays, its value is ``*``;
     - Content-Security-Policy nonces, the CloudFront edge node in ``via``, whole timestamps and times of day in banners and check summaries
       (a certificate's expiry date in a port record is kept): masked;
@@ -495,6 +497,13 @@ def stable_view(context):
         out['other_cve_matches'] = [{**m, 'verdict': ''} if isinstance(m, dict) and 'verdict' in m else m for m in out['other_cve_matches']]
     if isinstance(out.get('tailscale'), dict):
         out['tailscale'] = {k: v for k, v in out['tailscale'].items() if k != 'online'}
+    if out.get('earlier_checks'):
+        # the last steps of the host's most recently validated findings: every validation of ANY finding on the host rewrote them, so the key of
+        # every other match on the host without a floor moved, each was asked again and validated again, and that validation moved the key once
+        # more. On a host with hundreds of matches it re-asked the same evidence many times a day (40 percent of all triage calls on the
+        # production install, November 2026). Blanked, not removed, so a host with no checks keeps the key it had. The validation planner,
+        # which chooses the next check, still reads them from the full context.
+        out['earlier_checks'] = []
     if isinstance(out.get('ports'), list):
         out['ports'] = sorted(out['ports'], key=lambda p: (p.get('number', 0) if isinstance(p, dict) else 0,
                                                            json.dumps(p, sort_keys=True, default=str)))

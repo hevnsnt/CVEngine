@@ -19,10 +19,15 @@ wait_for_site() {
 }
 # A freshly installed stack is not ready when the site first answers: the Celery entrypoint can spend minutes before its workers reply. An
 # installed system that is being updated has had that time, so wait for it here, as a real install would have.
+# The application's Python package in the running celery container, found by its files: 1.5.0 renamed it, and these scripts run against the
+# installed (older) version as well as the updated one.
+app_package() {
+  dc exec -T celery sh -c 'for d in /usr/src/app/*/; do if [ -f "${d}celery.py" ] && [ -f "${d}settings.py" ]; then basename "$d"; break; fi; done' 2>/dev/null
+}
 wait_for_workers() {
   local deadline=$((SECONDS + ${1:-900})) count=0
   while (( SECONDS < deadline )); do
-    count=$(dc exec -T celery celery -A reNgine.tasks inspect ping -t 10 2>/dev/null | grep -c pong || true)
+    count=$(dc exec -T celery celery -A "$(app_package).tasks" inspect ping -t 10 2>/dev/null | grep -c pong || true)
     if (( count >= 3 )); then echo "$count Celery workers answer."; return 0; fi
     sleep 10
   done

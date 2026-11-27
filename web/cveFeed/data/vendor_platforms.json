@@ -2,7 +2,7 @@
  "_comment": "Platforms a customer points a name at by CNAME and the vendor runs: the TLS and HTTP configuration of such an endpoint is the vendor's, not the client's. Read by cveFeed.hygiene_rating. 'suffixes' match the CNAME target (or the certificate names) on a label boundary. 'discovery_labels' are names Microsoft 365 asks a customer to publish that point at Microsoft's own service: the endpoint is Microsoft's, not a client asset.",
  "platforms": [
   {"vendor": "Microsoft", "suffixes": ["outlook.com", "office365.com", "office.com", "office.net", "microsoftonline.com", "microsoftonline-p.net",
-                                       "microsoftonline-p.com", "manage.microsoft.com", "microsoft.com", "lync.com", "windows.net", "msidentity.com",
+                                       "microsoftonline-p.com", "manage.microsoft.com", "microsoft.com", "lync.com", "windows.net", "windows-int.net", "windows-ppe.net", "msidentity.com",
                                        "sharepoint.com"]},
   {"vendor": "Azure VPN gateway", "suffixes": ["vpn.azure.com"]},
   {"vendor": "Zendesk", "suffixes": ["zendesk.com", "zdusercontent.com", "zdassets.com"]},
@@ -28,6 +28,7 @@
   {"vendor": "Fly.io", "suffixes": ["fly.dev"]},
   {"vendor": "Cloudflare Pages", "suffixes": ["pages.dev"]},
   {"vendor": "Mailgun", "suffixes": ["mailgun.org"]},
+  {"vendor": "GoDaddy", "suffixes": ["commerce.godaddy.com", "onlinestore.godaddy.com", "titan.godaddy.com", "email.godaddy.com"]},
   {"vendor": "SendGrid", "suffixes": ["sendgrid.net"]}
  ],
  "discovery": {

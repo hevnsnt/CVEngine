@@ -183,7 +183,7 @@ class RefreshAndLockTests(_SyncBase):
 		self.assertGreater(CVEEntry.objects.get(pk=cve.pk).synced_at, timezone.now() - D(minutes=5))
 
 	def test_a_second_sync_while_one_runs_returns_at_once(self):
-		from reNgine import resources
+		from cvengine import resources
 		with resources.redis_claim(tasks.SYNC_LOCK, 'someone-else', 60) as holder:
 			if holder is not True:
 				self.skipTest('no Redis to hold the claim')

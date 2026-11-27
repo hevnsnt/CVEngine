@@ -15,19 +15,19 @@ finds the product states no version records that too (``hidden``): the AI is tol
 ``plan_for_host`` picks the probes for a host's leads without any AI, so this works with no AI key; the AI, when configured, may choose
 among the ones this module offers (cveFeed.validation_plan) and reason over what they found."""
 import itertools
+import json
 import logging
 import os
 import re
 import shlex
 from datetime import timedelta
-from urllib.parse import urlsplit
 
 from django.utils import timezone
 
 from cvengine_scanner import cms, fingerprint, versions
 from cvengine_scanner.flags import probe_nmap_flags
 
-from cveFeed import js_libraries
+from cveFeed import js_libraries, php_tells
 
 logger = logging.getLogger(__name__)
 
@@ -377,15 +377,14 @@ def observations_from_page(response, source_prefix='page'):
     out = [o for o in out if not (o['kind'] == 'version' and not o['version'] and o['product'].lower() in stated)]  # a version replaces the bare name
     for provider in versions.edges_from_headers({**headers, 'server': response.get('server', '')}):
         out.append(_observation('edge', provider, outcome='edge', confidence=0.8, source='header:edge', url='/'))
-    return out
+    # a link to a .php URL is no evidence of PHP: one elsewhere is dropped, a same-origin one is a lead unless the server confirms PHP (cveFeed.php_tells)
+    return php_tells.judge_observations(out, response=response)
 
 
 def next_version(body):
     """The Next.js version a framework script states (``window.next={version:"14.1.0"}``), or ''."""
     found = re.search(r'\bnext\s{0,8}=\s{0,8}\{\s{0,8}version\s{0,8}:\s{0,8}["\'](\d+\.\d+\.\d+[\w.-]{0,20})["\']', body or '')
     return found.group(1) if found else ''
-
-
 
 
 def _wordpress_signals(responses):
@@ -436,17 +435,6 @@ def allowed_names(sub):
     return names
 
 
-def served_by(response, base):
-    """Whether ``response`` (a ``fetch`` result) is the page of ``base``'s own host: where its redirects ended (``final_url``) is that host. A
-    host that only redirects to another one serves none of the scripts of the page it sends visitors to."""
-    final = response.get('final_url') or response.get('url') or ''
-    try:
-        here, there = (urlsplit(base).hostname or '').lower().rstrip('.'), (urlsplit(final).hostname or '').lower().rstrip('.')
-    except ValueError:
-        return False
-    return not there or here == there
-
-
 def observations_from_nmap(inventory, port):
     """Observations of the version probe from the parsed report of one port: the product and version (``hidden`` when nmap
     names the product only), the Server header the http-server-header script printed and every generator tag."""
@@ -491,20 +479,103 @@ def _sentinel_nmap_probe(project_id, target):
 
 # ----------------------------------------------------------------------------- recording
 
-def record(project_id, domain_id, host, probe_id, observations, now=None):
-    """Store ``observations`` for a host (one row per probe, port, kind and product; a repeat updates it, so a version that disappeared is
-    replaced by ``hidden``). Returns the rows."""
+OBS_KEY = ('project_id', 'host', 'probe', 'port', 'kind', 'product')  # the ProbeObservation unique key
+OBS_CHUNK = 500  # rows per statement when ``upsert_many`` writes
+
+
+def _obs_key(values):
+    """The unique key of an observation (a lookup dict or a row), with each part as the database compares it (a port of ``'443'`` is 443)."""
     from cveFeed.models import ProbeObservation
+    get = values.get if isinstance(values, dict) else (lambda name: getattr(values, name))
+    return tuple(ProbeObservation._meta.get_field(name).get_prep_value(get(name)) for name in OBS_KEY)
+
+
+def _json_value(value):
+    try:
+        return json.loads(json.dumps(value))
+    except (TypeError, ValueError):
+        return value  # JSON cannot hold it: it compares unequal and is written, as before
+
+
+def _same(row, name, value):
+    from django.db.models import JSONField
+    field = row._meta.get_field(name)
+    current = getattr(row, field.attname)
+    if isinstance(field, JSONField):
+        return _json_value(current) == _json_value(value)
+    return current == value
+
+
+def upsert_many(rows, existing=None):
+    """``ProbeObservation.objects.update_or_create(**lookup, defaults=defaults)`` for each ``(lookup, defaults)`` of ``rows``, in batches, with the
+    same end state. ``lookup`` names the unique key (``OBS_KEY``); ``defaults`` usually carries ``observed_at``.
+
+    The rows of those keys are read in one query (or taken from ``existing``, when the caller already read every row of these keys). A new row and a
+    row whose defaults changed are written with one INSERT ... ON CONFLICT DO UPDATE per batch (a row a parallel run made, or removed, in between ends as
+    ``update_or_create`` left it). A row found again with the same defaults is not rewritten: only its ``observed_at`` moves, in one UPDATE for the
+    batch, so its evidence JSON is not written again on every pass. Returns the rows in the order of ``rows`` (a key named twice is one row, with the
+    last defaults, as the second ``update_or_create`` left it)."""
+    from cveFeed.models import ProbeObservation
+    if not rows:
+        return []
+    current = {}
+    if existing is None:
+        lookups = [lookup for lookup, _ in rows]
+        existing = ProbeObservation.objects.filter(project_id__in={l['project_id'] for l in lookups}, host__in={l['host'] for l in lookups},
+                                                   probe__in={l['probe'] for l in lookups})
+    for row in existing:
+        current[_obs_key(row)] = row
+    out, write, touch = [], {}, {}
+    for lookup, defaults in rows:
+        key = _obs_key(lookup)
+        row = current.get(key)
+        if row is None:
+            row = current[key] = ProbeObservation(**lookup, **defaults)
+            write[key] = (row, set(defaults))
+        else:
+            changed = any(not _same(row, name, value) for name, value in defaults.items() if name != 'observed_at')
+            for name, value in defaults.items():
+                setattr(row, name, value)
+            if key in write:
+                write[key][1].update(defaults)
+            elif changed:
+                write[key] = (row, set(defaults))
+                touch.pop(key, None)
+            elif 'observed_at' in defaults:
+                touch[key] = row
+        out.append(row)
+    groups = {}
+    for key, (row, fields) in write.items():
+        groups.setdefault(tuple(sorted(fields)), []).append((key, row))
+    unique = ['project', 'host', 'probe', 'port', 'kind', 'product']
+    for fields, members in groups.items():
+        # a stored row is written through a copy holding the key and the defaults: the copy is what a create would insert, and on conflict only
+        # ``fields`` (the defaults) are set on the stored row, exactly what update_or_create wrote
+        batch = [row if row.pk is None else ProbeObservation(**dict(zip(OBS_KEY, key)), **{f: getattr(row, f) for f in fields})
+                 for key, row in members]
+        ProbeObservation.objects.bulk_create(batch, batch_size=OBS_CHUNK, update_conflicts=True, unique_fields=unique, update_fields=list(fields))
+        for (_key, row), written in zip(members, batch):
+            if row.pk is None:
+                row.pk = written.pk
+    by_time = {}
+    for row in touch.values():
+        by_time.setdefault(row.observed_at, []).append(row.pk)
+    for observed_at, ids in by_time.items():
+        for i in range(0, len(ids), OBS_CHUNK):
+            ProbeObservation.objects.filter(pk__in=ids[i:i + OBS_CHUNK]).update(observed_at=observed_at)
+    return out
+
+
+def record(project_id, domain_id, host, probe_id, observations, now=None, existing=None):
+    """Store ``observations`` for a host (one row per probe, port, kind and product; a repeat updates it, so a version that disappeared is
+    replaced by ``hidden``). Returns the rows. ``existing``: every stored row of this host and probe, when the caller already read them
+    (``upsert_many``); a row seen again unchanged only has its ``observed_at`` moved."""
     now = now or timezone.now()
-    rows = []
-    for o in observations:
-        row, _ = ProbeObservation.objects.update_or_create(
-            project_id=project_id, host=host.lower(), probe=probe_id, port=o['port'], kind=o['kind'], product=o['product'],
-            defaults={'domain_id': domain_id, 'version': o['version'], 'variant': o['variant'], 'url': o['url'],
-                      'outcome': o['outcome'], 'confidence': o['confidence'], 'source': o['source'], 'evidence': o['evidence'],
-                      'observed_at': now})
-        rows.append(row)
-    return rows
+    host = host.lower()
+    return upsert_many([({'project_id': project_id, 'host': host, 'probe': probe_id, 'port': o['port'], 'kind': o['kind'], 'product': o['product']},
+                         {'domain_id': domain_id, 'version': o['version'], 'variant': o['variant'], 'url': o['url'], 'outcome': o['outcome'],
+                          'confidence': o['confidence'], 'source': o['source'], 'evidence': o['evidence'], 'observed_at': now})
+                        for o in observations], existing=existing)
 
 
 def technology_names(observations):
@@ -740,7 +811,7 @@ def run_for_scan(scan_id, force=False):
     (at most MAX_PROBES_PER_HOST that are due; the http probes are a Sentinel's: ``http_probe``), inside the ledger TTL and ``max_hosts`` per scan, honouring exclusions, scan stop and pause. Returns ``{'hosts', 'probes', 'versions', 'reused', 'errors'}``."""
     from cveFeed import activity, host_context, ledger
     from cveFeed.nuclei_scan import scan_targets
-    from reNgine import resources
+    from cvengine import resources
     from startScan.models import ScanHistory, Subdomain
     scan = ScanHistory.objects.select_related('domain').get(pk=scan_id)
     project, domain = scan.domain.project_id, scan.domain
@@ -749,7 +820,7 @@ def run_for_scan(scan_id, force=False):
     stats = {'hosts': 0, 'probes': 0, 'versions': 0, 'reused': reused, 'errors': 0}
     subs = Subdomain.objects.filter(scan_history=scan, name__in=allowed).prefetch_related('technologies', 'ip_addresses__ports', 'waf')
     due = []
-    needed = features_needed(project, {s.name for s in subs})
+    needed = features_needed(project, set(subs.values_list('name', flat=True)))  # the names only: the loop below reads the rows and their prefetches once
     for sub in subs.select_related('target_domain').order_by('name'):
         leads = leads_for(sub) + unidentified_port_leads(sub)
         todo = {}
@@ -837,7 +908,7 @@ def _remote_http(scan, due):
     """``(answers, waiting)``: the http probes of ``due`` a Sentinel ran (``{asset: observations or the error}``, see
     ``agentapi.probe_dispatch.try_http_probes``), and whether they must wait because no scanner can take them (the kind never runs here)."""
     from agentapi import probe_dispatch
-    from reNgine.resources import ScannerUnavailable
+    from cvengine.resources import ScannerUnavailable
     planned = [(sub, asset, entry) for sub, todo in due for asset, entry in todo.items() if BY_ID[entry['probe']]['family'] == 'http']
     try:
         got = probe_dispatch.try_http_probes(scan.domain.project, scan, planned)
@@ -847,9 +918,24 @@ def _remote_http(scan, due):
     return got, False
 
 
+def _judge_php_link(project_id, host, probe_id, found):
+    """``found`` with a ``.php`` link observation judged (``php_tells.judge_observations``): the host's stored routes say whether the server confirms
+    PHP (one read, only when there is such an observation). The version row an earlier run stored for the link is removed: it is a lead now."""
+    if not any(o.get('kind') == 'version' and php_tells.is_link_tell(o.get('product'), o.get('source')) for o in found):
+        return found
+    from cveFeed.models import ProbeObservation, RouteAuth
+    ProbeObservation.objects.filter(project_id=project_id, host=host.lower(), probe=probe_id, kind='version', source=php_tells.LINK_SOURCE).delete()
+    rows = RouteAuth.objects.filter(project_id=project_id, host=host.lower(), retired_at__isnull=True).values_list('url', 'http_status', 'auth_state', 'evidence')
+    results = [(url, {'status': status, 'state': state, 'evidence': evidence or {}}) for url, status, state, evidence in rows]
+    return php_tells.judge_observations(found, confirmed=php_tells.host_confirmation(results).get(host.lower(), ''),
+                                        contrary=php_tells.host_contrary(results).get(host.lower(), ''))
+
+
 def apply_remote(project_id, domain_id, sub, entry, found):
     """Store and apply what a Sentinel's run of one planned probe found (``run_one``'s second half: the observations are the scanner's). A page
-    that stated the Java runtime (``Java runtime`` observations of the headers and error-page probes) becomes a Java runtime reading of the host."""
+    that stated the Java runtime (``Java runtime`` observations of the headers and error-page probes) becomes a Java runtime reading of the host.
+    A page's ``.php`` link (``page:.php link``) is stored as a lead, or as PHP when the host's routes confirm it (``cveFeed.php_tells``)."""
+    found = _judge_php_link(project_id, sub.name, entry['probe'], found)
     record(project_id, domain_id, sub.name, entry['probe'], found)
     added = apply_to_subdomain(sub, found)
     java = any(o.get('product') == JAVA_RUNTIME and o.get('outcome') == 'found' for o in found)

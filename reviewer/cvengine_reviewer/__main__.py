@@ -22,16 +22,23 @@ IDLE_SLEEP = 300
 ERROR_SLEEP = 60
 BACKOFF_SLEEP = 900
 MAX_FAILURES = 3
+USAGE_LIMIT_SLEEP = 3 * 3600  # the provider paused the organisation (usage limit reached): one probe call every three hours, not every fifteen minutes
 OPS_RETRY_SECONDS = 3600  # the operations job runs at most once an hour, whatever happens to it: it is a paid model call
 JOB_POLL = 15          # seconds between asks for pipeline jobs while there are none
 JOB_BATCH = 8          # jobs taken per ask
 MAX_WORKERS = 8        # pipeline jobs run side by side (the server says how many, up to this)
 # Failures of the provider itself (as against an answer that was cut off or empty): three in a row pause the work.
-OUTAGE = ('auth', 'rate_limit', 'network', 'http', 'provider_auth', 'provider_rate_limit', 'provider_network', 'provider_http',
+OUTAGE = ('provider_usage_limit', 'auth', 'rate_limit', 'network', 'http', 'provider_auth', 'provider_rate_limit', 'provider_network', 'provider_http',
           'provider_timeout', 'provider_connect_timeout', 'provider_error')
 
 
 def _failed(state, category):
+    if category == llm.USAGE_LIMIT_CATEGORY:
+        if state['pause_until'] <= time.monotonic():
+            logger.warning('the provider reports its usage limit reached: pausing for %s hours', USAGE_LIMIT_SLEEP // 3600)
+        state['pause_until'] = max(state['pause_until'], time.monotonic() + USAGE_LIMIT_SLEEP)
+        state['failures'] = 0
+        return
     if category in OUTAGE:
         state['failures'] += 1
         if state['failures'] >= MAX_FAILURES and state['pause_until'] <= time.monotonic():
@@ -76,7 +83,7 @@ def run_reviews(server, config, state):
             logger.info('operations: %s alert(s) diagnosed, actions run %s', result.get('alerts_updated'), result.get('actions_run'))
             state['failures'] = 0
         except llm.ModelError as exc:
-            _failed(state, exc.category)
+            _failed(state, llm.failure_category(exc))
             logger.warning('operations: model call failed (%s)', exc.category)
         except Exception as exc:  # noqa: BLE001 - the reviews below must still run; the job waits an hour
             logger.warning('operations: not completed (%s); next try in an hour', type(exc).__name__)
@@ -89,8 +96,8 @@ def run_reviews(server, config, state):
                 answer = jobs.review_one(server, config['review'], packet)
                 state['failures'] = 0
             except llm.ModelError as exc:
-                _failed(state, exc.category)
-                if exc.category not in OUTAGE:  # the model refused, answered nothing or was cut off twice: say so, or it is asked again every 15 minutes
+                _failed(state, llm.failure_category(exc))
+                if llm.failure_category(exc) not in OUTAGE:  # the model refused, answered nothing or was cut off twice: say so, or it is asked again every 15 minutes
                     jobs.report_unanswered(server, config['review'], packet, exc.category)
                 continue
             except ServerError as exc:

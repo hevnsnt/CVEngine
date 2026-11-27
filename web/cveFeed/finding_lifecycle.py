@@ -5,7 +5,7 @@ it saw again, and the earlier scans' rows stayed open beside it (the same adviso
 filed under a target, so a host covered by two targets of one project had each finding twice. Four rules keep that from happening:
 
 * **Upsert.** A scanner finding seen again is the same row, moved onto the scan that saw it (``earlier_copy``, called by
-  ``reNgine.tasks.save_vulnerability``): the same project, host name, source, template, name, URL and matcher. Its first-seen date, status,
+  ``cvengine.tasks.save_vulnerability``): the same project, host name, source, template, name, URL and matcher. Its first-seen date, status,
   note, assignee, comments, audit trail and AI triage stay with it. A hygiene finding a second target finds on the same host updates the row the
   first target filed (cveFeed.hygiene.store_findings).
 * **Duplicates.** Rows filed before this existed are merged by ``manage.py dedupe_findings`` (dry run by default): the row that stays
@@ -20,16 +20,18 @@ filed under a target, so a host covered by two targets of one project had each f
 
 None of this touches a finding a person closed, set in progress or reopened by hand, and a closure the engine made itself is marked so
 (``cveFeed.closure.AUTOMATIC``) and read back as ``closed_automatically``. An engine closure as fixed is undone when a later scan reports the
-finding again; a person's fixed status is not (it sticks, as before).
+finding again, and so is a closure that only says the host was archived (cveFeed.archive_closure); a person's fixed status is not (it sticks,
+as before).
 """
 import logging
 import re
 
 from django.db import IntegrityError, transaction
 from django.db.models import Q
+from django.db.models.fields.json import KeyTransform
 from django.utils import timezone
 
-from cveFeed.closure import AUTOMATIC, CLOSED
+from cveFeed.closure import AUTOMATIC, CLOSED, prepend_note
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +41,7 @@ FIXED_VERSION = AUTOMATIC + ' fixed version read.'
 FOLDED = (DUPLICATE, ALIAS)  # a copy the engine folded into another row: it stays closed when a scan sees it again
 REOPENED_NOTE = 'Reopened automatically: a later scan reports this again.'
 
-# what makes two scanner rows the same finding, besides the project and the host name (reNgine.tasks.VULNERABILITY_KEY without the scan's
+# what makes two scanner rows the same finding, besides the project and the host name (cvengine.tasks.VULNERABILITY_KEY without the scan's
 # own rows: target, scan, host row and endpoint)
 IDENTITY = ('source', 'template_id', 'name', 'http_url', 'matcher_name')
 LOCATION = ('target_domain', 'scan_history', 'subdomain', 'endpoint')
@@ -112,9 +114,11 @@ def seen_again(row):
     if not row.open_status:
         row.open_status = True
         changed.append('open_status')
-    if engine_fixed(row):
+    from cveFeed import archive_closure
+    if engine_fixed(row) or (archive_closure.is_archive_closed(row) and not archive_closure.still_archived(  # or only because the host was archived
+            row.target_domain.project_id if row.target_domain_id else None, row.subdomain.name if row.subdomain_id else '')):
         row.remediation_status, row.remediation_updated_at = 'open', timezone.now()
-        row.remediation_note = _note(f'{REOPENED_NOTE}\n{row.remediation_note}')
+        row.remediation_note = prepend_note(REOPENED_NOTE, row.remediation_note)  # a person's note below is never cut
         changed += ['remediation_status', 'remediation_updated_at', 'remediation_note']
     return changed
 
@@ -224,7 +228,7 @@ def close_fixed_for_host(domain, host, report, seen=None, read_in='', apply=True
         note = _note(f'{FIXED_VERSION} {why}: read by the WordPress scan on {host}' + (f' {read_in}' if read_in else '') + '.')
         close.setdefault(note, []).append(row.pk)
     if apply:
-        from reNgine.state_machines import REMEDIATION
+        from cvengine.state_machines import REMEDIATION
         for note, ids in close.items():
             # only from open with nobody on it, as read above: a person who took the finding up since then keeps it
             REMEDIATION.move(Vulnerability._base_manager.filter(pk__in=ids, remediation_by__isnull=True), 'fixed', only_from=('open',),
@@ -472,9 +476,38 @@ def _split_port(host):
     return (name, sep + port) if sep and port.isdigit() else (host, '')
 
 
+HOSTS_CHUNK = 500  # host names per pattern in ``_hosts_q``
+
+
+def _hosts_q(names):
+    """A filter on ``host`` that keeps every row whose host is one of ``names`` (lower case), alone or with a port (``name:443``): the rows
+    whose ``_split_port`` name is in ``names``, matched without case, so only those rows are read."""
+    names = sorted(names)
+    q = Q(pk__in=[])
+    for i in range(0, len(names), HOSTS_CHUNK):
+        q |= Q(host__iregex=r'^(%s)(:[0-9]+)?$' % '|'.join(re.escape(n) for n in names[i:i + HOSTS_CHUNK]))
+    return q
+
+
 def host_name(host):
     """The host name of a hygiene finding's host (``name`` or ``name:port``), lower case."""
     return _split_port((host or '').lower())[0]
+
+
+def _fold_rows(qs, line, **fields):
+    """Fold ``qs`` with ``line`` on top of the note. A note already there (a person's, kept under an automatic reopening) stays below the line,
+    as an archive closure keeps it (``closure.prepend_note``): it used to be replaced. One UPDATE for the rows with no note."""
+    qs.filter(remediation_note='').update(remediation_note=line, **fields)
+    for pk, note in qs.exclude(remediation_note='').values_list('pk', 'remediation_note'):
+        qs.filter(pk=pk).update(remediation_note=prepend_note(line, note), **fields)
+
+
+def _without_first_line():
+    """The note with its first line (the alias fold's) taken off: what a person had written below it stays, unfolding no longer empties it."""
+    from django.db.models import Case, TextField, Value, When
+    from django.db.models.functions import StrIndex, Substr
+    return Case(When(remediation_note__contains='\n', then=Substr('remediation_note', StrIndex('remediation_note', Value('\n')) + 1)),
+                default=Value(''), output_field=TextField())
 
 
 def fold_aliases(project_id, names=None, apply=True, now=None):
@@ -506,8 +539,9 @@ def fold_aliases(project_id, names=None, apply=True, now=None):
             if keeper:
                 fold.setdefault((keeper, host), []).append(row.pk)
         out['vulnerability'] = sum(len(ids) for ids in fold.values())
-        hyg = HygieneFinding.objects.filter(domain__project_id=project_id).only(
-            'id', 'host', 'check_name', 'evidence', 'status', 'remediation_status', 'remediation_note', 'remediation_by', 'assignee')
+        hyg = HygieneFinding.objects.filter(_hosts_q(targets | set(aliases)), domain__project_id=project_id).only(
+            'id', 'host', 'check_name', 'status', 'remediation_status', 'remediation_note', 'remediation_by', 'assignee').annotate(
+            not_after=KeyTransform('not_after', 'evidence'))  # the one key of the evidence read here, not the whole JSON
         target_rows, alias_rows = {}, []
         for row in hyg.order_by('id'):
             name, port = _split_port(row.host.lower())
@@ -522,7 +556,7 @@ def fold_aliases(project_id, names=None, apply=True, now=None):
             if keeper is None:
                 continue
             if row.check_name.startswith('tls_'):
-                mine, theirs = (row.evidence or {}).get('not_after'), (keeper.evidence or {}).get('not_after')
+                mine, theirs = row.not_after, keeper.not_after
                 if mine != theirs:
                     continue  # another certificate: the alias's own finding
             hfold.setdefault((keeper.pk, host), []).append(row.pk)
@@ -530,24 +564,24 @@ def fold_aliases(project_id, names=None, apply=True, now=None):
         if apply:
             stamp = now or timezone.now()
             for (keeper, host), ids in fold.items():
-                Vulnerability._base_manager.filter(pk__in=ids, open_status=True, remediation_status='open', remediation_by__isnull=True).update(
-                    open_status=False, remediation_note=alias_note('scanner finding', keeper, host, aliases[host]))
+                _fold_rows(Vulnerability._base_manager.filter(pk__in=ids, open_status=True, remediation_status='open', remediation_by__isnull=True),
+                           alias_note('scanner finding', keeper, host, aliases[host]), open_status=False)
                 touched.add(host)
             for (keeper, host), ids in hfold.items():
-                HygieneFinding.objects.filter(pk__in=ids, status='open', remediation_status='open', remediation_by__isnull=True).update(
-                    status='resolved', resolved_at=stamp, remediation_note=alias_note('hygiene finding', keeper, host, aliases[host]))
+                _fold_rows(HygieneFinding.objects.filter(pk__in=ids, status='open', remediation_status='open', remediation_by__isnull=True),
+                           alias_note('hygiene finding', keeper, host, aliases[host]), status='resolved', resolved_at=stamp)
                 touched.add(host)
     if plain:  # an alias that serves a page of its own again: what was folded for it is its own finding again
         again_v = Vulnerability._base_manager.filter(target_domain__project_id=project_id, subdomain__name__in=list(plain), open_status=False,
                                                      remediation_note__startswith=ALIAS)
-        again_h = [row.pk for row in HygieneFinding.objects.filter(domain__project_id=project_id, status='resolved',
+        again_h = [row.pk for row in HygieneFinding.objects.filter(_hosts_q(plain), domain__project_id=project_id, status='resolved',
                                                                    remediation_note__startswith=ALIAS).only('id', 'host')
-                   if _split_port(row.host.lower())[0] in plain]
+                   if _split_port(row.host.lower())[0] in plain]  # only the rows of these names are read, not every folded row of the project
         out['reopened'] = again_v.count() + len(again_h)
         if apply and out['reopened']:
             touched |= set(again_v.values_list('subdomain__name', flat=True))
-            again_v.update(open_status=True, remediation_note='')
-            HygieneFinding.objects.filter(pk__in=again_h).update(status='open', resolved_at=None, remediation_note='')
+            again_v.update(open_status=True, remediation_note=_without_first_line())
+            HygieneFinding.objects.filter(pk__in=again_h).update(status='open', resolved_at=None, remediation_note=_without_first_line())
             touched |= {_split_port(h.lower())[0] for h in HygieneFinding.objects.filter(pk__in=again_h).values_list('host', flat=True)}
     if apply and touched:
         from cveFeed import scoring

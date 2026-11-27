@@ -18,7 +18,7 @@ from cveFeed import bucket_probe, bucket_scan, ledger, secret_rules, secrets_inv
 from cveFeed.models import (ServiceRun, BountyEngagement, BountyProgram, HygieneFinding, ProjectSettings, ResourceRef, RouteAuth, SecretFinding,
                             SecretOccurrence)
 from dashboard.models import AuditLog
-from reNgine import resources
+from cvengine import resources
 from tests.fake_scanner import FakeScanner, assert_ran_nowhere_locally
 from tests.test_scanner_unavailable_stages import NoScannerBase
 

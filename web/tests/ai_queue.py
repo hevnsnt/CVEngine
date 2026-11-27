@@ -37,7 +37,7 @@ def configure(provider='anthropic', model='m', **fields):
 def ensure_configured(fake):
     """``configure`` with the fake's provider name, unless an enabled provider is already there."""
     from dashboard.models import AIProviderSettings
-    from reNgine.ai_profiles import PROFILES
+    from cvengine.ai_profiles import PROFILES
     if not AIProviderSettings.objects.filter(enabled=True).exists():
         name = getattr(fake, 'name', 'anthropic')
         configure(name if name in PROFILES else 'anthropic')
@@ -46,8 +46,8 @@ def ensure_configured(fake):
 def answer(job, fake):
     """The body the container would post for one handed-out job."""
     from cveFeed import ai_jobs
-    from reNgine.ai_providers import AIProviderError
-    from reNgine.ai_profiles import PROFILES
+    from cvengine.ai_providers import AIProviderError
+    from cvengine.ai_profiles import PROFILES
     name = getattr(fake, 'name', 'anthropic')
     name = name if name in PROFILES else 'anthropic'
     model = getattr(fake, 'model', 'm')
@@ -80,7 +80,7 @@ def serve(fake, rounds=200):
 
 def triage_prompt(kind, payload, host_context=None):
     """The user message a triage job's model reads, as the container builds it from the job's parts."""
-    from reNgine.ai_providers import triage_parts
+    from cvengine.ai_providers import triage_parts
     return container().job_message({'parts': triage_parts(kind, payload, host_context)})
 
 

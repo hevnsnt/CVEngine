@@ -8,6 +8,9 @@ dropped unless it lies inside the chunk it was asked about, so a Sentinel cannot
 declared. Nothing is ever deleted: a host that stops answering stays a target (the scan of it says it was unreachable) until an
 administrator removes it.
 
+Each answering address also brings the name the network or the host gives it (reverse DNS from the Sentinel's own resolver, mDNS, NetBIOS):
+``cveFeed.host_names`` keeps it on the target row at every sweep, and the pages show the host as ``name (address)``.
+
 Cadence is weekly (``CVENGINE_INTERNAL_DISCOVERY_DAYS``) with a "scan now" on the range; the sweep only runs in a project where a live
 ``network:internal`` Sentinel declares ``discover``, and never reads a silent network as an empty one: a chunk nobody answered is an
 error on the range, not a sweep that found nothing.
@@ -120,7 +123,7 @@ def _discover_range(range_id, dispatch, scan_after):
     from agentapi import sentinel_dispatch, stage_runs
     from cveFeed import activity
     from cveFeed.models import InternalRange
-    from reNgine.resources import redis_claim
+    from cvengine.resources import redis_claim
     dispatch = dispatch or sentinel_dispatch.dispatch_or_none
     row = InternalRange.objects.select_related('project__org').filter(pk=range_id).first()
     if row is None:
@@ -145,7 +148,8 @@ def _discover(row, dispatch, activity, scan_after):
         return {'range': row.cidr, 'error': message}
     running = activity.log('run_check', f'Discovering hosts in internal range {row.cidr}: a Sentinel inside the network sweeps it, never this server',
                            project=project.id, status='running')
-    found, failed, first_failure = [], 0, ''
+    from cveFeed import host_names
+    found, failed, first_failure, names = [], 0, '', {}
     for net in todo:
         result = dispatch(project, 'discover', {'cidr': str(net)}, host=str(net), ips=[str(net.network_address)], internal=True)
         if result is None:
@@ -156,6 +160,7 @@ def _discover(row, dispatch, activity, scan_after):
             ip = _usable(net, item.get('ip'))
             if ip:
                 found.append(ip)
+                names[ip] = host_names.pick(item)  # reverse DNS, mDNS or NetBIOS, as the Sentinel inside the network read them
     found = list(dict.fromkeys(found))
     existing = set(Domain.objects.filter(project=project, name__in=found).values_list('name', flat=True))
     fresh = [ip for ip in found if ip not in existing]
@@ -163,6 +168,7 @@ def _discover(row, dispatch, activity, scan_after):
     if fresh:
         outcome = add_entries(project, fresh, discover=False)
         created = outcome['created']
+    named = host_names.store(project, names)  # every sweep refreshes the names, new hosts and old
     done_sweep = start + len(todo) >= total
     update = {'last_discovery_error': first_failure[:200], 'discovery_cursor': start if failed else (0 if done_sweep else start + len(todo))}
     if not failed and done_sweep:
@@ -170,7 +176,7 @@ def _discover(row, dispatch, activity, scan_after):
         if start == 0:
             update['last_discovery_hosts'] = len(found)
     InternalRange.objects.filter(pk=row.pk).update(**update)
-    summary = {'range': row.cidr, 'chunks': len(todo), 'failed': failed, 'found': len(found), 'created': created}
+    summary = {'range': row.cidr, 'chunks': len(todo), 'failed': failed, 'found': len(found), 'created': created, 'named': named}
     if failed and not found:
         activity.settle(running, 'failed', message=f'Internal range {row.cidr}: {first_failure}; nothing was swept, so this is not a clean result')
     else:

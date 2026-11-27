@@ -1,6 +1,5 @@
-"""scripts/scanner.sh, scripts/scanner-update.sh and scripts/scanner_lock.py: the built-in scanner FOLLOWS the newest published Sentinel image (the moving
-tag ``main``), scanner.lock.json is the known-good floor it was tested with, and every way the image changes (the server's update scripts, the scheduled
-Scanner update) pulls it, starts it, keeps it only once it is healthy AND has checked in with a contract version the server accepts, otherwise puts the
+"""scripts/scanner.sh, scripts/scanner-update.sh and scripts/scanner_lock.py: the built-in scanner runs EXACTLY the Sentinel image scanner.lock.json pins by
+digest (security review S5: no moving tag), and every way the image changes (an update that brings a moved pin, the scheduled Scanner update) pulls it, starts it, keeps it only once it is healthy AND has checked in with a contract version the server accepts, otherwise puts the
 previous image back, and never fails the update. The docker those scripts call is web/tests/fake_docker.py."""
 import json
 import os
@@ -16,7 +15,10 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = ROOT / 'scripts'
 FAKE_DOCKER = Path(__file__).resolve().parent / 'fake_docker.py'
-MOVING = 'ghcr.io/hevnsnt/cvengine-sentinel:main'
+_LOCK = json.loads((ROOT / 'scanner.lock.json').read_text())
+# The reference compose runs by default: the pinned digest. The fake registry maps it to NEW, the image an update that moved the pin brings, while the
+# running container still has OLD (the previous pin); the scripts do not care which reference it is, only that they pull it and check what it gives.
+MOVING = f"{_LOCK['image']}@{_LOCK['floor']['digest']}"
 ROLLBACK = 'cvengine-sentinel-rollback:previous'
 OLD, NEW = 'sha256:' + 'a' * 64, 'sha256:' + 'b' * 64
 FLOOR = json.loads((ROOT / 'scanner.lock.json').read_text())['floor']['contract_version']  # the contract the floor commit speaks: the tests follow it, they do not repeat it
@@ -305,7 +307,7 @@ class ScannerUpdateTests(ScannerScriptBase):
         self.save()
         result = self.run_fn('cvengine_scanner_update')
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('already runs the newest', result.stderr)
+        self.assertIn('already runs the pinned image', result.stderr)
         self.assertFalse([c for c in self.calls() if 'force-recreate' in c or 'drain' in c])
 
     def test_a_busy_scanner_finishes_its_work_first_and_is_updated_at_the_next_run(self):
@@ -347,11 +349,12 @@ class ScannerUpdateTests(ScannerScriptBase):
         self.assertNotIn('CVENGINE_SCANNER_ROLLBACK_IMAGE', self.env_file())
         self.assertEqual(self.running_image(), NEW)
 
-    def test_a_fresh_install_pulls_the_newest_image_and_needs_no_digest(self):
+    def test_a_fresh_install_pulls_exactly_the_pinned_digest(self):
         result = self.run_fn('cvengine_scanner_fetch', 'cvengine_scanner_start')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.running_image(), NEW)
-        self.assertFalse([c for c in self.calls() if '@sha256' in c])
+        self.assertEqual([c for c in self.calls() if c.startswith('docker pull')], [f'docker pull -q {MOVING}'])
+        self.assertFalse([c for c in self.calls() if 'cvengine-sentinel:main' in c], 'the moving tag is never pulled')
 
     def test_the_update_scripts_path_checks_a_changed_image_even_for_make_up(self):
         self.running_old()
@@ -455,7 +458,8 @@ class HeldScannerTests(ScannerScriptBase):
 
 
 class LockTests(unittest.TestCase):
-    """scanner.lock.json is the known-good floor, not a pin: what it must hold, and what ``check`` proves."""
+    """scanner.lock.json pins the built-in scanner's image by digest, with the Sentinel commit it was published from (the one web/requirements.txt installs
+    the server's library from): what it must hold, what ``check`` proves, and how ``bump`` moves all three in one pull request."""
 
     @classmethod
     def setUpClass(cls):
@@ -465,6 +469,7 @@ class LockTests(unittest.TestCase):
         spec.loader.exec_module(cls.lock)
         cls.data = json.loads((ROOT / 'scanner.lock.json').read_text())
         cls.compose = (ROOT / 'docker-compose.yml').read_text()
+        cls.requirements = (ROOT / 'web' / 'requirements.txt').read_text()
 
     def run_cli(self, *args):
         return subprocess.run(['python3', str(SCRIPTS / 'scanner_lock.py'), *args], capture_output=True, text=True)
@@ -473,30 +478,39 @@ class LockTests(unittest.TestCase):
         result = self.run_cli('check')
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_the_lock_names_the_moving_tag_and_a_floor_not_an_exact_pin(self):
-        self.assertEqual(self.data['tag'], 'main')
-        self.assertEqual(self.run_cli('ref').stdout.strip(), MOVING)
-        self.assertNotIn('digest', self.data, 'no top-level digest: the lock does not choose the image')
+    def test_the_lock_pins_a_digest_and_the_commit_it_was_published_from(self):
         floor = self.data['floor']
+        self.assertEqual(self.data['tag'], 'main')  # what a bump reads, never what a host runs
+        self.assertRegex(floor['digest'], r'^sha256:[0-9a-f]{64}$')
+        self.assertEqual(self.run_cli('ref').stdout.strip(), f'{self.data["image"]}@{floor["digest"]}')
+        self.assertEqual(self.run_cli('digest').stdout.strip(), floor['digest'])
         self.assertRegex(floor['commit'], r'^[0-9a-f]{40}$')
         self.assertTrue(floor['commit'].startswith(floor['version']))
         self.assertIsInstance(floor['contract_version'], int)
-        if floor.get('digest') is not None:  # optional, kept for provenance
-            self.assertRegex(floor['digest'], r'^sha256:[0-9a-f]{64}$')
         self.assertEqual(self.run_cli('floor').stdout.strip(), floor['commit'])
         self.assertEqual(self.run_cli('contract-floor').stdout.strip(), str(floor['contract_version']))
+        self.assertEqual(self.lock.published_tag(self.data), f'sha-{floor["commit"][:12]}')
 
-    def test_the_compose_default_is_the_moving_tag_and_never_a_digest(self):
+    def test_the_compose_default_is_the_pinned_digest(self):
         self.assertEqual(self.lock.compose_default(self.compose), MOVING)
-        self.assertNotIn('@sha256', self.lock.compose_default(self.compose))
+        self.assertIn('@sha256:', MOVING)
+        self.assertNotIn('cvengine-sentinel:main', self.compose)
 
-    def test_check_fails_when_the_compose_default_is_a_digest_or_another_tag(self):
-        pinned = self.compose.replace(MOVING + '}}', 'ghcr.io/hevnsnt/cvengine-sentinel@' + OLD + '}}')
-        problems = self.lock.check(self.data, pinned, server=(FLOOR, 1))
-        self.assertTrue(any('not the moving tag' in p for p in problems) and any('not a digest' in p for p in problems), problems)
-        other = self.compose.replace(MOVING + '}}', 'ghcr.io/hevnsnt/cvengine-sentinel:1.4}}')
-        self.assertTrue(self.lock.check(self.data, other, server=(FLOOR, 1)))
-        self.assertEqual(self.lock.check(self.data, self.compose, server=(FLOOR, 1)), [])
+    def test_check_fails_on_a_moving_tag_another_digest_or_a_library_from_another_commit(self):
+        tag = self.compose.replace(MOVING + '}}', 'ghcr.io/hevnsnt/cvengine-sentinel:main}}')
+        problems = self.lock.check(self.data, tag, server=(FLOOR, 1))
+        self.assertTrue(any('not the pinned image' in p for p in problems) and any('pinned by digest' in p for p in problems), problems)
+        other = self.compose.replace(MOVING + '}}', 'ghcr.io/hevnsnt/cvengine-sentinel@' + OLD + '}}')
+        self.assertTrue(any('not the pinned image' in p for p in self.lock.check(self.data, other, server=(FLOOR, 1))))
+        moved = self.requirements.replace(self.data['floor']['commit'], 'c' * 40)
+        problems = self.lock.check(self.data, self.compose, server=(FLOOR, 1), requirements_text=moved)
+        self.assertTrue(any('move together' in p for p in problems), problems)
+        self.assertEqual(self.lock.check(self.data, self.compose, server=(FLOOR, 1), requirements_text=self.requirements), [])
+
+    def test_a_lock_without_a_digest_is_refused(self):
+        for digest in (None, '', 'sha256:short', 'main'):
+            with self.assertRaises(self.lock.LockError, msg=digest):
+                self.lock.validate({**self.data, 'floor': {**self.data['floor'], 'digest': digest}})
 
     def test_check_fails_when_the_floor_is_above_the_contract_the_server_reads(self):
         data = {**self.data, 'floor': {**self.data['floor'], 'contract_version': FLOOR + 1}}
@@ -511,12 +525,11 @@ class LockTests(unittest.TestCase):
         from agentapi import sentinel_contract  # the module the server itself reads it through
         self.assertEqual(pair, (sentinel_contract.version(), sentinel_contract.min_supported()))
 
-    def test_check_fails_when_the_tag_is_not_the_one_the_publish_workflow_moves(self):
+    def test_check_fails_when_the_tag_is_not_the_branch_a_bump_reads(self):
         data = {**self.data, 'tag': 'latest'}
-        compose = self.compose.replace(MOVING + '}}', 'ghcr.io/hevnsnt/cvengine-sentinel:latest}}')
-        self.assertTrue(any("moves 'main'" in p for p in self.lock.check(data, compose, server=(FLOOR, 1))))
+        self.assertTrue(any("newest commit of 'main'" in p for p in self.lock.check(data, self.compose, server=(FLOOR, 1))))
 
-    def test_the_floor_commit_is_checked_against_the_sentinel_main_branch(self):
+    def test_the_remote_check_asks_github_and_the_registry(self):
         def reply(status):
             handle = mock.MagicMock()
             handle.__enter__.return_value = handle
@@ -533,6 +546,13 @@ class LockTests(unittest.TestCase):
         with mock.patch('urllib.request.urlopen', return_value=reply('ahead')) as opened:
             self.lock.remote_check(self.data)
         self.assertIn(f'/compare/{self.data["floor"]["commit"]}...main', opened.call_args[0][0].full_url)
+        asked = []
+        same = lambda image, tag: asked.append((image, tag)) or self.data['floor']['digest']
+        with mock.patch('urllib.request.urlopen', return_value=reply('ahead')):
+            self.assertEqual(self.lock.check(self.data, self.compose, remote=True, server=(FLOOR, 1), resolver=same), [])
+            moved = self.lock.check(self.data, self.compose, remote=True, server=(FLOOR, 1), resolver=lambda image, tag: NEW)
+        self.assertEqual(asked, [(self.data['image'], f'sha-{self.data["floor"]["commit"][:12]}')])
+        self.assertTrue(any('not the pinned' in p for p in moved), moved)
 
     def test_accepts_follows_the_floor_and_the_servers_own_line(self):
         accepts = self.lock.accepts
@@ -553,40 +573,67 @@ class LockTests(unittest.TestCase):
         self.assertIn('below the floor', refused.stderr)
         self.assertEqual(self.run_cli('accepts', 'x').returncode, 2)
 
-    def test_the_floor_only_moves_up_and_a_digest_is_optional(self):
+    def test_the_contract_only_moves_up_and_a_digest_is_required(self):
         new = 'f' * 40
-        raised = self.lock.raise_floor(self.data, new, self.data['floor']['contract_version'] + 1)
-        self.assertEqual((raised['floor']['commit'], raised['floor']['version'], raised['floor']['digest']), (new, new[:12], None))
+        raised = self.lock.raise_floor(self.data, new, self.data['floor']['contract_version'] + 1, NEW)
+        self.assertEqual((raised['floor']['commit'], raised['floor']['version'], raised['floor']['digest']), (new, new[:12], NEW))
         with self.assertRaises(self.lock.LockError):
-            self.lock.raise_floor(self.data, new, self.data['floor']['contract_version'] - 1)
+            self.lock.raise_floor(self.data, new, self.data['floor']['contract_version'] - 1, NEW)
         with self.assertRaises(self.lock.LockError):
-            self.lock.raise_floor(self.data, 'short', FLOOR)
+            self.lock.raise_floor(self.data, 'short', FLOOR, NEW)
+        with self.assertRaises(self.lock.LockError):
+            self.lock.raise_floor(self.data, new, FLOOR, None)
         with self.assertRaises(self.lock.LockError):
             self.lock.validate({**self.data, 'tag': 'sha256:' + 'a' * 64})
         self.lock.validate({**self.data, 'image': 'localhost:5055/cvengine-sentinel'})  # a registry with a port is a registry
         with self.assertRaises(self.lock.LockError):
             self.lock.validate({**self.data, 'image': 'localhost:5055'})
 
-    def test_raise_floor_leaves_the_compose_default_alone(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            work = Path(tmp)
-            (work / 'scripts').mkdir()
-            shutil.copy(SCRIPTS / 'scanner_lock.py', work / 'scripts')
-            shutil.copy(ROOT / 'scanner.lock.json', work)
-            shutil.copy(ROOT / 'docker-compose.yml', work)
-            out = subprocess.run(['python3', 'scripts/scanner_lock.py', 'raise-floor', '--commit', 'a' * 40, '--contract', str(FLOOR)], cwd=work, capture_output=True, text=True)
-            self.assertEqual(out.returncode, 0, out.stderr)
-            self.assertEqual((work / 'docker-compose.yml').read_text(), self.compose)
-            self.assertEqual(subprocess.run(['python3', 'scripts/scanner_lock.py', 'check'], cwd=work).returncode, 0)
+    def work(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        (tmp / 'scripts').mkdir()
+        (tmp / 'web').mkdir()
+        shutil.copy(SCRIPTS / 'scanner_lock.py', tmp / 'scripts')
+        shutil.copy(SCRIPTS / 'image_pins.py', tmp / 'scripts')
+        shutil.copy(ROOT / 'scanner.lock.json', tmp)
+        shutil.copy(ROOT / 'docker-compose.yml', tmp)
+        shutil.copy(ROOT / 'web' / 'requirements.txt', tmp / 'web')
+        return tmp
+
+    def test_bump_moves_the_lock_the_compose_default_and_the_library_together(self):
+        work = self.work()
+        commit = 'e' * 40
+        asked = []
+        new = self.lock.bump(self.data, commit, resolver=lambda image, tag: asked.append((image, tag)) or NEW, root=work)
+        self.assertEqual(asked, [(self.data['image'], 'sha-' + 'e' * 12)])
+        self.assertEqual((new['floor']['commit'], new['floor']['digest'], new['floor']['contract_version']), (commit, NEW, FLOOR))
+        self.assertEqual(json.loads((work / 'scanner.lock.json').read_text()), new)
+        compose = (work / 'docker-compose.yml').read_text()
+        self.assertEqual(self.lock.compose_default(compose), f'{self.data["image"]}@{NEW}')
+        self.assertEqual(compose.replace(f'{self.data["image"]}@{NEW}', MOVING), self.compose, 'nothing else in the compose file moved')
+        requirements = (work / 'web' / 'requirements.txt').read_text()
+        self.assertEqual(self.lock.library_commit(requirements), commit)
+        self.assertEqual(requirements.replace(commit, self.data['floor']['commit']), self.requirements)
+        self.assertEqual(self.lock.check(new, compose, server=(FLOOR, 1), requirements_text=requirements), [])
+
+    def test_raise_floor_on_the_command_line_writes_all_three(self):
+        work = self.work()
+        out = subprocess.run(['python3', 'scripts/scanner_lock.py', 'raise-floor', '--commit', 'a' * 40, '--contract', str(FLOOR), '--digest', NEW],
+                             cwd=work, capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(out.stdout.strip(), f'{self.data["image"]}@{NEW}')
+        self.assertEqual(subprocess.run(['python3', 'scripts/scanner_lock.py', 'check'], cwd=work, capture_output=True).returncode, 0)
+        missing = subprocess.run(['python3', 'scripts/scanner_lock.py', 'raise-floor', '--commit', 'a' * 40, '--contract', str(FLOOR)], cwd=work, capture_output=True, text=True)
+        self.assertEqual(missing.returncode, 2)
 
     def test_the_floor_commit_is_the_one_the_servers_library_pin_comes_from(self):
-        requirements = (ROOT / 'web' / 'requirements.txt').read_text()
-        self.assertIn(f'cvENGINE-sentinel@{self.data["floor"]["commit"]}', requirements)
+        self.assertIn(f'cvENGINE-sentinel@{self.data["floor"]["commit"]}', self.requirements)
 
 
 @unittest.skipUnless(shutil.which('docker') and subprocess.run(['docker', 'compose', 'version'], capture_output=True).returncode == 0, 'needs docker compose')
 class ComposeRenderingTests(unittest.TestCase):
-    """What `docker compose config` makes of the scanner service: the moving tag by default, an administrator's image or the rollback image when set."""
+    """What `docker compose config` makes of the scanner service: the pinned digest by default, an administrator's image or the rollback image when set."""
 
     def render(self, **env):
         base = {k: v for k, v in os.environ.items() if not k.startswith('CVENGINE_')}
@@ -595,7 +642,7 @@ class ComposeRenderingTests(unittest.TestCase):
         self.assertEqual(out.returncode, 0, out.stderr)
         return json.loads(out.stdout)['services']['scanner']
 
-    def test_the_default_image_is_the_moving_tag_and_pulls_only_a_missing_one(self):
+    def test_the_default_image_is_the_pinned_digest_and_pulls_only_a_missing_one(self):
         scanner = self.render()
         self.assertEqual(scanner['image'], MOVING)
         self.assertEqual(scanner['pull_policy'], 'missing')
@@ -618,7 +665,7 @@ class UpdatePathTests(unittest.TestCase):
 
     def test_each_update_path_fetches_before_and_starts_after(self):
         for name, after in (('scripts/update.sh', 'worker_queues_ready && beat_ready'), ('scripts/update-deploy.sh', 'verify_serving || return 1'),
-                            ('scripts/apply-update.sh', 'verify_running "${services[@]}" || return 1'), ('Makefile', 'up -d --build ${SERVICES}')):
+                            ('scripts/apply-update.sh', 'verify_running "${services[@]}" || return 1'), ('Makefile', 'up -d --build --no-deps ${SERVICES}')):
             with self.subTest(name=name):
                 text = self.text(name)
                 self.assertIn('cvengine_scanner_fetch', text)
@@ -652,9 +699,9 @@ class UpdatePathTests(unittest.TestCase):
             with self.subTest(name=name):
                 subprocess.run(['bash', '-n', str(ROOT / name)], check=True)
 
-    def test_the_compose_default_is_the_rollback_then_the_moving_tag(self):
+    def test_the_compose_default_is_the_rollback_then_the_pinned_digest(self):
         self.assertRegex(self.text('docker-compose.yml'),
-                         re.escape('image: "${CVENGINE_SCANNER_IMAGE:-${CVENGINE_SCANNER_ROLLBACK_IMAGE:-') + r'[^}@]+\}\}"')
+                         re.escape('image: "${CVENGINE_SCANNER_IMAGE:-${CVENGINE_SCANNER_ROLLBACK_IMAGE:-') + r'[^}@]+@sha256:[0-9a-f]{64}\}\}"')
 
     def test_no_script_tells_a_person_to_pin_a_digest_for_the_scanner_to_update(self):
         for name in ('install.sh', 'scripts/scanner.sh', 'scripts/update.sh', 'Makefile'):

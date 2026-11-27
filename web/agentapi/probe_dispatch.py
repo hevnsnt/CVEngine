@@ -4,7 +4,7 @@
 The server keeps the choice of what to probe (the plan, the ledger, the per-scan cap), the scope policy (``cveFeed.probe_scope``), the
 validation of what comes back (``agentapi.probe_results``) and what is stored. The Sentinel runs the requests (``cvengine_scanner.probes``) under
 the policy the task carries. None of these kinds has a local path (``sentinel_dispatch.NEVER_LOCAL``): with no Sentinel able to take the work the
-stage waits for a scanner (``reNgine.resources.ScannerUnavailable``) and the work stays due."""
+stage waits for a scanner (``cvengine.resources.ScannerUnavailable``) and the work stays due."""
 import logging
 import os
 
@@ -30,7 +30,7 @@ def _hosts_label(names):
 
 def _unfinished(kind, what):
     """A task of a kind with no local path that ended without a result: nothing was asked, the work stays due."""
-    from reNgine.resources import ScannerUnavailable
+    from cvengine.resources import ScannerUnavailable
     return ScannerUnavailable(kind, f'a Sentinel returned no result for {what}')
 
 
@@ -580,14 +580,14 @@ def _route_answers(result, by_host, chunk):
 
 def try_signed_routes(project, scan, credential, by_host):
     """``{url: result or error}`` for the routes of ``by_host`` (``{host: [urls]}``, all covered by the one stored sign-in ``credential``) asked signed in by
-    the built-in scanner (kind ``route_probe_signed``): one task per 25 hosts, carrying ``secret_ref`` (a reference to the credential, never a value), which
-    only a built-in scanner that reads stored sign-ins is ever offered; it reads the credential once through ``sentinel/tasks/<id>/secret``. The answers
+    a Sentinel (kind ``route_probe_signed``): one task per 25 hosts, carrying ``secret_ref`` (a reference to the credential, never a value), which only a
+    built-in scanner that reads stored sign-ins, or an external Sentinel the credential's owner allowed (``signin_delivery.decision``), is ever offered; it reads the credential once through ``sentinel/tasks/<id>/secret``. The answers
     have the shape ``route_auth.analyse`` gives, and a route the scanner reports with an error, or not at all, is in the answer as an ``Exception``
     (asked again later, never a state). The kind is in ``NEVER_LOCAL`` and has no local path: when no scanner can take the work, or a task ended
     without a result, this raises ``ScannerUnavailable`` (nothing recorded, the routes stay due)."""
     from agentapi import sentinel_broker
     from cveFeed import probe_scope
-    from reNgine.resources import ScannerUnavailable
+    from cvengine.resources import ScannerUnavailable
     hosts = list(by_host)
     answered = {}
     for start in range(0, len(hosts), MAX_ROUTE_HOSTS_PER_TASK):
@@ -597,7 +597,7 @@ def try_signed_routes(project, scan, credential, by_host):
         result = sentinel_dispatch.dispatch_or_none(project, 'route_probe_signed', target, host=_hosts_label(chunk), scan=scan,
                                                     secret_ref=sentinel_broker.secret_ref_for(credential.pk))
         if result is None:  # dispatch_or_none raised ScannerUnavailable when no scanner took it: this is a task that ended without a result
-            raise ScannerUnavailable('route_probe_signed', 'the built-in scanner returned no result for a signed-in route check')
+            raise ScannerUnavailable('route_probe_signed', 'the scanner returned no result for a signed-in route check')
         answered.update(_route_answers(result, by_host, chunk))
     return answered
 
@@ -608,7 +608,7 @@ def try_page_reads(project, reads, scope, scan=None):
     the Sentinel could not make (unknown, never a state). The kind is in ``NEVER_LOCAL`` and has no local path: with no scanner able to take the work this
     raises ``ScannerUnavailable`` (nothing was read, nothing is recorded), and so does a task that ended with no result. A read the Sentinel did not
     report is an error row too."""
-    from reNgine.resources import ScannerUnavailable
+    from cvengine.resources import ScannerUnavailable
     target = {'reads': list(reads), 'scope': scope}
     label = _hosts_label(read['host'] for read in reads)
     result = sentinel_dispatch.dispatch_or_none(project, 'page_read', target, host=label, scan=scan)

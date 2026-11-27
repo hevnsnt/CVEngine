@@ -1,4 +1,4 @@
-"""A gevent worker keeps running while a task waits for Postgres (reNgine/gevent_db.py)."""
+"""A gevent worker keeps running while a task waits for Postgres (cvengine/gevent_db.py)."""
 import os
 import subprocess
 import sys
@@ -8,7 +8,7 @@ from unittest import mock
 from django.conf import settings
 from django.test import SimpleTestCase
 
-from reNgine import gevent_db
+from cvengine import gevent_db
 
 PROBE = textwrap.dedent('''
     import sys, time

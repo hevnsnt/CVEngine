@@ -10,13 +10,20 @@ Definitions (also shown to the user as the tooltip of each dashboard tile):
 
 * **Hosts**: distinct hosts in a project's current inventory (``latest_scan_q``). The same name in two targets of one project is one
   host, and so are names that resolve to exactly the same addresses (``example.com`` and ``www.example.com`` on the same servers are one
-  host with two names; names behind a CDN stay separate). The same name in two projects is two hosts. This is the Hosts page's count.
+  host with two names; names behind a CDN stay separate). The same name in two projects is two hosts. An archived host is not counted
+  (``archived_host_q``; archiving closed its findings, ``cveFeed.archive_closure``). This is the Hosts page's count.
 * **Live hosts**: hosts that resolved to an IP address or answered over HTTP. These are the tiles of the attack-surface map.
-* **Exposed hosts**: hosts with a CVE match the AI has not ruled out, or an open finding of medium severity or worse.
+* **Hosts with open findings** (``exposed`` in code and the API): hosts with a CVE match the AI has not ruled out, or an open finding of medium severity or worse.
+* **Open** (every count below): not closed by a person (fixed, accepted risk, false positive) and not dismissed by triage (``dismissed_q``: the
+  triage classed it a likely false positive or not applicable). The PDF report never counted a dismissed finding; the dashboard, the Findings
+  list and the weekly email now leave it out too, so the four agree. It stays in the list under ``status=all`` and keeps its own heat.
 * **CVE matches**: matches the AI has not ruled out. The Matches page opens on the same view. Counted per host: the same jQuery file on
   six sibling hosts is six matches. ``match_group_count`` counts them as the grouped Findings list shows them (one row for the six).
-* **Scanner findings**: open findings of low severity or worse (informational detections and closed findings excluded). The
+* **Scanner findings**: open findings of low severity or worse (informational detections, closed and dismissed findings excluded). The
   Findings page, Scanner type, Actionable status, shows the same set.
+* **Heat line** (fire, smoke, ice, ``HEAT_KINDS``): the open CVE matches and scanner findings by their heat, the two kinds that carry a heat of
+  their own (``cveFeed.threat``; a person can set either by hand). Hygiene findings are counted on their own line. The weekly email, the PDF
+  report and their labels read this one definition (``cveFeed.report_data.open_counts``).
 * **Scans running**: scans marked running that started within ``running_window()``. An older one is stalled (a casualty of a
   restart) and is never shown as running anywhere.
 * **Hygiene, top checks**: the three checks with the most actionable hygiene findings of medium severity or worse, counted over every finding (``hygiene_top_checks``).
@@ -34,6 +41,14 @@ from cveFeed.closure import CLOSED  # remediation states that close a finding: f
 RUNNING_WINDOW_SLACK = timedelta(hours=1)
 CERT_WARNING_DAYS = 30
 RULED_OUT = 'not_affected'  # the AI verdict that takes a CVE match off every list of exposure
+TRIAGE_DISMISSED = ('likely_false_positive', 'not_applicable')  # triage classes that make a finding not open work, of any kind
+HEAT_KINDS = ('cve', 'scanner')  # the kinds a heat line counts: each carries a heat of its own
+
+
+def dismissed_q(prefix='triage__'):
+    """A finding the triage classed a likely false positive or not applicable (``prefix`` reaches its Triage row): not open work anywhere. For a
+    CVE match the same answer also sets the AI verdict ``not_affected``; for a scanner or hygiene finding this is the only mark it carries."""
+    return Q(**{f'{prefix}classification__in': TRIAGE_DISMISSED})
 
 
 def match_is_live(match):
@@ -104,11 +119,62 @@ def queued_scans(qs=None):
     return (ScanHistory.objects.all() if qs is None else qs).filter(scan_status=-1)
 
 
+# A queued scan that nothing will ever start. A host pipeline row (cveFeed.discovery.run_host_pipeline) is created queued and marked running by the
+# same worker task a moment later, so one still queued after PIPELINE_QUEUED_GRACE lost that task (a restart or update killed it in between). Any
+# other queued scan (a discovery waiting for a discovery worker, an internal scan) waits in the broker, and the reaper sends a lost one again
+# (reaper.redispatch_queued_scans), so one still queued after queued_scan_limit() hours is a row nothing advances.
+PIPELINE_QUEUED_GRACE = timedelta(minutes=30)
+QUEUED_SCAN_HOURS = 48
+
+
+def queued_scan_limit():
+    """How long a queued scan may wait before it counts as stuck: CVENGINE_SCAN_QUEUED_HOURS, else 48 hours."""
+    import os
+    try:
+        return timedelta(hours=max(1, int(os.environ.get('CVENGINE_SCAN_QUEUED_HOURS', ''))))
+    except ValueError:
+        return timedelta(hours=QUEUED_SCAN_HOURS)
+
+
+def stuck_queued_q(now=None, limit=None):
+    """The queued scans that nothing will start (see PIPELINE_QUEUED_GRACE above). ``limit``: ``queued_scan_limit()`` when the caller already read it."""
+    from cveFeed.discovery import HOST_PIPELINE_TASK
+    now = now or timezone.now()
+    return Q(scan_status=-1) & (Q(tasks__contains=[HOST_PIPELINE_TASK], start_scan_date__lt=now - PIPELINE_QUEUED_GRACE)
+                                | Q(start_scan_date__lt=now - (limit or queued_scan_limit())))
+
+
+def waiting_scans(qs=None, now=None):
+    """The queued scans that really wait for a worker: ``queued_scans`` without the stuck rows (``stuck_queued_q``). This is the queue a starvation verdict
+    and the assessment share read; a stuck row waits for nothing, and the reaper closes it (reaper.expire_stuck_queued)."""
+    queued = queued_scans(qs)
+    return queued.exclude(pk__in=queued.filter(stuck_queued_q(now)).values('pk'))
+
+
+def queued_scan_split(now=None):
+    """``{'waiting', 'oldest_waiting_age_seconds', 'stuck', 'stuck_ids', 'oldest_stuck_age_seconds'}``: the queued scans that wait for a worker and the
+    ones nothing will start, with the age of the oldest of each (None when there is none) and the ids of the oldest ten stuck rows."""
+    from django.db.models import Count, Min
+    now = now or timezone.now()
+    stuck_q = stuck_queued_q(now)
+    queued = queued_scans()
+    got = queued.aggregate(total=Count('id'), stuck=Count('id', filter=stuck_q), oldest_stuck=Min('start_scan_date', filter=stuck_q))
+    oldest_waiting = waiting_scans(now=now).order_by('start_scan_date').values_list('start_scan_date', flat=True).first()
+
+    def age(at):
+        return int(max(0, (now - at).total_seconds())) if at else None
+    return {'waiting': got['total'] - got['stuck'], 'oldest_waiting_age_seconds': age(oldest_waiting), 'stuck': got['stuck'],
+            'stuck_ids': list(queued.filter(stuck_q).order_by('id').values_list('id', flat=True)[:10]) if got['stuck'] else [],
+            'oldest_stuck_age_seconds': age(got['oldest_stuck'])}
+
+
 def with_host_key(qs):
     """Annotate Subdomain rows with ``host_key``: the identity of the machine behind the name, so names that point at the same
     addresses are one host. The key is the project plus the sorted set of the row's IP addresses; a row with no address, or with an
     address of a CDN or shared edge (many unrelated sites share those), keeps its own name as its key. The same name (several
-    scans of it) therefore shares a key, and so do ``example.com`` and ``www.example.com`` when both resolve to the same addresses."""
+    scans of it) therefore shares a key, and so do ``example.com`` and ``www.example.com`` when both resolve to the same addresses. It is a key per
+    row: two copies of one name with different addresses (or one with none) get two keys. To count machines as the Hosts page folds them, use
+    ``machines``."""
     from django.contrib.postgres.aggregates import StringAgg
     from django.db.models import Case, CharField, Exists, OuterRef, Subquery, TextField, Value, When
     from django.db.models.functions import Cast, Concat
@@ -124,25 +190,96 @@ def with_host_key(qs):
                       default=Concat(project, Value(':i:'), '_ipset', output_field=CharField()), output_field=CharField()))
 
 
+class Machines:
+    """The machines of some projects' current inventory exactly as the Hosts page folds them (``machines``). ``of_row(id)`` gives the machine key (the
+    ``with_host_key`` form: ``<project>:i:<address ids>`` or ``<project>:n:<name>``) of a current row, ``name(key)`` the name the Hosts page shows for that
+    machine. A row outside the inventory read has no machine (None)."""
+
+    def __init__(self, by_row, by_name, names):
+        self._by_row, self._by_name, self._names = by_row, by_name, names
+
+    def of_row(self, sub_id):
+        return self._by_row.get(sub_id)
+
+    def name(self, key):
+        return self._names.get(key)
+
+    def keys(self):
+        return set(self._names)
+
+    def names(self):
+        """``[((project id, name), machine key)]`` for every name of the inventory read."""
+        return list(self._by_name.items())
+
+
+def machines(project_ids):
+    """``Machines`` of the current inventory (``latest_scan_q``) of ``project_ids``, folded by the Hosts page's own rules (``agentapi.services._one_per_host``,
+    worked out in Python by ``inventory_counts._collapse``, which ``tests/test_inventory_counts.py`` holds to the SQL): first one row per name (the most open
+    ports, the most addresses, the newest scan), then the names whose chosen rows share an address set are one machine, shown under the target's own name,
+    else the shortest. Every copy of a name (a scanless row beside the scanned one, a second target's copy) belongs to the machine of the row chosen for
+    the name, never to one of its own: ``with_host_key`` keys each row by that row's addresses alone, so a copy with no address, or with another address
+    set, used to count as a second machine. This is the one notion of a machine every count of hosts that links to the Hosts page reads (the Overview's
+    threat card, the email digest, ``reporting/threats``, ``get_threat_digest``). Reads the rows of these projects only, with the base manager: a worker
+    has no request scope, so the caller's project ids are the scope."""
+    from cveFeed import inventory_counts
+    from cveFeed.correlation import latest_scan_q
+    from startScan.models import Subdomain
+    ids = sorted({int(i) for i in project_ids or ()})
+    if not ids:
+        return Machines({}, {}, {})
+    rows = list(Subdomain._base_manager.filter(latest_scan_q()).filter(target_domain__project_id__in=ids)
+                .values_list('id', 'name', 'scan_history_id', 'target_domain__project_id', 'target_domain__name'))
+    rows = inventory_counts._active(rows)  # an archived host is no machine of the inventory (the Hosts page leaves it out too)
+    by_name = {}
+    best, _key = inventory_counts._collapse(rows, names_out=by_name)
+    by_row = {sub_id: by_name[(project_id, name)] for sub_id, name, _scan, project_id, _target in rows if (project_id, name) in by_name}
+    return Machines(by_row, by_name, {key: rep[1] for key, rep in best.items()})
+
+
+def _host_keys(qs):
+    """``[{'id', 'name', 'target_domain__project_id', 'host_key'}]`` for the Subdomain rows of ``qs``: the ``with_host_key`` key worked out here from ONE read
+    of the rows beside their address links (a row per address, its CDN flag with it), the same rule: the project (empty when there is none), then ``:n:``
+    and the name for a row with no address or with a CDN address, else ``:i:`` and the address ids in ascending order joined by commas. In SQL the key
+    is three correlated subqueries per row, worked out once to filter and again to select (60,000 buffers and 180 ms for the other names of the 900
+    hosts the graph draws on the production install; 4,700 buffers and 50 ms read this way)."""
+    rows = {}
+    for sub_id, name, project_id, ip_id, cdn in qs.order_by().values_list('id', 'name', 'target_domain__project_id', 'ip_addresses__id', 'ip_addresses__is_cdn'):
+        row = rows.get(sub_id)
+        if row is None:
+            row = rows[sub_id] = {'id': sub_id, 'name': name, 'target_domain__project_id': project_id, 'ips': [], 'cdn': False}
+        if ip_id is not None:
+            row['ips'].append(ip_id)
+            row['cdn'] = row['cdn'] or bool(cdn)
+    out = []
+    for row in rows.values():
+        project = '' if row['target_domain__project_id'] is None else str(row['target_domain__project_id'])
+        ips, cdn = row.pop('ips'), row.pop('cdn')
+        row['host_key'] = f"{project}:n:{row['name']}" if cdn or not ips else f"{project}:i:" + ','.join(str(i) for i in sorted(ips))
+        out.append(row)
+    return out
+
+
 def host_siblings(sub_ids):
     """``{id: [(id, name), ...]}``: for each given row, the other current-inventory rows of the same host: other copies of its name
     (a second target, a second scan), and every name that points at the same addresses together with their copies. A few queries
-    however many rows are asked about."""
+    however many rows are asked about. The host keys are ``with_host_key``'s, worked out from the address links (``_host_keys``)."""
     from cveFeed.correlation import latest_scan_q
     from startScan.models import Subdomain
     sub_ids = list(sub_ids)
     if not sub_ids:
         return {}
     current = Subdomain.objects.filter(latest_scan_q())
-    keyed = list(with_host_key(Subdomain.objects.filter(id__in=sub_ids)).values('id', 'name', 'target_domain__project_id', 'host_key'))
+    keyed = _host_keys(Subdomain.objects.filter(id__in=sub_ids))
     names_by_key = {}
-    # only a row that could have one of these keys gets its key worked out (a correlated address set per row): one with one of these names, or one on
-    # one of their addresses (an address-set key equal to a row's is made of that row's addresses); every other current row of the inventory is left out
+    # only a row that could have one of these keys gets its key worked out: one with one of these names, or one on one of their addresses (an
+    # address-set key equal to a row's is made of that row's addresses); every other current row of the inventory is left out
     through = Subdomain.ip_addresses.through
     near = Q(name__in={k['name'] for k in keyed}) | Q(id__in=through.objects.filter(
         ipaddress_id__in=through.objects.filter(subdomain_id__in=sub_ids).values('ipaddress_id')).values('subdomain_id'))
-    for r in with_host_key(current.filter(near)).filter(host_key__in={k['host_key'] for k in keyed}).values('host_key', 'name'):
-        names_by_key.setdefault(r['host_key'], set()).add(r['name'])
+    wanted_keys = {k['host_key'] for k in keyed}
+    for r in _host_keys(current.filter(near)):
+        if r['host_key'] in wanted_keys:
+            names_by_key.setdefault(r['host_key'], set()).add(r['name'])
     wanted = {n for names in names_by_key.values() for n in names} | {k['name'] for k in keyed}
     rows = {}
     for r in current.filter(name__in=wanted).exclude(id__in=sub_ids).values('id', 'name', 'target_domain__project_id'):
@@ -152,6 +289,27 @@ def host_siblings(sub_ids):
         names = names_by_key.get(k['host_key'], set()) | {k['name']}
         out[k['id']] = sorted((row for n in names for row in rows.get((k['target_domain__project_id'], n), [])), key=lambda row: (row[1], row[0]))
     return out
+
+
+def archived_host_q(prefix=''):
+    """A Q over host rows (``prefix`` reaches a Subdomain from another model) that holds when the host is archived in its project (``HostState.archived_at``).
+    Lists and counts leave such a host out by default (``qs.filter(~archived_host_q())``); its own page and the Archived view still show it. One indexed
+    lookup per row (the state's project and host)."""
+    from django.db.models import Exists, OuterRef
+    from django.db.models.functions import Lower
+
+    from cveFeed.models import HostState
+    return Q(Exists(HostState.objects.filter(project_id=OuterRef(f'{prefix}target_domain__project_id'), host=Lower(OuterRef(f'{prefix}name')),
+                                             archived_at__isnull=False)))
+
+
+def archived_keys(project_ids=None):
+    """``{(project id, host name)}`` of the archived hosts (of ``project_ids``, or every project): for a count worked out in Python."""
+    from cveFeed.models import HostState
+    qs = HostState.objects.filter(archived_at__isnull=False)
+    if project_ids is not None:
+        qs = qs.filter(project_id__in=list(project_ids))
+    return set(qs.values_list('project_id', 'host'))
 
 
 def exposed_among(reps, project_ids=None):
@@ -180,7 +338,7 @@ def host_reps(domain_id=None, domain_ids=None, in_scope=False):
     from agentapi.services import _one_per_host
     from cveFeed.correlation import latest_scan_q
     from startScan.models import Subdomain
-    base = Subdomain.objects.filter(latest_scan_q())
+    base = Subdomain.objects.filter(latest_scan_q()).filter(~archived_host_q())  # an archived host is not one of the inventory's hosts
     if in_scope:
         from targetApp.models import in_target_scope_q
         base = base.filter(in_target_scope_q())
@@ -231,8 +389,9 @@ def exposure_sources():
     is exposed when any of them names it."""
     from cveFeed.models import CVEMatch
     from startScan.models import Vulnerability
-    matches = CVEMatch.objects.exclude(ai_verdict=RULED_OUT).exclude(remediation_status__in=CLOSED).exclude(subdomain=None)
-    findings = Vulnerability.objects.filter(open_status=True, severity__gte=2).exclude(remediation_status__in=CLOSED).exclude(subdomain=None)
+    matches = CVEMatch.objects.exclude(ai_verdict=RULED_OUT).exclude(remediation_status__in=CLOSED).exclude(dismissed_q()).exclude(subdomain=None)
+    findings = (Vulnerability.objects.filter(open_status=True, severity__gte=2).exclude(remediation_status__in=CLOSED).exclude(dismissed_q())
+                .exclude(subdomain=None))
     return matches, findings
 
 
@@ -250,7 +409,8 @@ def exposed_host_count(reps=None):
 def exposed_matches():
     from cveFeed.correlation import latest_scan_q
     from cveFeed.models import CVEMatch
-    return CVEMatch.objects.exclude(ai_verdict=RULED_OUT).exclude(remediation_status__in=CLOSED).filter(latest_scan_q('subdomain__'))
+    return (CVEMatch.objects.exclude(ai_verdict=RULED_OUT).exclude(remediation_status__in=CLOSED).exclude(dismissed_q())
+            .filter(latest_scan_q('subdomain__')))
 
 
 def match_group_count():
@@ -261,16 +421,92 @@ def match_group_count():
     return finding_groups.row_count(exposed_matches())
 
 
+# Distinct issues: the findings counted as the grouped Findings list shows them.
+
+ISSUES_NOTE = 'Version-only matches on the same product and version of one host are one fix, so they count as one issue.'
+_ISSUE_FIELDS = ('matched_product', 'matched_version', 'subdomain__name', 'subdomain__target_domain__project_id', 'hard')
+
+
+def _issue_rows(qs):
+    """The CVE matches of ``qs`` grouped by what ``version_groups.group_key`` reads (product, version, host name, project) and whether the
+    match has hard evidence of its own (``match_policy.hard_evidence_q``), with how many matches each holds: ONE grouped query."""
+    from django.db.models import BooleanField, Case, Count, Value, When
+
+    from cveFeed.match_policy import hard_evidence_q
+    hard = Case(When(hard_evidence_q(), then=Value(True)), default=Value(False), output_field=BooleanField())
+    return list(qs.order_by().annotate(hard=hard).values(*_ISSUE_FIELDS).annotate(n=Count('id')).order_by())
+
+
+def _shared_sites(rows):
+    """``site_of`` for ``version_groups.group_key``, read only for the names that share a product version with another name of their project:
+    only there can the Hosts page's fold of names onto one host (``agentapi.services._version_sites``, the Findings list's own) change the count.
+    None when no two names do, so a count with nothing to fold reads no host at all."""
+    from cveFeed import version_groups
+    names_of = {}
+    for row in rows:
+        key = version_groups.group_key(row)  # by the host name alone
+        if key is not None:
+            names_of.setdefault(key[:3], set()).add(row['subdomain__name'])
+    shared = {(key[0], name) for key, names in names_of.items() if len(names) > 1 for name in names}
+    if not shared:
+        return None
+    from agentapi.services import _version_sites
+    return _version_sites([{'subdomain__target_domain__project_id': project_id, 'subdomain__name': name} for project_id, name in shared])
+
+
+def match_issues(qs, site_of=None, by_project=False):
+    """``(findings, issues)`` of a CVE match queryset: how many matches, and how many distinct issues they are as the grouped Findings list
+    (``group=product``) shows them. The matches that rest on one product and version reading of one host (every name of it) are one issue,
+    because one upgrade fixes them all (``cveFeed.version_groups``); a match with hard evidence of its own (a confirmed one), with no version or
+    no host counts once, as the list shows it on its own row. ``site_of``: the host of a name when the caller has the Hosts page's fold already;
+    by default it is read for the names that need it (``_shared_sites``). ``by_project``: ``{project id: (findings, issues)}`` instead.
+    One grouped query, plus two small host reads when two names of one project share a product version. Unlike the list, which reads at most
+    ``version_groups.GROUP_SCAN_MAX`` matches and counts the rest one row each, this is exact at any size."""
+    from cveFeed import version_groups
+    rows = _issue_rows(qs)
+    if site_of is None:
+        site_of = _shared_sites(rows)
+    findings, singles, keys = {}, {}, {}
+    for row in rows:
+        project_id = row['subdomain__target_domain__project_id']
+        findings[project_id] = findings.get(project_id, 0) + row['n']
+        key = version_groups.group_key(row, site_of)
+        if key is None:
+            singles[project_id] = singles.get(project_id, 0) + row['n']
+        else:
+            keys.setdefault(project_id, set()).add(key)
+    per = {pid: (n, singles.get(pid, 0) + len(keys.get(pid, ()))) for pid, n in findings.items()}
+    if by_project:
+        return per
+    return sum(n for n, _ in per.values()), sum(i for _, i in per.values())
+
+
+def distinct_issues(findings, cve_qs, site_of=None):
+    """The distinct issues of a set of ``findings`` (a count of CVE matches, scanner and hygiene findings together) whose CVE matches are
+    ``cve_qs`` (None: no CVE match among them): every scanner and hygiene finding is an issue of its own, and the CVE matches count as
+    ``match_issues`` counts them. The one function every surface that prints the figure calls (the Overview, the email, the PDF, the system status)."""
+    if cve_qs is None:
+        return findings
+    matched, issues = match_issues(cve_qs, site_of)
+    return findings - matched + issues
+
+
+def issues_text(findings, issues):
+    """``2,140 findings in 310 distinct issues``: the label every surface prints beside its raw count."""
+    return (f"{findings:,} finding{'' if findings == 1 else 's'} in {issues:,} distinct issue{'' if issues == 1 else 's'}")
+
+
 def actionable_findings(qs):
     """Open scanner findings of low severity or worse. This is the Findings page's Actionable filter for scanner findings:
-    informational detections and closed findings (fixed, an accepted risk or a false positive too) are the rest (``status=all``)."""
-    return qs.filter(open_status=True, severity__gte=1).exclude(remediation_status__in=CLOSED)
+    informational detections, closed findings (fixed, an accepted risk or a false positive too) and dismissed ones (``dismissed_q``) are the rest
+    (``status=all``)."""
+    return qs.filter(open_status=True, severity__gte=1).exclude(remediation_status__in=CLOSED).exclude(dismissed_q())
 
 
 def actionable_hygiene(qs, severity=1):
     """Open hygiene findings of ``severity`` or worse (low by default) that are not closed (fixed, accepted risk, false positive): the Findings page's
     Actionable filter for hygiene findings and the dashboard's Hygiene tile."""
-    return qs.filter(status='open', severity__gte=severity).exclude(remediation_status__in=CLOSED)
+    return qs.filter(status='open', severity__gte=severity).exclude(remediation_status__in=CLOSED).exclude(dismissed_q())
 
 
 HYGIENE_TOP_CHECKS = 3

@@ -1,14 +1,13 @@
 from urllib.parse import urlparse
-from django.apps import apps
 from django.contrib.auth.models import User
 from django.contrib.postgres.fields import ArrayField
 from django.db import models
 from django.db.models import Value
-from django.db.models.functions import Coalesce, MD5 as Md5
+from django.db.models.functions import Coalesce, Lower, MD5 as Md5, Upper
 from django.utils import timezone
-from reNgine.definitions import (CELERY_TASK_STATUSES,
+from cvengine.definitions import (CELERY_TASK_STATUSES,
 								 NUCLEI_REVERSE_SEVERITY_MAP)
-from reNgine.utilities import *
+from cvengine.utilities import *
 from scanEngine.models import EngineType
 from targetApp.models import Domain
 
@@ -58,6 +57,12 @@ class ScanHistory(models.Model):
 			models.Index(fields=['scan_status', 'id'], name='scan_status_id_idx'),
 			models.Index(fields=['domain', 'scan_status'], name='scan_domain_status_idx'),
 			models.Index(fields=['domain', 'start_scan_date'], name='scan_domain_started_idx'),
+			# The finished full scans and the finished host-pipeline scans by domain, for cveFeed.current_scans (the current inventory). The task
+			# name is cveFeed.discovery.HOST_PIPELINE_TASK, written out because this module cannot import cveFeed.
+			models.Index(fields=['domain', 'id'], name='scan_done_full_idx',
+				condition=models.Q(scan_status=2) & ~models.Q(tasks__contains=['host_pipeline'])),
+			models.Index(fields=['domain', 'id'], name='scan_done_pipe_idx',
+				condition=models.Q(scan_status=2) & models.Q(tasks__contains=['host_pipeline'])),
 		]
 
 	def __str__(self):
@@ -65,28 +70,6 @@ class ScanHistory(models.Model):
 
 	def get_subdomain_count(self):
 		return Subdomain.objects.filter(scan_history__id=self.id).count()
-
-	def get_subdomain_change_count(self):
-		last_scan = (
-			ScanHistory.objects
-			.filter(id=self.id)
-			.filter(tasks__overlap=['subdomain_discovery'])
-			.order_by('-start_scan_date')
-		)
-		scanned_host_q1 = (
-			Subdomain.objects
-			.filter(target_domain__id=self.domain.id)
-			.exclude(scan_history__id=last_scan[0].id)
-			.values('name')
-		)
-		scanned_host_q2 = (
-			Subdomain.objects
-			.filter(scan_history__id=last_scan[0].id)
-			.values('name')
-		)
-		new_subdomains = scanned_host_q2.difference(scanned_host_q1).count()
-		removed_subdomains = scanned_host_q1.difference(scanned_host_q2).count()
-		return [new_subdomains, removed_subdomains]
 
 
 	def get_endpoint_count(self):
@@ -151,10 +134,6 @@ class ScanHistory(models.Model):
 			.count()
 		)
 
-	def get_completed_ago(self):
-		if self.stop_scan_date:
-			return self.get_time_ago(self.stop_scan_date)
-
 	def get_total_scan_time_in_sec(self):
 		if self.stop_scan_date:
 			return (self.stop_scan_date - self.start_scan_date).seconds
@@ -214,6 +193,14 @@ class Subdomain(models.Model):
 			models.Index(fields=['target_domain', 'name'], name='sub_domain_name_idx'),
 			models.Index(fields=['scan_history', 'name'], name='sub_scan_name_idx'),
 			models.Index(fields=['target_domain', '-score'], name='sub_domain_score_idx'),
+			# a name matched without case (archive closures, a host's group of names): 0030
+			models.Index(Upper('name'), name='sub_upper_name_idx'),
+			# a name looked up in lower case within a project (cveFeed.manual_only, run for every host a sweep considers): 0037
+			models.Index(Lower('name'), name='sub_lower_name_idx'),
+		]
+		constraints = [
+			# one row per host in a scan (migration 0031 merged the duplicates); rows without a scan are not covered (NULLs differ)
+			models.UniqueConstraint(fields=['scan_history', 'target_domain', 'name'], name='uniq_sub_scan_dom_name'),
 		]
 
 	def __str__(self):
@@ -227,88 +214,11 @@ class Subdomain(models.Model):
 		return endpoints.count()
 
 	@property
-	def get_info_count(self):
-		return (
-			self.get_vulnerabilities
-			.filter(severity=0)
-			.count()
-		)
-
-	@property
-	def get_low_count(self):
-		return (
-			self.get_vulnerabilities
-			.filter(severity=1)
-			.count()
-		)
-
-	@property
-	def get_medium_count(self):
-		return (
-			self.get_vulnerabilities
-			.filter(severity=2)
-			.count()
-		)
-
-	@property
-	def get_high_count(self):
-		return (
-			self.get_vulnerabilities
-			.filter(severity=3)
-			.count()
-		)
-
-	@property
-	def get_critical_count(self):
-		return (
-			self.get_vulnerabilities
-			.filter(severity=4)
-			.count()
-		)
-
-	@property
-	def get_total_vulnerability_count(self):
-		return self.get_vulnerabilities.count()
-
-	@property
 	def get_vulnerabilities(self):
 		vulns = Vulnerability.objects.filter(subdomain__name=self.name, subdomain__target_domain_id=self.target_domain_id)
 		if self.scan_history:
 			vulns = vulns.filter(scan_history=self.scan_history)
 		return vulns
-
-	@property
-	def get_vulnerabilities_without_info(self):
-		vulns = Vulnerability.objects.filter(subdomain__name=self.name, subdomain__target_domain_id=self.target_domain_id).exclude(severity=0)
-		if self.scan_history:
-			vulns = vulns.filter(scan_history=self.scan_history)
-		return vulns
-
-	@property
-	def get_directories_count(self):
-		subdomains = (
-			Subdomain.objects
-			.filter(id=self.id)
-		)
-		dirscan = (
-			DirectoryScan.objects
-			.filter(directories__in=subdomains)
-		)
-		return (
-			DirectoryFile.objects
-			.filter(directory_files__in=dirscan)
-			.distinct()
-			.count()
-		)
-
-	@property
-	def get_subscan_count(self):
-		return (
-			SubScan.objects
-			.filter(subdomain__id=self.id)
-			.distinct()
-			.count()
-		)
 
 
 class SubScan(models.Model):
@@ -324,29 +234,8 @@ class SubScan(models.Model):
 	engine = models.ForeignKey(EngineType, on_delete=models.CASCADE, blank=True, null=True)
 	subdomain_subscan_ids = models.ManyToManyField('Subdomain', related_name='subdomain_subscan_ids', blank=True)
 
-	def get_completed_ago(self):
-		if self.stop_scan_date:
-			return get_time_taken(timezone.now(), self.stop_scan_date)
-
-	def get_total_time_taken(self):
-		if self.stop_scan_date:
-			return get_time_taken(self.stop_scan_date, self.start_scan_date)
-
 	def get_elapsed_time(self):
 		return get_time_taken(timezone.now(), self.start_scan_date)
-
-	def get_task_name_str(self):
-		taskmap = {
-			'subdomain_discovery': 'Subdomain discovery',
-			'dir_file_fuzz': 'Directory and File fuzzing',
-			'port_scan': 'Port Scan',
-			'fetch_url': 'Fetch URLs',
-			'vulnerability_scan': 'Vulnerability Scan',
-			'screenshot': 'Screenshot',
-			'waf_detection': 'Waf Detection',
-			'osint': 'Open-Source Intelligence'
-		}
-		return taskmap.get(self.type, 'Unknown')
 
 class EndPoint(models.Model):
 	id = models.AutoField(primary_key=True)
@@ -385,6 +274,9 @@ class VulnerabilityTags(models.Model):
 	id = models.AutoField(primary_key=True)
 	name = models.CharField(max_length=100)
 
+	class Meta:
+		constraints = [models.UniqueConstraint(fields=['name'], name='uniq_vulntag_name')]  # migration 0033 merged the duplicates
+
 	def __str__(self):
 		return self.name
 
@@ -401,6 +293,9 @@ class CveId(models.Model):
 	id = models.AutoField(primary_key=True)
 	name = models.CharField(max_length=100)
 
+	class Meta:
+		constraints = [models.UniqueConstraint(fields=['name'], name='uniq_cveid_name')]  # migration 0034 merged the duplicates
+
 	def __str__(self):
 		return self.name
 
@@ -408,6 +303,9 @@ class CveId(models.Model):
 class CweId(models.Model):
 	id = models.AutoField(primary_key=True)
 	name = models.CharField(max_length=100)
+
+	class Meta:
+		constraints = [models.UniqueConstraint(fields=['name'], name='uniq_cweid_name')]  # migration 0035 merged the duplicates
 
 	def __str__(self):
 		return self.name
@@ -497,21 +395,6 @@ class Vulnerability(models.Model):
 		severity = NUCLEI_REVERSE_SEVERITY_MAP[self.severity]
 		return f'{self.http_url} | `{severity.upper()}` | `{self.name}` | `{cve_str}`'
 
-	def get_severity(self):
-		return self.severity
-
-	def get_cve_str(self):
-		return ', '.join(f'`{cve.name}`' for cve in self.cve_ids.all())
-
-	def get_cwe_str(self):
-		return ', '.join(f'`{cwe.name}`' for cwe in self.cwe_ids.all())
-
-	def get_tags_str(self):
-		return ', '.join(f'`{tag.name}`' for tag in self.tags.all())
-
-	def get_refs_str(self):
-		return '•' + '\n• '.join(f'`{ref.url}`' for ref in self.references.all())
-
 	def get_path(self):
 		return urlparse(self.http_url).path
 
@@ -546,6 +429,12 @@ class Technology(models.Model):
 	# Both follow from the name and are kept in step by save(), so the database can filter on them.
 	version = models.CharField(max_length=200, blank=True, default='')
 	category = models.CharField(max_length=40, blank=True, default='', db_index=True)  # 'web server', 'language', 'cms', ...
+
+	class Meta:
+		constraints = [
+			# one row per exact name (migration 0032 merged the duplicates); spellings in another case stay apart (cveFeed.tech_rows)
+			models.UniqueConstraint(fields=['name'], name='uniq_technology_name'),
+		]
 
 	def save(self, *args, **kwargs):
 		from cveFeed.correlation import split_name_version
@@ -673,6 +562,15 @@ class Port(models.Model):
 	extra = models.JSONField(default=dict, blank=True)
 	source = models.CharField(max_length=32, blank=True, default='')
 	last_seen = models.DateTimeField(null=True, blank=True)
+	# The address this row is the port of (the one ``IpAddress.ports`` links it to): a port's key is (address, number, protocol), and the link
+	# table alone cannot hold a unique key over the port's number. Written by the port writers (startScan.port_rows), filled for the rows
+	# stored before by migration 0036. No database foreign key and no cascade: deleting an address leaves its port rows as before.
+	ip_address = models.ForeignKey('IpAddress', on_delete=models.DO_NOTHING, null=True, blank=True, db_constraint=False, db_index=False,
+								   related_name='+', editable=False)
+
+	class Meta:
+		# one row per port of an address: migration 0036 merged the duplicates. Rows with no address (NULL) are not covered.
+		constraints = [models.UniqueConstraint(fields=['ip_address', 'number', 'protocol'], name='uniq_port_ip_number_proto')]
 
 	def __str__(self):
 		return str(self.service_name)

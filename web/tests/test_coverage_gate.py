@@ -95,7 +95,7 @@ class FullScanGateTests(TestCase):
         self._clear_gate_note_key('full-port-scan')
 
     def _clear_gate_note_key(self, label):
-        from reNgine import resources
+        from cvengine import resources
         client = getattr(resources.get_store(), 'r', None)
         if client is not None:  # a key a previous test run left in Redis would hide what this one checks
             client.delete(f'cvengine:sweep:coverage-gate-note-{label}')

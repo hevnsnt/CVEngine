@@ -18,11 +18,11 @@ later, marks it a success. Making a machine explicit fixes that class of bug for
 
 ## How it works
 
-`web/reNgine/lifecycle.py` holds the `Machine` class; `web/reNgine/state_machines.py` holds every table. A table names each state (stored
+`web/cvengine/lifecycle.py` holds the `Machine` class; `web/cvengine/state_machines.py` holds every table. A table names each state (stored
 value, stable key, label, one-sentence meaning), the states a row may be created in, and the allowed moves. A state with no moves is final.
 
 ```python
-from reNgine.state_machines import SCAN, SUCCESS
+from cvengine.state_machines import SCAN, SUCCESS
 
 # Moves the row only if it is in a state allowed to become SUCCESS; returns 0 if it had moved on (a person stopped it).
 if not SCAN.move(ScanHistory.objects.filter(pk=scan_id), SUCCESS, stop_scan_date=now):
@@ -44,7 +44,7 @@ stored values and API field names never change (add a `state` name next to an ol
 | `scan` | `startScan.ScanHistory.scan_status`, and `ScanActivity.status` for each stage | queued -1, running 1, success 2, failed 0, **aborted 3** | A Stop is final. Failed may still become success (the reaper can close a scan that was still running; its own finish is the truth). REST and MCP scan rows carry `state` (the name) next to `status` (the code). |
 | `remediation` | `remediation_status` of `cveFeed.CVEMatch`, `startScan.Vulnerability` and `cveFeed.HygieneFinding` | open, in_progress, fixed, accepted_risk, false_positive (labels from `cveFeed.closure.LABELS`) | A person may move a finding between any statuses. An automatic actor (retest, agent report, AI reviewer, scanner engine, sweeps) writes only with `REMEDIATION.move(..., only_from=(<the status it read>,))`, so a decision a person made in between stands. An agent's "fixed" applies only from open or in progress (`AGENT_MAY_FIX`). |
 | `agent` | `agentapi.Agent.status` | pending, active, suspended, revoked | Created pending, active or suspended (`_initial_status`); after that only a person's `update_agent` moves it, in one conditional UPDATE from the status the decision was made on (409 when another decision landed first). A registration or heartbeat never writes it, and a claim re-reads it under its lock. Revoked is final for the agent, with one exception kept because the web interface offers it: a person's Reinstate (revoked -> active); a token cannot, and revoked -> suspended is refused (409). |
-| `sentinel_task` | `agentapi.SentinelTask.status` | queued, claimed, running, **done**, **failed**, expired | A report is filed only from claimed or running. Expired -> done/failed only through the late-result path (`_adopt_late`), for a task lost or timed out across an update (`LATE_SERVABLE_ERRORS`) whose Sentinel still covers the work; never one a person cancelled or one taken back from a suspended or narrowed Sentinel. |
+| `sentinel_task` | `agentapi.SentinelTask.status` | queued, claimed, running, **done**, **failed**, expired | A report is filed only from claimed or running. Expired -> done/failed only through the late-result path (`_adopt_late`), for a task lost or timed out across an update (`LATE_SERVABLE_ERRORS`) whose Sentinel still covers the work; never one a person cancelled or one taken back from a suspended or narrowed Sentinel. Claimed or running goes back to queued only when a Sentinel inside a private network held work that is not internal (`take_back_external`), so an external Sentinel takes it. |
 | `stage_run` | `agentapi.StageRun.state` | running, waiting, ready, **done**, **failed** | A pass writes (wait, close) only while the run is still in its round (`rounds`): one that outlived its lease and was taken over by another worker writes nothing. `cancelled` is listed by the model but never written, so it is not in the table. |
 | `ai_job` | `cveFeed.AIJob.status` | queued, leased, answered, applying, **applied**, **failed**, **expired** | queued to leased or expired; leased back to queued (lease ran out) or to answered; answered to applying; applying to queued (the stage's one retry), applied or failed. A continuation that ends after the housekeeping pass gave its job up as lost (`apply_lost`) changes nothing, and the lost job's stage is told through its `job_failure` hook. Leasing and taking an answer are made under a row lock that checks the state first. |
 
@@ -65,6 +65,9 @@ Found by a survey of the server and the Sentinel client. Each is moved to an exp
   watchdog pause an update pause.
 - **Stage runs** (`agentapi.StageRun.state`): explicit (above). Fixed while moving it: the close and the wait of a pass that outlived its lease
   overwrote the run another worker had resumed.
+- **Queued scans nothing will start.** A host pipeline still queued after 30 minutes, or any scan still queued after 48 hours
+  (`CVENGINE_SCAN_QUEUED_HOURS`), is moved to failed with the reason by the stuck job cleanup, only when the broker holds no message for it and no
+  open stage run carries it. The row is never deleted ([PIPELINE.md](PIPELINE.md#restarts-and-stuck-jobs)).
 - **Host assessments** (`HostAssessment.status`), archive review runs (`queued/running/partial/completed`, where partial means two things).
 - `SubScan.status` is dead (never written).
 

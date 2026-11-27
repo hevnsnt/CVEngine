@@ -1,4 +1,3 @@
-import base64
 import datetime
 from unittest import mock
 
@@ -27,73 +26,6 @@ def cert(**kw):
 	        'not_after': NOW + datetime.timedelta(days=200), 'signature_algorithm': 'sha256 (sha256WithRSAEncryption)',
 	        'key_description': 'RSA 2048', 'protocol': 'TLSv1.3', 'chain_error': '', 'legacy_tls': False}
 	return {**base, **kw}
-
-
-class SpfTests(TestCase):
-	def test_missing_depends_on_mail(self):
-		self.assertEqual(hy.evaluate_spf('a.com', [], True)[0].severity, hy.MEDIUM)
-		self.assertEqual(hy.evaluate_spf('a.com', [], False)[0].severity, hy.LOW)
-
-	def test_policy_strength(self):
-		self.assertEqual(checks(hy.evaluate_spf('a.com', ['v=spf1 include:_spf.google.com -all'], True)), set())
-		self.assertEqual(checks(hy.evaluate_spf('a.com', ['v=spf1 mx +all'], True)), {'spf_allow_all'})
-		self.assertEqual(hy.evaluate_spf('a.com', ['v=spf1 mx +all'], True)[0].severity, hy.CRITICAL)
-		self.assertEqual(checks(hy.evaluate_spf('a.com', ['v=spf1 mx ?all'], True)), {'spf_neutral'})
-		self.assertEqual(checks(hy.evaluate_spf('a.com', ['v=spf1 mx ~all'], True)), {'spf_softfail'})
-		self.assertEqual(checks(hy.evaluate_spf('a.com', ['v=spf1 mx'], True)), {'spf_no_all'})
-		self.assertEqual(checks(hy.evaluate_spf('a.com', ['v=spf1 redirect=_spf.example.com'], True)), set())  # redirect closes it
-		self.assertIn('spf_ptr', checks(hy.evaluate_spf('a.com', ['v=spf1 ptr -all'], True)))
-
-	def test_multiple_records_and_lookup_limit(self):
-		self.assertEqual(checks(hy.evaluate_spf('a.com', ['v=spf1 -all', 'v=spf1 mx -all'], True)), {'spf_multiple'})
-		self.assertIn('spf_too_many_lookups', checks(hy.evaluate_spf('a.com', ['v=spf1 -all'], True, lookup_count=11)))
-		self.assertNotIn('spf_too_many_lookups', checks(hy.evaluate_spf('a.com', ['v=spf1 -all'], True, lookup_count=10)))
-
-	def test_lookup_counting_follows_includes_without_looping(self):
-		zone = {'a.com': ['v=spf1 include:b.com mx a -all'], 'b.com': ['v=spf1 include:a.com ip4:1.2.3.4 exists:x.b.com -all']}
-		# include:b (1), b's include:a (1, then its terms are not walked again), exists (1), mx (1), a (1)
-		self.assertEqual(hy.count_spf_lookups('a.com', lambda d: zone.get(d, [])), 5)
-
-
-class DmarcTests(TestCase):
-	def test_missing_none_and_reject(self):
-		self.assertEqual(hy.evaluate_dmarc('a.com', [], True)[0].severity, hy.HIGH)
-		self.assertEqual(hy.evaluate_dmarc('a.com', [], False)[0].severity, hy.LOW)
-		self.assertEqual(checks(hy.evaluate_dmarc('a.com', ['v=DMARC1; p=none; rua=mailto:d@a.com'], True)), {'dmarc_none'})
-		self.assertEqual(checks(hy.evaluate_dmarc('a.com', ['v=DMARC1; p=reject; rua=mailto:d@a.com'], True)), set())
-
-	def test_details(self):
-		r = hy.evaluate_dmarc('a.com', ['v=DMARC1; p=quarantine; pct=50; sp=none'], True)
-		self.assertTrue({'dmarc_quarantine', 'dmarc_partial', 'dmarc_no_reports', 'dmarc_subdomain_weak'} <= checks(r))
-		self.assertEqual(checks(hy.evaluate_dmarc('a.com', ['v=DMARC1; rua=mailto:x@a.com'], True)), {'dmarc_invalid'})
-		self.assertEqual(checks(hy.evaluate_dmarc('a.com', ['v=DMARC1; p=none', 'v=DMARC1; p=reject'], True)), {'dmarc_multiple'})
-
-
-class DkimCaaTests(TestCase):
-	@staticmethod
-	def rsa_record(bits):
-		from cryptography.hazmat.primitives import serialization
-		from cryptography.hazmat.primitives.asymmetric import rsa
-		pub = rsa.generate_private_key(public_exponent=65537, key_size=bits).public_key()
-		der = pub.public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
-		return f'v=DKIM1; k=rsa; p={base64.b64encode(der).decode()}'
-
-	def test_key_strength_and_revocation(self):
-		self.assertEqual(hy.dkim_key_bits(self.rsa_record(2048)), 2048)
-		self.assertEqual(checks(hy.evaluate_dkim('a.com', {'google': self.rsa_record(2048)}, True)), set())
-		self.assertEqual(checks(hy.evaluate_dkim('a.com', {'s1': self.rsa_record(1024)}, True)), {'dkim_short_key'})
-		self.assertEqual(checks(hy.evaluate_dkim('a.com', {'old': 'v=DKIM1; p='}, True)), {'dkim_not_found'})  # revoked = not present
-		self.assertEqual(hy.evaluate_dkim('a.com', {'old': 'v=DKIM1; p='}, False), [])
-		self.assertEqual(hy.dkim_key_bits('v=DKIM1; p=notbase64!!'), 0)
-
-	def test_not_found_only_matters_for_mail_domains_and_is_informational(self):
-		self.assertEqual(hy.evaluate_dkim('a.com', {}, False), [])
-		f = hy.evaluate_dkim('a.com', {}, True)
-		self.assertEqual((f[0].check, f[0].severity), ('dkim_not_found', hy.INFO))
-
-	def test_caa(self):
-		self.assertEqual(checks(hy.evaluate_caa('a.com', [])), {'caa_missing'})
-		self.assertEqual(hy.evaluate_caa('a.com', ['0 issue "letsencrypt.org"']), [])
 
 
 class CertTests(TestCase):

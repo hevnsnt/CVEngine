@@ -1,6 +1,5 @@
-"""Which Sentinel commit the contract was read from (About and Sentinels pages), and the build wiring that installs the newest Sentinel main."""
+"""Which Sentinel commit the contract was read from (About and Sentinels pages), and the build wiring that installs exactly the pinned commit."""
 import json
-import subprocess
 from importlib import metadata
 from pathlib import Path
 from unittest import mock
@@ -48,39 +47,38 @@ class LibraryTests(TestCase):
 
 
 class BuildWiringTests(TestCase):
-    """The image installs the newest Sentinel main over the floor that requirements.txt pins; CI keeps the floor."""
+    """The image installs EXACTLY the Sentinel commit web/requirements.txt pins (security review S5): no branch is resolved at build time, and the
+    built-in scanner's image is pinned by digest to the image published from the same commit (scanner.lock.json)."""
 
-    def test_the_floor_stays_a_full_commit_in_requirements(self):
+    def test_the_pin_stays_a_full_commit_in_requirements(self):
         text = (ROOT / 'web' / 'requirements.txt').read_text()
         self.assertRegex(text, r'(?m)^cvengine-scanner @ git\+https://github\.com/hevnsnt/cvENGINE-sentinel@[0-9a-f]{40}')
 
-    def test_the_dockerfile_resolves_a_ref_to_a_commit_and_records_it(self):
+    def test_the_dockerfile_installs_the_pin_and_resolves_nothing(self):
         text = (ROOT / 'web' / 'Dockerfile').read_text()
-        self.assertIn('ARG SENTINEL_REF=main', text)
-        self.assertIn('ARG SENTINEL_SHA=', text)
-        self.assertRegex(text, r'cvengine-scanner @ git\+\$\{SENTINEL_REPO\}@\$\{sha\}')
-        self.assertIn('direct_url.json', text)
-        self.assertIn('com.cvengine.sentinel.sha', text)
-        self.assertLess(text.index('pip install --no-cache-dir -r /tmp/requirements.txt'), text.index('ARG SENTINEL_REF=main'))  # the newest goes over the floor, not under it
+        for gone in ('SENTINEL_REF', 'SENTINEL_SHA', 'SENTINEL_REPO', 'git ls-remote', 'refs/heads', 'cvengine-scanner @ git+'):
+            self.assertNotIn(gone, text)
+        self.assertIn('pip install --no-cache-dir -r /tmp/requirements.txt', text)
+        self.assertIn('direct_url.json', text)  # the build still prints the commit it holds
 
-    def test_every_build_passes_the_arguments_and_every_build_path_resolves_the_commit_first(self):
+    def test_no_build_path_passes_a_sentinel_ref_any_more(self):
+        self.assertFalse((ROOT / 'scripts' / 'sentinel-ref.sh').exists())
+        for name in ('docker-compose.yml', 'docker-compose.dev.yml', 'Makefile', 'scripts/update.sh', 'scripts/apply-update.sh', 'scripts/update-deploy.sh',
+                     '.env.example', 'install.sh'):
+            text = (ROOT / name).read_text()
+            for gone in ('sentinel-ref.sh', 'SENTINEL_REF', 'SENTINEL_SHA', 'SENTINEL_BUILD_ENV'):
+                self.assertNotIn(gone, text, name)
+
+    def test_the_library_and_the_scanner_image_come_from_one_commit(self):
+        lock = json.loads((ROOT / 'scanner.lock.json').read_text())
+        requirements = (ROOT / 'web' / 'requirements.txt').read_text()
+        self.assertIn(f'cvENGINE-sentinel@{lock["floor"]["commit"]}', requirements)
+        self.assertRegex(lock['floor']['digest'], r'^sha256:[0-9a-f]{64}$')
         compose = (ROOT / 'docker-compose.yml').read_text()
-        self.assertEqual(compose.count('SENTINEL_REF: "${SENTINEL_REF:-main}"'), 2)  # web and celery: the two builds of ./web
-        self.assertEqual(compose.count('SENTINEL_SHA: "${SENTINEL_SHA:-}"'), 2)
-        for script in ('scripts/update.sh', 'scripts/apply-update.sh', 'scripts/update-deploy.sh'):
-            text = (ROOT / script).read_text()
-            self.assertLess(text.index('scripts/sentinel-ref.sh'), text.index('build web celery celery-beat'), script)
-        makefile = (ROOT / 'Makefile').read_text()
-        self.assertEqual(makefile.count('${SENTINEL_BUILD_ENV}'), 2)  # make up and make build
-
-    def test_the_ref_script_takes_a_full_sha_as_it_is_and_refuses_what_is_not_a_ref(self):
-        run = lambda ref: subprocess.run(['bash', str(ROOT / 'scripts' / 'sentinel-ref.sh')], capture_output=True, text=True, env={'PATH': '/usr/bin:/bin', 'SENTINEL_REF': ref}, timeout=30)
-        self.assertEqual(run(SHA).stdout.strip(), SHA)
-        for bad in ('main; rm -rf /', '--upload-pack=x', '$(id)', 'a b'):
-            out = run(bad)
-            self.assertEqual((out.returncode, out.stdout.strip()), (0, ''), bad)  # nothing is printed: the Dockerfile then resolves SENTINEL_REF itself, and fails on a ref that is not one
+        self.assertIn(f'{lock["image"]}@{lock["floor"]["digest"]}}}}}', compose)
+        self.assertNotIn('cvengine-sentinel:main', compose)
 
     def test_ci_still_reads_a_full_commit_where_it_always_did(self):
         workflow = (ROOT / '.github' / 'workflows' / 'build-pr.yml').read_text()
         self.assertIn(r"cvENGINE-sentinel@\([0-9a-f]\{40\}\)", workflow)
-        self.assertRegex(workflow, r'scanner_lock\.py check --remote')  # the floor is on the Sentinel main branch
+        self.assertRegex(workflow, r'scanner_lock\.py check --remote')  # the pinned commit is on the Sentinel main branch and its image is the pinned digest

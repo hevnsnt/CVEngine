@@ -12,8 +12,8 @@ from django.http import FileResponse, Http404, JsonResponse
 from django.http.response import HttpResponseBase
 
 from cveFeed import egress_proxy, mailer, openvas_admin, seed_admin, tailscale_admin
-from reNgine import ai_prompts
-from reNgine.ai_profiles import (KEEP_ALIVE_PATTERN, NUMBER_SETTINGS, REASONING_CHOICES, SETTING_APPLIES, SETTING_ENV, STRUCTURED_MODES, AIRuntime, same_service)
+from cvengine import ai_prompts
+from cvengine.ai_profiles import (KEEP_ALIVE_PATTERN, NUMBER_SETTINGS, REASONING_CHOICES, SETTING_APPLIES, SETTING_ENV, STRUCTURED_MODES, AIRuntime, same_service)
 from dashboard.models import AIProviderSettings, ChaosAPIKey
 from scanEngine.models import Notification, Proxy, VulnerabilityReportSetting
 
@@ -85,10 +85,31 @@ def _text(data, key, current='', secret=False, max_len=500):
 
 # --- AI -----------------------------------------------------------------------
 
+GUIDANCE_PROGRESS_SECONDS = 30  # the AI tab's catalogue progress (five counts over the whole catalogue) is shared this long by every page load and save
+
+
 def _guidance_progress():
+    """``detection_author.progress()``, kept ``GUIDANCE_PROGRESS_SECONDS`` under a key of the daily budget (a save of it shows at once), the newest
+    CVE and the newest detection record (a new one shows at once). The catalogue belongs to no project, so every admin is given the same numbers."""
+    from django.core.cache import cache
+    from django.db.models import Max
+
     from cveFeed import detection_author
+    from cveFeed.models import CVEDetection, CVEEntry
     try:
-        return detection_author.progress()
+        key = (f"cve:guidance-progress:{detection_author.daily_limit()}:{CVEEntry.objects.aggregate(m=Max('id'))['m']}"
+               f":{CVEDetection.objects.aggregate(m=Max('id'))['m']}")
+        try:
+            got = cache.get(key)
+        except Exception:  # noqa: BLE001 - a cache outage counts directly
+            return detection_author.progress()
+        if got is None:
+            got = detection_author.progress()
+            try:
+                cache.set(key, got, GUIDANCE_PROGRESS_SECONDS)
+            except Exception:  # noqa: BLE001
+                pass
+        return got
     except Exception:  # noqa: BLE001 - a counting problem must not break the settings page
         return None
 
@@ -125,17 +146,47 @@ def _nuclei_in_force(cfg):
     chosen model, else the cheapest haiku of a list read in the last ten minutes, else '' (the page says the default is found when it loads)."""
     if (cfg.nuclei_model or '').strip():
         return cfg.nuclei_model.strip()
-    from reNgine import ai_nuclei_model
-    from reNgine.ai_providers import get_provider
+    from cvengine import ai_nuclei_model
+    from cvengine.ai_providers import get_provider
     try:
         return ai_nuclei_model.haiku_default(get_provider(cfg.provider, api_key=cfg.api_key or 'x', base_url=cfg.base_url or None), fetch=False) or ''
     except Exception:  # noqa: BLE001 - a stored provider this version does not know
         return ''
 
 
+def _bulk_and_budget(cfg):
+    """The bulk model and the AI money budget as the AI section shows them: what is saved, what is in force and where it comes from, and the
+    spend of this month and today (``cveFeed.ai_budget.state``)."""
+    from cveFeed import ai_budget
+    from cvengine import ai_routing
+    try:
+        budget = ai_budget.state(row=cfg)
+    except Exception:  # noqa: BLE001 - the page still loads when the ledger cannot be read; the queue holds the work meanwhile
+        budget = {'message': 'the AI spend could not be read'}
+    return {'bulk_model': cfg.bulk_model or '', 'use_bulk_model': bool(cfg.use_bulk_model),
+            'bulk_model_in_force': ai_routing.bulk_model(cfg) if cfg.provider else '',
+            'bulk_stages': sorted(stage for stage, kind in ai_routing.STAGE_MODEL.items() if kind == ai_routing.BULK),
+            'main_stages': sorted(stage for stage, kind in ai_routing.STAGE_MODEL.items() if kind == ai_routing.MAIN),
+            'monthly_budget_usd': str(cfg.monthly_budget_usd) if cfg.monthly_budget_usd is not None else None,
+            'daily_budget_usd': str(cfg.daily_budget_usd) if cfg.daily_budget_usd is not None else None,
+            'budget': budget}
+
+
+def _budget_value(data, key):
+    """A dollar budget from the page: None (empty: follow the environment, else no limit) or 0 to 1,000,000."""
+    from cveFeed import ai_budget
+    raw = data.get(key)
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return None
+    value = ai_budget.clean_limit(raw)
+    if value is None or isinstance(raw, bool):
+        raise SettingsError(400, f'{key} must be an amount in US dollars from 0 to 1000000, or empty for none')
+    return value
+
+
 def ai_get(request):
     cfg = AIProviderSettings.objects.first() or AIProviderSettings()
-    from reNgine.ai_providers import DEFAULT_MODELS, KEYLESS, SELECTABLE, SERVER_URL_PROVIDERS, effective_settings, provider_defaults
+    from cvengine.ai_providers import DEFAULT_MODELS, KEYLESS, SELECTABLE, SERVER_URL_PROVIDERS, effective_settings, provider_defaults
     out = {'provider': cfg.provider, 'model': cfg.model, 'base_url': cfg.base_url, 'enabled': cfg.enabled,
            'verified_at': cfg.verified_at.isoformat() if cfg.verified_at else None,
            'selectable': list(SELECTABLE), 'keyless': list(KEYLESS), 'needs_url': list(SERVER_URL_PROVIDERS),
@@ -145,6 +196,7 @@ def ai_get(request):
            'cve_guidance': _guidance_progress(), 'default_models': DEFAULT_MODELS, 'nuclei_model': cfg.nuclei_model,
            'nuclei_model_in_force': _nuclei_in_force(cfg),
            'providers': [p for p, _ in AIProviderSettings.PROVIDER_CHOICES]}
+    out.update(_bulk_and_budget(cfg))
     # How a request is made. null / '' is "not set here": the request follows the environment, then the provider's default (see `env`,
     # `provider_defaults` and `effective`, which says where each value in force comes from).
     out.update({name: getattr(cfg, name) if name in NUMBER_SETTINGS else getattr(cfg, name) or '' for name in AI_RUNTIME_FIELDS})
@@ -212,12 +264,12 @@ def _nuclei_model_value(raw, cfg, old_connection, old_value):
 
 
 def ai_put(request):
-    from reNgine.ai_providers import DEFAULT_MODELS, LOCAL_PORT, SERVER_URL_PROVIDERS
+    from cvengine.ai_providers import DEFAULT_MODELS, LOCAL_PORT, SERVER_URL_PROVIDERS
     data = _body(request)
     cfg = AIProviderSettings.objects.first() or AIProviderSettings()
     old_connection = (cfg.provider, cfg.model, cfg.base_url, cfg.api_key)
     provider = data.get('provider', cfg.provider)
-    if provider not in DEFAULT_MODELS:
+    if not isinstance(provider, str) or provider not in DEFAULT_MODELS:
         raise SettingsError(400, 'unknown provider')
     cfg.provider = provider
     cfg.model = _text(data, 'model', cfg.model, max_len=200)
@@ -251,6 +303,19 @@ def ai_put(request):
             cfg.auto_fire_max_scans = max(1, min(int(data['auto_fire_max_scans']), 5000))
         except (TypeError, ValueError):
             raise SettingsError(400, 'auto_fire_max_scans must be a number')
+    old_bulk = (cfg.bulk_model, cfg.use_bulk_model, cfg.monthly_budget_usd, cfg.daily_budget_usd)
+    if 'bulk_model' in data:
+        raw = '' if data['bulk_model'] is None else data['bulk_model']
+        if not isinstance(raw, str) or (raw.strip() and not MODEL_NAME.match(raw.strip())):
+            raise SettingsError(400, 'bulk_model must be a model name, or empty for the provider\'s cheapest current model')
+        cfg.bulk_model = raw.strip()
+    elif (cfg.provider, cfg.base_url) != (old_connection[0], old_connection[2]):
+        cfg.bulk_model = ''  # a model belongs to the provider it was chosen from
+    if 'use_bulk_model' in data:
+        cfg.use_bulk_model = bool(data['use_bulk_model'])
+    for key in ('monthly_budget_usd', 'daily_budget_usd'):
+        if key in data:
+            setattr(cfg, key, _budget_value(data, key))
     for key in ('plan_daily_total', 'plan_daily_per_project', 'cve_guidance_daily'):
         if key in data:
             try:
@@ -266,6 +331,13 @@ def ai_put(request):
     connection = [label for label, was, now in (('provider', old_connection[0], cfg.provider), ('model', old_connection[1], cfg.model),
                   ('base_url', old_connection[2], cfg.base_url), ('api_key', old_connection[3], cfg.api_key)) if was != now]
     nuclei = ['nuclei_model'] if cfg.nuclei_model != old_nuclei else []
+    new_bulk = (cfg.bulk_model, cfg.use_bulk_model, cfg.monthly_budget_usd, cfg.daily_budget_usd)
+    if new_bulk != old_bulk:
+        from cveFeed import ai_budget
+        ai_budget.clear_cache()
+        audit(request.user, 'ai.budget', cfg.provider, bulk_model=cfg.bulk_model or 'default', use_bulk_model=cfg.use_bulk_model,
+              monthly_budget_usd=str(cfg.monthly_budget_usd) if cfg.monthly_budget_usd is not None else 'none',
+              daily_budget_usd=str(cfg.daily_budget_usd) if cfg.daily_budget_usd is not None else 'none')
     if nuclei:
         audit(request.user, 'ai.nuclei_model', cfg.provider, changed=nuclei, nuclei_model=cfg.nuclei_model or 'default')  # a model name, never a key
     if changed or connection:  # names of what changed, and the new value of a setting that is a number or a word; never a key or an address
@@ -459,7 +531,7 @@ def _models_hit(provider, base_url, key, refresh=False):
     """The provider's model list as ``ai_models`` answers it (cached per provider, address and key hash): ``{models, recommended,
     nuclei_default}``. Raises SettingsError(400) with the plain reason when the list cannot be read."""
     from django.core.cache import cache
-    from reNgine.ai_providers import SELECTABLE, AIProviderError, get_provider, pick_cheapest_newest
+    from cvengine.ai_providers import SELECTABLE, AIProviderError, get_provider, pick_cheapest_newest
     cache_key = _models_cache_key(provider, base_url, key)
     hit = None
     if not refresh:
@@ -472,8 +544,11 @@ def _models_hit(provider, base_url, key, refresh=False):
             raw = get_provider(provider, api_key=key or None, base_url=base_url or None).list_models()
             listed = _clean_models(raw)
             recommended = '' if provider in SELECTABLE else (pick_cheapest_newest(raw) or '')
-            from reNgine import ai_nuclei_model
+            from cvengine import ai_nuclei_model
             haiku = ai_nuclei_model.remember(provider, base_url, raw)
+            if provider not in SELECTABLE:  # the bulk model's default is the same cheapest current model (cvengine.ai_routing)
+                from cvengine import ai_routing
+                ai_routing.remember(provider, base_url, raw)
             hit = {'models': listed, 'recommended': recommended if any(m['id'] == recommended for m in listed) else '',
                    'nuclei_default': haiku if any(m['id'] == haiku for m in listed) else ''}
             ttl = MODELS_CACHE_SECONDS
@@ -500,11 +575,11 @@ def ai_models(request):
     provider and address are the one it was saved for, so a stored key is never sent to a different service); the page never receives a
     key. The answer is cached for a few minutes per provider, address and key hash (``refresh`` skips the cache), a failure for a few
     seconds. Nothing in the answer, the cache or the log holds a key or the provider's own words."""
-    from reNgine.ai_providers import DEFAULT_MODELS, SERVER_URL_PROVIDERS
+    from cvengine.ai_providers import DEFAULT_MODELS, SERVER_URL_PROVIDERS
     data = _body(request)
     cfg = AIProviderSettings.objects.first() or AIProviderSettings()
     provider = data.get('provider') or cfg.provider
-    if provider not in DEFAULT_MODELS:
+    if not isinstance(provider, str) or provider not in DEFAULT_MODELS:
         raise SettingsError(400, 'unknown provider')
     base_url = str(data.get('base_url') or '').strip() or (cfg.base_url if provider == cfg.provider else '')
     if base_url and not re.match(r'^https?://', base_url, re.I):
@@ -548,7 +623,7 @@ def ai_error_hint(exc, timeout, connect=10, capped=False):
 
 def ai_test(request):
     import dataclasses
-    from reNgine.ai_providers import PROVIDERS, AIProviderError, connect_timeout, request_timeout
+    from cvengine.ai_providers import PROVIDERS, AIProviderError, connect_timeout, request_timeout
     cfg = AIProviderSettings.objects.first()
     if not cfg:
         raise SettingsError(400, 'save the AI settings first')
@@ -561,10 +636,10 @@ def ai_test(request):
         runtime = dataclasses.replace(runtime, request_timeout=TEST_TIMEOUT_CAP)
         waits = TEST_TIMEOUT_CAP
     try:
-        from reNgine.ai_providers import get_provider
+        from cvengine.ai_providers import get_provider
         provider = get_provider(cfg.provider, model=cfg.model or None, api_key=cfg.api_key or None,
                                 base_url=cfg.base_url or None, runtime=runtime)
-        from reNgine.ai_providers import usage_stage
+        from cvengine.ai_providers import usage_stage
         with usage_stage('connection_test'):
             reply = provider.complete(ai_prompts.CONNECTION_TEST_SYSTEM, ai_prompts.CONNECTION_TEST_USER)
     except AIProviderError as exc:
@@ -586,7 +661,10 @@ def ai_usage_get(request):
     days = request.GET.get('days', '7')
     if days not in ('1', '7', '30'):
         raise SettingsError(400, 'days must be 1, 7, or 30')
-    return snapshot(int(days))
+    cost = request.GET.get('cost', '1')
+    if cost not in ('0', '1'):
+        raise SettingsError(400, 'cost must be 0 or 1')
+    return snapshot(int(days), with_cost=cost == '1')  # ?cost=0 (the usage page): without cost_by_stage_day, which the page does not show
 
 
 def ai_usage_rate_put(request):
@@ -609,6 +687,8 @@ def keys_put(request):
         if name not in data:
             continue
         entry = data[name] or {}
+        if not isinstance(entry, dict):
+            raise SettingsError(400, f'{name} must be an object such as {{"key": "..."}} or {{"clear": true}}')
         if entry.get('clear'):
             model.objects.all().delete()
             continue
@@ -625,6 +705,7 @@ NOTIFY_FLAGS = ('send_to_slack', 'send_to_lark', 'send_to_discord', 'send_to_tel
                 'send_interesting_notif', 'send_vuln_notif', 'send_subdomain_changes_notif', 'send_scan_output_file',
                 'send_scan_tracebacks')
 NOTIFY_SECRETS = ('slack_hook_url', 'lark_hook_url', 'discord_hook_url', 'telegram_bot_token', 'telegram_bot_chat_id')
+NOTIFY_URLS = ('slack_hook_url', 'lark_hook_url', 'discord_hook_url')
 
 
 def notifications_get(request):
@@ -644,9 +725,21 @@ def notifications_put(request):
         if data.get(f'clear_{name}'):
             setattr(row, name, '')
         else:
-            setattr(row, name, _text(data, name, getattr(row, name) or '', secret=True, max_len=200))
+            value = _text(data, name, getattr(row, name) or '', secret=True, max_len=200)
+            if name in NOTIFY_URLS and value != (getattr(row, name) or ''):
+                _check_hook_url(name, value)
+            setattr(row, name, value)
     row.save()
     return notifications_get(request)
+
+
+def _check_hook_url(name, url):
+    """A webhook address must resolve to public addresses only (cvengine.hook_guard): the notification sender POSTs to it from the server,
+    so a loopback, link local, metadata or private address would have the server send its scan messages inside its own network."""
+    from cvengine.hook_guard import hook_refusal
+    reason = hook_refusal(url)
+    if reason:
+        raise SettingsError(400, f'{name} {reason}. A webhook must be a public http or https address.')
 
 
 # --- email -------------------------------------------------------------------------
@@ -678,7 +771,7 @@ def email_put(request):
     if not 1 <= port <= 65535:
         raise SettingsError(400, 'the port must be between 1 and 65535')
     security = data.get('security', cfg.security)
-    if security not in dict(cfg.SECURITY_CHOICES):
+    if not isinstance(security, str) or security not in dict(cfg.SECURITY_CHOICES):
         raise SettingsError(400, 'Security must be STARTTLS, SSL/TLS or None')
     username = _text(data, 'username', cfg.username, max_len=255)
     from_address = _text(data, 'from_address', cfg.from_address, max_len=254)
@@ -775,7 +868,7 @@ def proxy_put(request):
 
 REPORT_TEXT = {'company_name': 100, 'company_address': 200, 'company_email': 100, 'company_website': 100,
                'footer_text': 200, 'executive_summary_description': 5000}
-REPORT_FLAGS = {'show_executive_summary': 'show_executive_summary', 'show_footer': 'show_footer', 'show_banner': 'show_rengine_banner'}
+REPORT_FLAGS = {'show_executive_summary': 'show_executive_summary', 'show_footer': 'show_footer', 'show_banner': 'show_cvengine_banner'}
 
 
 def report_get(request):
@@ -811,7 +904,7 @@ def report_put(request):
 # --- ip allowlist ---------------------------------------------------------------
 
 def _client_ip(request):
-    from reNgine.client_ip import client_ip
+    from cvengine.client_ip import client_ip
     return client_ip(request)
 
 
@@ -848,7 +941,7 @@ def ip_allowlist_get(request):
 
 def ip_allowlist_put(request):
     from dashboard.models import IpAccessControl, IpAllowlistEntry
-    from reNgine import ip_allowlist as ipa
+    from cvengine import ip_allowlist as ipa
     data = _body(request)
     cfg = IpAccessControl.current()
     if 'enabled' in data:
@@ -867,7 +960,7 @@ def ip_allowlist_put(request):
 
 def ip_allowlist_entry_create(request):
     from dashboard.models import IpAllowlistEntry
-    from reNgine import ip_allowlist as ipa
+    from cvengine import ip_allowlist as ipa
     data = _body(request)
     cidr = _valid_cidr(_text(data, 'cidr', max_len=64))
     label = _text(data, 'label', max_len=200)
@@ -879,7 +972,7 @@ def ip_allowlist_entry_create(request):
 
 def ip_allowlist_entry_delete(request, entry_id):
     from dashboard.models import IpAccessControl, IpAllowlistEntry
-    from reNgine import ip_allowlist as ipa
+    from cvengine import ip_allowlist as ipa
     entry = IpAllowlistEntry.objects.filter(id=entry_id).first()
     if not entry:
         raise SettingsError(404, 'entry not found')
@@ -893,10 +986,37 @@ def ip_allowlist_entry_delete(request, entry_id):
     return {'deleted': True}
 
 
+# --- address bans (the input guard's AbuseBan) ------------------------------------------
+
+def ip_bans_get(request):
+    """The address bans in force now (not lifted, not expired), newest first, with the address the caller is using."""
+    from django.db.models import Q
+    from django.utils import timezone
+    from dashboard.models import AbuseBan
+    rows = (AbuseBan.objects.filter(lifted=False).exclude(ip='').filter(Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now()))
+            .order_by('-created_at', '-id')[:200])
+    return {'your_ip': _client_ip(request),
+            'bans': [{'id': b.id, 'ip': b.ip, 'reason': b.reason, 'username': b.username, 'created_at': b.created_at, 'expires_at': b.expires_at} for b in rows]}
+
+
+def ip_ban_lift(request, ban_id):
+    """Lift one ban at once (the address is let in again within seconds: the ban cache is reset). Audit logged."""
+    from dashboard.models import AbuseBan, AuditLog
+    from cvengine import input_guard
+    ban = AbuseBan.objects.filter(id=ban_id, lifted=False).first()
+    if ban is None:
+        raise SettingsError(404, 'no ban in force with that id')
+    AbuseBan.objects.filter(ip=ban.ip, lifted=False).update(lifted=True)  # every open ban of the address: lifting one must let it in
+    input_guard.invalidate_cache()
+    AuditLog.objects.create(actor=request.user if request.user.is_authenticated else None, actor_name=getattr(request.user, 'username', '') or '',
+                            action='abuse.ban_lifted', target=ban.ip[:300], detail={'ban_id': ban.id, 'reason': ban.reason[:300]})
+    return {'lifted': True, 'ip': ban.ip}
+
+
 # --- resources -----------------------------------------------------------------------
 
 def resources_get(request):
-    from reNgine import resources
+    from cvengine import resources
     return resources.cluster_snapshot()
 
 
@@ -1016,10 +1136,10 @@ def _update_row():
 
 def _updates_state(row):
     """The update state plus the question the Update button asks first (which scanners run) and what an unattended update left to say."""
-    from cveFeed import autotune, scanner_plan, updater
+    from cveFeed import autotune, client_address, scanner_plan, updater
     pin = autotune.discovery_pin()
     return {**updater.state(row), 'scanner_choice': scanner_plan.decision(), 'scanner_notice': scanner_plan.notice(),
-            'discovery_pin_notice': pin['text'] if pin else None}
+            'discovery_pin_notice': pin['text'] if pin else None, 'client_address_notice': client_address.notice()}
 
 
 def updates_get(request):
@@ -1172,12 +1292,16 @@ def reviewer_get(request):
            'template_validation_enabled': row.template_validation_enabled,
            'host_review_enabled': row.host_review_enabled, 'host_review_auto_close': row.host_review_auto_close, 'host_review_daily_max': row.host_review_daily_max,
            'host_review_auto_per_project_day': row.host_review_auto_per_project_day, 'host_reviews_today': host_review.reviews_today(),
-           'host_review_projects': [{'slug': p.slug, 'name': p.name, 'mode': host_review.mode_of(p)} for p in Project.objects.order_by('name')[:500]],
+           'host_review_projects': [{'slug': p.slug, 'name': p.name, 'mode': mode} for p, mode in host_review.modes_of(Project.objects.order_by('name')[:500])],
            'default_ops_hours': list(reviewer.DEFAULT_OPS_HOURS), 'default_models': reviewer.DEFAULT_MODELS,
            'reviews_today': reviewer.reviews_today(), 'last_ops_at': row.last_ops_at.isoformat() if row.last_ops_at else None,
            'container': builtin_reviewer.status(), 'working': reviewer.enabled(row, provider)}
     jobs = ai_jobs.waiting()
     out['ai_jobs'] = {**jobs, 'message': ai_jobs.waiting_message(jobs)}
+    from cvengine import ai_routing
+    if provider is not None and provider.provider == 'anthropic' and ai_routing.routed(provider) and ai_routing.bulk_model(provider):
+        # an empty review model is the bulk model while it is switched on (cvengine.ai_routing), so the picker's "Built-in" names that one
+        out['default_models'] = {**reviewer.DEFAULT_MODELS, 'review': ai_routing.bulk_model(provider)}
     if provider is not None:
         out['models_in_force'] = {'review': reviewer.model_for('review', row, provider), 'ops': reviewer.model_for('ops', row, provider)}
     return out
@@ -1305,6 +1429,30 @@ def setup_questions_post(request):
         raise SettingsError(exc.status, exc.message)
 
 
+def client_address_snippet(request):
+    """The lines a host nginx needs so the bundled proxy believes the client address it passes on (cveFeed.client_address.snippet), with this
+    install's upstream secret in them. A person only: an agent's call (the settings bridge) or an API token is refused, the answer is never
+    cached, and the reading is in the audit log."""
+    from cveFeed import client_address
+    from cveFeed.admin_api import audit
+    if getattr(request, 'via_agent', False) or getattr(request, 'api_token', None) is not None:
+        raise SettingsError(403, 'the host nginx lines hold the install\'s secret: a person reads them in the web interface')
+    text = client_address.snippet()
+    if not text:
+        raise SettingsError(409, 'this install has no upstream secret yet (CVENGINE_UPSTREAM_SECRET); the next update generates it')
+    audit(request.user, 'client_address.snippet_shown', 'host nginx lines')
+    response = JsonResponse({'snippet': text})
+    response['Cache-Control'] = 'no-store'
+    return response
+
+
+def client_address_recheck(request):
+    """Check again now whether the client address arrives (cveFeed.client_address.recheck): clears the notice when it does, never opens one."""
+    from cveFeed import client_address
+    out = client_address.recheck()
+    return {**out, 'notice': client_address.notice()}
+
+
 def alert_dismiss(request, alert_id):
     from cveFeed import reviewer
     if not reviewer.dismiss_alert(int(alert_id), request.user):
@@ -1321,6 +1469,8 @@ ROUTES = [
     ('GET', r'alerts', lambda r, **k: alerts_get(r)),
     ('GET', r'setup_questions', lambda r, **k: setup_questions_get(r)), ('POST', r'setup_questions', lambda r, **k: setup_questions_post(r)),
     ('POST', r'alerts/(?P<alert_id>\d{1,12})/dismiss', lambda r, alert_id, **k: alert_dismiss(r, alert_id)),
+    ('GET', r'client_address/snippet', lambda r, **k: client_address_snippet(r)),
+    ('POST', r'client_address/recheck', lambda r, **k: client_address_recheck(r)),
     ('PUT', r'ai/usage/rate', lambda r, **k: ai_usage_rate_put(r)),
     ('GET', r'scan_policy', lambda r, **k: scan_policy_get(r)), ('PUT', r'scan_policy', lambda r, **k: scan_policy_put(r)),
     ('POST', r'ai/test', lambda r, **k: ai_test(r)),
@@ -1362,6 +1512,8 @@ ROUTES = [
     ('GET', r'ip_allowlist', lambda r, **k: ip_allowlist_get(r)), ('PUT', r'ip_allowlist', lambda r, **k: ip_allowlist_put(r)),
     ('POST', r'ip_allowlist/entries', lambda r, **k: ip_allowlist_entry_create(r)),
     ('DELETE', r'ip_allowlist/entries/(?P<entry_id>\d+)', lambda r, entry_id, **k: ip_allowlist_entry_delete(r, int(entry_id))),
+    ('GET', r'ip_bans', lambda r, **k: ip_bans_get(r)),
+    ('POST', r'ip_bans/(?P<ban_id>\d{1,12})/lift', lambda r, ban_id, **k: ip_ban_lift(r, int(ban_id))),
 ]
 COMPILED = [(m, re.compile(f'^{p}/?$'), fn) for m, p, fn in ROUTES]
 

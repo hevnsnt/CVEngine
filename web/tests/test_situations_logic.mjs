@@ -1,12 +1,16 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
 
-import {chipsOf, countLine, heatOf, moreFindings, safeLink, stateView} from '../static/cve/situations-logic.js';
+import {chipsOf, countLine, heatOf, moreFindings, safeLink, stateView, tierFromSearch} from '../static/cve/situations-logic.js';
 
 test('chips list the tiers a situation has, worst first, and leave out the empty ones', () => {
   assert.deepEqual(chipsOf({proven: 2, likely: 0, exposure: 1, minor: 4}).map((c) => c.label), ['2 proven', '1 exposed', '4 minor']);
   assert.deepEqual(chipsOf({}), []);
   assert.deepEqual(chipsOf(null), []);
+});
+
+test('high hygiene sits between likely and exposed', () => {
+  assert.deepEqual(chipsOf({proven: 1, likely: 2, hygiene: 3, exposure: 1, minor: 4}).map((c) => c.label), ['1 proven', '2 likely', '3 high hygiene', '1 exposed', '4 minor']);
 });
 
 test('the edge colour is the worst tier: proof is fire, likely is smoke, the rest is not coloured', () => {
@@ -50,4 +54,10 @@ test('counts and the truncated-findings line', () => {
   assert.equal(countLine({}), '');
   assert.equal(moreFindings({findings: [1, 2], findings_total: 9, findings_truncated: true}), 'Showing 2 of 9 findings.');
   assert.equal(moreFindings({findings: [1], findings_total: 1, findings_truncated: false}), '');
+});
+
+test('a link may preselect one of the tier filters the page offers, and nothing else', () => {
+  assert.equal(tierFromSearch('?tier=hygiene'), 'hygiene');
+  assert.equal(tierFromSearch('?org=default&tier=proven'), 'proven');
+  for (const bad of ['', '?tier=', '?tier=everything', '?tier=<b>', null, undefined]) assert.equal(tierFromSearch(bad), '', String(bad));
 });

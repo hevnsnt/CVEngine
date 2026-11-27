@@ -1,6 +1,6 @@
 from django.db import migrations
 
-from reNgine.crypto_fields import ENCRYPTED_COLUMN_LENGTH, EncryptedCharField
+from cvengine.crypto_fields import ENCRYPTED_COLUMN_LENGTH, EncryptedCharField
 
 
 def encrypt_existing(apps, schema_editor):

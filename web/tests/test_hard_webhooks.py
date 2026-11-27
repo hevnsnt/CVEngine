@@ -5,7 +5,7 @@ from unittest import mock
 import requests
 from django.test import TestCase
 
-from reNgine import common_func
+from cvengine import common_func
 from scanEngine.models import Notification
 
 TOKEN = '123456:SECRET-bot-token'
@@ -24,6 +24,10 @@ class WebhookErrorTests(TestCase):
 	"""Verdict 9: a webhook URL or bot token never appears in an exception message, its chain or its traceback."""
 
 	def setUp(self):
+		# The hooks here are fixture names that do not resolve in the rig; the send time address rule has its own tests (test_notification_hook_url).
+		dns = mock.patch('cvengine.hook_guard.socket.getaddrinfo', return_value=[(2, 1, 6, '', ('8.8.4.4', 0))])
+		dns.start()
+		self.addCleanup(dns.stop)
 		Notification.objects.create(send_to_telegram=True, telegram_bot_token=TOKEN, telegram_bot_chat_id='99', send_to_slack=True,
 			slack_hook_url=SLACK, send_to_discord=True, discord_hook_url=DISCORD, send_to_lark=True, lark_hook_url=LARK)
 
@@ -103,6 +107,10 @@ class DiscordCacheTests(TestCase):
 	"""The Discord cache sits in Redis: nothing in it is trusted unless this installation signed it, and the hook URL is not in it."""
 
 	def setUp(self):
+		# The hooks here are fixture names that do not resolve in the rig; the send time address rule has its own tests (test_notification_hook_url).
+		dns = mock.patch('cvengine.hook_guard.socket.getaddrinfo', return_value=[(2, 1, 6, '', ('8.8.4.4', 0))])
+		dns.start()
+		self.addCleanup(dns.stop)
 		Notification.objects.create(send_to_discord=True, discord_hook_url=DISCORD)
 		self.store = {}
 		fake = mock.Mock()

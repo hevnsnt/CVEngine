@@ -50,12 +50,12 @@ class ShellTests(TestCase):
 		self.assertEqual(r.status_code, 200, (path, r.status_code))
 		return r.content.decode()
 
-	def test_the_rail_has_eight_entries_or_seven_without_bug_bounty(self):
+	def test_the_rail_has_ten_entries_or_nine_without_bug_bounty(self):
 		self.assertEqual([label for label, _ in rail(self.get(self.root, '/cve/?project=alpha&skip=1'))],
-						['Overview', 'Findings', 'Hygiene', 'Hosts', 'Suppliers', 'Scans', 'Scanners', 'Bug bounty'])
+						['Overview', 'Findings', 'Hygiene', 'Hosts', 'Suppliers', 'Scans', 'Reporting', 'Scanners', 'MCP', 'Bug bounty'])
 		for user in (self.analyst, self.org_admin):
 			self.assertEqual([label for label, _ in rail(self.get(user, '/cve/?project=alpha&skip=1'))],
-							['Overview', 'Findings', 'Hygiene', 'Hosts', 'Suppliers', 'Scans', 'Scanners'], user.username)
+							['Overview', 'Findings', 'Hygiene', 'Hosts', 'Suppliers', 'Scans', 'Reporting', 'Scanners', 'MCP'], user.username)
 		self.assertIn('Bug bounty', [label for label, _ in rail(self.get(self.pentester, '/cve/?project=alpha&skip=1'))])
 
 	def test_every_rail_entry_opens_a_page(self):
@@ -128,7 +128,7 @@ class ShellTests(TestCase):
 
 	def test_nav_builds_without_a_project(self):
 		built = nav.build('dashboard', None, bounty_enabled=False, sentinels_enabled=False)
-		self.assertEqual([e['label'] for e in built['rail']], ['Overview', 'Graph', 'Scanners'])
+		self.assertEqual([e['label'] for e in built['rail']], ['Overview', 'Graph', 'Reporting', 'Scanners', 'MCP'])
 		self.assertEqual(built['rail'][1]['href'], '/cve/graph/')  # the one asset page that needs no project
 
 

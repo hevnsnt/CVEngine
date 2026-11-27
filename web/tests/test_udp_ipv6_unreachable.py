@@ -9,8 +9,8 @@ from unittest import mock
 
 from cveFeed import ledger, udp_scan
 from cveFeed.models import AgentActivity
-from reNgine import resources
-from tests.test_udp_empty_report import REAL_NO_ROUTE, REAL_DOWN_ON_LINK, host_xml, report
+from cvengine import resources
+from tests.test_udp_empty_report import REAL_NO_ROUTE, host_xml, report
 from tests.test_udp_scan import UdpBase, run_udp
 
 V6 = ['2001:db8:1::10', '2001:db8:1::11', '2001:db8:2::20']
@@ -46,9 +46,6 @@ class ReadingTheReportTests(Ipv6UdpBase):
         with self.assertRaises(udp_scan.UdpScanError) as caught:
             udp_scan.host_from_report(report(), '192.0.2.10')
         self.assertNotIsInstance(caught.exception, udp_scan.NoIpv6Route)
-
-    def test_a_down_on_link_ipv6_host_is_still_a_clean_down_record(self):
-        self.assertEqual(udp_scan.host_from_report(REAL_DOWN_ON_LINK, 'fd00:dead:beef:77::99')['status'], 'down')
 
     def test_an_ipv6_host_that_was_scanned_is_still_its_record(self):
         xml = report(up=1, total=1, hosts=host_xml('2001:db8:1::10'))

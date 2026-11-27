@@ -30,7 +30,8 @@ const a = (cls, text, href, title) => {
   if (title) n.title = title;
   return n;
 };
-export const hostAnchor = (project, name) => a("host-link", name, hostHref(project, name));
+// ``text`` is what the link says when it is not the name itself: an internal host's ``host_label`` (``printer01 (192.168.1.5)``); the link still names the host
+export const hostAnchor = (project, name, text = name) => a("host-link", text || name, hostHref(project, name));
 export const ipAnchor = (project, address) => a("host-link", address, ipHref(project, address), `The host with address ${address}`);
 export const cveAnchor = (project, cveId, matchId, host) =>
   a("host-link cve-link", cveId, cveHref(project, cveId, matchId, host), matchId || host ? "The match on this host" : "Every match of this CVE");

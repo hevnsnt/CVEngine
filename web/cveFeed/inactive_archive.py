@@ -25,7 +25,7 @@ def candidates(now=None):
 
 def check_one(row, *, resolver=None, tcp_probe=None, now=None):
     from cveFeed import activity
-    from cveFeed.archive_rediscovery import observe
+    from cveFeed.archive_rediscovery import HELD, PERMANENT, observe
     from cveFeed.exclusions import is_excluded
     from cveFeed.host_assessment import enqueue
     from cveFeed.models import HostAssessment
@@ -41,7 +41,7 @@ def check_one(row, *, resolver=None, tcp_probe=None, now=None):
     domain, host = row.domain, row.host.lower().rstrip('.')
     if domain.project_id != row.project_id or is_excluded(row.project_id, host) or not (
             host == domain.name.lower() or (not domain.is_host_scoped() and host.endswith('.' + domain.name.lower()))):
-        return 'deferred'
+        return HELD
     if HostAssessment.objects.filter(project_id=row.project_id, host=host, status__in=('queued', 'running')).exists() or \
             ScanHistory.objects.filter(domain=domain, scan_status__in=(-1, 1), start_scan_date__gte=now - STUCK_SCAN_AGE).exists():
         return 'deferred'
@@ -83,7 +83,7 @@ def check_one(row, *, resolver=None, tcp_probe=None, now=None):
             values.update(inactive_first_absent_at=None, inactive_last_absent_at=None,
                           inactive_absent_checks=0)
         selector.update(**values)
-        return 'error' if status == 'error' else 'deferred'
+        return 'error' if status == 'error' else HELD if status in PERMANENT + ('unobserved',) else 'deferred'
 
     prior_still_valid = bool(row.inactive_first_absent_at and row.last_seen <= row.inactive_first_absent_at)
     first = row.inactive_first_absent_at if prior_still_valid else now
@@ -94,7 +94,12 @@ def check_one(row, *, resolver=None, tcp_probe=None, now=None):
     if count >= 2 and first <= now - MIN_ABSENCE and row.last_seen <= first:
         values.update(archived_at=now, archived_by_user=False, archive_reason='Automatically archived after two negative observations '
                       'at least 30 days apart; history is preserved')
-        if selector.update(**values):
+        from cveFeed import archive_closure
+        with transaction.atomic():  # the archive and the closure of what is open on the host (cveFeed.archive_closure) together
+            archived = selector.update(**values)
+            if archived:
+                archive_closure.close_host(row.project_id, host, why=archive_closure.WHY_GONE, when=now)
+        if archived:
             activity.log('inventory', f'{host} archived after repeated absence over 30 days',
                          project=row.project_id, status='done', host=host)
             return 'archived'
@@ -135,7 +140,7 @@ def run_page(run_id=None, *, resolver=None, tcp_probe=None):
                 .select_related('domain', 'project').order_by('pk')[:PAGE])
     if (resolver is None or tcp_probe is None) and rows:
         from cveFeed.archive_rediscovery import Reads
-        from reNgine.resources import ScannerUnavailable
+        from cvengine.resources import ScannerUnavailable
         try:
             reads = Reads(rows, dns=resolver is None, tcp=tcp_probe is None)
         except ScannerUnavailable as exc:  # no Sentinel can take the reads and they never run here: nothing was asked, nothing is archived or reactivated
@@ -171,6 +176,7 @@ def run_page(run_id=None, *, resolver=None, tcp_probe=None):
         try:
             review_inactive_hosts.apply_async(args=[run.pk], queue='cve_feed_queue', countdown=1)
         except Exception:
+            logger.warning('inactive host review run %s: the next batch could not be queued; the run stops as partial', run.pk, exc_info=True)
             run.status = 'partial'
             run.save(update_fields=['status'])
         return {'run_id': run.pk, 'status': run.status, 'checked': run.checked, 'more': True}

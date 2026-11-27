@@ -103,7 +103,7 @@ class AgentApiTests(TestCase):
 
 	def test_csrf_enforced_for_sessions_but_not_tokens(self):
 		from django.contrib.auth import BACKEND_SESSION_KEY, HASH_SESSION_KEY, SESSION_KEY
-		from reNgine.hashed_sessions import SessionStore
+		from cvengine.hashed_sessions import SessionStore
 		from django.conf import settings
 		ss = SessionStore()
 		ss[SESSION_KEY], ss[HASH_SESSION_KEY] = str(self.alice.pk), self.alice.get_session_auth_hash()
@@ -772,6 +772,15 @@ class AgentApiTests(TestCase):
 			self.assertEqual(by_id[refused]['error']['code'], -32600)
 			self.assertIn('one search_hosts or list_hosts', by_id[refused]['error']['message'])
 
+	def test_a_batch_runs_one_large_listing_whichever_tool_it_is(self):
+		calls = [{'jsonrpc': '2.0', 'id': i, 'method': 'tools/call', 'params': {'name': name, 'arguments': {'project': 'proj-a'}}}
+		         for i, name in enumerate(['list_findings', 'list_cve_matches', 'get_system_status', 'list_projects'], 1)]
+		status, data = self.mcp_post(calls)
+		by_id = {r['id']: r for r in data}
+		self.assertNotIn('error', by_id[1])
+		self.assertEqual((by_id[2]['error']['code'], by_id[3]['error']['code']), (-32600, -32600))
+		self.assertNotIn('error', by_id[4])  # a cheap call still runs beside the one large one
+
 	def test_a_statement_the_database_cut_off_is_answered_plainly_by_the_api_and_the_mcp(self):
 		from django.db.utils import OperationalError
 		cut = OperationalError('canceling statement due to statement timeout')
@@ -796,6 +805,13 @@ class AgentApiTests(TestCase):
 		status, data = rpc(token, 'tools/call', {'name': name, 'arguments': args or {}})
 		content = data['result']['content'][0]['text']
 		return data['result']['isError'], (json.loads(content) if not data['result']['isError'] else content)
+
+	def test_mcp_server_info_reports_the_release_version(self):
+		from django.conf import settings
+		status, data = rpc(self.t_alice, 'initialize', {})
+		self.assertEqual(data['result']['serverInfo'], {'name': 'cvengine', 'version': settings.CVENGINE_CURRENT_VERSION})
+		self.assertNotEqual(data['result']['serverInfo']['version'], '1.0.0')
+		self.assertNotEqual(data['result']['serverInfo']['version'], 'unknown')
 
 	def test_mcp_tells_the_agent_which_text_is_untrusted(self):
 		from agentapi.mcp import UNTRUSTED_NOTICE
@@ -1379,10 +1395,12 @@ class LiveDashboardTests(TestCase):
 		cls.user = User.objects.create_user('liveuser', password='x')
 		ProjectMembership.objects.create(user=cls.user, project=cls.pa, role='user')
 
-	def test_activity_feed_is_scoped_but_includes_global_entries(self):
+	def test_activity_feed_is_scoped_and_global_entries_reach_an_app_admin_only(self):
 		c = client_for(self.user)
 		msgs = [i['message'] for i in c.get('/cve/api/activity').json()['items']]
-		self.assertIn('Reading the cve.now feed', msgs)
+		self.assertNotIn('Reading the cve.now feed', msgs)  # a line with no project describes the instance (tenancy.scope)
+		root = client_for(User.objects.create_superuser('liveroot', 'r@x.io', 'x'))
+		self.assertIn('Reading the cve.now feed', [i['message'] for i in root.get('/cve/api/activity').json()['items']])
 		self.assertIn('A target', msgs)
 		self.assertNotIn('B secret target', msgs)
 
@@ -1415,7 +1433,7 @@ class LiveDashboardTests(TestCase):
 		msgs = [i['message'] for i in c.get('/cve/api/activity?project=la').json()['items']]
 		self.assertIn('A target', msgs)
 		self.assertNotIn('B secret target', msgs)
-		self.assertIn('Reading the cve.now feed', msgs)  # system-wide lines stay
+		self.assertNotIn('Reading the cve.now feed', msgs)  # system-wide lines are an App Admin's only
 		self.assertEqual(c.get(f'/cve/api/discovery?project=la&scan={self.sb.id}').json()['scan'], None)
 
 	def test_dashboard_project_the_user_cannot_see_is_not_found(self):
@@ -1681,7 +1699,7 @@ class BulkTargetTests(TestCase):
 		self.assertEqual((one['status'], one['queue_position']), (-1, 2))
 
 	def test_parse_org_text(self):
-		from agentapi.services import has_org_headers, parse_org_text
+		from agentapi.services import parse_org_text
 		org, groups, errors = parse_org_text('stray.example\n##Acme\n#Web\na.com\n10.0.0.1, b.com\n#Ops\nc.com # note\n#web\na.com\nd.com\n##Other')
 		self.assertEqual(org, 'Acme')
 		self.assertEqual(groups, [('Web', ['a.com', '10.0.0.1', 'b.com', 'd.com']), ('Ops', ['c.com'])])
@@ -1689,8 +1707,6 @@ class BulkTargetTests(TestCase):
 		# no ##Org: still groups; "# comment" (hash + space) is a comment; entries above a header go to the default project
 		org, groups, errors = parse_org_text('top.example\n# just a note\n#Web\na.com', default_project='Current')
 		self.assertEqual((org, groups, errors), (None, [('Current', ['top.example']), ('Web', ['a.com'])], []))
-		self.assertTrue(has_org_headers('#Widgets\na.com'))
-		self.assertFalse(has_org_headers('# only a comment\na.com'))
 
 	def test_bulk_by_org_creates_projects_checks_permissions(self):
 		admin = User.objects.create_user('orgadmin', password='x')

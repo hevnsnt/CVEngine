@@ -574,8 +574,8 @@ class StoredHostTests(TestCase):
 		sub.ip_addresses.add(ip)
 		return sub
 
-	def rows(self, token=None, project='cov-pa'):
-		status, data = call(token or self.token, 'GET', f'/api/v1/projects/{project}/hosts')
+	def rows(self, token=None, project='cov-pa', archived=False):
+		status, data = call(token or self.token, 'GET', f'/api/v1/projects/{project}/hosts' + ('?archived=1' if archived else ''))
 		self.assertEqual(status, 200, data)
 		return {h['host']: h for h in data['results']}
 
@@ -585,11 +585,11 @@ class StoredHostTests(TestCase):
 	@contextlib.contextmanager
 	def steady_caches(self):
 		"""Pin the per-process caches that expire on the clock, so no request of a measure pays for one. A request costs two queries more when the
-		IP allowlist and ban caches (reNgine.ip_allowlist, reNgine.input_guard: 10 seconds) have expired, and one or three more when the internal
+		IP allowlist and ban caches (cvengine.ip_allowlist, cvengine.input_guard: 10 seconds) have expired, and one or three more when the internal
 		network table (cveFeed.internal_view: 5 minutes) has. Those queries belong to whichever request lands after the expiry, whatever the page
 		holds: on a slow CI worker one landed in the host-less ``without`` request of the first measure only, and the cost read 7 against 9."""
 		from cveFeed import internal_view
-		from reNgine import input_guard, ip_allowlist
+		from cvengine import input_guard, ip_allowlist
 		internal_view.invalidate()
 		with mock.patch.object(internal_view, 'CACHE_SECONDS', float('inf')), \
 				mock.patch.object(ip_allowlist, '_load', return_value=(False, [])), \
@@ -710,7 +710,8 @@ class StoredHostTests(TestCase):
 
 	def test_an_excluded_or_archived_host_is_paused(self):
 		HostState.objects.create(project=self.pa, domain=self.da, host='alpha.example.test', archived_at=timezone.now())
-		rows = self.rows()
+		self.assertNotIn('alpha.example.test', self.rows())  # an archived host is left out of the list unless asked for
+		rows = self.rows(archived=True)
 		self.assertEqual(rows['alpha.example.test']['check_coverage']['paused'], 'archived')
 		self.assertEqual(rows['alpha.example.test']['check_coverage']['applicable'], 0)
 		self.assertNotEqual(rows['www.alpha.example.test']['check_coverage']['applicable'], 0)

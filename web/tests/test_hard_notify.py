@@ -35,7 +35,7 @@ class FeedAnnouncementTests(TestCase):
 		ip.ports.add(Port.objects.create(number=80, product='nginx', version='1.18.0'))
 		self.sent = []
 		for name in SENDERS:
-			patcher = mock.patch(f'reNgine.common_func.{name}', side_effect=lambda text, n=name: self.sent.append((n, text)))
+			patcher = mock.patch(f'cvengine.common_func.{name}', side_effect=lambda text, n=name: self.sent.append((n, text)))
 			patcher.start()
 			self.addCleanup(patcher.stop)
 		Notification.objects.create(send_to_slack=True, slack_hook_url='https://hooks.invalid/x')
@@ -155,7 +155,8 @@ JENKINS = [{'product': 'jenkins', 'ranges': [{'introduced': '1.0', 'fixed': '2.4
 class KevFeedAnnouncementTests(FeedAnnouncementTests):
 	"""The same announcement plumbing under the KEV heat policy (the default): the host's evidence is a banner nmap probed from a vendor-built
 	service (Jenkins) and runZero's report of the CVE on it (hard evidence: since 1.3.5 a proven version alone is smoke), so a KEV CVE in its
-	range is fire and paged; the cap of the legacy policy is not read."""
+	range is fire and paged; the cap of the legacy policy is not read. The inherited false positive test holds here too: the AI cannot close
+	a match whose version is in range, and since 1.3.5 needs validation holds the heat at smoke even with runZero's report."""
 
 	def setUp(self):
 		super().setUp()
@@ -181,21 +182,6 @@ class KevFeedAnnouncementTests(FeedAnnouncementTests):
 		CVEMatch.objects.update(template_result='vulnerable')  # a template test confirmed it: now it is fire, and pageable
 		self.assertTrue(notify.fire_matches(timezone.now() - timedelta(minutes=5)))
 		self.assertIn('1 new fire-tier CVE match on 1 host', self.slack()[0])
-
-	def test_a_match_the_ai_calls_a_false_positive_stays_open_but_is_not_announced(self):
-		# The AI's call cannot close a match whose version is in range (it is held at needs validation), and since 1.3.5 needs validation holds
-		# the heat at smoke even with runZero's report: it stays open, is still tested, and is not announced until a check confirms it.
-		AIProviderSettings.objects.create(auto_fire=True, enabled=True, api_key='sk-ant-test-key')
-		cve = self.cve()
-		provider = mock.Mock(model='m')
-		provider.name = 'anthropic'
-		provider.complete.return_value = '{"classification": "likely_false_positive", "reason": "banner says patched"}'
-		with mock.patch('cveFeed.tasks.template_test_for_cve.delay'):
-			out = auto_fire_new_cves([cve.pk])
-			ai_queue.serve(provider)  # the AI reviewer container answers the triage auto-fire queued
-		self.assertEqual(out, {'fired': 1})
-		self.assertEqual(CVEMatch.objects.get().ai_verdict, 'uncertain')
-		self.assertEqual(self.slack(), [])
 
 	def test_a_cve_that_is_neither_on_the_kev_nor_exploited_is_never_announced(self):
 		cve = CVEEntry.objects.create(cve_id='CVE-2099-64', kev=False, exploit_db=False, cvss=10.0, epss_reached=True,

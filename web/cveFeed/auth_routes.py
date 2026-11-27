@@ -1,11 +1,12 @@
 """The web route check, signed in: for the routes a stored sign-in (cveFeed.auth_checks) covers, the same bounded GET as
 the anonymous route check but with the target's headers and cookie, so a person can see what the application answers behind its login.
 
-Where it runs: on the built-in scanner only (task kind ``route_probe_signed``, ``agentapi.probe_dispatch.try_signed_routes``), never on this server: the
-server keeps the credential store and decides which routes a credential covers, but it sends no stored sign-in to any host. A task carries the routes
+Where it runs: on the built-in scanner, or on an external Sentinel the credential's owner allowed (``agentapi.signin_delivery``; task kind
+``route_probe_signed``, ``agentapi.probe_dispatch.try_signed_routes``), never on this server: the server keeps the credential store and decides which
+routes a credential covers, but it sends no stored sign-in to any host. A task carries the routes
 and a scope policy plus ``secret_ref`` (a reference to the credential, never a value); the scanner reads the credential once through
 ``POST sentinel/tasks/<id>/secret``, sends it only to a route that credential was stored for, follows no redirect and returns no value. Without a
-built-in scanner that reads stored sign-ins the pass waits (``ScannerUnavailable``): nothing is recorded and the routes stay due.
+Sentinel that may read the stored sign-in the pass waits (``ScannerUnavailable``): nothing is recorded and the routes stay due.
 
 The anonymous answer stays what a route's state, auth-change history and sensitive-data scan are about; this pass only adds
 ``evidence['authenticated']`` to the route (state, status, title, redirect target, when, which credential revision), marked
@@ -48,7 +49,7 @@ def signed_evidence(result, cred, values, now):
 
 
 def _ask(project, scan, cred, by_host):
-    """The seam: ``{url: result or Exception}`` for the routes of one credential, through the built-in scanner (tests replace it)."""
+    """The seam: ``{url: result or Exception}`` for the routes of one credential, through a Sentinel that may read it (tests replace it)."""
     from agentapi import probe_dispatch
     return probe_dispatch.try_signed_routes(project, scan, cred, by_host)
 
@@ -59,7 +60,7 @@ def run_signed_in(scan_id, force=False, ask=None):
     never raises, so the anonymous check's result stands. ``ask(project, scan, credential, {host: [urls]})`` replaces the scanner (tests)."""
     from cveFeed import activity, ledger, route_auth
     from cveFeed.models import RouteAuth
-    from reNgine import resources
+    from cvengine import resources
     from startScan.models import ScanHistory
     ask = ask or _ask
     scan = ScanHistory.objects.select_related('domain').get(pk=scan_id)
@@ -138,7 +139,7 @@ def run_signed_in(scan_id, force=False, ask=None):
                         summary['differs'] += result['state'] != row.auth_state
                         summary['not_signed_in'] += result['state'] in LOGIN_STATES
                         finished.append(asset)
-            except resources.ScannerUnavailable as exc:  # no built-in scanner can take it and it may not run here: not a failure, the routes stay due
+            except resources.ScannerUnavailable as exc:  # no Sentinel that may read the sign-in can take it and it may not run here: not a failure, the routes stay due
                 ledger.record(SERVICE, finished, project, scan)
                 message = f'no scanner could take this work ({exc.kind}); the targets stay due until one can'
                 logger.warning('signed-in route check of scan %s is waiting for a scanner: %s', scan.id, exc)

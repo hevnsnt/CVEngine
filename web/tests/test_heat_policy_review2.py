@@ -25,7 +25,7 @@ from agentapi import services
 from cveFeed import hot_validation, match_policy, notify, scoring, threat, triage
 from cveFeed.models import BackgroundCursor, CVEEntry, CVEMatch, Triage
 from cveFeed.threat import FIRE, HEAT_RANK, ICE, SMOKE
-from reNgine.tasks import parse_nuclei_result, save_vulnerability
+from cvengine.tasks import parse_nuclei_result, save_vulnerability
 from startScan.models import CveId, ScanHistory, Subdomain, Vulnerability
 from tests.test_heat_policy import LEGACY
 from tests.test_heat_policy_review import JENKINS, Base
@@ -270,7 +270,7 @@ class FindingParityTests(Base):
 			v = Vulnerability.objects.create(name=label, severity=4, source='nuclei', subdomain=self.sub, target_domain=self.domain,
 											 scan_history=self.scan, open_status=True)
 			for n in names:
-				v.cve_ids.add(CveId.objects.create(name=n))
+				v.cve_ids.add(CveId.objects.get_or_create(name=n)[0])  # names are unique
 			ids[v.pk] = label
 		sub = Subdomain.objects.prefetch_related('vulnerability_set__cve_ids', 'vulnerability_set__tags', 'vulnerability_set__triage').get(pk=self.sub.pk)
 		py = {r['id']: r['temp'] for r in services._heat_reasons(sub) if r['kind'] == 'finding'}
@@ -407,7 +407,7 @@ class ClosedPairsScopeTests(Base):
 		results = {'source': 'existing', 'results': [{'host': self.sub.name, 'vulnerable': True}]}
 		with mock.patch('cveFeed.templategen.run_cve_tests', return_value=results), \
 				mock.patch('cveFeed.templategen.is_confirmed', return_value=True), \
-				mock.patch('reNgine.ai_settings.get_configured_provider', side_effect=RuntimeError('none')), \
+				mock.patch('cvengine.ai_settings.get_configured_provider', side_effect=RuntimeError('none')), \
 				mock.patch('cveFeed.conductor.bounty_blocked_projects', return_value=set()), \
 				mock.patch.object(notify, 'template_hits') as hits:
 			tasks.template_test_for_cve(cve.pk, [self.sub.name], project_id=self.project.pk)

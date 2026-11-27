@@ -89,7 +89,7 @@ class LibraryPlanTests(unittest.TestCase):
 	def test_the_plan_always_keeps_the_script_read(self):
 		from cveFeed import validation_plan
 		checks, _ = validation.plan_checks(self.subject(), self.SIG)
-		with mock.patch('reNgine.ai_settings.get_configured_provider', return_value=None):
+		with mock.patch('cvengine.ai_settings.get_configured_provider', return_value=None):
 			decision, _provider = validation_plan.plan(1, mock.Mock(signature='s'), mock.Mock(), self.subject(), checks, ('', 'none'))
 		self.assertEqual(decision['check_kinds'], ['script_read'])
 
@@ -576,7 +576,7 @@ class HotLaneTests(Base):
 			ran.append(check['kind'])
 			return page_read_double.run_script_read(check, site)
 		with mock.patch('cveFeed.validation_authority.require_authority'), \
-				mock.patch('reNgine.ai_settings.get_configured_provider', return_value=None), \
+				mock.patch('cvengine.ai_settings.get_configured_provider', return_value=None), \
 				mock.patch('cveFeed.conductor.bounty_blocked_projects', return_value=set(blocked)), \
 				mock.patch.dict(validation.RUNNERS, {'script_read': read, 'nmap_sv': lambda c: ran.append('nmap_sv'),
 													 'http_head': lambda c: ran.append('http_head')}), \

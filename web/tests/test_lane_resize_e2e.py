@@ -19,7 +19,7 @@ from tests.test_gevent_worker_e2e import BROKER, WEB, _redis_ok
 @unittest.skipUnless(_redis_ok(), 'needs the Redis of CELERY_BROKER')
 class LaneResizeEndToEndTests(unittest.TestCase):
     def setUp(self):
-        from reNgine.celery import app as real
+        from cvengine.celery import app as real
         self.name = f'lane{uuid.uuid4().hex[:10]}'
         self.queue = f'{self.name}_q'
         self.node = f'cve_feed_worker@{self.name}'

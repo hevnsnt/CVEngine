@@ -1,6 +1,6 @@
 """The AI maintainer's signals (1.4.0 work package 1): what is measured, from where, and that a source that is missing or malformed reads as unknown,
-never as healthy (``agentapi.maintainer_signals``, ``reNgine.container_signals``, ``reNgine.queue_age``, ``agentapi.claim_refusals``, the restarts in
-``reNgine.lane_memory``). The status shows them under ``system.signals``."""
+never as healthy (``agentapi.maintainer_signals``, ``cvengine.container_signals``, ``cvengine.queue_age``, ``agentapi.claim_refusals``, the restarts in
+``cvengine.lane_memory``). The status shows them under ``system.signals``."""
 import json
 import os
 import tempfile
@@ -13,9 +13,9 @@ from django.test import SimpleTestCase, TestCase
 from django.test.utils import CaptureQueriesContext
 
 from agentapi import claim_refusals, maintainer_signals as ms
-from reNgine import container_signals as cs
-from reNgine import lane_memory as lm
-from reNgine import queue_age
+from cvengine import container_signals as cs
+from cvengine import lane_memory as lm
+from cvengine import queue_age
 
 NOW = 1_700_000_000.0
 
@@ -143,7 +143,7 @@ class ContainerSignalTests(SimpleTestCase):
         self.assertEqual(calls[0][0], ('web',))
 
     def test_the_worker_resource_tick_publishes_the_worker_container(self):
-        from reNgine import resources
+        from cvengine import resources
         store = resources.RedisStore(mock.MagicMock(), 'cvengine:heavy:test')
         with mock.patch.object(store, 'publish_state') as state, mock.patch.object(cs, 'publish') as publish:
             resources.report_state(store, state_fn=lambda: {'total_mb': 1, 'limit_mb': None, 'used_mb': 1, 'available_mb': 1}, now_fn=lambda: NOW)
@@ -210,7 +210,7 @@ class QueueAgeTests(SimpleTestCase):
         self.assertEqual(pipe.execute.call_count, 1)
 
     def test_against_a_real_redis_list(self):
-        from reNgine import resources
+        from cvengine import resources
         client = resources.redis_client()
         name = 'test_maintainer_signals_queue'
         client.delete(name)
@@ -271,10 +271,10 @@ class LaneSignalTests(SimpleTestCase):
         self.assertEqual([rows[l]['state'] for l in ('classic', 'discovery', 'cve_feed')], ['unknown', 'unknown', 'known'])
 
     def test_the_worker_writes_the_limit_of_its_container(self):
-        with mock.patch.object(lm, 'lane_name', return_value='classic'), mock.patch('reNgine.resources.cgroup_memory', return_value=(2048 << 20, 100 << 20)):
+        with mock.patch.object(lm, 'lane_name', return_value='classic'), mock.patch('cvengine.resources.cgroup_memory', return_value=(2048 << 20, 100 << 20)):
             lm.write(NOW, 123.0)
         self.assertEqual(json.loads(cache.get(lm.CACHE_PREFIX + 'classic'))['limit_mb'], 2048)
-        with mock.patch.object(lm, 'lane_name', return_value='classic'), mock.patch('reNgine.resources.cgroup_memory', return_value=(None, None)):
+        with mock.patch.object(lm, 'lane_name', return_value='classic'), mock.patch('cvengine.resources.cgroup_memory', return_value=(None, None)):
             lm.write(NOW, 123.0)
         self.assertIsNone(json.loads(cache.get(lm.CACHE_PREFIX + 'classic'))['limit_mb'])  # no cgroup: unknown, not unlimited
 
@@ -353,7 +353,7 @@ class ContainerReadTests(SimpleTestCase):
         self.assertIsNone(ms.containers(NOW, client)['containers'][0]['oom_kills_24h'])
 
     def test_a_broker_that_cannot_be_asked_is_unknown_through_collect(self):
-        with mock.patch('reNgine.resources.redis_client', return_value=None):
+        with mock.patch('cvengine.resources.redis_client', return_value=None):
             out = ms.collect(None, None, NOW)
         self.assertEqual(out['signals']['containers']['state'], 'unknown')
         self.assertIn('containers', out['unknown'])
@@ -494,8 +494,9 @@ class ClaimRefusalTests(SimpleTestCase):
         self.addCleanup(self.clean)
 
     def clean(self):
-        from reNgine import resources
-        client = resources.redis_client()
+        # the counters live in the cache's Redis (claim_refusals._client), not the broker's: cleaning the broker's database left an earlier
+        # test's callers in the hour, and a shuffled order then found the two field cap already full
+        client = claim_refusals._client(claim_refusals.KEY)
         for key in client.scan_iter(match=claim_refusals.KEY + '*'):
             client.delete(key)
 
@@ -667,7 +668,9 @@ class StatusSignalsTests(TestCase):
             ms.collect(depths, client, NOW)
         # cold: database (size and longest query, one transaction), the three oldest-queued reads, the AI counters (about ten counts, and about eight for
         # the reviewer, host review, guidance, planning and per-project triage caps), the triage backlog (one aggregate), the claim names none
-        self.assertLessEqual(len([q for q in cold.captured_queries if 'SAVEPOINT' not in q['sql'] and not q['sql'].startswith(('SET', 'RELEASE'))]), 30)
+        # the time limit of each bounded block is set (and the caller's put back) with SET or set_config: neither is a read
+        self.assertLessEqual(len([q for q in cold.captured_queries if 'SAVEPOINT' not in q['sql'] and not q['sql'].startswith(('SET', 'RELEASE'))
+                                  and 'set_config(' not in q['sql']]), 30)
         self.assertEqual(len([q for q in warm.captured_queries if 'SAVEPOINT' not in q['sql']]), 0)  # everything database-backed is reused for a minute
         cache.clear()
         with CaptureQueriesContext(connection) as whole:

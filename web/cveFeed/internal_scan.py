@@ -10,8 +10,8 @@ Sentinel answers, the step fails and the scan says so, and the next sweep tries 
 
 What it runs: the host record for the address (no network access), an nmap fingerprint, a TLS audit of each TLS port nmap found, the nuclei
 technology pass, CVE correlation, then the AI-targeted nuclei pass. Each stage is the external pipeline's own function (same
-parsing, same persistence); only the execution seam differs. ``internal_scope`` makes the stages treat the address as a target and makes
-every local scanner refuse to run, so a seam that was missed fails loudly. Stages that run from this server directly (route checks,
+parsing, same persistence); only the execution seam differs. ``internal_scope`` makes the stages treat the address as a target; this
+server runs no scan tool of its own, so no stage can reach the address from here. Stages that run from this server directly (route checks,
 probes, hygiene, database exposure, screenshots) have no Sentinel path and are not run. The WordPress scan runs through a Sentinel on the sites the Sentinel-run technology
 pass tagged as WordPress (this server sends no probe of its own), and OpenVAS has its own opt-in sweep (``cveFeed.openvas_scan.internal_batch``).
 """
@@ -21,7 +21,7 @@ from datetime import timedelta
 
 from django.utils import timezone
 
-from reNgine.state_machines import SCAN
+from cvengine.state_machines import SCAN
 
 logger = logging.getLogger(__name__)
 
@@ -152,7 +152,9 @@ def _nmap(scan, project, ip, org_id, dispatch):
         return {'error': 'the Sentinel reported nothing for the address'}
     totals = persist_inventory(inventory, org_id=org_id, os_reliable=result.get('os_reliable') is not False)  # the Sentinel's own network, unless it says it sits behind Docker Desktop's
     ledger.record('nmap-fast', [ip], project.id, scan)  # what the check coverage of the host reads
-    return {'hosts': len(inventory), **totals}
+    from cveFeed import host_names
+    evidence = host_names.mark_printer(project, ip, inventory[0]['ports'], inventory[0]['os_guess'])
+    return {'hosts': len(inventory), **totals, **({'printer': '; '.join(evidence)} if evidence else {})}
 
 
 def _testssl(scan, project, domain, ip, org_id, dispatch):
@@ -206,6 +208,35 @@ def _udp(scan, project, ip, org_id, dispatch):
     return {'open': len(outcome['open']), 'changed': len(outcome['changed'])}
 
 
+# The gentle profile of a printer (``Domain.printer``, set from its fingerprint by ``cveFeed.host_names.mark_printer``). A printer prints what
+# reaches its raw print ports and many embedded web servers fall over under a long TLS audit, so after the fingerprint (which never touches
+# 515 or 9100 to 9107: cvengine_scanner.printers) it gets only the nuclei technology pass, held to its web ports and to read-only HTTP
+# templates; its certificate is the one the fingerprint's ssl-cert script read. No TLS audit (testssl), no UDP sweep, no WordPress scan,
+# no AI-targeted pass, and the OpenVAS sweep leaves it out (``cveFeed.openvas_scan``).
+PRINTER_WEB_PORTS = (80, 443, 631)
+PRINTER_STAGE = 'Printer: scanned gently'
+PRINTER_SKIPPED = ('internal_testssl', 'internal_udp_scan', 'internal_wpscan', 'nuclei_targeted_scan')
+
+
+def _gentle(scan, project, ip, nuclei_stream, provider):
+    """The printer's stages: the light nuclei pass on its web ports only (``nuclei_scan.run_light_nuclei`` with ``printer_ports``), then CVE
+    correlation. Each skipped stage is recorded as skipped with the reason, so the scan page says the printer was scanned gently."""
+    from agentapi import sentinel_dispatch
+    from cveFeed import activity, nuclei_scan
+    from cveFeed.discovery import _stage
+    from cveFeed.tasks import correlate_cves
+
+    def stream(kind):
+        return nuclei_stream(kind) if nuclei_stream else sentinel_dispatch.wrap_nuclei_stream(scan, kind, internal=True)
+    activity.log('run_check', f'{PRINTER_STAGE}: {ip} is a printer, so only read-only web checks on ports '
+                 f'{", ".join(map(str, PRINTER_WEB_PORTS))} run; no TLS audit, UDP sweep, targeted pass or OpenVAS, and never its print ports',
+                 project=project.id, status='skipped', scan_id=scan.id)
+    _stage(scan, f'{PRINTER_STAGE}: Nuclei read-only web pass (internal Sentinel)', 'nuclei_light_scan',
+           lambda: nuclei_scan.run_light_nuclei(scan.id, stream=stream('nuclei_light'), printer_ports=PRINTER_WEB_PORTS),
+           fallback={'targets': 0, 'techs': {}})
+    _stage(scan, 'CVE correlation', 'cve_correlation', lambda: correlate_cves(scan_history_id=scan.id), fallback={'subdomains': 0, 'matches': 0})
+
+
 def run(scan_id, dispatch=None, nuclei_stream=None, provider=False, wp_runner=None):
     """Run the internal pipeline for one queued scan. ``dispatch`` replaces ``sentinel_dispatch.dispatch_or_none`` in tests, ``nuclei_stream``
     (``kind -> stream``) replaces the Sentinel nuclei streams, and ``provider`` (``False`` = the configured AI, ``None`` = none) the AI planner.
@@ -240,8 +271,8 @@ def _run(scan_id, dispatch=None, nuclei_stream=None, provider=False, wp_runner=N
     from cveFeed.discovery import FAILED, SUCCESS, _stage, mark_running
     from cveFeed.bounty_gate import Gate
     from cveFeed.exclusions import is_excluded
-    from reNgine.tasks import persist_bbot_result
-    from reNgine import discovery_events as bbot_lib
+    from cvengine.tasks import persist_bbot_result
+    from cvengine import discovery_events as bbot_lib
     from startScan.ip_rows import org_id_of_project
     from startScan.models import ScanActivity, ScanHistory
     from targetApp.target_types import sentinel_only_target
@@ -277,7 +308,10 @@ def _run(scan_id, dispatch=None, nuclei_stream=None, provider=False, wp_runner=N
     from targetApp.target_types import internal_scope
     with internal_scope():
         nmap = _stage(scan, 'nmap scan (internal Sentinel)', 'nmap_scan', lambda: _nmap(scan, project, ip, org_id, dispatch), fallback={'hosts': 0})
-        if not nmap.get('error'):
+        from cveFeed import host_names
+        if not nmap.get('error') and host_names.is_printer(project.id, ip):
+            _gentle(scan, project, ip, nuclei_stream, provider)
+        elif not nmap.get('error'):
             def stream(kind):
                 return nuclei_stream(kind) if nuclei_stream else sentinel_dispatch.wrap_nuclei_stream(scan, kind, internal=True)
             _stage(scan, 'TLS audit (internal Sentinel)', 'internal_testssl', lambda: _testssl(scan, project, domain, ip, org_id, dispatch), fallback={'tested': 0})
@@ -295,7 +329,7 @@ def _run(scan_id, dispatch=None, nuclei_stream=None, provider=False, wp_runner=N
     status = FAILED if nmap.get('error') else SUCCESS
     error = nmap.get('error') or (('Failed stages: ' + ', '.join(failed_names)) if failed_names else '')
     if not SCAN.move(ScanHistory.objects.filter(pk=scan_id), status, stop_scan_date=timezone.now(), error_message=(error or '')[:290] or None):
-        # a person stopped it while a stage ran (the stop is final: reNgine.state_machines.SCAN); say so instead of a result it no longer has
+        # a person stopped it while a stage ran (the stop is final: cvengine.state_machines.SCAN); say so instead of a result it no longer has
         activity.settle(running, 'skipped', message=f'Internal scan of {ip} was stopped')
         return {'scan_id': scan_id, 'status': 'aborted'}
     activity.settle(running, 'done' if status == SUCCESS else 'failed',

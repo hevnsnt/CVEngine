@@ -12,7 +12,7 @@ _BANNER_TECH_RE = re.compile(r"^([A-Za-z][\w.+-]*?)_(\d[\w.+~-]*)(?:\s|$)")
 
 
 def split_name_version(tech_name):
-    """reNgine stores tech as 'Name' or 'Name:version' (httpx tech-detect); a scanner may also store a CPE or a 'Name_version' banner."""
+    """Technology rows store tech as 'Name' or 'Name:version' (httpx tech-detect); a scanner may also store a CPE or a 'Name_version' banner."""
     if not tech_name:
         return "", ""
     name = tech_name.strip()

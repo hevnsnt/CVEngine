@@ -68,7 +68,7 @@ class ComposeEnvTests(unittest.TestCase):
 
 @unittest.skipUnless(yaml and (ROOT / 'docker-compose.yml').is_file(), 'needs PyYAML and the compose file')
 class BuiltinScannerComposeTests(unittest.TestCase):
-    """The built-in scanner service (docs/BUILTIN-SCANNER.md): on by default, the moving tag scanner.lock.json names, a network of its own, a health check
+    """The built-in scanner service (docs/BUILTIN-SCANNER.md): on by default, the digest scanner.lock.json pins, a network of its own, a health check
     on its heartbeats, and the enrollment read from the shared volume by the client itself."""
 
     @classmethod
@@ -79,9 +79,9 @@ class BuiltinScannerComposeTests(unittest.TestCase):
     def test_it_is_a_default_service_not_behind_a_profile(self):
         self.assertNotIn('profiles', self.scanner)
 
-    def test_it_follows_the_moving_tag_and_never_builds_an_image(self):
+    def test_it_runs_the_pinned_digest_and_never_builds_an_image(self):
         self.assertTrue(self.scanner['image'].startswith('${CVENGINE_SCANNER_IMAGE:-${CVENGINE_SCANNER_ROLLBACK_IMAGE:-'))
-        self.assertTrue(self.scanner['image'].endswith('cvengine-sentinel:main}}'))
+        self.assertRegex(self.scanner['image'], r'cvengine-sentinel@sha256:[0-9a-f]{64}\}\}$')
         self.assertNotIn('build', self.scanner)
         self.assertEqual(self.scanner['pull_policy'], '${CVENGINE_SCANNER_PULL_POLICY:-missing}')
 

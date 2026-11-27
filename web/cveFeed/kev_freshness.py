@@ -130,7 +130,7 @@ def reread(subdomain_ids):
     from cveFeed.archive_rediscovery import archived_names
     from cveFeed.exclusions import is_excluded
     from cveFeed.match_policy import unversioned_products
-    from reNgine import resources
+    from cvengine import resources
     from startScan.models import Subdomain
     from targetApp.models import Domain
     read = 0

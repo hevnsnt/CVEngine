@@ -316,23 +316,50 @@ def store(project_id, domain_id, host, key, reading, now=None):
 
 
 PASSIVE_KEYS = ('jdwp:', 'header:', 'probe:', 'tech:', 'bundled:', 'jenkins:')
+DERIVED_KEY = r'^(bundled|jenkins|tech|header):'  # the keys ``refresh_host`` drops when the host no longer gives them
+PREFETCH_CHUNK = 2000  # host names per query of ``prefetch_passive``
 
 
-def refresh_host(sub, now=None, rescan_findings=True):
+def prefetch_passive(subs):
+    """What ``refresh_host`` reads of every one of ``subs``, in two queries (per ``PREFETCH_CHUNK`` names) instead of two per host:
+    ``({(project id, host): [version probe rows]}, {(project id, host)} that hold a derived reading)``. Hand both to ``refresh_host``."""
+    from cveFeed.models import JavaRuntime, ProbeObservation
+    keys = {(s.target_domain.project_id, s.name.lower().rstrip('.')) for s in subs if getattr(s, 'target_domain_id', None) is not None}
+    projects, names = {key[0] for key in keys}, sorted({key[1] for key in keys})
+    probe_rows, derived = {key: [] for key in keys}, set()
+    for start in range(0, len(names), PREFETCH_CHUNK):
+        chunk = names[start:start + PREFETCH_CHUNK]
+        for row in ProbeObservation.objects.filter(project_id__in=projects, host__in=chunk, product='Java runtime', kind='version'):
+            if (row.project_id, row.host) in probe_rows:
+                probe_rows[(row.project_id, row.host)].append(row)
+        derived |= set(JavaRuntime.objects.filter(project_id__in=projects, host__in=chunk, key__regex=DERIVED_KEY)
+                       .values_list('project_id', 'host').distinct()) & keys
+    return probe_rows, derived
+
+
+def refresh_host(sub, now=None, rescan_findings=True, prefetched=None):
     """Make and store the readings ``sub`` gives away without a request (``passive_readings``), drop the derived ones it no longer gives (a product
-    upgraded, a header gone), and file the JDWP exposure of a port nmap identified. Returns the readings stored."""
+    upgraded, a header gone), and file the JDWP exposure of a port nmap identified. Returns the readings stored. ``prefetched`` (from
+    ``prefetch_passive``, for a loop over many hosts) saves the reads: the host's version probe rows, and the delete of derived readings when the
+    host holds none."""
     from cveFeed.models import JavaRuntime, ProbeObservation
     from startScan.models import open_services
     now = now or timezone.now()
     project_id = sub.target_domain.project_id
     host = sub.name.lower().rstrip('.')
     ports = [(ip.address, p) for ip in sub.ip_addresses.all() for p in open_services(ip)]
-    probe_rows = ProbeObservation.objects.filter(project_id=project_id, host=host, product='Java runtime', kind='version')
+    if prefetched is not None:
+        probe_rows = prefetched[0].get((project_id, host), [])
+    else:
+        probe_rows = ProbeObservation.objects.filter(project_id=project_id, host=host, product='Java runtime', kind='version')
     found = passive_readings(sub, ports, probe_rows)
     for key, reading in found:
         store(project_id, sub.target_domain_id, host, key, reading, now=now)
-    stale = JavaRuntime.objects.filter(project_id=project_id, host=host).exclude(key__in=[k for k, _r in found])
-    stale.filter(key__regex=r'^(bundled|jenkins|tech|header):').delete()  # derived from what the host shows now: gone when that is gone
+    if prefetched is not None and any(re.match(DERIVED_KEY, key) for key, _r in found):
+        prefetched[1].add((project_id, host))  # a derived reading is stored now: a later row of the same name drops it when it no longer gives it
+    if prefetched is None or (project_id, host) in prefetched[1]:
+        stale = JavaRuntime.objects.filter(project_id=project_id, host=host).exclude(key__in=[k for k, _r in found])
+        stale.filter(key__regex=DERIVED_KEY).delete()  # derived from what the host shows now: gone when that is gone
     if rescan_findings and sub.scan_history_id:
         for address, port in ports:
             if jdwp_kind(port) == 'nmap':
@@ -351,7 +378,7 @@ def is_java_host(sub, runtimes=None):
 
 def file_jdwp_exposure(scan, sub, address, port, evidence=''):
     """The critical finding of an open JDWP port: one row per host name and endpoint (a rescan updates it). Returns 1 when it is new."""
-    from reNgine.tasks import save_vulnerability
+    from cvengine.tasks import save_vulnerability
     if scan is None:
         return 0
     evidence = java.clip(evidence, 300)
@@ -498,16 +525,22 @@ def run_for_scan(scan_id, force=False, dispatch=None):
     kind (the active reads stay due; the passive readings are stored first)."""
     from agentapi import probe_dispatch, sentinel_dispatch
     from cveFeed import activity
-    from reNgine.resources import ScannerUnavailable
+    from cvengine.resources import ScannerUnavailable
     from startScan.models import ScanHistory, Subdomain
     scan = ScanHistory.objects.select_related('domain__project').get(pk=scan_id)
     project = scan.domain.project
     summary = {'hosts': 0, 'asked': 0, 'readings': 0, 'exposed': 0, 'waiting': 0}
     if not enabled():
         return {**summary, 'skipped': 'disabled'}
-    for sub in Subdomain.objects.filter(scan_history=scan).select_related('target_domain', 'scan_history').prefetch_related('technologies', 'ip_addresses__ports'):
+    subs = list(Subdomain.objects.filter(scan_history=scan).select_related('target_domain', 'scan_history').prefetch_related('technologies', 'ip_addresses__ports'))
+    try:
+        prefetched = prefetch_passive(subs)  # the hosts' stored rows in two queries for the scan, not two per host
+    except Exception:  # noqa: BLE001 - without it every host reads its own rows, as before
+        logger.exception('could not read the stored Java runtime rows of scan %s at once', scan.pk)
+        prefetched = None
+    for sub in subs:
         try:
-            summary['readings'] += len(refresh_host(sub))
+            summary['readings'] += len(refresh_host(sub, prefetched=prefetched))
         except Exception:  # noqa: BLE001 - one host's stored data never stops the stage
             logger.exception('passive Java runtime readings of host %s failed', sub.pk)
     found = candidates(scan)
@@ -531,7 +564,7 @@ def run_for_hosts(project, host_names, dispatch=None, priority=1):
     """The work planner's entry: the same plan, gates (unattended: the bug bounty engagement must have confirmed automated testing), ledger and
     storage as ``run_for_scan`` for the named hosts' current inventory rows, with no scan of its own."""
     from agentapi import probe_dispatch, sentinel_dispatch
-    from reNgine.resources import ScannerUnavailable
+    from cvengine.resources import ScannerUnavailable
     summary = {'hosts': 0, 'asked': 0, 'readings': 0, 'exposed': 0, 'waiting': 0}
     if not enabled():
         return {**summary, 'skipped': 'disabled'}
@@ -684,8 +717,8 @@ def runtime_items(cve):
 def java_cves(cve_by_id):
     """The CVEs of a pool whose affected products name the Java runtime, memoised per pool."""
     memo = _JAVA_POOL
-    if memo.get('id') != id(cve_by_id) or memo.get('size') != len(cve_by_id):
-        memo.update(id=id(cve_by_id), size=len(cve_by_id), cves=[c for c in cve_by_id.values() if runtime_items(c)])
+    if memo.get('pool') is not cve_by_id:  # the pool itself, not its id: a refreshed pool can reuse a freed one's id and size
+        memo.update(pool=cve_by_id, cves=[c for c in cve_by_id.values() if runtime_items(c)])
     return memo['cves']
 
 

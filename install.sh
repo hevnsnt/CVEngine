@@ -231,6 +231,8 @@ CVENGINE_INSTALL_SENTINELS=$sentinels ./scripts/init-env.sh ${domain:+"$domain"}
 # the updater applies too.
 log() { ok "$*"; }
 cvengine_fit_memory .env
+# This server's own public addresses, which the self exclusion never scans (CVENGINE_SELF_ADDRESSES; the updater keeps them current)
+if [ -f scripts/self-addresses.sh ] && . scripts/self-addresses.sh; then cvengine_ensure_self_addresses || true; fi
 # A host port chosen for this run (CVENGINE_HTTPS_PORT, CVENGINE_HTTP_PORT in the environment, for a machine where something else holds 443) is
 # written to .env: make, docker compose and the update watcher run later without this environment and would otherwise publish the defaults, move the
 # proxy back to 443 (or fail on it) and leave the address printed above wrong. Without a value given here, what .env already says stays.
@@ -253,7 +255,7 @@ address=${address:-localhost}
 ok "address: https://$address/"
 
 # the certificate is made once, and again only when the address changed
-cert_file=secrets/certs/rengine.pem
+cert_file=secrets/certs/cvengine.pem
 needs_cert=1
 if [ -s "$cert_file" ] && have openssl; then
   host=${address%%:*}
@@ -287,7 +289,7 @@ ok "the web service is answering"
 step "Preparing the database and your admin account"
 make migrate >/dev/null 2>&1 || make migrate || { show_logs; die "Database migrations failed."; }
 admin_output=$(make admin 2>&1) || { echo "$admin_output" >&2; show_logs; die "Could not create the admin account. Try 'make admin' once the services are up."; }
-# the make command echo ("docker compose ... exec") is noise: keep only the account banner
+# the make command echo ("docker compose ... run ... migrate", the one-off owner service) is noise: keep only the account banner
 admin_banner=$(printf '%s\n' "$admin_output" | sed -n '/^====/,$p')
 account='the account below'
 if [ -z "$admin_banner" ]; then

@@ -105,7 +105,7 @@ class Base(TestCase):
         response = self.get(who, path, **params)
         self.assertEqual(response.status_code, 200, response.content[:300] if not response.streaming else '')
         text = self.body(response)
-        self.assertTrue(text.startswith('﻿'), 'the file starts with the UTF-8 byte order mark')
+        self.assertTrue(text.startswith('\ufeff'), 'the file starts with the UTF-8 byte order mark')
         return list(csv.DictReader(io.StringIO(text[1:], newline='')))
 
     def hosts(self, who, path, **params):
@@ -253,7 +253,7 @@ class PlainListTests(Base):
 
     def test_the_plain_list_has_one_entry_per_line_and_no_header_or_marks(self):
         text = self.body(self.get('boss', PROJECT, format='txt'))
-        self.assertFalse(text.startswith('﻿'))
+        self.assertFalse(text.startswith('\ufeff'))
         self.assertTrue(text.endswith('\n'))
         self.assertTrue(all(line and ' ' not in line and ',' not in line for line in text.splitlines()))
 
@@ -403,3 +403,23 @@ class McpTests(Base):
             error, text = tool_call(self.t['boss'], 'export_hosts', {'project': 'hx-web'})
         self.assertTrue(error)
         self.assertIn('hosts/export', text)
+
+    def test_a_list_too_big_stops_reading_hosts_once_it_is_past_the_cap(self):
+        for n in range(23):
+            self.host(self.web, f'big{n:02d}.example.com', f'203.0.113.{100 + n}')
+        real, chunks_read = host_export._rows, []
+
+        def counted(*args, **kwargs):
+            for row in real(*args, **kwargs):
+                chunks_read.append(row)
+                yield row
+        with mock.patch.object(host_export, 'MCP_MAX_BYTES', 300), mock.patch.object(host_export, '_rows', counted):
+            error, text = tool_call(self.t['boss'], 'export_hosts', {'project': 'hx-web'})
+        self.assertTrue(error)
+        self.assertIn('hosts/export', text)
+        self.assertLess(len(chunks_read), 26)  # the rows after the cap was passed were never read
+        with mock.patch.object(host_export, 'MCP_MAX_BYTES', 10 ** 6):  # under the cap: the whole file, as before
+            error, out = tool_call(self.t['boss'], 'export_hosts', {'project': 'hx-web'})
+        self.assertFalse(error, out)
+        self.assertEqual(out['hosts'], 26)
+        self.assertEqual(len(list(csv.DictReader(io.StringIO(out['content'][1:], newline='')))), 26)

@@ -91,11 +91,11 @@ class RunTests(TestCase):
 		AIProviderSettings.objects.create(auto_fire=True)
 		Notification.objects.create(send_to_slack=True, slack_hook_url='https://hooks.invalid/x')
 		self.messages = []
-		patcher = mock.patch('reNgine.common_func.send_slack_message', side_effect=lambda text: self.messages.append(text))
+		patcher = mock.patch('cvengine.common_func.send_slack_message', side_effect=lambda text: self.messages.append(text))
 		patcher.start()
 		self.addCleanup(patcher.stop)
 		for name in ('send_discord_message', 'send_lark_message', 'send_telegram_message'):
-			p = mock.patch(f'reNgine.common_func.{name}')
+			p = mock.patch(f'cvengine.common_func.{name}')
 			p.start()
 			self.addCleanup(p.stop)
 
@@ -105,7 +105,7 @@ class RunTests(TestCase):
 			cve = CVEEntry.objects.get(pk=cve_pk)
 			outcome = {'source': 'existing', 'results': [{'host': h, 'vulnerable': h in vulnerable_by_cve.get(cve.cve_id, ())} for h in hosts]}
 			with mock.patch('cveFeed.templategen.run_cve_tests', return_value=outcome), \
-					mock.patch('reNgine.ai_settings.get_configured_provider', return_value=None):
+					mock.patch('cvengine.ai_settings.get_configured_provider', return_value=None):
 				tasks.template_test_for_cve(cve_pk, hosts, project_id, batch)
 		with mock.patch('cveFeed.tasks.template_test_for_cve.delay', side_effect=fake_delay):
 			return tasks.auto_fire_new_cves([c.pk for c in self.cves])
@@ -127,13 +127,13 @@ class RunTests(TestCase):
 			calls.append(cve_pk)
 			if len(calls) == 1:
 				with mock.patch('cveFeed.templategen.run_cve_tests', side_effect=RuntimeError('nuclei crashed')), \
-						mock.patch('reNgine.ai_settings.get_configured_provider', return_value=None):
+						mock.patch('cvengine.ai_settings.get_configured_provider', return_value=None):
 					with self.assertRaises(RuntimeError):
 						tasks.template_test_for_cve(cve_pk, hosts, project_id, batch)
 				return
 			outcome = {'source': 'existing', 'results': [{'host': h, 'vulnerable': True} for h in hosts]}
 			with mock.patch('cveFeed.templategen.run_cve_tests', return_value=outcome), \
-					mock.patch('reNgine.ai_settings.get_configured_provider', return_value=None):
+					mock.patch('cvengine.ai_settings.get_configured_provider', return_value=None):
 				tasks.template_test_for_cve(cve_pk, hosts, project_id, batch)
 		with mock.patch('cveFeed.tasks.template_test_for_cve.delay', side_effect=fake_delay):
 			tasks.auto_fire_new_cves([c.pk for c in self.cves])

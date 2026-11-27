@@ -17,6 +17,7 @@ from tests.test_tenancy import client_for
 ALLOWED_UNLINKED = {
     'cve_welcome': 'first run only; the dashboard has a button to open it again (?again=1)',
     'cve_update_questions': 'asked once after an update (the dashboard sends an App Admin here), then a reminder in the status strip and Settings > Questions about updates link to it',
+    'cve_ai': 'linked from the AI Model Usage page (Setup) and from About, not from the shell',
     'cve_how': 'a card on the dashboard explains it and links here',
     'cve_scan': 'a scan detail page, reached from the Scans lists',
     'cve_host_screenshot': 'an image of a host, reached from the host page',
@@ -56,7 +57,7 @@ class EveryPageIsLinkedTests(TestCase):
         Project.objects.create(name='Alpha', slug='alpha', insert_date=timezone.now(), org=Org.objects.create(name='Org', slug='org'))
 
     def shell(self):
-        with mock.patch('agentapi.sentinel_broker.has_sentinels', return_value=True):
+        with mock.patch('agentapi.sentinel_broker.has_sentinels', return_value=True), mock.patch('cveFeed.internal_page.nav_visible', return_value=True):
             html = client_for(self.root).get('/cve/alpha/hosts/').content.decode()
         rail = html[html.index('<aside class="rail"'):html.index('</aside>')]
         phone = html[html.index('class="tabbar"'):html.index('<dialog class="palette"')]

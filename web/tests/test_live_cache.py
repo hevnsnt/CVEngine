@@ -31,7 +31,7 @@ def steady_caches():
     tests.test_check_coverage: the IP allowlist and ban caches expire after 10 s, the internal network table after 5 minutes, and a request
     landing after the expiry costs two or three queries more)."""
     from cveFeed import internal_view
-    from reNgine import input_guard, ip_allowlist
+    from cvengine import input_guard, ip_allowlist
     internal_view.invalidate()
     with mock.patch.object(internal_view, 'CACHE_SECONDS', float('inf')), \
             mock.patch.object(ip_allowlist, '_load', return_value=(False, [])), \
@@ -392,7 +392,7 @@ class GraphVersionCacheTests(World):
 
 class QueryCeilingTests(World):
     """Pinned with the clock caches held steady. ``floor`` is what any authenticated request costs before its view runs (the session, the user, the
-    memberships, the roles: 9 for a member, 5 for an App Admin), measured on /cve/api/alive, which does nothing else; what a poll adds to it is what
+    memberships, the roles, and saving the session again: 8 for a member, 8 for an App Admin; a member's was 9 before tenancy.snapshot, without the save), measured on /cve/api/alive, which does nothing else; what a poll adds to it is what
     this class pins."""
 
     def queries(self, client, path, **extra):
@@ -406,8 +406,10 @@ class QueryCeilingTests(World):
         return self.queries(client, '/cve/api/alive')[1]
 
     def test_the_floor_is_what_it_was(self):
-        self.assertEqual(self.floor(client_for(self.a1)), 9)
-        self.assertEqual(self.floor(client_for(self.root)), 5)
+        # session, user, profile, project memberships, organization memberships, then the session saved again (SESSION_SAVE_EVERY_REQUEST, the 12 hour
+        # idle timeout: one UPDATE, which a test case wraps in a savepoint and its release)
+        self.assertEqual(self.floor(client_for(self.a1)), 8)
+        self.assertEqual(self.floor(client_for(self.root)), 8)
 
     def test_stats_warm_poll_costs_the_floor_and_the_fresh_scan_counts(self):
         client = client_for(self.a1)
@@ -425,7 +427,7 @@ class QueryCeilingTests(World):
             views.clear_stats_cache()
             with CaptureQueriesContext(connection) as ctx:
                 client.get('/cve/api/stats')
-        self.assertLessEqual(len(ctx), 50, len(ctx))  # one walk (47 measured: the whole-inventory collapse is now a few set-based reads, not one big statement), once per scope per ten seconds, not once per tab
+        self.assertLessEqual(len(ctx), 54, len(ctx))  # one walk (53 measured: the whole-inventory collapse is now a few set-based reads, not one big statement, and each statement over the current hosts reads the current scan ids first, cveFeed.current_scans), once per scope per ten seconds, not once per tab
 
     def test_graph_live_warm_poll_costs_the_floor(self):
         client = client_for(self.a1)

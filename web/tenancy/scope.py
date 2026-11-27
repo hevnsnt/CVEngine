@@ -8,6 +8,7 @@ instead of trusting each view to filter. A DRF filter backend does the same for
 viewsets whose class-level querysets were built at import time. Celery and
 management commands run with no active scope, so they are unrestricted.
 """
+import contextlib
 import contextvars
 
 from django.db.models import Q
@@ -66,6 +67,7 @@ SCOPES = {
     'agentapi.SentinelPartial': 'task__project_id',  # a streamed task's batches waiting to be stored, read only by the stage that dispatched it
     'cveFeed.AuthCredential': 'project_id',
     'cveFeed.FindingComment': 'project_id',
+    'cveFeed.HostNote': 'project_id',  # an operator's note on one host (agentapi.notes)
     'cveFeed.FindingAuditEvent': 'project_id',
     'cveFeed.HostArchive': 'project_id',
     'cveFeed.HostMove': 'project_id',
@@ -86,7 +88,13 @@ SCOPES = {
     'cveFeed.ResourceRef': 'project_id',
     'dashboard.ApiCredential': 'project_id',  # an organization's own credential has no project (NULLABLE)
 }
-NULLABLE = {'cveFeed.AgentActivity', 'dashboard.ApiCredential', 'cveFeed.AIJob', 'agentapi.StageRun'}  # system-wide (or organization-wide) entries have no project
+NULLABLE = {'dashboard.ApiCredential', 'cveFeed.AIJob', 'agentapi.StageRun',
+            'cveFeed.ReportExport'}  # system-wide (or organization-wide) entries have no project; an organization report has none and is only ever read by requested_by (report_export._mine)
+# cveFeed.AgentActivity is not NULLABLE: an activity line with no project describes the whole instance (how many CVEs were checked against how
+# many hosts, worker restarts, the work planner's batches), so only a caller who sees instance-wide data reads it. That is an App Admin in an
+# unrestricted view (All projects, an API token): a scope of project ids, even an App Admin's page narrowed to one project
+# (cveFeed.views.project_scoped), holds that project's lines only. Keeping the rule a function of the project ids alone keeps every cached
+# snapshot keyed by those ids (cveFeed.snapshot_cache.scope_hash) correct.
 
 # Models that hold a foreign key to a project, domain, scan or organization and are deliberately NOT in SCOPES. Every other one must be listed above
 # (tests.test_sentinel_hardening checks this), so a model that gains a project owner cannot be forgotten.
@@ -104,6 +112,7 @@ UNSCOPED = {
     'cveFeed.ServiceRun': 'engine bookkeeping (nmap rows are global), never read for a user',
     'cveFeed.TriageVerdict': 'one answer shared by every finding with the same evidence; project only records where it was reached, so '
                              'triage reuses a closing answer and shows its words only there (task 256), never listed for a user',
+    'cveFeed.ReportSubscription': 'a whole-organization report has no project; every read goes through agentapi.report_subscriptions, which filters by the caller\'s organizations and projects',
     'agentapi.SentinelEnrollment': 'organization or instance wide as often as project wide, and redeemed with no user at all',
 }
 
@@ -115,6 +124,19 @@ def set_scope(allowed_ids, user=None):
 def reset_scope(tokens):
     _allowed.reset(tokens[0])
     _user.reset(tokens[1])
+
+
+@contextlib.contextmanager
+def as_user(user):
+    """Run a block under ``user``'s project scope, as a request of theirs would. A worker job made for one person (a report, a saved
+    search) runs with no scope; this is the second guard behind the job's own project filters, so a query that forgot its filter still
+    reads only the projects that person may see now. An App Admin's scope is unrestricted, as in a request."""
+    from tenancy import roles
+    tokens = set_scope(roles.allowed_project_ids(user), user)
+    try:
+        yield
+    finally:
+        reset_scope(tokens)
 
 
 def allow(project_id):
@@ -147,17 +169,48 @@ def scope_queryset(queryset):
     return queryset.filter(scope_filter(label, allowed))
 
 
+def _reached_from_scoped_row(manager):
+    """True for a related manager (``row.children``) whose row is itself a project-owned model. That row was read through a scoped
+    manager, so its children are read as they always were: no extra join or filter on the pages that walk them."""
+    instance = getattr(manager, 'instance', None)
+    return instance is not None and instance._meta.label in SCOPES
+
+
+class ScopedManagerMixin:
+    """Put before a manager class: its querysets carry the active scope (see ``scoped_manager_class``)."""
+    _tenancy_wrapped = True
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        return queryset if _reached_from_scoped_row(self) else scope_queryset(queryset)
+
+
+_scoped_classes = {}
+
+
+def scoped_manager_class(cls):
+    """A subclass of the manager class ``cls`` whose querysets carry the active scope.
+
+    The scope lives on the class, not on one manager object, because Django builds every related manager from the default manager's
+    CLASS: the reverse side of a foreign key (``cve_entry.matches``, ``engine.scanhistory_set``, ``agent.tasks``) and both sides of a
+    many-to-many (``technology.technologies``, ``address.ip_addresses``). Patching only the ``objects`` object left those unscoped, so a
+    row of a global model (a CVE, an engine, a technology, an address) could list another project's rows. Now such a list holds only the
+    caller's projects, a ``prefetch_related`` through it included. A related manager whose row is itself project-owned keeps reading as
+    before (``_reached_from_scoped_row``). Django's many-to-many ``count()`` and ``exists()`` shortcut (the link table alone) is taken
+    only when the manager class is exactly ``Manager``, so such a count into a project-owned model now joins the target table: that is
+    what lets the scope apply to it. No page counts one today."""
+    made = _scoped_classes.get(cls)
+    if made is None:
+        made = _scoped_classes[cls] = type(f'Scoped{cls.__name__}', (ScopedManagerMixin, cls), {'__module__': cls.__module__})
+    return made
+
+
 def install(apps):
-    """Wrap each scoped model's default manager (called from the app ready hook)."""
+    """Scope each project-owned model's default manager, and with it every related manager Django derives from it (called from
+    the app ready hook)."""
     for label in SCOPES:
         model = apps.get_model(label)
         manager = model._default_manager
         if getattr(manager, '_tenancy_wrapped', False):
             continue
-        original = manager.get_queryset
-
-        def scoped(original=original):
-            return scope_queryset(original())
-
-        manager.get_queryset = scoped
-        manager._tenancy_wrapped = True
+        manager.__class__ = scoped_manager_class(manager.__class__)

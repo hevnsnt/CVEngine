@@ -228,8 +228,24 @@ class OrgAndInstanceEnrollmentTests(SentinelBase):
         bob = User.objects.create_user('s_bob3', password='x')
         OrgMembership.objects.create(user=bob, org=self.org2, role='admin')
         token = create_token(bob, 'bob3')[1]
-        status, _ = call(token, 'POST', '/api/v1/orgs/one/sentinels/enroll')
-        self.assertEqual(status, 403)
+        status, out = call(token, 'POST', '/api/v1/orgs/one/sentinels/enroll')
+        # the same answer as an organization that does not exist, so a slug cannot be probed from outside
+        self.assertEqual(status, 404)
+        missing_status, missing = call(token, 'POST', '/api/v1/orgs/does-not-exist/sentinels/enroll')
+        self.assertEqual((status, out), (missing_status, missing))
+
+    def test_another_orgs_admin_cannot_probe_an_org_over_mcp_either(self):
+        bob = User.objects.create_user('s_bob4', password='x')
+        OrgMembership.objects.create(user=bob, org=self.org2, role='admin')
+        token = create_token(bob, 'bob4')[1]
+        texts = []
+        for org in ('one', 'does-not-exist'):
+            resp = self.client.post('/mcp/', data=json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call', 'params': {
+                'name': 'generate_sentinel_enrollment', 'arguments': {'org': org}}}), content_type='application/json', HTTP_AUTHORIZATION=f'Bearer {token}')
+            result = resp.json()['result']
+            self.assertTrue(result['isError'])
+            texts.append(result['content'][0]['text'])
+        self.assertEqual(texts[0], texts[1])
 
     def test_plain_project_member_cannot_generate_org_enrollment(self):
         status, _ = call(self.t['alice'], 'POST', '/api/v1/orgs/one/sentinels/enroll')
@@ -420,7 +436,7 @@ class ScopeAndClaimTests(SentinelBase):
 
     def test_oversized_and_malicious_strings_are_clipped_never_stored_verbatim(self):
         # Unit-level, on the broker's own validation: a shell-injection-shaped, over-length string must never be
-        # trusted or stored as given, whatever an HTTP-layer defense (reNgine.input_guard) also does with it in transit.
+        # trusted or stored as given, whatever an HTTP-layer defense (cvengine.input_guard) also does with it in transit.
         evil = '; rm -rf / #' * 50
         clean = sentinels.clean_result('nmap', {'outcome': 'done', 'hosts': [{'ip': '192.0.2.50', 'os_guess': evil,
                  'ports': [{'number': 80, 'product': evil, 'version': evil, 'service_name': evil}]}]})

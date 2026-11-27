@@ -47,3 +47,37 @@ class PortFloodTests(TestCase):
         self.host(self.two, 'a.two.example.test', ip)
         self.assertEqual(len(port_flood.findings_for(self.one)), 1)
         self.assertEqual(len(port_flood.findings_for(self.two)), 1)
+
+    def test_the_crowded_count_runs_once_not_once_per_host(self):
+        """Each host reads its addresses' counts from one count of the crowded addresses: the queries do not grow with the flooded hosts."""
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+        ports = [Port.objects.create(number=n, state='open', protocol='tcp') for n in range(1, port_flood.THRESHOLD + 3)]
+
+        def flooded(address):
+            ip = IpAddress.objects.create(address=address)
+            ip.ports.add(*ports)
+            return ip
+
+        self.host(self.one, 'a.one.example.test', flooded('192.0.2.20'))
+        port_flood.findings_for(self.one)  # warm the per-project exclusion lists (cveFeed.exclusions): their reads happen once, not per host
+        with CaptureQueriesContext(connection) as one:
+            first = port_flood.findings_for(self.one)
+        for n in range(21, 25):
+            self.host(self.one, f'h{n}.one.example.test', flooded(f'192.0.2.{n}'))
+        with CaptureQueriesContext(connection) as five:
+            found = port_flood.findings_for(self.one)
+        self.assertEqual([f.host for f in first], ['a.one.example.test'])
+        self.assertEqual(sorted(f.host for f in found), ['a.one.example.test'] + [f'h{n}.one.example.test' for n in range(21, 25)])
+        self.assertEqual({f.host: f.evidence['addresses'] for f in found}['h22.one.example.test'], ['192.0.2.22'])
+        self.assertEqual({f.host: f.evidence['open_ports_kept'] for f in found}['h22.one.example.test'], port_flood.THRESHOLD + 2)
+        self.assertEqual(len(five), len(one))
+
+    def test_a_host_counts_only_its_own_crowded_addresses(self):
+        """A host on a crowded and a quiet address lists the crowded one only, with its own count."""
+        busy = self.flooded_address('192.0.2.30', port_flood.THRESHOLD + 1)
+        quiet = IpAddress.objects.create(address='192.0.2.31')
+        sub = self.host(self.one, 'a.one.example.test', busy)
+        sub.ip_addresses.add(quiet)
+        (finding,) = port_flood.findings_for(self.one)
+        self.assertEqual((finding.evidence['addresses'], finding.evidence['open_ports_kept']), (['192.0.2.30'], port_flood.THRESHOLD + 1))

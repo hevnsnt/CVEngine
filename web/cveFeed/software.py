@@ -31,16 +31,19 @@ def tool(key, name, url, group, version, license, purpose, where='sentinel', opt
 # The Sentinel commit the Sentinel versions below were read from (its Dockerfile and requirements.txt). tests/test_about_page.py holds it equal to
 # the floor commit of scanner.lock.json and to the sha web/requirements.txt pins: raising the floor means reading the Sentinel's pins again, then changing this line.
 # (The built-in scanner image follows the newest published build; the page says what it was read at, not that it runs exactly this.)
-SENTINEL_PINS_COMMIT = 'a918bc89cd7a4c5710e0f2566634556444dfe551'
+SENTINEL_PINS_COMMIT = '29d1613f88bc6106209b2a5365210fa8a6153795'
 
 GH = 'https://github.com/'
+# NPSL section 6: a system that runs Nmap for its users says so, with a link to nmap.org (the About page, the How it works page, THIRD-PARTY.md, README.md)
+NMAP_NOTICE = 'cvENGINE uses the Nmap Security Scanner to perform its tasks'
+NMAP_URL = 'https://nmap.org'
 SENTINEL_DOCKERFILE = 'sentinel:Dockerfile'
 SENTINEL_REQUIREMENTS = 'sentinel:requirements.txt'
 
 TOOLS = [
     # -- Scanners and tools -------------------------------------------------------------------------------------------------------------------------
     tool('nmap', 'nmap', 'https://nmap.org', 'scanners', '7.993', 'Nmap Public Source License 0.95',
-         'Service and OS fingerprinting, and the UDP exposure sweep', pins=[(SENTINEL_DOCKERFILE, r'ARG NMAPVERSION=([0-9.]+)')]),
+         'Service and OS fingerprinting, and the UDP exposure sweep. ' + NMAP_NOTICE + ' (https://nmap.org)', pins=[(SENTINEL_DOCKERFILE, r'ARG NMAPVERSION=([0-9.]+)')]),
     tool('naabu', 'naabu', GH + 'projectdiscovery/naabu', 'scanners', '2.7.0', 'MIT', 'Full-port discovery ahead of nmap',
          pins=[(SENTINEL_DOCKERFILE, r'ARG NAABU_VERSION=([0-9.]+)')]),
     tool('nuclei', 'nuclei', GH + 'projectdiscovery/nuclei', 'scanners', '3.11.1', 'MIT',
@@ -52,22 +55,28 @@ TOOLS = [
     tool('testssl', 'testssl.sh', GH + 'testssl/testssl.sh', 'scanners', '3.2.5', 'GPL-2.0 (a separate program, never linked)',
          'TLS audit: protocols, ciphers and the named TLS vulnerabilities', pins=[(SENTINEL_DOCKERFILE, r'ARG TESTSSL_VERSION=([0-9.]+)')]),
     tool('wpscan', 'WPScan', GH + 'wpscanteam/wpscan', 'scanners', '4.2.1', 'WPScan Public Source License',
-         'WordPress core, plugin and theme checks (free for testing your own systems; a commercial license is needed for managed or hosted use)',
+         'WordPress core, plugin and theme checks (free for testing your own systems; a commercial license is needed for managed or hosted use). '
+         'A hosted install turns it off with CVENGINE_HOSTED_LICENSE_SAFE=1',
          pins=[(SENTINEL_DOCKERFILE, r'ARG WPSCAN_VERSION=([0-9.]+)')]),
     tool('wafw00f', 'wafw00f', GH + 'EnableSecurity/wafw00f', 'scanners', '2.4.2', 'BSD-3-Clause', 'Names the firewall in front of a web host',
          pins=[(SENTINEL_DOCKERFILE, r'ARG WAFW00F_VERSION=([0-9.]+)')]),
     tool('bbot', 'bbot', GH + 'blacklanternsecurity/bbot', 'scanners', '3.1.0', 'AGPL-3.0 (a separate program, never imported)',
-         'Discovery of domains, subdomains and addresses', pins=[(SENTINEL_DOCKERFILE, r'ARG BBOT_VERSION=([0-9.]+)')]),
+         'Discovery of domains, subdomains and addresses', pins=[(SENTINEL_DOCKERFILE, r'ARG BBOT_VERSION=([0-9.]+)')],
+         notes='Its dependencies asndb, radixtarget and cloudcheck are AGPL-3.0 too'),
     tool('blastdns', 'blastdns', GH + 'blacklanternsecurity/blastdns', 'scanners', '2.0.4', 'AGPL-3.0-or-later (a separate program, never imported)',
          'bbot\'s own DNS resolver (a Rust library), pinned so a rebuild never picks up a newer one', pins=[(SENTINEL_DOCKERFILE, r'ARG BLASTDNS_VERSION=([0-9.]+)')]),
-    tool('blasthttp', 'blasthttp', GH + 'blacklanternsecurity/blasthttp', 'scanners', '0.10.1', 'See its package page (a bbot dependency, never imported)',
+    tool('blasthttp', 'blasthttp', GH + 'blacklanternsecurity/blasthttp', 'scanners', '0.10.1', 'AGPL-3.0 (a bbot dependency, never imported)',
          'bbot\'s own HTTP engine (a Rust library), pinned so a rebuild never picks up a newer one', pins=[(SENTINEL_DOCKERFILE, r'ARG BLASTHTTP_VERSION=([0-9.]+)')]),
-    tool('baddns', 'baddns', GH + 'blacklanternsecurity/baddns', 'scanners', '2.5.0', 'GPL-3.0 (a separate program, never imported)',
+    tool('baddns', 'baddns', GH + 'blacklanternsecurity/baddns', 'scanners', '2.5.0', 'AGPL-3.0 (the license file it ships; its package metadata says GPL-3.0; a separate program, never imported)',
          'bbot\'s subdomain-takeover and dangling-record module, installed with bbot', pins=[(SENTINEL_DOCKERFILE, r'ARG BADDNS_VERSION=([0-9.]+)')]),
-    tool('badsecrets', 'badsecrets', GH + 'blacklanternsecurity/badsecrets', 'scanners', '1.3.0', 'GPL-3.0 (a separate program, never imported)',
+    tool('badsecrets', 'badsecrets', GH + 'blacklanternsecurity/badsecrets', 'scanners', '1.3.0', 'AGPL-3.0 (the license file it ships; its package metadata says GPL-3.0; a separate program, never imported)',
          'bbot\'s known-weak-secret module (web framework signing keys), installed with bbot', pins=[(SENTINEL_DOCKERFILE, r'ARG BADSECRETS_VERSION=([0-9.]+)')]),
-    tool('gowitness', 'gowitness', GH + 'sensepost/gowitness', 'scanners', '', 'GPL-3.0',
-         'Older discovery-time screenshots, installed and run by bbot (the host page falls back to them)'),
+    tool('gowitness', 'gowitness', GH + 'sensepost/gowitness', 'scanners', '3.2.2', 'GPL-3.0',
+         'Older discovery-time screenshots, run by bbot; built from source with current Go dependencies (the host page falls back to them)',
+         pins=[(SENTINEL_DOCKERFILE, r'ARG GOWITNESS_VERSION=([0-9.]+)')]),
+    tool('trajan', 'Trajan', GH + 'praetorian-inc/trajan', 'scanners', '1.0.2', 'Apache-2.0',
+         'Looks for CI/CD pipeline misconfigurations in deep (kitchen-sink) discovery, run by bbot; built from source with current Go dependencies',
+         pins=[(SENTINEL_DOCKERFILE, r'ARG TRAJAN_VERSION=([0-9.]+)')]),
     tool('kingfisher', 'Kingfisher', GH + 'mongodb/kingfisher', 'scanners', '2.19.1', 'Apache-2.0',
          'Finds exposed secrets in pages and scripts, on the Sentinel only (the `secrets_scan` kind)', pins=[(SENTINEL_DOCKERFILE, r'ARG KINGFISHER_VERSION=([0-9.]+)')]),
     tool('sshamble', 'sshamble', GH + 'runZeroInc/sshamble', 'scanners', '0.5.1', 'BSD-2-Clause',
@@ -91,31 +100,34 @@ TOOLS = [
          'The GMP client library behind the OpenVAS add-on, in the Sentinel image (the server image no longer installs it)',
          pins=[(SENTINEL_REQUIREMENTS, r'(?m)^python-gvm==([0-9.]+)')]),
     tool('go', 'Go toolchain', 'https://go.dev', 'scanners', '1.27.4', 'BSD-3-Clause',
-         'Builds nuclei and naabu in the Sentinel image; removed again in the same image layer, so no Go runs in it',
+         'Builds nuclei, naabu, sshamble, gowitness and trajan from source in a build stage of the Sentinel image, every Go module at or above a '
+         'fixed-CVE floor (the ARG GO_DEPENDENCY_FLOOR= list); no Go is in the final image',
          pins=[(SENTINEL_DOCKERFILE, r'ARG GOVERSION=([0-9.]+)')]),
     tool('tailscale', 'Tailscale', GH + 'tailscale/tailscale', 'scanners', '1.104.7', 'BSD-3-Clause',
          'The optional sidecar that joins a tailnet so scans can reach it', where='server', optional='COMPOSE_PROFILES=tailscale',
          pins=[('docker-compose.yml', r'tailscale/tailscale:v([0-9.]+)')]),
     # -- OpenVAS add-on -----------------------------------------------------------------------------------------------------------------------------
-    tool('gvmd', 'gvmd', GH + 'greenbone/gvmd', 'greenbone', 'stable (image pinned by digest)', 'AGPL-3.0-or-later (with gvm-libs, GPL-2.0-or-later)',
+    tool('gvmd', 'gvmd', GH + 'greenbone/gvmd', 'greenbone', 'stable (latest, not pinned)', 'AGPL-3.0-or-later (with gvm-libs, GPL-2.0-or-later)',
          'The vulnerability manager; cvENGINE drives it over GMP', optional='COMPOSE_PROFILES=openvas on a Sentinel'),
-    tool('ospd-openvas', 'ospd-openvas', GH + 'greenbone/ospd-openvas', 'greenbone', 'stable (image pinned by digest)', 'AGPL-3.0-or-later',
+    tool('ospd-openvas', 'ospd-openvas', GH + 'greenbone/ospd-openvas', 'greenbone', 'stable (latest, not pinned)', 'AGPL-3.0-or-later',
          'The scanner wrapper; the only container there with NET_RAW and NET_ADMIN', optional='COMPOSE_PROFILES=openvas on a Sentinel'),
     tool('openvas-scanner', 'openvas-scanner (with openvasd and the notus service)', GH + 'greenbone/openvas-scanner', 'greenbone',
-         'stable (image pinned by digest)', 'GPL-2.0 (its Rust parts GPL-2.0-or-later)', 'The scan engine', optional='COMPOSE_PROFILES=openvas on a Sentinel'),
-    tool('pg-gvm', 'pg-gvm', GH + 'greenbone/pg-gvm', 'greenbone', 'stable (image pinned by digest)', 'GPL-3.0 (PostgreSQL itself: PostgreSQL License)',
+         'stable (latest, not pinned)', 'GPL-2.0 (its Rust parts GPL-2.0-or-later)', 'The scan engine', optional='COMPOSE_PROFILES=openvas on a Sentinel'),
+    tool('pg-gvm', 'pg-gvm', GH + 'greenbone/pg-gvm', 'greenbone', 'stable (latest, not pinned)', 'GPL-3.0 (PostgreSQL itself: PostgreSQL License)',
          'The PostgreSQL database of the OpenVAS add-on, with pg-gvm-migrator for upgrades', optional='COMPOSE_PROFILES=openvas on a Sentinel'),
-    tool('greenbone-redis', 'Redis (Greenbone redis-server image)', 'https://greenbone.github.io/docs/latest/', 'greenbone', 'stable (image pinned by digest)',
+    tool('greenbone-redis', 'Redis (Greenbone redis-server image)', 'https://greenbone.github.io/docs/latest/', 'greenbone', 'stable (latest, not pinned)',
          'Unknown (the license of the Redis version Greenbone ships; not read from the image)', 'The scanner\'s cache', optional='COMPOSE_PROFILES=openvas on a Sentinel'),
     tool('greenbone-feed', 'Greenbone feed data',
-         'https://greenbone.github.io/docs/latest/', 'greenbone', 'community (moving tag); gpg-data pinned by digest', 'Its own terms, printed by the data containers when they start',
+         'https://greenbone.github.io/docs/latest/', 'greenbone', 'community (moving tag); gpg-data follows stable', 'Its own terms, printed by the data containers when they start',
          'Vulnerability tests and advisory data, refreshed by the data containers', optional='COMPOSE_PROFILES=openvas on a Sentinel',
          notes='Data sets: vulnerability-tests, notus-data, scap-data, cert-bund-data, dfn-cert-data, data-objects, report-formats, gpg-data'),
     # -- Platform -----------------------------------------------------------------------------------------------------------------------------------
     tool('ubuntu', 'Ubuntu', 'https://ubuntu.com', 'platform', '26.04', 'Free software, each package under its own license', 'The base of the server and Sentinel images',
-         where='both', pins=[('web/Dockerfile', r'(?m)^FROM ubuntu:([0-9.]+)$'), (SENTINEL_DOCKERFILE, r'(?m)^FROM ubuntu:([0-9.]+)@')]),
-    tool('python', 'Python', 'https://www.python.org', 'platform', 'distribution package', 'PSF License', 'The runtime of the server, the Sentinel client and the AI reviewer '
-         '(the reviewer image is python:3.13-slim-bookworm)', where='both'),
+         where='both', pins=[('web/Dockerfile', r'(?m)^FROM ubuntu:([0-9.]+)@sha256:[0-9a-f]{64}$'), (SENTINEL_DOCKERFILE, r'(?m)^FROM ubuntu:([0-9.]+)@')]),
+    tool('python', 'Python', 'https://www.python.org', 'platform', '3.14.10', 'PSF License', 'The runtime of the server image (python-build-standalone, pinned: 3.14.0 to 3.14.4 '
+         'had the incremental garbage collector that crashed the workers)', where='server', pins=[('web/Dockerfile', r'ARG PYTHON_VERSION=([0-9.]+)')]),
+    tool('python-sentinel', 'Python (Sentinel and reviewer)', 'https://www.python.org', 'platform', 'distribution package', 'PSF License',
+         'The runtime of the Sentinel client and the AI reviewer (the reviewer image is python:3.13-slim-bookworm)', where='sentinel'),
     tool('django', 'Django', 'https://www.djangoproject.com', 'platform', '6.0.10', 'BSD-3-Clause', 'The web framework and its REST framework',
          where='server', pins=[('web/requirements.txt', r'(?m)^Django==([0-9.]+)')]),
     tool('celery', 'Celery', GH + 'celery/celery', 'platform', '5.7.0', 'BSD-3-Clause', 'The task queue (with kombu, amqp, billiard and vine) and its beat scheduler',
@@ -125,11 +137,11 @@ TOOLS = [
     tool('weasyprint', 'WeasyPrint', GH + 'Kozea/WeasyPrint', 'platform', '70.0', 'BSD-3-Clause', 'Renders the PDF reports (with DejaVu Sans)',
          where='server', pins=[('web/requirements.txt', r'(?m)^weasyprint==([0-9.]+)')]),
     tool('postgresql', 'PostgreSQL', 'https://www.postgresql.org', 'platform', '18', 'PostgreSQL License', 'The database (the postgres:18-alpine image)',
-         where='server', pins=[('docker-compose.yml', r'image: "postgres:([0-9]+)-alpine"')]),
-    tool('redis', 'Redis', GH + 'redis/redis', 'platform', 'moving tag (redis:alpine)',
-         'Redis 8 and later: RSALv2, SSPLv1 or AGPLv3 at your option; Redis 7.2 and earlier: BSD-3-Clause. The tag moves, so check the image you pulled',
+         where='server', pins=[('docker-compose.yml', r'image: "postgres:([0-9]+)-alpine@sha256:[0-9a-f]{64}"')]),
+    tool('redis', 'Redis', GH + 'redis/redis', 'platform', 'redis:alpine, pinned by digest',
+         'Redis 8 and later: RSALv2, SSPLv1 or AGPLv3 at your option; Redis 7.2 and earlier: BSD-3-Clause. The digest docker-compose.yml pins says which release',
          'The Celery broker, the cache and the locks', where='server'),
-    tool('nginx', 'nginx', GH + 'nginx/nginx', 'platform', 'moving tag (nginx:alpine)', 'BSD-2-Clause', 'The reverse proxy that terminates TLS', where='server'),
+    tool('nginx', 'nginx', GH + 'nginx/nginx', 'platform', 'nginx:alpine, pinned by digest', 'BSD-2-Clause', 'The reverse proxy that terminates TLS', where='server'),
     tool('anthropic-sdk', 'Anthropic SDK', GH + 'anthropics/anthropic-sdk-python', 'platform', '2.8.0', 'Apache-2.0',
          'The AI reviewer container\'s only dependency of note (with its pinned dependencies); OpenAI-compatible servers and Ollama are called with the standard library',
          where='server', optional='idles until an AI provider is set up', pins=[('reviewer/requirements.txt', r'(?m)^anthropic==([0-9.]+)')]),
@@ -232,8 +244,15 @@ DATA_SOURCES = [
     source('OSV', 'https://osv.dev', 'Distribution fix data for Ubuntu and Debian packages (backport detection)', used_by='cveFeed/distro_sync.py'),
     source('Debian security tracker', 'https://security-tracker.debian.org', 'Debian fix data', used_by='cveFeed/distro_sync.py'),
     source('crt.sh', 'https://crt.sh', 'Certificate transparency lookups', used_by='cveFeed/ctmonitor.py'),
+    source('Cert Spotter', 'https://sslmate.com/certspotter/', 'Certificate transparency lookups when crt.sh cannot answer. Its API without a key is for '
+           'personal or evaluation use; off with CVENGINE_CT_FALLBACK=0 or CVENGINE_HOSTED_LICENSE_SAFE=1', used_by='cveFeed/ctmonitor.py'),
+    source('Shodan InternetDB', 'https://internetdb.shodan.io', 'Open ports and CPEs of an address, through bbot\'s shodan_idb module in discovery. Free for '
+           'non-commercial use only; CVENGINE_HOSTED_LICENSE_SAFE=1 leaves the module out', used_by='agentapi/sentinel_stream.py'),
+    source('Cloudflare Radar Zero Wire', 'https://radar.cloudflare.com/zero-wire', 'Vulnerability briefings named in email reports. CC BY-NC 4.0 '
+           '(non-commercial use); switched on the Reporting page, and off with CVENGINE_HOSTED_LICENSE_SAFE=1', used_by='cveFeed/zero_wire.py'),
     source('IANA RDAP bootstrap and the registries it names', 'https://data.iana.org/rdap/dns.json', 'Registry lookups for the dangling-domain and email hygiene checks', used_by='cveFeed/mailfail.py'),
-    source('Internet Archive', 'https://web.archive.org', 'Saved URLs, as passive evidence of what a host once ran', used_by='cveFeed/archive_urls.py'),
+    source('Internet Archive', 'https://web.archive.org', 'Saved URLs, as passive evidence of what a host once ran. Access is granted for scholarship and '
+           'research; off with CVENGINE_ARCHIVE_LOOKUP=0 or CVENGINE_HOSTED_LICENSE_SAFE=1', used_by='cveFeed/archive_urls.py'),
     source('nuclei-templates releases', 'https://github.com/projectdiscovery/nuclei-templates/releases', 'The reviewer\'s check for a release newer than the one the Sentinels pin (the server downloads no templates)', used_by='reviewer/cvengine_reviewer/server.py'),
     source('badkeys blocklist', 'https://badkeys.info', 'Known-weak SSH host keys, downloaded by `sshamble badkeys-update` on the Sentinel, daily. Turn that off with CVENGINE_BADKEYS_REFRESH=0 on an air-gapped Sentinel', used_by='cvENGINE-sentinel client/badkeys.py'),
     source('Greenbone Community feed', 'https://greenbone.github.io/docs/latest/', 'Vulnerability tests and advisory data for the OpenVAS add-on, from registry.community.greenbone.net', 'the OpenVAS add-on', used_by='docker-compose.yml, the openvas-* data services'),
@@ -242,18 +261,17 @@ DATA_SOURCES = [
     source('Bugcrowd Vulnerability Rating Taxonomy', 'https://github.com/bugcrowd/vulnerability-rating-taxonomy', 'Bundled as cveFeed/data/vrt.json for report categories and priority (Apache-2.0)', used_by='cveFeed/bounty_playbook.py'),
     source('Rapid7 Recog', 'https://github.com/rapid7/recog', 'Banner fingerprints bundled as cveFeed/data/recog/ (pinned commit, BSD-2-Clause): the product, version and CPE stored banners state', used_by='cveFeed/recog.py'),
     source('HackerOne', 'https://api.hackerone.com', 'Submitting a report you wrote, with your own API token', 'your own HackerOne token', used_by='cveFeed/bounty_submit.py'),
-    source('WPScan vulnerability data', 'https://wpscan.com/', 'WordPress vulnerabilities for WPScan', 'your own wpscan.com token', used_by='the Sentinel\'s WPScan'),
+    source('WPScan vulnerability data', 'https://wpscan.com/', 'WordPress vulnerabilities for WPScan. Use in a service needs a WPScan Enterprise plan; never sent with CVENGINE_HOSTED_LICENSE_SAFE=1', 'your own wpscan.com token', used_by='the Sentinel\'s WPScan'),
     source('runZero Export API', 'https://www.runzero.com', 'Asset inventory (OS, hardware, tags, CVE reports); no runZero code is bundled', 'your own Export API token', used_by='cveFeed/runzero.py'),
     source('Tailscale API', 'https://tailscale.com/api', 'Read-only access to your own tailnet, and the fixed versions from Tailscale\'s security bulletins', 'the Tailscale add-on and your own credentials', used_by='cveFeed/tailscale_api.py'),
-    source('Slack, Discord, Telegram and Lark', 'https://slack.com', 'Notifications, to the webhook or bot you configure', 'a webhook you configure', used_by='reNgine/common_func.py'),
-    source('Google Fonts', 'https://fonts.google.com', 'Inter, loaded by the HTML report only when you open one (the app itself serves its own fonts)', used_by='templates/report/'),
+    source('Slack, Discord, Telegram and Lark', 'https://slack.com', 'Notifications, to the webhook or bot you configure', 'a webhook you configure', used_by='cvengine/common_func.py'),
 ]
 
 AI_PROVIDERS = [
-    source('Anthropic', 'https://www.anthropic.com', 'AI triage, template drafting, validation and the reviewer, through its API', 'an API key you add', used_by='reNgine/ai_profiles.py'),
-    source('OpenAI', 'https://openai.com', 'The same, through its API', 'an API key you add', used_by='reNgine/ai_profiles.py'),
-    source('OpenRouter', 'https://openrouter.ai', 'The same, through its API', 'an API key you add', used_by='reNgine/ai_profiles.py'),
-    source('Ollama, vLLM and LM Studio', 'https://github.com/ollama/ollama', 'Self-hosted servers cvENGINE calls over HTTP (Ollama MIT, vLLM Apache-2.0; no code of any of them is included)', 'a server you run', used_by='reNgine/ai_providers.py'),
+    source('Anthropic', 'https://www.anthropic.com', 'AI triage, template drafting, validation and the reviewer, through its API', 'an API key you add', used_by='cvengine/ai_profiles.py'),
+    source('OpenAI', 'https://openai.com', 'The same, through its API', 'an API key you add', used_by='cvengine/ai_profiles.py'),
+    source('OpenRouter', 'https://openrouter.ai', 'The same, through its API', 'an API key you add', used_by='cvengine/ai_profiles.py'),
+    source('Ollama, vLLM and LM Studio', 'https://github.com/ollama/ollama', 'Self-hosted servers cvENGINE calls over HTTP (Ollama MIT, vLLM Apache-2.0; no code of any of them is included)', 'a server you run', used_by='cvengine/ai_providers.py'),
     source('Model Context Protocol', 'https://modelcontextprotocol.io', 'How agents connect to cvENGINE', used_by='agentapi/mcp.py'),
 ]
 

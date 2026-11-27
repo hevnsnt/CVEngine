@@ -1,0 +1,15 @@
+{% extends 'cveFeed/base.html' %}
+{% load assets %}
+{% block title %}CVEngine · Reporting{% endblock %}
+{% block content %}
+<div class="page-head"><div>
+<h1>Reporting</h1>
+<p class="sub">Download a findings or hosts report for an organization or a project, as a PDF or a CSV file, and send a weekly or monthly summary by email.</p>
+</div></div>
+<div id="reports-root" data-project="{{ initial_project }}" data-org="{{ initial_org }}" data-slug="{% if slug != '_all' %}{{ slug|default:'' }}{% endif %}" data-superuser="{% if is_app_admin %}1{% endif %}">
+  <div class="wait"><p class="note wait-line">Reading what you can report on...</p><span class="sk-bar wait-bar" aria-hidden="true"></span><span class="sk-bar wait-bar" aria-hidden="true"></span></div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script type="module" src="{% asset 'cve/reports.js' %}"></script>
+{% endblock %}

@@ -50,7 +50,7 @@ class Fixture(TestCase):
 		self.counter = 0
 		self.sent = []
 		for name in SENDERS:
-			patcher = mock.patch(f'reNgine.common_func.{name}', side_effect=lambda text, n=name: self.sent.append((n, text)))
+			patcher = mock.patch(f'cvengine.common_func.{name}', side_effect=lambda text, n=name: self.sent.append((n, text)))
 			patcher.start()
 			self.addCleanup(patcher.stop)
 
@@ -509,6 +509,18 @@ class TenancyTests(Fixture):
 	def test_the_all_projects_view_cannot_hold_or_list_saved_searches(self):
 		self.assertEqual(call(self.token, 'GET', '/api/v1/projects/_all/saved-searches')[0], 400)
 		self.assertEqual(call(self.token, 'POST', '/api/v1/projects/_all/saved-searches', {'name': 'n', 'query': 'port:22'})[0], 400)
+
+	def test_the_list_never_reads_the_matched_hosts(self):
+		"""The list shows no matched hosts, so their JSON (up to 1000 per search) is not read; what it shows is unchanged."""
+		from django.db import connection
+		from django.test.utils import CaptureQueriesContext
+		SavedSearch.objects.filter(pk=self.s.pk).update(matched={f'k{n}': f'h{n}.example.test' for n in range(500)}, last_match_count=500)
+		expected = call(self.token, 'GET', f'{self.base}/{self.s.pk}')[1]
+		with CaptureQueriesContext(connection) as seen:
+			status, listed = call(self.token, 'GET', self.base)
+		self.assertEqual(status, 200)
+		self.assertEqual([r for r in listed['results'] if r['id'] == self.s.pk], [expected])
+		self.assertFalse([q for q in seen if '"matched"' in q['sql']])
 
 	def test_the_session_user_gets_the_same_answers(self):
 		browser = client_for(self.owner)

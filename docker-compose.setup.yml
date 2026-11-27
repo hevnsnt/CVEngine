@@ -12,3 +12,8 @@ services:
       - CITY=${CITY:-City}
     volumes:
       - ./secrets/certs:/certs:rw
+    logging:  # rotated like every service (docker-compose.yml, x-logging)
+      driver: json-file
+      options:
+        max-size: "${CVENGINE_LOG_MAX_SIZE:-50m}"
+        max-file: "${CVENGINE_LOG_MAX_FILE:-5}"

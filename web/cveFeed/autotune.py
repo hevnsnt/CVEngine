@@ -14,7 +14,7 @@ removes the saved value and hands the same number to the tuner, so nothing jumps
 are ever tuned (``cveFeed.scan_concurrency.FIELDS``, ``cveFeed.tunables.TUNABLES``); AI spend caps and anything that guards safety say False.
 
 **Precedence** for a tunable setting: saved by a person > environment when not the default > tuned (mode Auto) > environment > default. The tuned numbers are a row in the
-database (the truth), published to Redis (``reNgine.resources.AUTO_VALUES_KEY``) on every change and every 30 seconds, and read by the workers
+database (the truth), published to Redis (``cvengine.resources.AUTO_VALUES_KEY``) on every change and every 30 seconds, and read by the workers
 the same way as the saved values, so a change takes effect within seconds with no restart (the discovery pool is resized live, as for a save).
 
 **The run** (``run``, the ``autotune`` beat task every ten minutes on cve_feed_queue, one at a time): take a measurement
@@ -39,7 +39,7 @@ from collections import namedtuple
 from datetime import datetime, timedelta, timezone as dt_timezone
 
 from cveFeed import autotune_sentinels
-from reNgine import ai_prompts, resources
+from cvengine import ai_prompts, resources
 
 logger = logging.getLogger(__name__)
 
@@ -224,7 +224,7 @@ def publish(row=None):
 
 
 def recover(publish_again=True):
-    """The tuned values from the database (what ``reNgine.resources.auto_values`` falls back to when Redis lost its copy)."""
+    """The tuned values from the database (what ``cvengine.resources.auto_values`` falls back to when Redis lost its copy)."""
     row = settings_row()
     values = applied_values(row)
     if publish_again:
@@ -787,7 +787,7 @@ def ask_advisor(offered, summary, now):
 
 def job_answer(job, text):
     """The advisor answered: kept for the next round, which validates it (``autotune_policy.validate_advice``) against what it offers then."""
-    from reNgine.ai_providers import clean_text
+    from cvengine.ai_providers import clean_text
     client = _redis()
     if client is not None:
         client.set(ADVICE_KEY, json.dumps({'reply': clean_text(text, 20000), 'at': _now().timestamp()}), ex=ADVICE_FRESH)
@@ -1168,7 +1168,7 @@ def ai_apply(proposals, offer, now_dt=None):
         return results
     if offer['gate']:
         return results + [{'setting': i['setting'][:64], 'status': 'refused', 'text': f'ignored: {offer["gate"]}'} for i in items]
-    from reNgine.ai_providers import clean_text
+    from cvengine.ai_providers import clean_text
     offered = {k: {'setting': o['setting'], 'value': o['value'], 'range': o['range']} for k, o in offer['offered'].items()}
     keys, row, mode, samples = by_key(), settings_row(), effective_mode(), recent_samples(now_dt)
     seen = set()
@@ -1219,7 +1219,7 @@ def _ai_record_refused(m, current, item, why, now_dt, resolution='refused'):
     value = item.get('value')
     number = value if isinstance(value, int) and not isinstance(value, bool) else None
     try:
-        from reNgine.ai_providers import clean_text
+        from cvengine.ai_providers import clean_text
         reason = clean_text(item.get('reason') or '', 200) or 'AI proposal'
         alert = item.get('alert') if isinstance(item.get('alert'), str) and len(item['alert']) <= 40 else None
         direction = 'raise' if number is not None and current is not None and number > current else 'lower'
@@ -1322,18 +1322,26 @@ def pause_failing_kinds(mode, now_dt):
     for agent in Agent.objects.filter(kind='scanner', status='active'):
         stored = ((agent.managed_settings or {}).get('pauses') or {}).get('value') or {}
         active = sentinel_policy.active_pauses(agent, now_dt)
+        window = now_dt - timedelta(hours=PAUSE_WINDOW_HOURS)
+        # the tasks this Sentinel finished in the window, read once (each kind's own start is never earlier than the window), where every kind
+        # took two or three queries of its own
+        finished = {}
+        for kind, status, at in (SentinelTask.objects.filter(agent=agent, finished_at__gte=window, status__in=('done', 'failed'))
+                                 .values_list('kind', 'status', 'finished_at')):
+            finished.setdefault(kind, []).append((status, at))
         for kind in SentinelTask.KINDS:
             if kind in active:
                 continue
             ended = sentinel_policy._until(stored.get(kind) or {}) if isinstance(stored.get(kind), dict) else None
-            since = max(now_dt - timedelta(hours=PAUSE_WINDOW_HOURS), ended) if ended else now_dt - timedelta(hours=PAUSE_WINDOW_HOURS)
-            rows = SentinelTask.objects.filter(agent=agent, kind=kind, finished_at__gte=since, status__in=('done', 'failed'))
-            if rows.filter(status='done').exists() or rows.filter(status='failed').count() < PAUSE_FAILURES:
+            since = max(window, ended) if ended else window
+            statuses = [status for status, at in finished.get(kind, ()) if at >= since]
+            failed = statuses.count('failed')
+            if 'done' in statuses or failed < PAUSE_FAILURES:
                 continue
             from cveFeed.models import TuningDecision
             earlier = TuningDecision.objects.filter(setting=f'sentinel_pause:{kind}', signals__agent_id=agent.pk, created_at__gte=now_dt - timedelta(days=1)).count()
             hours = PAUSE_HOURS[min(earlier, len(PAUSE_HOURS) - 1)]
-            reason = f'{kind} failed {rows.filter(status="failed").count()} times in a row on {agent.name} and finished none'
+            reason = f'{kind} failed {failed} times in a row on {agent.name} and finished none'
             try:
                 until = sentinel_policy.pause(agent, kind, hours, reason, by='auto-tuning', now=now_dt)
             except sentinel_policy.PauseRefused as exc:
@@ -1512,7 +1520,7 @@ def run(now_dt=None):
     state = advisor_state(row)
     reply = take_advice(now) if offered else None
     if reply is not None:  # the answer to the question an earlier round queued
-        from reNgine.ai_providers import clean_text
+        from cvengine.ai_providers import clean_text
         accepted, refused, error = policy.validate_advice(reply, offered, clean=clean_text)
         advice = accepted
         _set_record({'at': state.get('last_at') or now, 'error': error or None})
@@ -1663,7 +1671,7 @@ def _resize_discovery_directly(ceiling):
     """Resize every discovery worker that answers, without the database (``scan_concurrency.apply_discovery`` reads it)."""
     try:
         from cveFeed import scan_concurrency
-        from reNgine.celery import app
+        from cvengine.celery import app
         names = list(scan_concurrency.discovery_workers(app))
         if names:
             app.control.broadcast('autoscale', arguments={'max': ceiling}, destination=names, reply=False)

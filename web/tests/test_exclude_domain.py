@@ -6,7 +6,7 @@ from agentapi.auth import create_token
 from agentapi.services import ApiError
 from cveFeed.exclusions import ExclusionSet, drop_excluded, excluded_names, is_excluded
 from cveFeed.models import HostExclusion, HostState
-from reNgine.tasks import save_subdomain
+from cvengine.tasks import save_subdomain
 from startScan.models import ScanHistory, Subdomain, Vulnerability
 from targetApp.models import Domain
 from tests.test_agentapi import call
@@ -39,6 +39,8 @@ class ExclusionSetTests(Base):
 		self.assertFalse(is_excluded(self.a1.id, 'sub.exact.test'))
 		self.assertFalse(is_excluded(self.b1.id, 'www.snow.test'))  # another organization
 		self.assertEqual(drop_excluded(self.a1.id, ['a.snow.test', 'keep.test', 'exact.test']), ['keep.test'])
+		from cveFeed import exclusions
+		exclusions.forget()  # a cold cache: the list is read from the database (a warm one answers from the copy the last read cached)
 		with mock.patch('cveFeed.models.HostExclusion.objects') as objects:
 			objects.filter.side_effect = RuntimeError('db')
 			self.assertEqual(excluded_names(self.a1.id), frozenset())  # best effort: discovery carries on

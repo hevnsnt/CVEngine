@@ -134,22 +134,26 @@ _own = {'at': 0.0, 'addresses': frozenset()}
 
 
 def own_addresses():
-    """The addresses this cvENGINE instance answers on: ``CVENGINE_OWN_ADDRESSES`` (comma separated; for an instance behind NAT or a load balancer)
-    and what ``DOMAIN_NAME`` resolves to, cached for an hour. A scan of any of them would be this instance scanning itself."""
+    """The addresses this cvENGINE instance answers on: ``CVENGINE_SELF_ADDRESSES`` and ``CVENGINE_OWN_ADDRESSES`` (comma separated; for an instance
+    behind a CDN, NAT or a load balancer) and what ``DOMAIN_NAME`` resolves to, cached for an hour. A scan of any of them would be this instance
+    scanning itself. A resolved address inside a CDN's shared edge range (a name behind Cloudflare) is not the instance: it fronts many other sites."""
+    from cveFeed import hosting
     import socket
     from django.conf import settings
     now = time.monotonic()
     if _own['at'] and now - _own['at'] < OWN_TTL:
         return _own['addresses']
     found, looked_up = set(), True
-    for part in os.environ.get('CVENGINE_OWN_ADDRESSES', '').split(','):
-        part = part.strip()
-        if part:
-            found.add(_compressed(part))
+    for env in ('CVENGINE_SELF_ADDRESSES', 'CVENGINE_OWN_ADDRESSES'):
+        for part in os.environ.get(env, '').split(','):
+            part = part.strip()
+            if part:
+                found.add(_compressed(part))
     name = str(getattr(settings, 'DOMAIN_NAME', '') or '').strip()
     if name:
         try:
-            found.update(_compressed(item[4][0]) for item in socket.getaddrinfo(name, None, type=socket.SOCK_STREAM))
+            found.update(_compressed(item[4][0]) for item in socket.getaddrinfo(name, None, type=socket.SOCK_STREAM)
+                         if not hosting.provider_range(_compressed(item[4][0])))
         except (OSError, UnicodeError):
             looked_up = False
     # A failed lookup is asked again within a minute, not an hour: until it works this server's own address is not refused.
@@ -163,6 +167,17 @@ def _compressed(address):
         return ipaddress.ip_address(str(address).split('%')[0].strip()).compressed
     except ValueError:
         return str(address).strip()
+
+
+def _excluded_reason(project_id, host):
+    """Why an excluded host is not scanned: "this cvENGINE server" when it is the server itself (its name, or an address it resolves to), else the
+    organization's exclusion."""
+    from cveFeed import exclusions
+    try:
+        refusal = exclusions.address_excluded(project_id, host)
+    except Exception:  # noqa: BLE001 - the host stays refused either way; only the wording is at stake
+        refusal = None
+    return 'this cvENGINE server, never scanned' if refusal and 'this cvENGINE server' in refusal else 'excluded from scanning'
 
 
 def refuse_reason(ip):
@@ -206,6 +221,23 @@ def _latest_row(project_id, host, scoped=False):
     if scoped:
         rows = rows.filter(in_target_scope_q())
     return rows.select_related('scan_history', 'target_domain').annotate(held=held_expr()).order_by('held', '-scan_history_id').first()
+
+
+def _latest_rows(project_id, hosts, scoped=False):
+    """``{name: row}``: ``_latest_row`` of each of ``hosts`` in one query (the same filter and order, one row per name), with each row's addresses
+    read in one more. ``assess`` looks at every candidate of a project, up to a thousand names, and read them one query each."""
+    from cveFeed.manual_only import held_expr
+    from startScan.models import Subdomain
+    from targetApp.models import in_target_scope_q
+    hosts = list(hosts)
+    if not hosts:
+        return {}
+    rows = Subdomain.objects.filter(target_domain__project_id=project_id, name__in=hosts)
+    if scoped:
+        rows = rows.filter(in_target_scope_q())
+    rows = (rows.select_related('scan_history', 'target_domain').annotate(held=held_expr()).order_by('name', 'held', '-scan_history_id').distinct('name')
+            .prefetch_related('ip_addresses'))
+    return {row.name: row for row in rows}
 
 
 def _names(items):
@@ -253,6 +285,8 @@ def host_heat(project_id, names):
         return {}
     rows = (Subdomain.objects.filter(target_domain__project_id=project_id, name__in=wanted).order_by('name', '-scan_history_id').distinct('name')
             .prefetch_related('cve_matches__cve_entry', services.triage_prefetch('cve_matches__triage'), 'vulnerability_set', services.triage_prefetch('vulnerability_set__triage'), 'vulnerability_set__cve_ids', 'vulnerability_set__tags'))
+    rows = list(rows)
+    services._prime_nuclei(rows)  # whether the template scan ran, for every row at once: a host with nothing hot asked it once per host
     out = {}
     for sub in rows:
         reasons = services._heat_reasons(sub, capped=False)
@@ -284,7 +318,7 @@ def assess(project_id, candidates, forced=(), gate=True, resolve=None, blocked=N
     reasons, then the longest-waiting; a forced host with no heat comes last. ``resolve=None`` reads the stored address: the explanation
     shown to people. The real selection passes ``_address`` (the stored address a scanner may touch; no name is looked up). ``internal`` selects the project's declared internal networks, whose names are their
     own address and which only a Sentinel inside can reach."""
-    from cveFeed import exclusions, ledger
+    from cveFeed import exclusions, internal_view, ledger
     from targetApp.target_types import internal_networks, scannable_hosts, sentinel_only_target
     names = sorted(_names(candidates))
     forced = _names(forced)
@@ -311,15 +345,18 @@ def assess(project_id, candidates, forced=(), gate=True, resolve=None, blocked=N
     from targetApp.models import narrowed_names
     narrowed = narrowed_names(project_id, names)  # held only under a target that is now exactly one host: no person's naming lifts that
     passed = []
+    latest = _latest_rows(project_id, [host for host in names if host in heats], scoped=True)
     for host in names:
         heat = heats.get(host, ('', (0, 0)))[0]
-        sub = _latest_row(project_id, host, scoped=True) if host in heats else None
+        sub = latest.get(host) if host in heats else None
         if host in narrowed:
             refuse(host, heat, 'its target is set to this host only: a name under it is not scanned')
+        elif internal and (printed := internal_view.printer_of(project_id, host)):  # forced or not: OpenVAS's service detection writes to every port
+            refuse(host, heat, f'a printer ({printed}): OpenVAS is not run on printers, which print what reaches their print ports')
         elif sub is None:
             refuse(host, heat, 'not a host of this project')
         elif host not in kept:
-            refuse(host, heat, 'excluded from scanning')
+            refuse(host, heat, _excluded_reason(project_id, host))
         elif (barred := bounty.refusal(project_id, host)):
             refuse(host, heat, 'bug bounty: ' + barred)
         elif sub.target_domain.discovery_mode == 'manual' and host not in forced:  # "just add them, do not scan yet": only a person who names the host reaches it
@@ -339,10 +376,13 @@ def assess(project_id, candidates, forced=(), gate=True, resolve=None, blocked=N
         else:
             passed.append((host, sub, heat))
     chosen, by_ip = [], {}
+    # one vetting of every host that is left (the exclusions, the archive and a fresh bug bounty Gate are read once for the batch, as
+    # scannable_hosts does for any list); each entry is judged on its own, so the batch keeps exactly the hosts a call per host kept
+    vetted = set() if internal or not passed else set(scannable_hosts([host for host, _sub, _heat in passed], resolver=blocked, project=project_id))
     for host, sub, heat in passed:
         if internal:
             ip = host
-        elif not scannable_hosts([host], resolver=blocked, project=project_id):
+        elif host not in vetted:
             refuse(host, heat, 'a scanner may not be pointed at it (a prohibited address range)')
             continue
         else:
@@ -436,7 +476,7 @@ QUEUE_REASONS = (
     ('scanned_this_week', lambda r: r.startswith('scanned ') and 'due again after a week' in r, 'scanned this week'),
     ('shared_platform', lambda r: r.startswith(SHARED_MARKERS), 'on shared platforms'),
     ('failed_lately', lambda r: r.startswith((INCONCLUSIVE, 'could not be scanned', 'OpenVAS was interrupted')), 'failed or interrupted lately'),
-    ('excluded', lambda r: r == 'excluded from scanning', 'excluded from scanning'),
+    ('excluded', lambda r: r in ('excluded from scanning', 'this cvENGINE server, never scanned'), 'excluded from scanning'),
     ('bug_bounty', lambda r: r.startswith('bug bounty:'), 'held back by bug bounty scope'),
     ('manual_only', lambda r: r.startswith('the target is set to manual only'), 'on manual only targets'),
     ('single_host_target', lambda r: r.startswith('its target is set to this host only'), 'under a single host target'),
@@ -900,7 +940,7 @@ def apply_observations(sub):
     ``(findings, evidence, resolved)``."""
     from cveFeed import correlation
     from cveFeed.models import CVEEntry, CVEMatch, ProbeObservation
-    from reNgine.tasks import save_vulnerability
+    from cvengine.tasks import save_vulnerability
     domain = sub.target_domain
     cutoff = timezone.now() - timedelta(days=FRESH_DAYS)
     observations = list(ProbeObservation.objects.filter(project_id=domain.project_id, host=sub.name.lower(), probe=PROBE, kind=OBS_KIND))
@@ -1212,7 +1252,7 @@ def tick(resolve=None, blocked=None):
     one-at-a-time slot for ever."""
     from cveFeed.models import OpenvasRun, OpenvasSettings
     from cveFeed.scan_control import operator_pause_requested
-    from reNgine import resources
+    from cvengine import resources
     row = OpenvasSettings.current()
     if not row.enabled:
         return {'skipped': 'the OpenVAS add-on is switched off'}

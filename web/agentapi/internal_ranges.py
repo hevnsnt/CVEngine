@@ -5,7 +5,7 @@ private addresses may become targets, so it is an authorisation, and the list it
 a range adds nothing to what this server scans: ``targetApp.target_types.is_scannable_ip`` still refuses every such address for local
 execution. See ``cveFeed.models.InternalRange``.
 """
-from django.db import IntegrityError
+from django.db import IntegrityError, transaction
 
 from agentapi.services import ApiError, _iso, get_one_project
 from tenancy import audit, roles
@@ -51,7 +51,8 @@ def add_range(ctx, slug, body):
     if InternalRange.objects.filter(project=project).count() >= MAX_RANGES:
         raise ApiError(400, f'a project may declare at most {MAX_RANGES} internal ranges')
     try:
-        row = InternalRange.objects.create(project=project, cidr=cidr, description=description.strip(), created_by=ctx.user)
+        with transaction.atomic():  # a savepoint: a refused duplicate must not poison the request's transaction (the session save that follows needs it)
+            row = InternalRange.objects.create(project=project, cidr=cidr, description=description.strip(), created_by=ctx.user)
     except IntegrityError:
         raise ApiError(409, f'{cidr} is already declared for this project')
     audit.record(ctx.user, 'internal_range.add', f'{project.slug} {cidr}', org=project.org_id, project=project.slug, cidr=cidr)

@@ -12,7 +12,7 @@ from django.utils import timezone
 
 from agentapi import system_status
 from dashboard.models import Org, Project
-from reNgine import resources
+from cvengine import resources
 
 
 class SilentServer:
@@ -44,7 +44,7 @@ class SilentServer:
 
 class DispatchTests(TransactionTestCase):
     def test_a_broker_that_does_not_answer_cannot_stall_the_status(self):
-        from reNgine.celery import app
+        from cvengine.celery import app
         client = resources.redis_client()
         client.delete(system_status.WARM_LOCK)
         original = app.connection_for_write

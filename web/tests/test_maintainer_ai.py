@@ -371,7 +371,7 @@ class ParityTests(Base):
             self.assertNotIn(forbidden, item['setting']['enum'])
 
     def test_both_copies_of_the_task_line_say_what_the_field_is_for(self):
-        from reNgine import ai_prompts
+        from cvengine import ai_prompts
         from tests.test_ai_prompts import _reviewer_prompts
         for text in (ai_prompts.TASKS['operations_check'], _reviewer_prompts().OPS_TASK):
             self.assertIn('propose at most two changes', text)

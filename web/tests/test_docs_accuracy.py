@@ -16,9 +16,12 @@ NUMBER_WORDS = {10: 'ten', 11: 'eleven', 12: 'twelve', 15: 'fifteen', 29: 'twent
 HISTORICAL = {'SECRETS-PLAN.md', 'SENTINEL-CLIENT-HANDOFF.md', 'SCANNER-ARCHITECTURE.md'}
 NOT_SETTINGS = {
     'CVENGINE_AWK_VALUE',  # an awk variable inside scripts/
+    'CVENGINE_CURRENT_VERSION',  # a Django setting read from web/.version, not from the environment
+    'CVENGINE_EDITION',  # a Django setting read from web/.edition, not from the environment
     'CVENGINE_ROOT',  # a test hook of the host inventory script
     'CVENGINE_SCALE_FIXTURE',  # the scale-test fixture
     'CVENGINE_TEST_BLOCK_NETWORK',  # the test runner
+    'CVENGINE_TEST_MODULE_TIMES',  # the test runner's --module-times, set by the runner itself for its workers
 }
 
 
@@ -122,7 +125,7 @@ class OperatorNotesTests(SimpleTestCase):
     def test_the_notes_cover_what_the_owner_asked_for(self):
         text = doc_text('docs/1.4-OPERATOR-NOTES.md')
         for needle in ('CVENGINE_DB_CONN_MAX_AGE', 'CVENGINE_AGENT_TASK_RETENTION_DAYS', 'CVENGINE_NUCLEI_AI_MAX_PER_DAY', 'CVENGINE_REPORT_MAX_HOSTS',
-                       'CVENGINE_REPORT_MAX_FINDINGS', 'CVENGINE_BULK_DISCOVER_NOW', 'CVENGINE_SENTINEL_DENY_RANGES', 'POSTGRES_SHARED_BUFFERS',
+                       'CVENGINE_REPORT_MAX_WRITEUPS', 'CVENGINE_BULK_DISCOVER_NOW', 'CVENGINE_SENTINEL_DENY_RANGES', 'POSTGRES_SHARED_BUFFERS',
                        'Addresses we must never scan', 'BUILTIN-SCANNER.md', 'waiting for a free slot', 'Haiku', 'refusal', 'Rolling back'):
             self.assertIn(needle, text)
         self.assertNotIn('pin', re.sub(r'(?i)\b(?:pinned|pins|spinning)\b', '', text).lower().replace('chaining', ''), 'the scanner section must not describe pinning')
@@ -160,12 +163,12 @@ class StaleClaimTests(SimpleTestCase):
             for phrase in stale:
                 self.assertFalse(phrase in text, f'{os.path.basename(name)} still says "{phrase}"')
 
-    def test_the_front_end_doc_names_the_eight_rail_entries(self):
+    def test_the_front_end_doc_names_every_rail_entry(self):
         text = doc_text('docs/FRONTEND.md')
         from cveFeed import nav
-        for label in ('Overview', 'Findings', 'Hygiene', 'Hosts', 'Suppliers', 'Scans', 'Scanners', 'Bug bounty'):
+        for label in ('Overview', 'Findings', 'Hygiene', 'Hosts', 'Internal network', 'Suppliers', 'Scans', 'Reporting', 'Scanners', 'MCP', 'Bug bounty'):
             self.assertIn(f'**{label}**', text)
-        self.assertEqual(len(nav.SECTION_ICON), 8)
+        self.assertEqual(len(nav.SECTION_ICON), 11)
 
     def test_the_upgrade_notes_cover_1_4(self):
         text = doc_text('docs/UPGRADE.md')
@@ -219,3 +222,49 @@ class LinkTests(SimpleTestCase):
                 elif anchor and dest.suffix == '.md' and anchor not in anchors_of(str(dest)):
                     broken.append(f'{os.path.basename(name)}: {target} (no such heading)')
         self.assertEqual(broken, [])
+
+
+class RouteAndToolNameTests(SimpleTestCase):
+    """A REST path the docs give with its /api/v1/ prefix is a real route of agentapi.rest.ROUTES for that method (N1 found a Sentinel template
+    route the server never had), and the stale lines the same review found stay gone."""
+
+    @staticmethod
+    def shape(path):
+        """A route or a documented path with every variable part (a named group, {id}, <name>) made one marker, so the two compare as text."""
+        path = re.sub(r'\(\?P<\w+>(?:[^()]|\([^()]*\))*\)', 'X', path)
+        path = re.sub(r'\{[^}]*\}|<[^>]*>', 'X', path)
+        return path.replace('\\', '').strip('/')
+
+    def test_every_api_v1_path_the_docs_name_is_a_route(self):
+        from agentapi import rest
+        routes = {(method, self.shape(pattern)) for method, pattern, *_ in rest.ROUTES}
+        missing = []
+        for name in glob.glob(str(ROOT / 'docs' / '*.md')) + [str(ROOT / 'README.md')]:
+            if os.path.basename(name) in HISTORICAL:
+                continue
+            text = re.sub(r'<[^>]*>', '{x}', Path(name).read_text(encoding='utf-8'))  # a placeholder may hold spaces (<its project>)
+            for method, path in re.findall(r'\b(GET|POST|PUT|PATCH|DELETE) `?/api/v1/([^`\s?)]+)', text):
+                path = path.rstrip('.,;:')
+                if (method, self.shape(path)) not in routes:
+                    missing.append(f'{os.path.basename(name)}: {method} /api/v1/{path}')
+        self.assertEqual(sorted(set(missing)), [], 'named in the docs but not a REST route')
+
+    def test_the_stale_lines_n1_found_stay_gone(self):
+        stale = ('Heavy jobs wait in a queue that hands out memory', '`<KIND>` is the kind in capitals', '`get_target`', 'falls back to running that stage locally')
+        for name in glob.glob(str(ROOT / 'docs' / '*.md')) + [str(ROOT / 'README.md')]:
+            if os.path.basename(name) in HISTORICAL:
+                continue
+            text = Path(name).read_text(encoding='utf-8')
+            for phrase in stale:
+                self.assertFalse(phrase in text, f'{os.path.basename(name)} still says "{phrase}"')
+
+    def test_the_worker_health_check_knobs_are_documented(self):
+        code = (WEB / 'celery_healthcheck.py').read_text(encoding='utf-8')
+        names = set(re.findall(r"os\.environ\.get\('(CELERY_HEALTH_[A-Z_]+)'", code))
+        self.assertTrue(names)
+        self.assertEqual(sorted(n for n in names if n not in all_docs()), [])
+
+    def test_the_docs_say_rest_ignores_an_unknown_argument_and_mcp_refuses_it(self):
+        text = doc_text('docs/AGENT-API.md')
+        self.assertTrue('A REST route ignores a query parameter or body field it does not read' in text)
+        self.assertTrue('An MCP tool refuses an argument its input schema does not list' in text)

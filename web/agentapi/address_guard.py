@@ -118,13 +118,15 @@ def _networks_overlap(project_id, cidr):
     return exclusions.Refusal(f"{wanted} overlaps {net}, which is on the organization's do-not-scan list", entry=str(net)) if net else None
 
 
-def _refusals(project_id, values, resolved=None, unknown=()):
-    """``{value: Refusal}`` for the values the rule refuses: networks (a sweep of a range) by overlap, everything else by ``address_refusals``."""
+def _refusals(project_id, values, resolved=None, unknown=(), own=True):
+    """``{value: Refusal}`` for the values the rule refuses: networks (a sweep of a range) by overlap, everything else by ``address_refusals``. This
+    cvENGINE server's own names and addresses are refused for every project (``own``); a range sweep that covers the server's address is not refused for
+    it (the organization's list decides ranges), and the work that follows the sweep is refused for the server's address host by host."""
     from cveFeed import exclusions
     networks = [v for v in values if '/' in v and '://' not in v and _is_address_like(v)]
     out = {}
     plain = [v for v in values if v not in networks]
-    out.update(exclusions.address_refusals(project_id, plain, resolved, unknown=unknown))
+    out.update(exclusions.address_refusals(project_id, plain, resolved, unknown=unknown, own=own))
     for cidr in networks:
         try:
             refusal = _networks_overlap(project_id, cidr)
@@ -211,7 +213,9 @@ def result_refusal(task, result):
     refusal = task_refusal(task, wait_for_unknown=False)
     if refusal:
         return refusal
-    refusals = _refusals(task.project_id, result_addresses(result))
+    # the addresses a result names: a sweep's answer from the server's own address is not a reason to drop the whole result (``own=False``); the server's
+    # address was never handed out as work (dispatch refuses it), and its host is refused again for any work that follows
+    refusals = _refusals(task.project_id, result_addresses(result), own=False)
     return next(iter(refusals.values())) if refusals else None
 
 
@@ -342,7 +346,7 @@ def resolve_before_discovery(scan, domain):
     and raise ``AddressExcluded`` when it points into the list. A target that is a whole domain is discovered as before (the run carries the list as ranges it
     never touches, and what it finds is judged per host). An unreadable list refuses the run."""
     from cveFeed import exclusions
-    from reNgine.resources import AddressExcluded
+    from cvengine.resources import AddressExcluded
     project_id = _project_id(domain.project_id)
     if not project_id:
         return
@@ -373,8 +377,9 @@ def record_resolved(scan, domain, name, ips):
     """Keep what a lookup resolved ``name`` to in the inventory (the host with its addresses), so every later question about the host is answered from it."""
     from startScan.models import IpAddress, Subdomain
     org = domain.project.org if domain.project_id else None
-    sub = Subdomain.objects.filter(scan_history=scan, target_domain=domain, name=name).first() or \
-        Subdomain.objects.create(scan_history=scan, target_domain=domain, name=name, discovered_date=timezone_now())
+    from startScan.ip_rows import get_or_create_first
+    sub = get_or_create_first(Subdomain, defaults={'discovered_date': timezone_now()},  # a host created meanwhile by another writer is read, not duplicated
+                              scan_history=scan, target_domain=domain, name=name)[0]
     for ip in ips:
         sub.ip_addresses.add(IpAddress.objects.get_or_create(address=ip, org=org)[0])
 

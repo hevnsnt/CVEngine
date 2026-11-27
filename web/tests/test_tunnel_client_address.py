@@ -1,10 +1,10 @@
 """Behind a Cloudflare Tunnel (docs/HOSTING-ONLINE.md, "Through a Cloudflare Tunnel") the application must see each visitor's own address, from the
 bundled proxy's X-Forwarded-For, and must not be talkable into a wrong one. Three layers are checked here:
 
-* the bundled proxy (config/nginx/rengine.conf, run by a real nginx: the proxy's own nginx:alpine image, and in CI a missing image is a failure, not a
+* the bundled proxy (config/nginx/cvengine.conf, run by a real nginx: the proxy's own nginx:alpine image, and in CI a missing image is a failure, not a
   skip): a forged X-Forwarded-For is replaced, except that its chain is kept (and the peer appended) when BOTH the request came in on the tunnel
   listener and the peer is listed in trusted-upstreams.conf; a listed peer on the ordinary port, or an unlisted peer on the tunnel port, is overwritten;
-* reNgine.client_ip on the chain the proxy then sends (what Cloudflare sends: the visitor's address appended to whatever the visitor wrote);
+* cvengine.client_ip on the chain the proxy then sends (what Cloudflare sends: the visitor's address appended to whatever the visitor wrote);
 * the IP allowlist middleware, the abuse ban and the sign-in throttle: one visitor's ban does not touch another behind the same tunnel."""
 import os
 import re
@@ -22,18 +22,20 @@ from django.core.cache import cache
 from django.http import HttpResponse
 from django.test import RequestFactory, SimpleTestCase, TestCase
 
-from reNgine.client_ip import client_ip
+from cvengine.client_ip import client_ip
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-CONF = open(os.path.join(REPO, 'config', 'nginx', 'rengine.conf'), encoding='utf-8').read()
+CONF = open(os.path.join(REPO, 'config', 'nginx', 'cvengine.conf'), encoding='utf-8').read()
 CONNECTOR = '172.18.0.7'   # cloudflared as the web container's proxy sees it (a Docker address)
 ALICE, BOB = '198.51.100.20', '203.0.113.30'
 FORGED = '10.0.0.99'
-TRUSTED = '172.16.0.0/12'
+TRUSTED = '172.16.0.0/12'  # the range installs had before review r3 S3; the shipped default is now the proxy's one address (PROXY)
+PROXY = '172.16.238.10'
+SECRET = 'Zq8rT2vW9xY3bN5mK7pL4sD6fG1hJ0aEcUr7Xk2Ma9QdVb4Ns6Pw1Tj8'  # 56 characters: a generated secret is 48, and nginx's default map bucket (64) cannot hold one
 
 
 class ClientAddressTests(SimpleTestCase):
-    """reNgine.client_ip on the chains the tunnel produces. Cloudflare appends the address that connected to it to any X-Forwarded-For the visitor
+    """cvengine.client_ip on the chains the tunnel produces. Cloudflare appends the address that connected to it to any X-Forwarded-For the visitor
     sent (https://developers.cloudflare.com/fundamentals/reference/http-headers/), so the visitor's real address is the right-most one."""
 
     def ip(self, xff, remote='172.18.0.5', trusted=TRUSTED):
@@ -64,7 +66,8 @@ class FakeUpstream(BaseHTTPRequestHandler):
         self.do_GET()
 
     def do_GET(self):  # noqa: N802
-        type(self).seen.append({'xff': self.headers.get('X-Forwarded-For'), 'proto': self.headers.get('X-Forwarded-Proto'), 'host': self.headers.get('Host')})
+        type(self).seen.append({'xff': self.headers.get('X-Forwarded-For'), 'proto': self.headers.get('X-Forwarded-Proto'), 'host': self.headers.get('Host'),
+                                'upstream': self.headers.get('X-CVEngine-Upstream')})
         self.send_response(200)
         self.send_header('Content-Length', '2')
         self.end_headers()
@@ -110,7 +113,7 @@ def free_port():
 
 
 class BundledProxyTests(SimpleTestCase):
-    """config/nginx/rengine.conf under a real nginx with a fake application behind it. The test client connects from 127.0.0.1, which stands for
+    """config/nginx/cvengine.conf under a real nginx with a fake application behind it. The test client connects from 127.0.0.1, which stands for
     cloudflared (or for anything else that connects). The proxy has two listeners here, as it does in the container: one stands for 443 and one for
     the tunnel port 8443 (given a free number, which the conf's one literal 8443 is rewritten to)."""
 
@@ -121,7 +124,8 @@ class BundledProxyTests(SimpleTestCase):
                 self.fail('CI is set but the nginx:alpine image cannot be used (needs docker): the proxy test must run in CI, not be skipped')
             self.skipTest('needs an nginx binary or docker')
 
-    def run_proxy(self, trusted_file):
+    def run_proxy(self, trusted_file, secret=None):
+        """``secret``: None leaves the secret file out (as when the template was never rendered); a string renders the shipped template with it."""
         tmp = tempfile.mkdtemp()
         os.chmod(tmp, 0o755)
         self.addCleanup(shutil.rmtree, tmp, True)
@@ -129,6 +133,16 @@ class BundledProxyTests(SimpleTestCase):
         with open(f'{tmp}/trusted-upstreams.conf', 'w') as f:  # the stock file (comments only) unless the test mounts its own
             f.write(stock if trusted_file is None else trusted_file)
         os.chmod(f'{tmp}/trusted-upstreams.conf', 0o644)
+        os.makedirs(f'{tmp}/inc')
+        os.chmod(f'{tmp}/inc', 0o755)
+        if secret is not None:  # every shipped template, as the image's entrypoint renders them (the plain match and the case-sensitive one)
+            templates = os.path.join(REPO, 'config', 'nginx', 'templates')
+            for name in sorted(os.listdir(templates)):
+                template = open(os.path.join(templates, name), encoding='utf-8').read()
+                rendered = f'{tmp}/inc/{name[:-len(".template")]}'
+                with open(rendered, 'w') as f:
+                    f.write(template.replace('${CVENGINE_UPSTREAM_SECRET}', secret))
+                os.chmod(rendered, 0o644)
         upstream = HTTPServer(('127.0.0.1', 0), FakeUpstream)
         FakeUpstream.seen = []
         threading.Thread(target=upstream.serve_forever, daemon=True).start()
@@ -136,10 +150,14 @@ class BundledProxyTests(SimpleTestCase):
         plain, tunnel = free_ports(2)
         etc = f'{tmp}' if self.runner == 'local' else '/t'
         head = CONF[:CONF.index('\nserver {')].replace('/etc/nginx/trusted-upstreams.conf', f'{etc}/trusted-upstreams.conf')
-        self.assertIn('"~^8443:1:.+"', head)
-        head = head.replace('"~^8443:1:.+"', f'"~^{tunnel}:1:.+"')
+        self.assertIn('/etc/nginx/conf.d/cvengine-upstream-secret*.inc', head)
+        self.assertIn('/etc/nginx/conf.d/cvengine-upstream-exact*.inc', head)
+        head = head.replace('/etc/nginx/conf.d/cvengine-upstream-', f'{etc}/inc/cvengine-upstream-')
+        self.assertIn('"~^8443:1:[01]:.+"', head)
+        self.assertIn('"~^443:[01]:1:.+"', head)
+        head = head.replace('"~^8443:1:[01]:.+"', f'"~^{tunnel}:1:[01]:.+"').replace('"~^443:[01]:1:.+"', f'"~^{plain}:[01]:1:.+"')
         server = CONF[CONF.index('    location / {'):]
-        server = server[:server.index('\n    }') + 6].replace('http://rengine:8000', f'http://127.0.0.1:{upstream.server_port}')  # the address is set in a variable in the location (follows the web container)
+        server = server[:server.index('\n    }') + 6].replace('http://cvengine:8000', f'http://127.0.0.1:{upstream.server_port}')  # the address is set in a variable in the location (follows the web container)
         server = server.replace('/etc/nginx/state/', f'{etc}/state/')
         scratch = f'{tmp}/scratch' if self.runner == 'local' else '/tmp'
         os.makedirs(scratch, exist_ok=True)
@@ -173,8 +191,11 @@ class BundledProxyTests(SimpleTestCase):
         FakeUpstream.seen = []
         return plain, tunnel
 
-    def get(self, port, xff=None):
-        request = urllib.request.Request(f'http://127.0.0.1:{port}/', headers={'X-Forwarded-For': xff} if xff else {})
+    def get(self, port, xff=None, secret=None):
+        headers = {'X-Forwarded-For': xff} if xff else {}
+        if secret is not None:
+            headers['X-CVEngine-Upstream'] = secret
+        request = urllib.request.Request(f'http://127.0.0.1:{port}/', headers=headers)
         urllib.request.urlopen(request, timeout=5).read()
         return FakeUpstream.seen[-1]['xff']
 
@@ -193,29 +214,67 @@ class BundledProxyTests(SimpleTestCase):
         plain, tunnel = self.run_proxy('192.0.2.0/24 1;\n')
         self.assertEqual(self.get(tunnel, f'{FORGED}, {ALICE}'), '127.0.0.1')
 
-    def test_a_listed_peer_on_the_ordinary_port_is_not_believed_either(self):
+    def test_a_listed_peer_on_the_ordinary_port_is_not_believed_without_the_secret(self):
         plain, tunnel = self.run_proxy('127.0.0.1 1;\n')
         self.assertEqual(self.get(plain, f'{FORGED}, {ALICE}'), '127.0.0.1')
         self.assertEqual(self.get(plain, ALICE), '127.0.0.1')
 
-    def test_a_listed_peer_on_the_tunnel_port_has_its_chain_kept_and_itself_appended(self):
+    def test_a_listed_peer_on_the_tunnel_port_has_its_chain_passed_on_unchanged(self):
+        # the application trusts only this proxy (CVENGINE_TRUSTED_PROXIES defaults to its fixed address), so the peer is not appended: the
+        # right-most address is the one the vouching upstream wrote
         plain, tunnel = self.run_proxy('127.0.0.1 1;\n')
-        self.assertEqual(self.get(tunnel, ALICE), f'{ALICE}, 127.0.0.1')
-        self.assertEqual(self.get(tunnel, f'{FORGED}, {ALICE}'), f'{FORGED}, {ALICE}, 127.0.0.1')
-        self.assertEqual(self.get(tunnel), '127.0.0.1')  # no chain: the peer alone, with no stray comma
+        self.assertEqual(self.get(tunnel, ALICE), ALICE)
+        self.assertEqual(self.get(tunnel, f'{FORGED}, {ALICE}'), f'{FORGED}, {ALICE}')
+        self.assertEqual(self.get(tunnel), '127.0.0.1')  # no chain: the peer alone
 
     def test_end_to_end_the_application_picks_the_visitor_behind_a_listed_peer(self):
         plain, tunnel = self.run_proxy('127.0.0.1 1;\n')
         for visitor in (ALICE, BOB):
             for written in ('', f'{FORGED}, '):  # what the visitor wrote before Cloudflare appended the address it saw
                 chain = self.get(tunnel, f'{written}{visitor}')
-                request = RequestFactory().get('/', REMOTE_ADDR='172.18.0.2', HTTP_X_FORWARDED_FOR=chain.replace('127.0.0.1', '172.18.0.7'))
-                with mock.patch.dict(os.environ, {'CVENGINE_TRUSTED_PROXIES': TRUSTED}):
-                    self.assertEqual(client_ip(request), visitor)
+                for remote, trusted in ((PROXY, PROXY), ('172.18.0.2', TRUSTED)):  # the shipped default, and an install that kept the old range
+                    request = RequestFactory().get('/', REMOTE_ADDR=remote, HTTP_X_FORWARDED_FOR=chain)
+                    with mock.patch.dict(os.environ, {'CVENGINE_TRUSTED_PROXIES': trusted}):
+                        self.assertEqual(client_ip(request), visitor)
 
     def test_every_proxied_route_uses_the_same_rule(self):
-        self.assertEqual(len(re.findall(r'X-Forwarded-For \$cvengine_forwarded_for;', CONF)), 3)
+        self.assertEqual(len(re.findall(r'X-Forwarded-For \$cvengine_forwarded_for;', CONF)), 4)
+        self.assertEqual(len(re.findall(r'X-CVEngine-Upstream "";', CONF)), 4)  # and none passes the secret on
         self.assertNotIn('X-Forwarded-For $remote_addr', CONF)
+
+    # The 443 listener and the upstream secret (review r3 S2): a host nginx that sends the install's secret has its X-Forwarded-For believed.
+
+    def test_on_443_a_request_with_the_secret_has_its_chain_kept(self):
+        plain, tunnel = self.run_proxy(None, secret=SECRET)
+        self.assertEqual(self.get(plain, ALICE, secret=SECRET), ALICE)
+        self.assertEqual(self.get(plain, f'{FORGED}, {ALICE}', secret=SECRET), f'{FORGED}, {ALICE}')
+        self.assertEqual(self.get(plain, secret=SECRET), '127.0.0.1')  # no chain: the peer
+
+    def test_on_443_a_wrong_or_missing_secret_is_overwritten(self):
+        plain, tunnel = self.run_proxy(None, secret=SECRET)
+        # nginx compares map strings without regard to case: the case-sensitive template is what refuses lower, upper and swapped case
+        for sent in (None, '', SECRET + 'x', SECRET[:-1], SECRET.lower(), SECRET.upper(), SECRET.swapcase(), 'k' + SECRET, f'{SECRET}, {SECRET}'):
+            self.assertEqual(self.get(plain, ALICE, secret=sent), '127.0.0.1', sent)
+
+    def test_the_secret_is_never_passed_on_to_the_application(self):
+        plain, tunnel = self.run_proxy('127.0.0.1 1;\n', secret=SECRET)
+        for port in (plain, tunnel):
+            self.get(port, ALICE, secret=SECRET)
+            self.assertIsNone(FakeUpstream.seen[-1]['upstream'])
+
+    def test_with_no_secret_nothing_is_believed_on_443(self):
+        # no rendered file (the template was never rendered), an empty secret (rendered as "k"), one that is too short, an unrendered template
+        # and a secret holding regex characters, which the case-sensitive template must not turn into a pattern that matches any header
+        for secret in (None, '', 'short', '${CVENGINE_UPSTREAM_SECRET}', '.{32,256}', '[A-Za-z0-9]+'):
+            plain, tunnel = self.run_proxy(None, secret=secret)
+            for sent in ('', 'k', 'short', '${CVENGINE_UPSTREAM_SECRET}', SECRET):
+                self.assertEqual(self.get(plain, ALICE, secret=sent), '127.0.0.1', (secret, sent))
+
+    def test_the_secret_does_not_open_the_tunnel_listener_to_an_unlisted_peer_or_the_reverse(self):
+        plain, tunnel = self.run_proxy('192.0.2.0/24 1;\n', secret=SECRET)
+        self.assertEqual(self.get(tunnel, ALICE), '127.0.0.1')
+        plain, tunnel = self.run_proxy('127.0.0.1 1;\n', secret=SECRET)
+        self.assertEqual(self.get(plain, ALICE), '127.0.0.1')  # a listed peer still needs the secret on 443
 
 
 def ok_view(request):
@@ -228,7 +287,7 @@ class OneVisitorsBanIsNotEveryonesTests(TestCase):
 
     def setUp(self):
         cache.clear()
-        from reNgine import input_guard, ip_allowlist
+        from cvengine import input_guard, ip_allowlist
         input_guard.invalidate_cache()
         ip_allowlist.invalidate_cache()
         patch = mock.patch.dict(os.environ, {'CVENGINE_TRUSTED_PROXIES': TRUSTED})
@@ -236,13 +295,13 @@ class OneVisitorsBanIsNotEveryonesTests(TestCase):
         self.addCleanup(patch.stop)
 
     def through_the_tunnel(self, visitor, forged=''):
-        from reNgine.ip_allowlist import IpAllowlistMiddleware
+        from cvengine.ip_allowlist import IpAllowlistMiddleware
         request = RequestFactory().get('/', REMOTE_ADDR='172.18.0.2', HTTP_X_FORWARDED_FOR=f'{forged}{visitor}, {CONNECTOR}')
         return IpAllowlistMiddleware(ok_view)(request).status_code
 
     def test_a_ban_hits_only_that_visitor(self):
         from dashboard.models import AbuseBan
-        from reNgine import input_guard
+        from cvengine import input_guard
         AbuseBan.objects.create(ip=ALICE, reason='test')
         input_guard.invalidate_cache()
         self.assertEqual(self.through_the_tunnel(ALICE), 403)
@@ -250,21 +309,21 @@ class OneVisitorsBanIsNotEveryonesTests(TestCase):
 
     def test_a_banned_visitor_cannot_hide_behind_a_forged_left_hand_address(self):
         from dashboard.models import AbuseBan
-        from reNgine import input_guard
+        from cvengine import input_guard
         AbuseBan.objects.create(ip=ALICE, reason='test')
         input_guard.invalidate_cache()
         self.assertEqual(self.through_the_tunnel(ALICE, forged=f'{BOB}, '), 403)
 
     def test_a_visitor_cannot_borrow_another_visitors_clean_record_by_forging_it(self):
         from dashboard.models import AbuseBan
-        from reNgine import input_guard
+        from cvengine import input_guard
         AbuseBan.objects.create(ip=ALICE, reason='test')
         input_guard.invalidate_cache()
         self.assertEqual(self.through_the_tunnel(BOB, forged=f'{ALICE}, '), 200)  # Bob is not punished for what Alice's name was written next to
 
     def test_the_allowlist_sees_the_visitor_not_the_connector(self):
         from dashboard.models import IpAccessControl, IpAllowlistEntry
-        from reNgine import ip_allowlist
+        from cvengine import ip_allowlist
         control = IpAccessControl.current()
         control.enabled = True
         control.save()
@@ -275,7 +334,7 @@ class OneVisitorsBanIsNotEveryonesTests(TestCase):
         self.assertEqual(self.through_the_tunnel(BOB, forged=f'{ALICE}, '), 403)
 
     def test_the_connectors_own_address_is_never_banned_by_the_guard(self):
-        from reNgine.input_guard import _ip_is_banable
+        from cvengine.input_guard import _ip_is_banable
         self.assertFalse(_ip_is_banable(CONNECTOR))
 
     def test_sign_in_failures_are_counted_per_visitor(self):
@@ -285,3 +344,15 @@ class OneVisitorsBanIsNotEveryonesTests(TestCase):
         self.assertNotEqual(a['ip'], b['ip'])
         self.assertNotEqual(a['pair'], b['pair'])
         self.assertIn(ALICE, a['ip'])
+
+
+class MapBucketTests(TestCase):
+    """The proxy crashed on start on a real install: a 48 character secret overflows nginx's default 64 byte map bucket."""
+
+    def test_the_config_raises_the_map_bucket_above_the_longest_secret(self):
+        conf = open(os.path.join(REPO, 'config', 'nginx', 'cvengine.conf'), encoding='utf-8').read()
+        found = re.search(r'^map_hash_bucket_size\s+(\d+);', conf, re.M)
+        self.assertIsNotNone(found, 'cvengine.conf must set map_hash_bucket_size')
+        self.assertEqual(len(re.findall(r'^map_hash_bucket_size\b', conf, re.M)), 1, 'nginx refuses the directive twice')
+        self.assertLess(found.start(), conf.index('\nmap '), 'it must come before the first map block: after one, nginx refuses it as a duplicate')
+        self.assertGreaterEqual(int(found.group(1)), 512)  # the shape check accepts a secret of up to 256 characters, plus the key's prefix and the entry overhead

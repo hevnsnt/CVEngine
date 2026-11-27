@@ -16,7 +16,7 @@ from django.utils import timezone
 from agentapi import auth
 from agentapi.services import ApiError, get_one_project, paginate
 from cveFeed import host_inventory as store, inventory_schema as schema
-from reNgine.client_ip import client_ip
+from cvengine.client_ip import client_ip
 from tenancy import throttle
 
 logger = logging.getLogger(__name__)
@@ -197,7 +197,8 @@ def list_inventories(ctx, slug, params):
     from django.utils import timezone
     project, _ = get_one_project(ctx, slug)
     days = store.stale_days(project)
-    qs = _qs(project).order_by('-reported_at', '-id')
+    # the list shows each report's brief (package_count, never the package, patch or listening lists): leave the big JSON columns in the table
+    qs = _qs(project).defer('packages', 'patches', 'services').order_by('-reported_at', '-id')
     status = params.get('status') or ''
     if status not in ('', 'matched', 'unmatched', 'stale', 'fresh'):
         raise ApiError(400, 'status must be matched, unmatched, stale or fresh')

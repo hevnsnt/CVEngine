@@ -32,14 +32,14 @@ class CleaningTests(SimpleTestCase):
 		self.assertEqual(alias_note.clean_alias('  Lab printer  '), 'Lab printer')
 		self.assertEqual(alias_note.clean_alias(''), '')
 		self.assertEqual(alias_note.clean_alias('x' * alias_note.ALIAS_MAX), 'x' * alias_note.ALIAS_MAX)
-		for bad in ('x' * (alias_note.ALIAS_MAX + 1), 'two\nlines', 'tab\there', 'nul\x00', 'bidi‮evil', 'sep arator', 7, None, ['a']):
+		for bad in ('x' * (alias_note.ALIAS_MAX + 1), 'two\nlines', 'tab\there', 'nul\x00', 'bidi\u202eevil', 'sep\u2028arator', 7, None, ['a']):
 			with self.assertRaises(ValueError, msg=repr(bad)):
 				alias_note.clean_alias(bad)
 
 	def test_a_note_may_have_lines_but_no_control_characters_and_is_bounded(self):
 		self.assertEqual(alias_note.clean_note(' rack 3\r\nunit 7 \n'), 'rack 3\nunit 7')
 		self.assertEqual(alias_note.clean_note('y' * alias_note.NOTE_MAX), 'y' * alias_note.NOTE_MAX)
-		for bad in ('y' * (alias_note.NOTE_MAX + 1), 'bell\x07', 'bidi‮evil', 5, None):
+		for bad in ('y' * (alias_note.NOTE_MAX + 1), 'bell\x07', 'bidi\u202eevil', 5, None):
 			with self.assertRaises(ValueError, msg=repr(bad)):
 				alias_note.clean_note(bad)
 
@@ -267,8 +267,11 @@ class HostProfileTests(Base):
 		self.assertEqual((status, data['alias'], data['note']), (200, '<b>Cam</b> & co', EVIL))  # stored and returned as typed
 		from dashboard.models import AbuseStrike
 		self.assertEqual(AbuseStrike.objects.count(), 0)  # the note held <script> and was not struck
-		self.assertEqual(call(self.token, 'POST', url, {'alias': 'cam; ls -la'})[0], 403)  # an alias is not free text: the input guard still reads it
-		self.assertEqual(AbuseStrike.objects.count(), 1)
+		# an alias is not free text: the input guard still reads it, refuses it (400) and counts it. A token caller at the threshold keeps its token
+		# and is flagged for an admin (review r3 S1), and the test client's address is private, so nothing is banned and the answer stays 400
+		self.assertEqual(call(self.token, 'POST', url, {'alias': 'cam; ls -la'})[0], 400)
+		self.assertEqual(list(AbuseStrike.objects.values_list('field', flat=True)), ['alias'])
+		self.assertGreater(AbuseStrike.objects.get().weight, 0)
 
 
 class SearchTests(Base):

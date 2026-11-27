@@ -58,6 +58,8 @@ def node_sites(scan):
     if scope() == 'all':
         names = {n for n, s in subs.items() if s.http_status}
     else:
+        from django.db.models import prefetch_related_objects
+        prefetch_related_objects(list(subs.values()), 'technologies')  # one read of the technologies, not one per host
         names = {n for n, s in subs.items() if any(NODE_NAME_RE.match(t.name or '') for t in s.technologies.all())}
     routes = RouteAuth.objects.filter(project_id=scan.domain.project_id, host__in=list(subs), retired_at__isnull=True)
     for host, evidence in routes.values_list('host', 'evidence') if scope() == 'runtimes' else ():
@@ -77,7 +79,7 @@ def run_for_scan(scan_id, force=False):
     TTL-gated. A critical finding is raised only when the detector's own verdict is VULNERABLE. Returns a summary
     dict; never raises."""
     from cveFeed import activity, ledger
-    from reNgine import resources
+    from cvengine import resources
     from startScan.models import ScanHistory
     if not enabled():
         return {'checked': 0, 'skipped': 'disabled'}
@@ -128,7 +130,7 @@ def run_for_scan(scan_id, force=False):
 
 
 def _record_finding(scan, sub, url, result):
-    from reNgine.tasks import save_vulnerability
+    from cvengine.tasks import save_vulnerability
     evidence = (result.get('response') or '')[:2048]
     save_vulnerability(
         target_domain=scan.domain, scan_history=scan, subdomain=sub, http_url=url, name=f'{CVE_ID} (node2shell)',

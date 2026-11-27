@@ -17,6 +17,18 @@ What it checks, with the host's cores, memory and free disk in front of it:
            4 GB or more the line is removed (the number falls back to what auto-tuning chooses).
   limits   A container memory ceiling below what its service needs (the database: 1 GB on a host with 6 GB or more, else 768 MB; the web server 768 MB).
            A ceiling below that is the one the kernel enforces by killing the process. It is raised, in the file that sets it.
+  postgres The database's memory settings (POSTGRES_SHARED_BUFFERS, POSTGRES_EFFECTIVE_CACHE_SIZE, POSTGRES_WORK_MEM, POSTGRES_MAINTENANCE_WORK_MEM),
+           sized from the memory the database can really use: its container ceiling (after the limits rule raised it), else its share of the host.
+           Only a value that is absent or still the shipped default is raised, in the env file Compose reads; a value the owner set is left, nothing
+           is lowered, and the sizes always fit inside the container ceiling (the kernel kills a database that reaches it). The update recreates the
+           database container once, because its command line changed.
+  diagnose The database's lock wait log and WAL timing (log_lock_waits, track_wal_io_timing), on by default in docker-compose.yml through
+           POSTGRES_LOG_LOCK_WAITS and POSTGRES_TRACK_WAL_IO_TIMING: said, never changed. Off in the env file is the owner's own choice and is left; a compose
+           file that passes the other database settings but not these (PostgreSQL's default is off) is a warning, because a slow write then
+           cannot be told from a lock wait.
+  commit   Whether a commit waits for its WAL flush (synchronous_commit, POSTGRES_SYNCHRONOUS_COMMIT, off by default in docker-compose.yml): said with
+           who set it (the shipped default, or the owner's own value in the env file), never changed. A compose file that passes the other database
+           settings but not this one runs with PostgreSQL's default (on), which is safe: said, not a warning.
   budget   The ceilings together against the host: said, never changed (the ceilings are not use, and the one to lower is the owner's to choose).
   disk     Free space below what an update needs: said.
 
@@ -37,6 +49,24 @@ FLOORS_MIB = {'db': (1024, 768), 'web': (768, 768)}   # service: (host at BIG_HO
 LIMIT_VARS = {'db': 'DB_MEM_LIMIT', 'web': 'WEB_MEM_LIMIT'}
 BUDGET_PERCENT = 90
 DISK_FLOOR_GB = 14                  # what the first 1.4 update needs (docs/UPGRADE.md)
+
+# postgres: the settings docker-compose.yml reads from the env file, with the defaults it ships (read from the compose file itself when it says)
+PG_DEFAULTS = {'POSTGRES_SHARED_BUFFERS': '256MB', 'POSTGRES_EFFECTIVE_CACHE_SIZE': '768MB', 'POSTGRES_WORK_MEM': '4MB',
+               'POSTGRES_MAINTENANCE_WORK_MEM': '64MB'}
+PG_SETTING = {'POSTGRES_SHARED_BUFFERS': 'shared_buffers', 'POSTGRES_EFFECTIVE_CACHE_SIZE': 'effective_cache_size', 'POSTGRES_WORK_MEM': 'work_mem',
+              'POSTGRES_MAINTENANCE_WORK_MEM': 'maintenance_work_mem'}
+PG_SHARED_MAX_MIB = 2048            # shared_buffers: a quarter of what the database may use, never more than this
+PG_TIERS_MIB = ((3072, 16, 256), (1536, 8, 128))   # memory the database may use: (at least, work_mem, maintenance_work_mem); below the last, left
+PG_BUSY = 24                        # connections that may sort at once: the web server's 16 threads and the workers'
+PG_SORTS = 4                        # sort or hash steps one busy query may hold (work_mem is per step, per connection)
+PG_FIT_PERCENT = 90                 # what the settings may plan for, out of the memory the database may use (the rest: connections, the server itself)
+PG_CACHE_PERCENT = 55               # effective_cache_size: at most this share of the host
+PG_NOTE = 'written by the updater: Postgres'
+# diagnose: the database diagnostics docker-compose.yml turns on by default ({env name: the PostgreSQL setting}), reported, never written
+PG_DIAGNOSTICS = {'POSTGRES_LOG_LOCK_WAITS': 'log_lock_waits', 'POSTGRES_TRACK_WAL_IO_TIMING': 'track_wal_io_timing'}
+PG_ON = ('on', 'true', 'yes', '1')
+# commit: whether a commit waits for its WAL flush, off by default in docker-compose.yml; reported, never written
+PG_COMMIT = 'POSTGRES_SYNCHRONOUS_COMMIT'
 
 SIZE = re.compile(r'^(\d+(?:\.\d+)?)\s*([kKmMgG]?)[bB]?$')
 
@@ -175,6 +205,82 @@ def effective_limit(compose_files, env_files, service):
     return result
 
 
+def pg_defaults(compose_files):
+    """{env name: shipped default} of the Postgres memory settings the compose files read (``${POSTGRES_WORK_MEM:-4MB}``); empty when none does."""
+    found = {}
+    for path in compose_files:
+        try:
+            with open(path) as fh:
+                text = fh.read()
+        except OSError:
+            continue
+        for name, default in re.findall(r'\$\{(POSTGRES_[A-Z_]+):?-([^}]*)\}', text):
+            if name in PG_DEFAULTS:
+                found[name] = default or PG_DEFAULTS[name]
+    return found
+
+
+def pg_text(mib):
+    """Megabytes as Postgres writes them: 1024 -> 1GB, 512 -> 512MB."""
+    return f'{mib // 1024}GB' if mib % 1024 == 0 else f'{mib}MB'
+
+
+def written_by_us(path, key):
+    """Was the KEY= line of this env file written by this rule (the note line just above it)? Such a value may be raised again later."""
+    try:
+        with open(path) as fh:
+            lines = fh.read().split('\n')
+    except OSError:
+        return False
+    for i, line in enumerate(lines):
+        if line.startswith(key + '=') and i and lines[i - 1].startswith('# ' + PG_NOTE):
+            return True
+    return False
+
+
+def pg_plan(usable_mib, host_mib, others_mib):
+    """What the settings should be for a database that may use ``usable_mib``: {env name: MiB}, a setting left out when it stays as shipped."""
+    plan = {'POSTGRES_SHARED_BUFFERS': min(PG_SHARED_MAX_MIB, usable_mib // 4 // 128 * 128)}
+    for floor, work, maint in PG_TIERS_MIB:
+        if usable_mib >= floor:
+            plan['POSTGRES_WORK_MEM'], plan['POSTGRES_MAINTENANCE_WORK_MEM'] = work, maint
+            break
+    # what the planner may assume the operating system caches for it: the host's share after the other containers' ceilings, never less than what the
+    # database itself may use, never more than PG_CACHE_PERCENT of the host (it reserves nothing, so it only has to be a fair guess)
+    cache = min(host_mib * PG_CACHE_PERCENT // 100, max(host_mib - others_mib, usable_mib))
+    plan['POSTGRES_EFFECTIVE_CACHE_SIZE'] = min(cache, host_mib) // 256 * 256
+    return plan
+
+
+def pg_needs(values):
+    """MiB the settings can take at the busiest moment: shared buffers, every busy connection's sorts, one maintenance job."""
+    return values['POSTGRES_SHARED_BUFFERS'] + PG_SORTS * values['POSTGRES_WORK_MEM'] * PG_BUSY + values['POSTGRES_MAINTENANCE_WORK_MEM']
+
+
+def pg_step_down(key, value, floor):
+    """The next smaller size of one planned setting, never below ``floor`` (what is there now): the plan shrinks until it fits the ceiling."""
+    if key == 'POSTGRES_WORK_MEM':
+        lower = [v for v in (8,) if floor < v < value]
+    elif key == 'POSTGRES_MAINTENANCE_WORK_MEM':
+        lower = [v for v in (128,) if floor < v < value]
+    else:
+        half = value // 2 // 128 * 128
+        lower = [half] if floor < half < value else []
+    return lower[0] if lower else floor
+
+
+def pg_put(path, key, value, note):
+    """put_line, and the note this rule wrote above an earlier value of the same key goes with it (no orphaned comment)."""
+    with open(path) as fh:
+        lines = fh.read().split('\n')
+    kept = [l for i, l in enumerate(lines)
+            if not (l.startswith('# ' + PG_NOTE) and i + 1 < len(lines) and lines[i + 1].startswith(key + '='))]
+    if kept != lines:
+        with open(path, 'w') as fh:
+            fh.write('\n'.join(kept))
+    put_line(path, key, value, note)
+
+
 def rewrite_limits(path, service, new_text, stamp, backups):
     lines, found = service_limit_lines(path, service)
     changes = []
@@ -189,6 +295,171 @@ def rewrite_limits(path, service, new_text, stamp, backups):
         with open(path, 'w') as fh:
             fh.write('\n'.join(lines))
     return changes
+
+
+# --- the postgres rule -------------------------------------------------------------------------------------------------------------------------------
+
+MIB = 1024 ** 2
+
+
+def postgres_rule(args, facts, env_files, compose_files, stamp, backups, say):
+    """Size the database's memory settings for this host. Raises only a value that is absent or still the shipped default (or one this rule wrote
+    before), never lowers one, never writes a ceiling (the limits rule owns those), and never plans past the database's container ceiling."""
+    defaults = pg_defaults(compose_files)
+    host = facts['mem_mb']
+    if not defaults or not host or not env_files:
+        return  # a compose file that does not read these from the env file, an unknown host, or no env file to write: nothing to size
+    target = env_files[0]  # the env file Compose reads, where the limits rule writes too
+
+    got = effective_limit(compose_files, env_files, 'db')
+    ceiling = got[0] // MIB if got else None
+    if ceiling is not None and not args.apply:
+        # report only: size against the ceiling --apply would leave (the limits rule raises one below its floor first)
+        floor = FLOORS_MIB['db'][0 if host >= BIG_HOST_MB else 1]
+        ceiling = max(ceiling, floor)
+    others = 0
+    for service in ('web', 'celery', 'celery-beat', 'redis', 'proxy', 'reviewer', 'scanner'):
+        other = effective_limit(compose_files, env_files, service)
+        others += other[0] // MIB if other else 0
+    if ceiling is not None:
+        usable = min(ceiling, host * 3 // 4)  # the container ceiling, never most of a host smaller than it
+        where = f'its container ceiling of {ceiling} MB'
+    else:
+        usable = min(host // 2, max(host - others, host // 4))  # no ceiling: its share of the host after the other containers' ceilings
+        where = f'its share of this host ({host} MB, less the other containers\' ceilings)'
+
+    current, ours, unread = {}, {}, []
+    for key, shipped in PG_DEFAULTS.items():
+        default = defaults.get(key, shipped)
+        text = env_value([target], key)
+        value = size_bytes(text if text is not None else default)
+        if value is None:
+            unread.append(f'{key}={text}')
+            continue
+        current[key] = value // MIB
+        ours[key] = key in defaults and (text is None or value == size_bytes(default) or written_by_us(target, key))
+    if unread:
+        say('info', 'postgres', f'{", ".join(unread)} in {target} is not a size this review reads, so the database settings were not sized: left as they are.')
+        return
+
+    plan = pg_plan(usable, host, others)
+    values = {k: max(v, plan[k]) if ours[k] and k in plan else v for k, v in current.items()}
+    room = usable * PG_FIT_PERCENT // 100
+    for key in ('POSTGRES_WORK_MEM', 'POSTGRES_MAINTENANCE_WORK_MEM', 'POSTGRES_SHARED_BUFFERS'):
+        while pg_needs(values) > room and values[key] > current[key]:
+            values[key] = pg_step_down(key, values[key], current[key])
+    raised = {k: v for k, v in values.items() if v > current[k]}
+    left = sorted(f'{k}={env_value([target], k)}' for k in plan if k in defaults and not ours[k] and plan[k] > current[k])
+    if left:
+        say('info', 'postgres', f'{", ".join(left)} in {target} is your own and is left as it is (this host would get more).')
+    shipped = {k: size_bytes(defaults.get(k, d)) // MIB for k, d in PG_DEFAULTS.items()}
+    if pg_needs(values) > room and any(current[k] > shipped[k] for k in current):  # said only for values somebody raised: the shipped ones are not news
+        say('warn', 'postgres', f'The database settings can take about {pg_needs(values)} MB at the busiest moment (shared_buffers, plus work_mem for '
+            f'{PG_SORTS} sort steps on each of {PG_BUSY} busy connections, plus maintenance_work_mem), more than fits in {where}. Nothing was lowered: '
+            'lower POSTGRES_WORK_MEM or POSTGRES_SHARED_BUFFERS in the env file, or raise DB_MEM_LIMIT (docs/DEPLOYMENT.md, Sizing the database).')
+    if not raised:
+        return
+    words = ', '.join(f'{PG_SETTING[k]} {pg_text(current[k])} -> {pg_text(v)}' for k, v in raised.items())
+    if not args.apply:
+        say('warn', 'postgres', f'The database runs with settings sized for a small host: {words} would fit {where}. --apply raises them '
+            '(the database then restarts once).', changes=[words])
+        return
+    if getattr(args, 'no_db_restart', False):
+        # the caller does not restart the database (Settings > Sentinels recreates only the server's processes): a value written now would wait
+        # unseen for the next restart, so it is left for the next update, which writes it and restarts the database once
+        say('info', 'postgres', f'The database settings would be raised ({words}); the next update does it, because this run does not restart the database.')
+        return
+    backup(target, stamp, backups)
+    changes = []
+    for key, value in raised.items():
+        before = env_value([target], key)
+        pg_put(target, key, pg_text(value), f'{PG_NOTE} {PG_SETTING[key]} for a database that may use {usable} MB on this host')
+        changes.append(f'{key}: {before if before is not None else "(not set, " + pg_text(current[key]) + ")"} -> {pg_text(value)}')
+    say('fixed', 'postgres', f'Postgres settings changed, the database restarts once during this update: {words}, written to {target}, sized for '
+        f'{where} (work_mem is per sort step and per connection, so it stays modest). Run by hand outside an update, they take effect with '
+        'docker compose up -d db (with your usual -f files and --env-file).', changes=changes, restart='db')
+
+
+# --- the diagnose rule -------------------------------------------------------------------------------------------------------------------------------
+
+def pg_diagnostic_defaults(compose_files):
+    """{env name: shipped default} of the database diagnostics the compose files pass (``${POSTGRES_LOG_LOCK_WAITS:-on}``); empty when none does."""
+    found = {}
+    for path in compose_files:
+        try:
+            with open(path) as fh:
+                text = fh.read()
+        except OSError:
+            continue
+        for name, default in re.findall(r'\$\{(POSTGRES_[A-Z_]+):?-([^}]*)\}', text):
+            if name in PG_DIAGNOSTICS:
+                found[name] = default
+    return found
+
+
+def diagnose_rule(env_files, compose_files, say):
+    """Say whether the database logs lock waits and times its WAL writes. Never writes: on is the shipped default, and off is the owner's own."""
+    shipped = pg_diagnostic_defaults(compose_files)
+    if not shipped and not pg_defaults(compose_files):
+        return  # compose files that pass the database no settings from the env file at all (not ours): nothing to say, as for the postgres rule
+    target = env_files[:1]  # the env file Compose reads
+    on, own, missing = [], [], []
+    for key, setting in PG_DIAGNOSTICS.items():
+        if key not in shipped:
+            missing.append(setting)
+            continue
+        text = env_value(target, key)
+        value = text if text else shipped[key]  # ${KEY:-on}: an empty value takes the default too
+        if value.strip().lower() in PG_ON:
+            on.append(setting)
+        else:
+            own.append(f'{key}={text}')
+    if on:
+        say('info', 'diagnose', f'The database runs with {" and ".join(on)} on: a lock wait longer than deadlock_timeout is logged with the process '
+            'that holds the lock, and the time spent writing WAL is counted in pg_stat_io.')
+    if own:
+        say('info', 'diagnose', f'{", ".join(own)} in {target[0]} is your own and is left as it is (the shipped default is on).')
+    if missing:
+        say('warn', 'diagnose', f'The compose files do not pass {" and ".join(missing)} to the database, so it runs with PostgreSQL\'s default (off): '
+            'a slow write cannot be told from a lock wait. The shipped docker-compose.yml turns them on (POSTGRES_LOG_LOCK_WAITS, POSTGRES_TRACK_WAL_IO_TIMING).')
+
+
+# --- the commit rule ---------------------------------------------------------------------------------------------------------------------------------
+
+def pg_commit_default(compose_files):
+    """The shipped default of POSTGRES_SYNCHRONOUS_COMMIT in the compose files (``${POSTGRES_SYNCHRONOUS_COMMIT:-off}``), None when none passes it."""
+    found = None
+    for path in compose_files:
+        try:
+            with open(path) as fh:
+                text = fh.read()
+        except OSError:
+            continue
+        for name, default in re.findall(r'\$\{(POSTGRES_[A-Z_]+):?-([^}]*)\}', text):
+            if name == PG_COMMIT:
+                found = default
+    return found
+
+
+def commit_rule(env_files, compose_files, say):
+    """Say whether the database's commits wait for their WAL flush, and who set it. Never writes: off is the shipped default, on is the owner's own."""
+    shipped = pg_commit_default(compose_files)
+    if shipped is None and not pg_defaults(compose_files) and not pg_diagnostic_defaults(compose_files):
+        return  # compose files that pass the database no settings from the env file at all (not ours): nothing to say, as for the postgres rule
+    if shipped is None:
+        say('info', 'commit', 'The compose files do not pass synchronous_commit to the database, so every commit waits for its WAL flush (PostgreSQL\'s '
+            'default, on, unless an ALTER SYSTEM value says otherwise). The shipped docker-compose.yml turns it off (POSTGRES_SYNCHRONOUS_COMMIT).')
+        return
+    target = env_files[:1]  # the env file Compose reads
+    text = env_value(target, PG_COMMIT)
+    value = (text if text else shipped).strip()  # ${KEY:-off}: an empty value takes the default too
+    waits = value.lower() not in ('off', 'false', 'no', '0')
+    how = ('every commit waits for its WAL flush' if waits else
+           'a commit does not wait for its WAL flush: a crash can lose about the last 0.6 s of acknowledged writes, never corrupt the database; '
+           'audit rows, token revocations, address bans and validation budget reservations still wait for theirs')
+    who = (f'{PG_COMMIT}={text} in {target[0]}, your own, left as it is' if text else
+           f'the shipped default; {PG_COMMIT}={"off" if waits else "on"} in .env turns it {"off" if waits else "back on"}')
+    say('info', 'commit', f'The database runs with synchronous_commit={value} ({who}): {how}.')
 
 
 # --- the review --------------------------------------------------------------------------------------------------------------------------------------
@@ -258,6 +529,15 @@ def review(args):
         say('fixed', 'limits', f'The {service} container was held to {have}, less than the {floor} MB it needs on this host (the kernel kills a process that reaches the '
             f'ceiling: the database was killed this way). Raised to {new} in {where}.', service=service, changes=changes)
 
+    # postgres (after limits: it sizes against the ceiling that rule raised)
+    postgres_rule(args, facts, env_files, compose_files, stamp, backups, say)
+
+    # diagnose
+    diagnose_rule(env_files, compose_files, say)
+
+    # commit
+    commit_rule(env_files, compose_files, say)
+
     # budget
     total = 0
     for service in ('db', 'web', 'celery', 'celery-beat', 'redis', 'proxy', 'reviewer', 'scanner'):
@@ -301,6 +581,7 @@ def main(argv=None):
     parser.add_argument('--mem-mb', type=int, default=0)
     parser.add_argument('--cores', type=int, default=0)
     parser.add_argument('--disk-gb', type=int, default=None)
+    parser.add_argument('--no-db-restart', action='store_true', help='the caller does not restart the database: the postgres rule only reports')
     parser.add_argument('--json', action='store_true')
     args = parser.parse_args(argv)
     env, files = parse_compose_args(args.compose_args)

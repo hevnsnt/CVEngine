@@ -248,15 +248,18 @@ class ReportedFixture(VersionFixture):
         correlation.correlate_subdomains(list(subs), index, cve_by_id, min_confidence=0.4)
         return [m for m in CVEMatch.objects.filter(cve_entry=row) if m.ai_verdict != 'not_affected']
 
-    def reported(self, sub, product='openssh', version='8.9p1', cpe='cpe:/a:openbsd:openssh:8.9p1', when=None, port=0, project=None):
-        reading = source_versions.product_reading(product, version, source_versions.SHODAN_PROVIDER, cpe=cpe)
+    def reported(self, sub, product='openssh', version='8.9p1', cpe='cpe:/a:openbsd:openssh:8.9p1', when=None, port=0, project=None, shodan=False):
+        """A third-party reading of ``sub``: runZero's by default (the one that may match), Shodan InternetDB's with ``shodan`` (a lead, never matched)."""
+        provider, probe = ((source_versions.SHODAN_PROVIDER, source_versions.SHODAN_PROBE) if shodan
+                           else (source_versions.RUNZERO_PROVIDER, source_versions.RUNZERO_PROBE))
+        reading = source_versions.product_reading(product, version, provider, cpe=cpe)
         project = project or sub.target_domain.project
-        source_versions.store_reported(project.id, sub.target_domain_id, sub.name, source_versions.SHODAN_PROBE, [reading],
-                                       source_versions.SHODAN_PROVIDER, when or timezone.now(), port=port, undated=True)
+        source_versions.store_reported(project.id, sub.target_domain_id, sub.name, probe, [reading], provider, when or timezone.now(), port=port,
+                                       undated=shodan)
 
 
 class ShodanTests(ReportedFixture, TestCase):
-    def test_a_versioned_cpe_is_a_reported_reading_not_a_technology_and_is_matched_cpe_first(self):
+    def test_a_versioned_cpe_is_a_reported_reading_not_a_technology_and_never_a_match(self):
         row = cve('CVE-2026-300010', *OPENSSH)
         sub = self.discover()
         reading = ProbeObservation.objects.get(probe=source_versions.SHODAN_PROBE, product='openbsd openssh')
@@ -269,21 +272,40 @@ class ShodanTests(ReportedFixture, TestCase):
         others = dict(ProbeObservation.objects.filter(probe=source_versions.SHODAN_PROBE).exclude(pk=reading.pk).values_list('product', 'version'))
         self.assertEqual(others, {'canonical ubuntu linux': '', 'jquery': ''})
         self.assertEqual(names(sub), set())
+        # Shodan InternetDB is keyed by address: a lead for our own checks, never a CVE match, however fresh and versioned
+        self.assertEqual(source_versions.in_use(sub), [])
+        self.assertEqual(self.correlate(row), [])
+        self.assertFalse(CVEMatch.objects.filter(cve_entry=row).exists())
+
+    def test_runzero_readings_still_match_cpe_first_at_the_reported_confidence(self):
+        row = cve('CVE-2026-300015', *OPENSSH)
+        sub = self.host_scan(web=False).subdomain_set.select_related('target_domain').get()
+        self.reported(sub)
         match, = self.correlate(row)
         self.assertEqual((match.source, match.matched_version, match.version_in_range), ('tech', '8.9p1', True))
         self.assertLessEqual(match.confidence, source_versions.REPORTED_CONFIDENCE)
-        self.assertEqual((match.evidence['reported_by'], match.evidence['cpe']), ('shodan_idb', 'cpe:/a:openbsd:openssh:8.9p1'))
+        self.assertEqual((match.evidence['reported_by'], match.evidence['cpe']), ('runzero', 'cpe:/a:openbsd:openssh:8.9p1'))
         from cveFeed import match_policy
         self.assertFalse(match_policy.version_proven(match))
 
+    def test_shodan_never_matches_even_beside_a_runzero_reading_of_another_product(self):
+        shodan_row = cve('CVE-2026-300016', *OPENSSH)
+        jetty_row = cve('CVE-2026-300017', 'eclipse', 'jetty', '9.4.0', '9.4.52')
+        sub = self.host_scan(web=False).subdomain_set.select_related('target_domain').get()
+        self.reported(sub, shodan=True)
+        self.reported(sub, product='jetty', version='9.4.41', cpe='cpe:/a:eclipse:jetty:9.4.41', port=8080)
+        self.assertEqual(self.correlate(shodan_row), [])
+        self.assertEqual(len(self.correlate(jetty_row)), 1)
+
     def test_a_fresh_first_party_reading_wins_and_closes_the_stale_passive_match(self):
         row = cve('CVE-2026-300011', *OPENSSH)
-        sub = self.discover()
+        sub = self.host_scan(web=False).subdomain_set.select_related('target_domain').get()
+        self.reported(sub)
         self.assertEqual(len(self.correlate(row)), 1)
         ip = sub.ip_addresses.first()
         ip.ports.add(Port.objects.create(number=22, service_name='ssh', product='OpenSSH', version='9.6p1', cpe='cpe:/a:openbsd:openssh:9.6p1',
                                          state='open', source='nmap'))
-        self.assertEqual(self.correlate(row), [])  # 9.6p1 is past the fix; the 8.9p1 Shodan saw is superseded, its match closed
+        self.assertEqual(self.correlate(row), [])  # 9.6p1 is past the fix; the 8.9p1 runZero reported is superseded, its match closed
         closed = CVEMatch.objects.get(cve_entry=row)
         self.assertEqual(closed.ai_verdict, 'not_affected')
         Port.objects.filter(number=22).update(state='closed')
@@ -291,7 +313,8 @@ class ShodanTests(ReportedFixture, TestCase):
 
     def test_a_first_party_sighting_with_no_version_is_not_given_the_passive_version(self):
         row = cve('CVE-2026-300012', *OPENSSH)
-        sub = self.discover()
+        sub = self.host_scan(web=False).subdomain_set.select_related('target_domain').get()
+        self.reported(sub)
         sub.ip_addresses.first().ports.add(Port.objects.create(number=22, service_name='ssh', product='OpenSSH', state='open', source='nmap'))
         self.assertEqual(self.correlate(row), [])
 
@@ -301,7 +324,7 @@ class ShodanTests(ReportedFixture, TestCase):
         self.reported(sub, when=timezone.now() - timedelta(days=source_versions.REPORTED_MAX_AGE_DAYS + 1))
         self.assertEqual(self.correlate(row), [])
         item, = version_sources.readings_for([self.project.id], ['app.rt.test'])[(self.project.id, 'app.rt.test')]
-        self.assertEqual((item['stale'], item['matched'], item['reported']['by']), (True, False, 'shodan_idb'))
+        self.assertEqual((item['stale'], item['matched'], item['reported']['by']), (True, False, 'runzero'))
         self.reported(sub)  # seen again today
         self.assertEqual(len(self.correlate(row)), 1)
 
@@ -314,11 +337,16 @@ class ShodanTests(ReportedFixture, TestCase):
         self.assertEqual(self.correlate(row), [])  # and then the port closed
         self.assertEqual(source_versions.verdict(ProbeObservation.objects.get(product='jetty'), source_versions.first_party(sub)), 'port_closed')
 
-    def test_search_finds_reported_readings(self):
+    def test_search_finds_runzero_readings_and_shodan_only_by_its_own_source(self):
         sub = self.host_scan(web=False).subdomain_set.select_related('target_domain').get()
         self.reported(sub)
-        self.assertEqual([r.product for r in version_sources.search_rows('vsource', 'shodan-idb')], ['openssh'])
-        self.assertEqual([r.product for r in version_sources.search_rows('vsource', 'reported')], ['openssh'])
+        self.reported(sub, product='redis', version='7.2.4', cpe='cpe:/a:redislabs:redis:7.2.4', shodan=True)
+        self.assertEqual([r.product for r in version_sources.search_rows('vsource', 'shodan-idb')], ['redis'])
+        self.assertEqual({r.product for r in version_sources.search_rows('vsource', 'reported')}, {'openssh', 'redis'})
+        self.assertEqual({r.product for r in version_sources.search_rows('vsource', 'any')}, {'openssh'})
+        self.assertEqual(list(version_sources.search_rows('component', 'redis')), [])  # not a product the host runs
+        self.assertEqual(list(version_sources.readings_for([self.project.id], ['app.rt.test']).get((self.project.id, 'app.rt.test'), [])
+                              )[0]['source'], 'runzero')
 
 
 class TenancyTests(ReportedFixture, TestCase):
@@ -387,11 +415,10 @@ class BackfillTests(ReportedFixture, TestCase):
         self.assertEqual(rows(source_versions.DB_PROBE)[('version', 'Memcached', 11211)].version, '1.6.21')
         self.assertEqual(rows(source_versions.SHODAN_PROBE)[('reported', 'openbsd openssh', 0)].version, '8.9p1')
         self.assertNotIn('openssh:8.9p1', names(sub))  # the CPE technology gave way to the reported reading
-        match, = [m for m in CVEMatch.objects.filter(cve_entry=row)]
-        self.assertTrue(match.evidence.get('reported'))
+        self.assertFalse(CVEMatch.objects.filter(cve_entry=row).exists())  # Shodan's reading is a lead: it makes no match
         again = source_versions.catch_up(apply=True)  # idempotent
         self.assertEqual(ProbeObservation.objects.filter(probe__in=source_versions.PROBES).count(), 3)
-        self.assertEqual(CVEMatch.objects.filter(cve_entry=row).count(), 1)
+        self.assertEqual(CVEMatch.objects.filter(cve_entry=row).count(), 0)
         self.assertEqual(again['hosts'], 1)
 
     def test_it_is_registered_and_runs_as_a_command(self):

@@ -60,8 +60,15 @@ def branch_warning(branch):
             'It gets work in progress that has not been released or fully tested.')
 
 
+def host_dir():
+    """The host's web/ folder as this container sees it: where the update channel's files live (the requests this side writes, the state the host
+    publishes). ``CVENGINE_HOST_DIR`` in production (docker-compose.yml mounts web/ there, because the application runs from the image's own copy
+    of the source); the source folder itself where web/ is the source (the development stack, the tests)."""
+    return getattr(settings, 'CVENGINE_HOST_DIR', '') or settings.BASE_DIR
+
+
 def _file(name):
-    return os.path.join(settings.BASE_DIR, name)
+    return os.path.join(host_dir(), name)
 
 
 def installed_sha():
@@ -77,7 +84,7 @@ def installed_sha():
     return env if SHA_RE.match(env) else ''
 
 
-_build_seen = None  # the answer, computed when the web process starts (reNgine.middleware.HtmlRevalidateMiddleware); tests put None back
+_build_seen = None  # the answer, computed when the web process starts (cvengine.middleware.HtmlRevalidateMiddleware); tests put None back
 
 
 def fingerprint(*roots):

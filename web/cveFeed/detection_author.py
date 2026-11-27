@@ -13,7 +13,7 @@ from django.utils import timezone
 
 from cveFeed import detection
 from cveFeed.models import CVEDetection, CVEEntry
-from reNgine import ai_prompts
+from cvengine import ai_prompts
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +23,10 @@ AI_RETRY_AFTER = datetime.timedelta(days=7)  # a record written before the back-
 # stops (the record keeps its rules-written checks and says so; an administrator's guidance asks again, and a changed CVE resets the count).
 AI_BACKOFF = (datetime.timedelta(hours=6), datetime.timedelta(days=1), datetime.timedelta(days=3), datetime.timedelta(days=7))
 AI_MAX_FAILURES = len(AI_BACKOFF) + 1
+# The provider refusing or failing to answer (the usage limit reached, a rate limit, an HTTP error) says nothing about the CVE: it is not a failed
+# ask, so it never counts toward ``AI_MAX_FAILURES`` and an outage cannot use up a record's tries. The record is asked again after this wait.
+PROVIDER_REFUSALS = frozenset(('provider_rate_limit', 'provider_http'))
+PROVIDER_REFUSAL_WAIT = datetime.timedelta(hours=1)
 RULES_LOOP_BATCH = 5000  # rules records are free and instant: a run writes them in rounds this size until none are left or time is up
 RULES_LOOP_SECONDS = 240
 AI_ID_PREFIX = 'ai-'
@@ -290,7 +294,7 @@ def input_hash(cve):
 def user_parts(cve, current=None, guidance=''):
     """The user message of one detection question, as the parts of an AI job (cveFeed.ai_jobs): what cvENGINE says itself as text, the
     CVE feed's data, the current record and an administrator's guidance fenced by the AI reviewer container."""
-    from reNgine.ai_providers import clean_text
+    from cvengine.ai_providers import clean_text
     from cveFeed.correlation import clean_affected, prepared_ranges
     affected = []
     for item in clean_affected(cve.affected)[:10]:
@@ -454,7 +458,7 @@ def job_answer(job, text):
         if job.attempt == 1:
             # sent back once with why the validator refused it (as a triage answer is); the second answer is the one that counts
             from cveFeed import ai_jobs
-            from reNgine.ai_providers import repair_parts
+            from cvengine.ai_providers import repair_parts
             return ai_jobs.Retry('cve_detection', repair_parts(job.packet.get('parts') or [], text, '; '.join(problems[:5]) or 'not a usable detection record'))
         # an answer outside the schema is a failed ask, not an answer: counted, backed off and asked again later (``_record_failure``). It used to
         # set ``ai_model``, which ``due_q`` reads as "answered": the record was never asked again and counted as written.
@@ -473,7 +477,18 @@ def job_failure(job, category, detail):
     row = CVEDetection.objects.filter(pk=job.context.get('record')).first()
     if row is None:
         return
+    if category in PROVIDER_REFUSALS or (detail or {}).get('provider_message'):  # the message is only sent for the usage limit
+        _record_refusal(row, category)
+        return
     _record_failure(row, category)
+
+
+def _record_refusal(row, category):
+    """The provider refused the call (``PROVIDER_REFUSALS``): ``ai_failures`` is left as it is, the record is asked again after
+    ``PROVIDER_REFUSAL_WAIT`` and says why it waits. An earlier real failure's note and count are kept in the count."""
+    hours = int(PROVIDER_REFUSAL_WAIT.total_seconds() // 3600)
+    note = f'the AI provider refused the call ({category}); not counted as a failed attempt; will ask again after {hours} hour(s)'
+    CVEDetection.objects.filter(pk=row.pk).update(ai_problems=[note], ai_retry_at=timezone.now() + PROVIDER_REFUSAL_WAIT)
 
 
 def _record_failure(row, category, problems=()):

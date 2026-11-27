@@ -45,7 +45,8 @@ class SharedCacheTests(TestCase):
 	def test_a_second_process_sees_the_same_count_and_the_counter_survives_a_restart(self):
 		for _ in range(tenancy_views.MAX_FAILURES - 1):
 			tenancy_views.fail(self.user)
-		other_process = RedisCache(settings.CACHES['default']['LOCATION'], {})  # a different worker, or this one after a restart
+		conf = settings.CACHES['default']
+		other_process = RedisCache(conf['LOCATION'], {k: v for k, v in conf.items() if k not in ('BACKEND', 'LOCATION')})  # a different worker, or this one after a restart
 		self.assertEqual(other_process.get(f'mfa_fail:{self.user.pk}'), tenancy_views.MAX_FAILURES - 1)
 		self.assertFalse(tenancy_views.locked(self.user))
 		tenancy_views.fail(self.user)
@@ -72,7 +73,7 @@ class SharedCacheTests(TestCase):
 
 class CacheUrlTests(unittest.TestCase):
 	def url(self, **env):
-		from reNgine.settings import _cache_url
+		from cvengine.settings import _cache_url
 		with mock.patch.dict(os.environ, env, clear=False):
 			for key in ('CACHE_URL', 'CELERY_BROKER'):
 				if key not in env:

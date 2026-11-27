@@ -23,6 +23,14 @@ case " $* " in
   *" migrate --check "*) if [ -f "$STUB_DIR/unmigrated_once" ]; then rm -f "$STUB_DIR/unmigrated_once"; exit 1; fi
     if [ -f "$STUB_DIR/unmigrated" ]; then exit 1; fi; exit 0;;
   *" info "*) echo "$STUB_DIR";;
+  *" db_app_role gate "*) if [ -f "$STUB_DIR/gate_fails" ]; then
+      echo "db_app_role: ERROR: the database role cvengine_app cannot log in (refused). The application is not started with the owner password instead." >&2
+      echo "Fix: make the database accept cvengine_app, then run the update again. To run on the owner role until then, set CVENGINE_DB_ALLOW_OWNER_FALLBACK=1 in .env and run it again." >&2
+      exit 1; fi
+    echo "db_app_role: web, celery and celery-beat run as the database role cvengine_app"; exit 0;;
+  *" config --format json "*) if [ -f "$STUB_DIR/proxy_config" ]; then cat "$STUB_DIR/proxy_config"; exit 0; fi
+    if [ -f "$STUB_DIR/overlay_leaks" ]; then
+      echo '{"services": {"db": {"environment": {"POSTGRES_PASSWORD": "canary"}}, "celery": {"environment": {"POSTGRES_PASSWORD": "canary"}}}}'; fi; exit 0;;
   *" ps -q web "*|*" ps -q celery "*|*" ps -q celery-beat "*) if [ -f "$STUB_DIR/old_containers" ]; then echo oldcontainer; fi; exit 0;;
   *" image inspect "*) if [ -f "$STUB_DIR/image_moved" ]; then echo sha256:new; else echo sha256:old; fi; exit 0;;
   *" inspect -f {{.Image}} oldcontainer"*) echo sha256:old; exit 0;;
@@ -34,6 +42,12 @@ case " $* " in
   *" showmigrations "*) if [ -f "$STUB_DIR/migrations_state" ]; then cat "$STUB_DIR/migrations_state"; else echo "[X]  app.0001_initial"; fi; exit 0;;
   *"celery_healthcheck.py"*) if [ -f "$STUB_DIR/workers_down" ]; then echo "classic_worker does not answer"; exit 1; fi; exit 0;;
   *"http.client"*) if [ -f "$STUB_DIR/web_not_serving" ]; then exit 1; fi; exit 0;;
+  *"client-address-probe/update-verify"*) if [ -f "$STUB_DIR/proxy_no_web" ]; then echo 502; else echo 204; fi; exit 0;;
+  *" run --rm --network none "*) case "$*" in *" nginx -t"*) if [ -f "$STUB_DIR/proxy_refuses_new" ]; then
+      echo "nginx: [emerg] could not build map_hash, you should increase map_hash_bucket_size: 64" >&2
+      echo "nginx: configuration file /etc/nginx/nginx.conf test failed" >&2; exit 1; fi;; esac; exit 0;;
+  *" exec -T proxy nginx -t "*) if [ -f "$STUB_DIR/proxy_refuses" ]; then
+      echo "nginx: [emerg] could not build map_hash, you should increase map_hash_bucket_size: 64" >&2; exit 1; fi; exit 0;;
   *" exec "*) if [ -f "$STUB_DIR/web_down" ]; then exit 1; fi
     echo "banner line"; cat "$STUB_DIR/running_count" 2>/dev/null || echo 0; exit 0;;
   *" ps -a --filter "*) if [ -f "$STUB_DIR/running_config_files" ]; then echo abc123; fi; exit 0;;
@@ -44,6 +58,7 @@ case " $* " in
     esac; echo; exit 0;;
   *" ps --status running --services "*) if [ -f "$STUB_DIR/service_down" ]; then printf 'web\ncelery\ncelery-beat\ndb\nredis\n'; else printf 'web\ncelery\ncelery-beat\nproxy\ndb\nredis\n'; fi; exit 0;;
   *" config --services "*) printf 'web\\ncelery\\ncelery-beat\\ndb\\nredis\\n'
+    if [ -f "$STUB_DIR/has_migrate" ]; then echo migrate; fi
     if [ -f "$STUB_DIR/has_reviewer" ]; then echo reviewer; fi
     case " $* " in *" docker-compose.dev.yml "*) ;; *) echo proxy;; esac
     if [ -f "$STUB_DIR/has_scanner" ]; then echo scanner; fi; exit 0;;
@@ -380,7 +395,7 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         calls = self.calls()
         self.assertIn('docker compose -f docker-compose.dev.yml build web celery celery-beat', calls)
         self.assertIn('docker compose -f docker-compose.dev.yml up -d --no-recreate db redis', calls)
-        self.assertIn('docker compose -f docker-compose.dev.yml run --rm --no-deps --entrypoint python3 web manage.py migrate --noinput', calls)
+        self.assertIn('docker compose -f docker-compose.dev.yml run --rm --no-deps -e CVENGINE_DB_ROLE=owner --entrypoint python3 web manage.py migrate --noinput', calls)
         # the dev compose file has no proxy service, so none is named (naming it made every dev update fail)
         self.assertIn('docker compose -f docker-compose.dev.yml up -d --no-deps --force-recreate web celery celery-beat', calls)
         self.assertFalse([c for c in calls if '--force-recreate' in c and 'proxy' in c])
@@ -448,8 +463,10 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.approve(newest)
         self.assertEqual(self.run_script().returncode, 0)
         from_file = [c for c in self.calls() if c.startswith('docker compose')]
-        # the deploy file also pulls the proxy image and reads the migration count (the built-in copy, for checkouts older than the deploy file, does not)
-        verification = lambda call: any(x in call for x in ('http.client', 'celery_healthcheck', 'migrate --check', 'image prune', ' info ', ' pull ', 'showmigrations'))
+        # the deploy file also pulls the proxy image, reads the migration count, checks that the proxy stays up and enables again the accounts the old
+        # abuse guard disabled (the built-in copy, for checkouts older than the deploy file, does none of that: those checkouts have no such command)
+        verification = lambda call: any(x in call for x in ('http.client', 'celery_healthcheck', 'migrate --check', 'image prune', ' info ', ' pull ', 'showmigrations',
+                                                            ' ps -q proxy', ' exec -T proxy nginx -t', 'reenable_guard_disabled_users'))
         self.assertEqual([c for c in from_file if not verification(c)], built_in)
 
     def test_the_dev_stack_pulls_nothing(self):
@@ -671,7 +688,7 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.assertIn('full deploy: web/README is not on the documentation allowlist', (self.work / 'web' / '.update-log').read_text())
 
     def test_unlisted_paths_are_a_full_deploy(self):
-        for path in ('docker-compose.yml', 'config/nginx/rengine.conf', 'scripts/x.sh', 'docs/notes.txt', 'docs/run.sh', 'README.txt', 'Makefile',
+        for path in ('docker-compose.yml', 'config/nginx/cvengine.conf', 'scripts/x.sh', 'docs/notes.txt', 'docs/run.sh', 'README.txt', 'Makefile',
                      'web/requirements.txt', 'web/Dockerfile', 'scanner.lock.json', 'docs-extra/a.md', 'sub/README.md'):
             with self.subTest(path=path):
                 self.setUp()
@@ -748,6 +765,7 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         shutil.copy(SCRIPTS / 'update-deploy.sh', other / 'scripts' / 'update-deploy.sh')
         shutil.copy(SCRIPTS / 'update-disk.sh', other / 'scripts' / 'update-disk.sh')
         shutil.copy(SCRIPTS / 'db-backup.sh', other / 'scripts' / 'db-backup.sh')
+        shutil.copy(SCRIPTS / 'proxy-check.sh', other / 'scripts' / 'proxy-check.sh')
         self.git('add', '-A', cwd=other)
         self.git('commit', '-m', 'the deploy file', cwd=other)
         self.git('push', 'origin', 'master', cwd=other)
@@ -877,6 +895,69 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.assertFalse(self.deployed_marker())
         self.assertNotIn('docker image prune -f', self.calls())
         self.assertIn('exec -T celery python3 celery_healthcheck.py', ' '.join(self.calls()))
+
+    def test_an_update_is_not_done_while_the_proxy_does_not_start(self):
+        # the web service answers and every worker too, but nginx refuses the proxy's configuration and the container restarts over and over:
+        # `ps` calls it running between two restarts, so the update was reported done and the page taken down while no visitor got an answer
+        (self.stub / 'proxy_refuses').write_text('')
+        self.new = self.publish_deploy_file()
+        self.approve()
+        result = self.run_script(CVENGINE_VERIFY_PROXY_TRIES='2', CVENGINE_VERIFY_POLL='0')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        log = (self.work / 'web' / '.update-log').read_text()
+        self.assertIn('the proxy does not answer for the site', log)
+        self.assertIn('could not build map_hash', log)
+        self.assertEqual(self.head(), self.new)  # after the migration: the new code is kept and retried, never the old code on the new schema
+        self.assertTrue(self.approved())
+        self.assertFalse(self.deployed_marker())
+        self.assertNotIn('docker image prune -f', self.calls())
+
+    def test_a_request_through_the_proxy_that_does_not_reach_web_is_not_done(self):
+        (self.stub / 'proxy_no_web').write_text('')
+        self.new = self.publish_deploy_file()
+        self.approve()
+        result = self.run_script(CVENGINE_VERIFY_PROXY_TRIES='2', CVENGINE_VERIFY_POLL='0')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        log = (self.work / 'web' / '.update-log').read_text()
+        self.assertIn('a request through the proxy to the web service got 502', log)
+        self.assertTrue(self.approved())
+        self.assertFalse(self.deployed_marker())
+
+    def test_a_proxy_configuration_nginx_refuses_stops_the_update_before_the_migration_and_keeps_the_previous_version(self):
+        # nginx -t of the new configuration (with the secret the update just wrote) in a throwaway container, before anything is migrated: a
+        # refusal is a failure before the migration, so the previous commit is put back and its proxy keeps serving, and the screen says why
+        (self.stub / 'proxy_config').write_text(json.dumps({'services': {'proxy': {
+            'image': 'nginx:alpine', 'environment': {'CVENGINE_UPSTREAM_SECRET': 'canary-secret-value-0123456789abcdef'},
+            'volumes': [{'type': 'bind', 'source': '/x/config/nginx/cvengine.conf', 'target': '/etc/nginx/conf.d/cvengine.conf'}]}}}))
+        (self.stub / 'proxy_refuses_new').write_text('')
+        self.new = self.publish_deploy_file()
+        self.approve()
+        result = self.run_script(CVENGINE_VERIFY_POLL='0')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        log = (self.work / 'web' / '.update-log').read_text()
+        self.assertIn('proxy: nginx refuses the new configuration: nginx: [emerg] could not build map_hash', log)
+        self.assertEqual(self.head(), self.prev)  # the previous version is back
+        calls = self.calls()
+        preflight = next(i for i, c in enumerate(calls) if ' run --rm --network none ' in c)
+        self.assertIn(' -e CVENGINE_UPSTREAM_SECRET ', calls[preflight])
+        self.assertNotIn('canary-secret-value', '\n'.join(calls))  # the secret never reaches a command line
+        self.assertIn('-v /x/config/nginx/cvengine.conf:/etc/nginx/conf.d/cvengine.conf:ro', calls[preflight])
+        first_migrate = [i for i, c in enumerate(calls) if ' migrate --noinput' in c]
+        self.assertTrue(not first_migrate or first_migrate[0] > preflight)
+        phase = json.loads((self.work / 'web' / '.update-phase.json').read_text())
+        self.assertEqual(phase['phase'], 'failed')
+        self.assertIn('nginx refuses the new proxy configuration', phase.get('detail', ''))
+        self.assertLessEqual(len(phase['detail']), 200)  # what an older update-state.py, which runs the way back, still accepts
+
+    def test_a_verified_update_has_checked_the_proxy_after_the_web_service(self):
+        self.new = self.publish_deploy_file()
+        self.approve()
+        self.assertEqual(self.run_script(CVENGINE_VERIFY_POLL='0').returncode, 0)
+        calls = self.calls()
+        self.assertIn('exec -T proxy nginx -t', ' '.join(calls))
+        served = max(i for i, c in enumerate(calls) if 'http.client' in c)
+        checked = next(i for i, c in enumerate(calls) if 'exec -T proxy nginx -t' in c)
+        self.assertGreater(checked, served)
 
     def run_with_env_file(self, text):
         """An update whose checkout carries the helper scripts (host-fit, redis-password) and an .env with ``text``; returns the update log."""
@@ -1129,6 +1210,20 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.assertEqual(self.run_script().returncode, 1)
         self.assertTrue(self.approved())
         self.assertEqual(self.head(), self.prev)
+
+    def test_a_file_changed_by_hand_to_what_the_approved_commit_has_does_not_block_the_update(self):
+        # the host applied a fix by hand (one line of the proxy configuration) that the approved commit brings word for word
+        (self.work / 'web' / 'README').write_text('v2\n')
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.head(), self.new)
+        self.assertEqual((self.work / 'web' / 'README').read_text(), 'v2\n')
+        self.assertIn('web/README was changed on this server to what', self.update_log())
+
+    def update_log(self):
+        state = self.git('rev-parse', '--git-dir', cwd=self.work)
+        return (self.work / state / 'cvengine-update' / 'update.log').read_text()
 
     def phase_file(self):
         import json
@@ -1628,6 +1723,77 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.assertIn('is not restored', log)
         self.assertNotIn('returning to', log)
 
+    # The owner password stays out of the application: the one-off migrate service.
+
+    def publish_owner_service(self):
+        """A release with the migrate service (docker compose config --services lists it) and scripts/db-app-role.sh."""
+        (self.stub / 'has_migrate').touch()
+        other = self.tmp / 'other'
+        (other / 'scripts').mkdir(exist_ok=True)
+        for name in ('db-app-role.sh', 'redis-password.sh'):
+            shutil.copy(SCRIPTS / name, other / 'scripts' / name)
+        return self.publish_deploy_file()
+
+    def test_the_owner_commands_run_in_the_migrate_service_after_the_role_check_and_before_the_restart(self):
+        self.new = self.publish_owner_service()
+        self.approve()
+        result = self.run_script(CVENGINE_UPDATE_BACKUPS='3')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = self.calls()
+        index = lambda text: next(i for i, c in enumerate(calls) if text in c)
+        gate = 'run --rm --no-deps -T -e CVENGINE_DB_ALLOW_OWNER_FALLBACK=0 migrate python3 manage.py db_app_role gate'
+        migrate = 'docker compose -f docker-compose.yml run --rm --no-deps migrate python3 manage.py migrate --noinput'
+        self.assertIn(migrate, calls)
+        self.assertIn('docker compose -f docker-compose.yml run --rm --no-deps -T migrate python3 manage.py showmigrations --plan', calls)
+        # the layout is read twice: by the proxy's nginx -t (scripts/proxy-check.sh, before the dump) and by the owner password check (after it)
+        owner_check = max(i for i, c in enumerate(calls) if 'config --format json' in c and i < index(gate))
+        self.assertLess(index('config --format json'), index('pg_dump'))
+        order = [index(' up -d --no-recreate db redis'), index('pg_dump'), owner_check, index(gate), index(migrate),
+                 index('up -d --no-deps --force-recreate web celery celery-beat proxy')]
+        self.assertEqual(order, sorted(order), calls)
+        # nothing runs an owner command in an application container any more
+        self.assertFalse([c for c in calls if 'CVENGINE_DB_ROLE=owner' in c])
+        self.assertFalse([c for c in calls if ' web ' in c and (' migrate --noinput' in c or 'showmigrations' in c)])
+        self.assertIn('run as the database role cvengine_app', (self.work / 'web' / '.update-log').read_text())
+
+    def test_an_app_role_that_cannot_log_in_stops_the_update_before_the_migration_with_the_fix(self):
+        (self.stub / 'gate_fails').touch()
+        self.new = self.publish_owner_service()
+        self.approve()
+        result = self.run_script(CVENGINE_UPDATE_BACKUPS='3')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        calls = self.calls()
+        gate = next(i for i, c in enumerate(calls) if 'db_app_role gate' in c)
+        # the new version never migrated or restarted anything; the one migrate call is the previous version being put back by its own deploy
+        self.assertEqual(len([c for c in calls if ' migrate --noinput' in c]), 1)
+        self.assertFalse([c for c in calls[:gate] if ' migrate --noinput' in c or '--force-recreate web' in c])
+        self.assertEqual(self.head(), self.prev)
+        log = (self.work / 'web' / '.update-log').read_text()
+        self.assertIn('cvengine_app cannot log in', log)
+        self.assertIn('Fix: make the database accept cvengine_app', log)
+        self.assertIn('CVENGINE_DB_ALLOW_OWNER_FALLBACK=1', log)
+
+    def test_the_fallback_switch_reaches_the_role_check(self):
+        (self.work / '.env').write_text('CVENGINE_DB_ALLOW_OWNER_FALLBACK=1\n')
+        self.new = self.publish_owner_service()
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue([c for c in self.calls() if '-e CVENGINE_DB_ALLOW_OWNER_FALLBACK=1 migrate python3 manage.py db_app_role gate' in c])
+
+    def test_an_overlay_that_still_hands_the_owner_password_to_a_service_stops_the_update(self):
+        (self.stub / 'overlay_leaks').touch()
+        self.new = self.publish_owner_service()
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        calls = self.calls()
+        self.assertFalse([c for c in calls if 'db_app_role gate' in c])
+        log = (self.work / 'web' / '.update-log').read_text()
+        self.assertIn('gives the database owner password to: celery.', log)
+        self.assertNotIn('canary', log)
+        self.assertEqual(self.head(), self.prev)
+
     # --- a dump before the migration, and what a failed migration does ---------------------------------------------------------------------
 
     def backups(self, pattern='*.sql.gz'):
@@ -1956,7 +2122,7 @@ class UpgradePostgresScriptTests(unittest.TestCase):
         result = self.run_script()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('already done', result.stdout)
-        self.assertIn('rengine_postgres_data', result.stdout)
+        self.assertIn('cvengine_postgres_data', result.stdout)
         self.assertFalse([c for c in self.calls() if c.startswith('docker run')])
 
     def test_env_without_the_variables_still_gets_the_defaults(self):
@@ -1965,8 +2131,8 @@ class UpgradePostgresScriptTests(unittest.TestCase):
         result = self.run_script()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         calls = self.calls()
-        self.assertTrue(any('pg_isready -U rengine -d rengine' in c for c in calls))
-        self.assertTrue(any('rengine_postgres_data:/var/lib/postgresql/data' in c for c in calls))
+        self.assertTrue(any('pg_isready -U cvengine -d cvengine' in c for c in calls))
+        self.assertTrue(any('cvengine_postgres_data:/var/lib/postgresql/data' in c for c in calls))
 
     def test_db_container_and_other_users_of_the_old_volume_are_stopped_before_pg12_starts(self):
         (self.stub / 'old_volume').write_text('')

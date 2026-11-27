@@ -220,7 +220,7 @@ class RescanPagingTests(Base):
 		migration.baseline(apps, None)
 		self.assertIsNotNone(CVEMatch.objects.get(pk=m.pk).fire_notified_at)
 		from cveFeed import tasks
-		from reNgine import celery
+		from cvengine import celery
 		with mock.patch('cveFeed.notify.baseline_heat_policy') as baseline:
 			celery.baseline_heat_pages()
 			tasks.report_resources()
@@ -395,9 +395,9 @@ class ScannerFindingHeatTests(Base):
 		v = Vulnerability.objects.create(name=name, severity=severity, source=source, subdomain=self.sub, target_domain=self.domain,
 										 scan_history=self.scan, open_status=True)
 		for cve in cves:
-			v.cve_ids.add(CveId.objects.create(name=cve))
+			v.cve_ids.add(CveId.objects.get_or_create(name=cve)[0])  # names are unique
 		for tag in tags:
-			v.tags.add(VulnerabilityTags.objects.create(name=tag))
+			v.tags.add(VulnerabilityTags.objects.get_or_create(name=tag)[0])
 		return v
 
 	def heats(self, capped=True):

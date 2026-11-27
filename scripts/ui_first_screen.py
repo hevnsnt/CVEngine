@@ -11,8 +11,9 @@ At 1366x768, 1280x720, 1440x900, 1920x1080 and 390x844 (a touch screen) it asser
   - none of "[object", "undefined", "null", "NaN" or a bare "?" in the text of any of these pages (a value the server did not send is said in words);
   - no sideways scroll on any page that has rows (Suppliers used to push its Remove button off the right edge);
   - Overview: no button, label or sentence sits on the title, and the purpose sentence is whole or "About this page" shows it;
-  - the purpose sentence of Overview, Situations, Hygiene, Sentinels, Suppliers, Secrets and Scans is whole, or an "About this page" button is on screen and
+  - the purpose sentence of Overview, Hygiene, Sentinels, Suppliers, Secrets and Scans is whole, or an "About this page" button is on screen and
     opens the whole sentence with a tap and with Enter, and Escape closes it again and gives the focus back to the button;
+  - Situations has no "About this page" button (its own "What is this" explains the page);
   - Changes: at least 5 data rows fully on the first screen at 1366x768 and 1280x720 (the daily chart is closed under its own line), 1 on a phone;
   - Sentinels: at least 3 rows fully on the first screen on a desktop and 2 on a phone, no summary strip that scrolls sideways, no text cut at the side, and a Sentinel's note
     (why its update failed) is on its closed row;
@@ -56,10 +57,11 @@ PAGES = {
     'hosts': (f'{PROJECT}/hosts/', '.host-rows .host-row'),
     'targets': (f'{PROJECT}/targets/', 'main tbody tr'),
     'activity': (f'{PROJECT}/activity/', 'main tbody tr'),
+    'reporting': (f'reports/?project={PROJECT}', None),
 }
 # text a person must never read on a page: an object printed as text, a missing value, a bare question mark standing for "unknown"
 BAD_TEXT = re.compile(r'\[object|\bundefined\b|\bnull\b|\bNaN\b|(?:^|[\s(:>])\?(?:$|[\s),.:])', re.M)
-PURPOSE_PAGES = ('overview', 'situations', 'hygiene', 'sentinels', 'suppliers', 'secrets', 'scans')
+PURPOSE_PAGES = ('overview', 'hygiene', 'sentinels', 'suppliers', 'secrets', 'scans')
 MEASURE = r"""(sel) => {
   const vis = (e) => { const cs = getComputedStyle(e); return cs.display !== 'none' && cs.visibility !== 'hidden' && e.getClientRects().length > 0; };
   const bar = document.querySelector('.tabbar');
@@ -188,6 +190,8 @@ def measure_all(b, shots):
                 check(not m['over'], f'{name} {tag}: nothing sits on the title (found {m["over"]})')
             if name in PURPOSE_PAGES:
                 purpose_checks(pg, name, m, tag)
+            if name == 'situations':
+                check(m['about'] is None, f'situations {tag}: no "About this page" button (its "What is this" explains the page)')
             if name == 'changes':
                 need = 1 if touch else 5
                 if touch or (w, h) in ((1366, 768), (1280, 720)):

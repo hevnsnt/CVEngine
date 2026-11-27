@@ -1,7 +1,17 @@
 #!/bin/bash
 set -Eeuo pipefail
 
-python3 manage.py migrate --noinput
+# This container does not migrate and has no owner password: the one-off migrate service (docker-compose.yml, web/migrate-entrypoint.sh) runs the
+# migrations as the database's OWNER role, creates and grants the least privilege app role, and checks that it logs in, before this starts (its
+# depends_on, the update scripts, make up). The server uses the app role (web/db-role.sh); the owner role only when CVENGINE_DB_ALLOW_OWNER_FALLBACK=1
+# made the migrate service hand it over.
+. "$(dirname "$0")/db-role.sh" && cvengine_db_role 0
+# A restart on new code whose migrations nobody applied yet waits for them instead of serving errors (migrate --check reads django_migrations,
+# which the app role may).
+until python3 manage.py migrate --check >/dev/null 2>&1; do
+    echo "Waiting for the database migrations; they run in the one-off migrate service: docker compose run --rm migrate"
+    sleep 3
+done
 
 case "${DEBUG:-0}" in
     1|true|True|yes)
@@ -17,7 +27,7 @@ case "${DEBUG:-0}" in
         # Only the gunicorn process gets a database statement timeout (30 s, CVENGINE_WEB_STATEMENT_TIMEOUT_MS, 0 = none): the migration above, the management
         # commands run with `exec` and the workers must not be cut off by it, and a web request that needs more than 30 s for one statement is too big (review 2 F2).
         export CVENGINE_WEB_STATEMENT_TIMEOUT_MS="${CVENGINE_WEB_STATEMENT_TIMEOUT_MS-30000}"
-        exec python3 -m gunicorn reNgine.wsgi:application \
+        exec python3 -m gunicorn cvengine.wsgi:application \
             --bind 0.0.0.0:8000 \
             --worker-class gthread \
             --workers "${GUNICORN_WORKERS:-2}" \

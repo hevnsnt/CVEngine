@@ -5,6 +5,8 @@ import models lazily.
 """
 import re
 
+from tenancy import snapshot
+
 ADMIN, USER, AUDIT, PENTESTER = 'admin', 'user', 'audit', 'pentester'
 RANK = {ADMIN: 4, PENTESTER: 3, USER: 2, AUDIT: 1}
 SAFE_METHODS = ('GET', 'HEAD', 'OPTIONS')
@@ -49,10 +51,10 @@ def is_reserved_project(*values):
 # so only superusers may open it. Per-project settings below need the admin role.
 SUPERUSER_ONLY = re.compile(
     r'^/(admin/|cve/(api/)?(setup|settings|welcome)(/|$)|[^/]+/admin_interface|'
-    r'scanEngine/[^/]+/(tool_settings|api_vault|tool_arsenal|ai_settings|llm_toolkit|rengine_settings|'
+    r'scanEngine/[^/]+/(tool_settings|api_vault|tool_arsenal|ai_settings|llm_toolkit|'
     r'notification_settings|proxy_settings|report_settings|hackerone_settings|add|delete|update|wordlist|interesting|testHackerone))')
 # Per-project settings that need the admin role (none yet: notification, proxy and report
-# settings are global singletons in reNgine, so they are instance-wide above).
+# settings are global singletons in the inherited code, so they are instance-wide above).
 ADMIN_ONLY = re.compile(r'^/(?!)')
 # Bug bounty workflow: the program catalogue and report pages (/cve/bounty, /cve/api/bounty).
 # App Admins always have it; any other user only after an App Admin authorized that user (UserProfile.bugbounty_enabled,
@@ -61,7 +63,7 @@ ADMIN_ONLY = re.compile(r'^/(?!)')
 BUGBOUNTY = re.compile(r'^/cve/(api/)?bounty(/|$)|^/(?!cve/)[^/]+/bountyhub(/|$)|'
                        r'^/scanEngine/[^/]+/(hackerone_settings|testHackerone)', re.I)
 # api/v1 and mcp enforce tenancy in agentapi.services (the project is not always in the URL).
-ALWAYS_OPEN = re.compile(r'^/((logout|login|invite|mfa|staticfiles|404)(/|$)|mcp/|api/v1/|cve/account(/|$)|cve/api/account(/|$)|cve/about(/|$)|cve/how-it-works(/|$))')
+ALWAYS_OPEN = re.compile(r'^/((logout|login|invite|unsubscribe|mfa|staticfiles|404)(/|$)|mcp/|api/v1/|cve/account(/|$)|cve/api/account(/|$)|cve/about(/|$)|cve/ai(/|$)|cve/mcp(/|$)|cve/how-it-works(/|$))')
 
 
 def best_role(roles):
@@ -97,6 +99,9 @@ def effective_role(user, project):
     from dashboard.models import OrgMembership, ProjectMembership
     if user.is_superuser:
         return ADMIN
+    snap = snapshot.for_user(user) if project.pk is not None else None
+    if snap is not None:  # this request's own user: answered from the memberships it already read (tenancy.snapshot)
+        return resolve_role(snap.project_role(project.pk), snap.org_role(project.org_id) if project.org_id else None)
     pm = ProjectMembership.objects.filter(user=user, project=project).values_list('role', flat=True).first()
     om = None
     if project.org_id:
@@ -109,6 +114,9 @@ def allowed_project_ids(user):
     from dashboard.models import OrgMembership, Project, ProjectMembership
     if user.is_superuser:
         return None
+    snap = snapshot.for_user(user)
+    if snap is not None:
+        return snap.allowed_project_ids()
     ids = set(ProjectMembership.objects.filter(user=user).values_list('project_id', flat=True))
     org_ids = list(OrgMembership.objects.filter(user=user).values_list('org_id', flat=True))
     if org_ids:
@@ -120,6 +128,9 @@ def user_best_role(user):
     from dashboard.models import OrgMembership, ProjectMembership
     if user.is_superuser:
         return ADMIN
+    snap = snapshot.for_user(user)
+    if snap is not None:
+        return best_role(snap.roles())
     return best_role(
         list(ProjectMembership.objects.filter(user=user).values_list('role', flat=True)) +
         list(OrgMembership.objects.filter(user=user).values_list('role', flat=True)))
@@ -129,7 +140,7 @@ GLOBAL_ROLE_FOR = {ADMIN: 'sys_admin', PENTESTER: 'penetration_tester', USER: 'p
 
 
 def sync_global_role(user):
-    """Keep reNgine's legacy global role equal to the user's highest tenancy role.
+    """Keep the inherited legacy global role equal to the user's highest tenancy role.
 
     The legacy decorators check that global role; tenancy's per-project rules
     (middleware) then tighten it for the project actually being accessed.
@@ -143,19 +154,6 @@ def sync_global_role(user):
         if role == ADMIN and not user.is_superuser:
             role = USER
         assign_role(user, GLOBAL_ROLE_FOR[role])
-
-
-LEGACY_TO_TENANCY = {'sys_admin': ADMIN, 'penetration_tester': USER, 'auditor': AUDIT}
-
-
-def grant_from_legacy_role(target_user, legacy_role, org_slug=None):
-    """User-management UI hook: turn a legacy global role into an org membership (default org if unspecified)."""
-    from dashboard.models import Org, OrgMembership
-    role = LEGACY_TO_TENANCY.get(legacy_role)
-    org = (Org.objects.filter(slug=org_slug).first() if org_slug else None) or Org.objects.order_by('id').first()
-    if not (role and org):
-        return
-    OrgMembership.objects.update_or_create(user=target_user, org=org, defaults={'role': role})
 
 
 # ---- who administers what -------------------------------------------------------------
@@ -214,6 +212,9 @@ def user_org_ids(user):
 def requires_mfa(user):
     """Organization MFA policy also covers members assigned directly to its projects."""
     from dashboard.models import OrgMembership, ProjectMembership
+    snap = snapshot.for_user(user)
+    if snap is not None:
+        return snap.requires_mfa()
     return (OrgMembership.objects.filter(user=user, org__require_mfa=True).exists()
             or ProjectMembership.objects.filter(user=user, project__org__require_mfa=True).exists())
 

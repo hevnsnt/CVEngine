@@ -1,10 +1,10 @@
 // Pure helpers of the Situations page (no DOM, no imports): the words, the three empty states and what a link may point at.
 // tests/test_situations_logic.mjs runs them under `node --test`.
 
-export const TIER_WORDS = { proven: "proven", likely: "likely", exposure: "exposed", minor: "minor" };
-const ORDER = ["proven", "likely", "exposure", "minor"];
+export const TIER_WORDS = { proven: "proven", likely: "likely", hygiene: "high hygiene", exposure: "exposed", minor: "minor" };
+const ORDER = ["proven", "likely", "hygiene", "exposure", "minor"];
 
-// [{key, n, label}] of the tiers a situation has, worst first: "2 proven", "1 likely", "3 exposed", "4 minor"
+// [{key, n, label}] of the tiers a situation has, worst first: "2 proven", "1 likely", "1 high hygiene", "3 exposed", "4 minor"
 export function chipsOf(counts) {
   const c = counts || {};
   return ORDER.filter((k) => Number(c[k]) > 0).map((k) => ({ key: k, n: Number(c[k]), label: `${Number(c[k])} ${TIER_WORDS[k]}` }));
@@ -21,6 +21,13 @@ const LINK = /^\/cve\/[-\w]+\/(vulns|hygiene|secrets|hosts)\/(\?[-\w=%.&]*)?(#[-
 export const safeLink = (href) => (typeof href === "string" && LINK.test(href) ? href : "");
 
 const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+// The tier filter a link asks for ("?tier=hygiene", the Overview's Needs attention tile), or "" for one the page does not offer.
+export const TIER_FILTERS = ["all", "exposure", "hygiene", "likely", "proven"];
+export function tierFromSearch(search) {
+  const wanted = new URLSearchParams(typeof search === "string" ? search : "").get("tier") || "";
+  return TIER_FILTERS.includes(wanted) ? wanted : "";
+}
+
 export const countLine = (data) => (data && data.count != null ? plural(data.count, "situation", "situations") : "");
 
 // What an empty list says, from the server's `state` (never from the rows): {kind, title, body, tone}.

@@ -1,13 +1,13 @@
-"""``reNgine.broker_acks``: an ack whose broker connection drops must still free its delivery, or the channel's prefetch keeps counting it and
+"""``cvengine.broker_acks``: an ack whose broker connection drops must still free its delivery, or the channel's prefetch keeps counting it and
 an acks_late worker runs one task fewer at once until it restarts (``tests/test_gevent_worker_e2e.py`` shows it end to end). These drive kombu's
 real Redis ``QoS`` with the broker side (``_remove_from_indices``) stood in for."""
 import unittest
 from unittest import mock
 
 import redis
-import reNgine.celery  # noqa: F401  (the app installs the guard; read before any test here installs it itself)
+import cvengine.celery  # noqa: F401  (the app installs the guard; read before any test here installs it itself)
 from kombu.transport import redis as kombu_redis
-from reNgine import broker_acks
+from cvengine import broker_acks
 
 INSTALLED_BY_THE_APP = getattr(kombu_redis.QoS, broker_acks._MARK, False)
 
@@ -43,7 +43,7 @@ class AckFreesTheSlotTests(unittest.TestCase):
     def test_the_app_installs_it(self):
         self.assertTrue(INSTALLED_BY_THE_APP)
         self.assertTrue(broker_acks.install())  # idempotent
-        self.assertEqual(kombu_redis.QoS.ack.__module__, 'reNgine.broker_acks')
+        self.assertEqual(kombu_redis.QoS.ack.__module__, 'cvengine.broker_acks')
 
     def test_an_ack_is_removed_from_the_broker_and_frees_its_slot(self):
         qos = qos_with(['a', 'b'])
@@ -92,11 +92,11 @@ class InstallIsFailSafeTests(unittest.TestCase):
     def test_a_kombu_that_does_not_look_as_expected_is_left_alone_with_a_warning_and_nothing_raises(self):
         import kombu
         before = kombu_redis.QoS.ack
-        with mock.patch.object(kombu_redis, 'QoS', None), self.assertLogs('reNgine.broker_acks', 'WARNING') as logs:
+        with mock.patch.object(kombu_redis, 'QoS', None), self.assertLogs('cvengine.broker_acks', 'WARNING') as logs:
             self.assertFalse(broker_acks.install())  # the transport has no QoS
         self.assertIn(f'kombu {kombu.__version__} lacks kombu.transport.redis.QoS', logs.output[0])
         with mock.patch.object(broker_acks, '_install', side_effect=RuntimeError('odd kombu')), \
-                self.assertLogs('reNgine.broker_acks', 'WARNING') as logs:
+                self.assertLogs('cvengine.broker_acks', 'WARNING') as logs:
             self.assertFalse(broker_acks.install())  # anything unexpected
         self.assertIn('Could not guard kombu', logs.output[0])
         self.assertIs(kombu_redis.QoS.ack, before)

@@ -2,7 +2,7 @@ from django.db import migrations
 
 
 def encrypt_existing(apps, schema_editor):
-    """Encrypt the update-check token already stored, in place (see reNgine.crypto_fields)."""
+    """Encrypt the update-check token already stored, in place (see cvengine.crypto_fields)."""
     for row in apps.get_model('cveFeed', 'UpdateSettings').objects.all().iterator():
         row.save(update_fields=['token'])
 

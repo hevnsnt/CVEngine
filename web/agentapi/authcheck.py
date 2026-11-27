@@ -3,7 +3,8 @@
 a stored sign-in lets the scanners act as a person inside the application. Values are write-only: nothing here returns one, only the
 header and cookie NAMES, and the audit log records names too. Every credential has an explicit scope (one host or all hosts of the target)
 and an explicit expiry (30, 90 or 120 days, or never). A sign-in is sent only over a TLS connection whose certificate verifies, unless the
-owner switched on ``allow_untrusted_certificate`` for it (audited, with a warning).
+owner switched on ``allow_untrusted_certificate`` for it (audited, with a warning). A sign-in goes only to the built-in scanner unless the owner
+switched on ``allow_external_sentinels`` for it (audited, with a warning): then also to an external Sentinel ``agentapi.signin_delivery`` allows.
 """
 from agentapi.services import ApiError, get_one_project
 from cveFeed import auth_checks
@@ -34,7 +35,7 @@ def _target(project, target_id):
 
 def list_credentials(ctx, slug, params=None):
     """The stored sign-ins of a project, masked: label, target, host (null with scope ``target``: every host of the target), origins, header and cookie names,
-    expiry (with the days left), state (active or expired) and ``allow_untrusted_certificate``. Never a value. ``target_id`` narrows to one target."""
+    expiry (with the days left), state (active or expired), ``allow_untrusted_certificate`` and ``allow_external_sentinels``. Never a value. ``target_id`` narrows to one target."""
     from cveFeed.models import AuthCredential
     project = _admin(ctx, slug)
     rows = AuthCredential.objects.filter(project=project).select_related('domain', 'updated_by').order_by('domain__name', 'host', 'id')
@@ -49,7 +50,9 @@ def set_credential(ctx, slug, target_id, body):
     or 120 (days from now) or ``"never"``. ``headers`` is a list of ``{name, secret}`` (``secret`` is the header value; blank for a name
     already stored keeps it, and names left out are removed), ``cookie_secret`` a ``name=value; ...`` string (blank keeps the stored one,
     ``clear_cookie: true`` removes it) ``origins`` the ``scheme:port`` list it may go to (default ``["https:443"]``) and ``allow_untrusted_certificate`` (boolean, default false,
-    kept when left out): also send it over a connection whose certificate does not verify, which lets anyone in the network path read it. REST and the web
+    kept when left out): also send it over a connection whose certificate does not verify, which lets anyone in the network path read it, and
+    ``allow_external_sentinels`` (boolean, default false, kept when left out): also let an external Sentinel read it for a signed-in task
+    (``agentapi.signin_delivery``), so the value leaves this server for a machine it does not run. REST and the web
     page only: a secret never passes through an MCP tool."""
     from cveFeed.admin_api import audit
     from cveFeed.models import AuthCredential
@@ -79,6 +82,11 @@ def set_credential(ctx, slug, target_id, body):
             allow = bool(existing.allow_untrusted_certificate) if existing else False
         elif not isinstance(allow, bool):
             raise auth_checks.CredentialError('allow_untrusted_certificate must be true or false')
+        external = body.get('allow_external_sentinels', MISSING)
+        if external is MISSING:
+            external = bool(existing.allow_external_sentinels) if existing else False
+        elif not isinstance(external, bool):
+            raise auth_checks.CredentialError('allow_external_sentinels must be true or false')
     except auth_checks.CredentialError as exc:
         raise ApiError(400, str(exc))
     if existing is None and AuthCredential.objects.filter(domain=domain).count() >= MAX_PER_TARGET:
@@ -87,15 +95,20 @@ def set_credential(ctx, slug, target_id, body):
     cred.label, cred.origins, cred.expires_at, cred.updated_by = label, origins, expires, ctx.user
     changed = allow != bool(cred.allow_untrusted_certificate)
     cred.allow_untrusted_certificate = allow
+    external_changed = external != bool(cred.allow_external_sentinels)
+    cred.allow_external_sentinels = external
     cred.secret = {'headers': headers, 'cookie': cookie}
     cred.save()
     audit(ctx.user, 'target.auth_credential.set', f'{project.slug}:{domain.name}:{host or "*"}', org=project.org_id, label=label,
           headers=[name for name, _ in headers], cookie=bool(cookie), origins=origins, scope='host' if host else 'target', expires=str(body.get('expires')).strip().lower(),
           expires_at=expires.isoformat() if expires else None,
-          created=existing is None, allow_untrusted_certificate=allow)
+          created=existing is None, allow_untrusted_certificate=allow, allow_external_sentinels=external)
     if changed:  # its own audit row: the switch lets the sign-in cross a connection whose server was not verified
         audit(ctx.user, 'target.auth_credential.untrusted_certificate', f'{project.slug}:{domain.name}:{host or "*"}', org=project.org_id,
               label=label, allow_untrusted_certificate=allow)
+    if external_changed:  # its own audit row: the switch lets the sign-in leave this server for an external Sentinel
+        audit(ctx.user, 'target.auth_credential.external_sentinels', f'{project.slug}:{domain.name}:{host or "*"}', org=project.org_id,
+              label=label, allow_external_sentinels=external)
     return auth_checks.summary(cred)
 
 

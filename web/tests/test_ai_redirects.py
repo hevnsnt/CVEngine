@@ -6,7 +6,7 @@ from unittest import mock
 
 from django.test import SimpleTestCase
 
-from reNgine import ai_providers as ai
+from cvengine import ai_providers as ai
 
 SEEN = []
 

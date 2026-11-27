@@ -13,7 +13,7 @@ from agentapi.auth import create_token
 from cveFeed import closure, finding_lifecycle, hygiene, wpscan_scan
 from cveFeed.models import CVEEntry, CVEMatch, FindingAuditEvent, FindingComment, HygieneFinding, ProbeObservation, RouteAuth
 from dashboard.models import Org, Project, ProjectMembership
-from reNgine.tasks import save_vulnerability
+from cvengine.tasks import save_vulnerability
 from scanEngine.models import EngineType
 from startScan.models import ScanHistory, Subdomain, Vulnerability
 from targetApp.models import Domain
@@ -323,6 +323,42 @@ class RedirectAliasTests(LifecycleBase):
 		self._root('www.example.com', 'https://www.example.com/', 200, '')
 		self.assertEqual(finding_lifecycle.fold_aliases(self.project.pk)['reopened'], 1)
 		self.assertTrue(Vulnerability.objects.get(pk=www_row.pk).open_status)
+
+	def test_folding_keeps_a_note_already_on_the_finding_and_unfolding_gives_it_back(self):
+		# the fold replaced the note, and unfolding emptied it: a person's note kept under an automatic reopening was lost
+		_apex_row, www_row = self._pair()
+		note = f'{finding_lifecycle.REOPENED_NOTE}\nTicket OPS-9: the vendor is on it'
+		Vulnerability.objects.filter(pk=www_row.pk).update(remediation_note=note)
+		cert = dict(check_name='tls_expiring', severity=2, title='Certificate expires', evidence={'not_after': '2026-11-18'})
+		HygieneFinding.objects.create(domain=self.domain, host='example.com:443', **cert)
+		h_www = HygieneFinding.objects.create(domain=self.domain, host='www.example.com:443', remediation_note='Ticket OPS-10', **cert)
+		out = finding_lifecycle.fold_aliases(self.project.pk)
+		self.assertEqual((out['vulnerability'], out['hygiene']), (1, 1))
+		www_row.refresh_from_db()
+		h_www.refresh_from_db()
+		self.assertFalse(www_row.open_status)
+		self.assertTrue(www_row.remediation_note.startswith(finding_lifecycle.ALIAS))
+		self.assertTrue(www_row.remediation_note.endswith('\n' + note))
+		self.assertTrue(finding_lifecycle.is_folded(www_row))
+		self.assertEqual(h_www.status, 'resolved')
+		self.assertTrue(h_www.remediation_note.startswith(finding_lifecycle.ALIAS))
+		self.assertTrue(h_www.remediation_note.endswith('\nTicket OPS-10'))
+		self._root('www.example.com', 'https://www.example.com/', 200, '')
+		self.assertEqual(finding_lifecycle.fold_aliases(self.project.pk)['reopened'], 2)
+		www_row.refresh_from_db()
+		h_www.refresh_from_db()
+		self.assertEqual((www_row.open_status, www_row.remediation_note), (True, note))  # only the alias line comes off
+		self.assertEqual((h_www.status, h_www.remediation_note), ('open', 'Ticket OPS-10'))
+		# a fold of a finding with no note writes the line alone, and unfolding empties it, as before
+		Vulnerability.objects.filter(pk=www_row.pk).update(remediation_note='')
+		self._root('www.example.com', 'https://www.example.com/', 301, 'https://example.com/')
+		finding_lifecycle.fold_aliases(self.project.pk)
+		www_row.refresh_from_db()
+		self.assertNotIn('\n', www_row.remediation_note)
+		self._root('www.example.com', 'https://www.example.com/', 200, '')
+		finding_lifecycle.fold_aliases(self.project.pk)
+		www_row.refresh_from_db()
+		self.assertEqual(www_row.remediation_note, '')
 
 	def test_a_cname_to_the_apex_gets_no_mail_findings_of_its_own(self):
 		cname = {'www.example.com'}

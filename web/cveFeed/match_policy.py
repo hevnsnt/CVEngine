@@ -218,6 +218,19 @@ def is_version_only(match):
                                  getattr(match, 'distro_status', '') or '', _validation_status(match))
 
 
+def is_reported_only(match):
+    """Whether a CVEMatch rests only on a third-party reported reading (``evidence.reported``: runZero's service or operating system version, never
+    Shodan's, which matches nothing) with no hard evidence and no first-party read behind it (a first-party reading of the same product replaces
+    the reported one in correlation, so the evidence says ``reported`` no more). It is a candidate to check, held at ice until a first-party read
+    or a check confirms it (``threat.match_heat``)."""
+    return evidence_flag(getattr(match, 'evidence', None), 'reported') and is_version_only(match)
+
+
+def reported_only_q(prefix=''):
+    """The database form of ``is_reported_only``."""
+    return evidence_flag_q('reported', prefix) & version_only_q(prefix)
+
+
 def version_only_q(prefix=''):
     """The database form of ``is_version_only``."""
     return ~hard_evidence_q(prefix)
@@ -484,20 +497,52 @@ def _has_other_evidence(match):
 
 def sighting_of(match):
     """``(product name, cpe)`` of the technology or port a correlated match was made from, read from the evidence it stored. A sighting
-    that is gone (a rescan replaced it) falls back to the matched product."""
+    that is gone (a rescan replaced it) falls back to the matched product. ``prime_sightings`` reads it for many matches at once."""
     from startScan.models import Port, Technology
     from cveFeed.correlation import split_name_version
     evidence = match.evidence or {}
     source_id = evidence.get('source_id')
+    primed = match.__dict__.get('_sighted')  # (source, source id, the row read), when ``prime_sightings`` read it for this evidence
+    primed = primed[2] if primed is not None and primed[:2] == (evidence.get('source'), source_id) else _UNREAD
     if source_id and evidence.get('source') == 'tech':
-        name = Technology.objects.filter(pk=source_id).values_list('name', flat=True).first()
+        name = Technology.objects.filter(pk=source_id).values_list('name', flat=True).first() if primed is _UNREAD else primed
         if name:
             return split_name_version(name)[0], ''
     if source_id and evidence.get('source') == 'port':
-        row = Port.objects.filter(pk=source_id).values_list('product', 'cpe').first()
+        row = Port.objects.filter(pk=source_id).values_list('product', 'cpe').first() if primed is _UNREAD else primed
         if row and row[0]:
             return row[0].strip(), row[1] or evidence.get('cpe') or ''
     return match.matched_product, evidence.get('cpe') or ''
+
+
+_UNREAD = object()
+
+
+def prime_sightings(matches):
+    """Read for many matches at once the technology or port row ``sighting_of`` would read for each (two queries, whatever the number), and
+    keep it on each match object with the evidence it was read for. ``forget_primed`` drops it."""
+    from startScan.models import Port, Technology
+    wanted = {'tech': set(), 'port': set()}
+    for m in matches:
+        evidence = m.evidence if isinstance(m.evidence, dict) else {}
+        source_id = evidence.get('source_id')
+        if evidence.get('source') in wanted and isinstance(source_id, int) and not isinstance(source_id, bool) and source_id:
+            wanted[evidence['source']].add(source_id)
+    rows = {'tech': dict(Technology.objects.filter(pk__in=wanted['tech']).values_list('pk', 'name')) if wanted['tech'] else {},
+            'port': {pk: (product, cpe) for pk, product, cpe in Port.objects.filter(pk__in=wanted['port']).values_list('pk', 'product', 'cpe')}
+            if wanted['port'] else {}}
+    for m in matches:
+        evidence = m.evidence if isinstance(m.evidence, dict) else {}
+        source, source_id = evidence.get('source'), evidence.get('source_id')
+        if source in wanted and source_id in wanted[source]:
+            m._sighted = (source, source_id, rows[source].get(source_id))
+
+
+def forget_primed(matches):
+    """Drop what ``prime_standing`` and ``prime_sightings`` kept on each match, so a later caller asks the database again."""
+    for m in matches:
+        m.__dict__.pop('_worked_on', None)
+        m.__dict__.pop('_sighted', None)
 
 
 def has_standing(match):

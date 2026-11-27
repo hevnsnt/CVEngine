@@ -300,6 +300,13 @@ def row_preference(scan_id=None):
                  When(scan_history__scan_status=2, then=1), default=2, output_field=IntegerField()), '-id')
 
 
+def _endpoint_host():
+    """A hygiene finding's ``host`` without the port a certificate or TLS finding adds (``mail.example.com:443`` is ``mail.example.com``); a bare IPv6
+    address, which has more than one colon, is left as it is. The SQL twin of ``host_resolver.base_name``."""
+    from django.db.models import CharField, F, Func, Value
+    return Func(F('host'), Value('^([^:]+):[0-9]{1,5}$'), Value('\\1'), function='regexp_replace', output_field=CharField())
+
+
 def rescore_hosts(project_id, names, now=None, scan_id=None):
     """Recompute the score of these hosts (by name) of a project and store it on every Subdomain row of that name (older
     scans' copies too, so sorting is consistent) and on HostState. The inputs come from one Subdomain row per name: the row of
@@ -322,9 +329,10 @@ def rescore_hosts(project_id, names, now=None, scan_id=None):
                                     'vulnerability_set__triage'))  # a score reads a CVE's tier fields, and a finding's CVEs
         subs = {s.name.lower(): s for s in newest}
         routes, recent, zombies, hygiene = {}, {}, {}, {}
-        for h in (HygieneFinding.objects.filter(domain__project_id=project_id, host__in=chunk, status='open', severity__gte=1)
-                  .exclude(remediation_status__in=CLOSED).values('id', 'host', 'severity', 'title')):
-            hygiene.setdefault(h['host'].lower(), []).append(h)
+        # a certificate or TLS finding names its endpoint, name:443: it is the host's (cveFeed.host_resolver.base_name)
+        for h in (HygieneFinding.objects.filter(domain__project_id=project_id, status='open', severity__gte=1).annotate(_host=_endpoint_host())
+                  .filter(_host__in=chunk).exclude(remediation_status__in=CLOSED).values('id', '_host', 'severity', 'title')):
+            hygiene.setdefault(h['_host'].lower(), []).append(h)
         for r in RouteAuth.objects.filter(project_id=project_id, host__in=chunk).values('host', 'path', 'auth_state', 'sensitive_score', 'sensitive',
                                                                                          'zombie_since'):
             routes.setdefault(r['host'], []).append(r)
@@ -380,7 +388,7 @@ def rescore_if_heat_cap_changed():
     sweep claim (``rescore_all_hosts(force=True)``): a claim taken by the daily pass minutes before the change must not leave the scores on
     the old cap until the next day. Returns whether it queued. Never raises."""
     from cveFeed.threat import heat_signature
-    from reNgine import resources
+    from cvengine import resources
     try:
         client = getattr(resources.get_store(), 'r', None)
         if client is None:

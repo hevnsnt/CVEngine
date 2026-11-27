@@ -200,6 +200,8 @@ export function kindNote(info) {
     return `Withheld after repeated failures until ${clock(info.retry_at) || "the retry time"}; then tried again.`;
   const when = info.at ? `, ${ago(info.at)}` : "";
   if (state === "denied") {
+    if (info.source === "hosted license")
+      return "Off on this hosted server (CVENGINE_HOSTED_LICENSE_SAFE): WPScan needs a commercial license for hosted use.";
     if (info.source === "instance default")
       return `Denied by the instance default${info.by ? ` (set by ${info.by})` : ""}${when}.`;
     return `Denied${info.by ? ` by ${info.by}` : ""}${when}.`;
@@ -211,7 +213,7 @@ export function kindNote(info) {
 
 // The modes an administrator may pick for a kind: none for a kind the Sentinel does not declare (it cannot be enabled) or one its machine turned off.
 export const modesOffered = (info) =>
-  info && info.declared && kindState(info) !== "machine_off" ? ["allow", "deny", "prefer"] : [];
+  info && info.declared && kindState(info) !== "machine_off" && info.source !== "hosted license" ? ["allow", "deny", "prefer"] : [];
 export const canReset = (info) => Boolean(info && info.source === "agent");
 const validCap = (cap) =>
   cap == null || (Number.isInteger(cap) && cap >= 1 && cap <= MAX_CONCURRENT);
@@ -618,7 +620,7 @@ const ROWS = [
   [
     "network",
     "Where it runs",
-    "Choose the server grant. Internal Sentinels scan declared private networks only when their machine setting allows it.",
+    "Choose the server grant. An internal Sentinel scans only hosts inside the declared internal ranges, and only when its machine setting allows it; it never takes external work.",
   ],
   ["profile", "Size", "Light never runs OpenVAS."],
   [

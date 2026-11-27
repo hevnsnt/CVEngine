@@ -7,6 +7,7 @@ from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
 from django.http import JsonResponse
 from django.db import transaction
+from cvengine.usage_stamps import durable_commit
 
 from dashboard.models import ApiToken, OrgMembership, ProjectMembership, UserProfile
 from tenancy import audit, mfa, roles, throttle
@@ -92,7 +93,8 @@ def change_password(request, keep_machine_tokens=False):
     tokens = ApiToken.objects.filter(user=user, revoked=False)
     if keep_machine_tokens:
         tokens = tokens.exclude(scope__in=('sentinel', 'reviewer'))
-    tokens.update(revoked=True)
+    with durable_commit():  # a revocation a crash could undo would let the token in again
+        tokens.update(revoked=True)
     profile, _ = UserProfile.objects.get_or_create(user=user)
     profile.must_change_password = False
     profile.save(update_fields=['must_change_password'])

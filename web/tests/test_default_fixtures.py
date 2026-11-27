@@ -29,7 +29,7 @@ class LoadDefaultFixturesTests(TestCase):
         self.assertTrue(EngineType.objects.filter(default_engine=True).exists())
 
     def test_the_engines_are_labels_and_no_tool_registry_is_loaded(self):
-        # every scan runs the same fixed pipeline: the engines carry no reNgine tool configuration, and the external tool registry is gone
+        # every scan runs the same fixed pipeline: the engines carry no inherited tool configuration, and the external tool registry is gone
         load()
         for engine in EngineType.objects.all():
             self.assertNotIn('uses_tools', engine.yaml_configuration)

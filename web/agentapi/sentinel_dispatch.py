@@ -42,6 +42,7 @@ COMPLETION_CEILING = {'nmap': 900, 'naabu': 1020, 'nuclei_light': 900, 'nuclei_t
 # identity_check and page_read: no batch of theirs is bounded by one tool, so the wait is above the Sentinel's hard stop (watchdog 900 s + 300 s grace) and a minute: identity may run
 # 200 DNS questions at 5 s and 50 certificates at 3 s (1150 s), a page read 540 s of reads and one read of up to 600 s (tests.test_sentinel_time_limits).
 DEFAULT_CEILING = 900
+PERSON_PRIORITY = 4  # a Sentinel task of a host run a person asked for (Rescan host): above fire (3), smoke (2), ice (1) and the planner (0)
 # Added to a kind's ceiling for each target beyond the first (an address of a chunk, a template-pass target): a chunk of 64 addresses takes longer than one.
 # Only the kinds that take a chunk of targets are listed; any other adds nothing.
 PER_TARGET_SECONDS = {'nmap': 90, 'naabu': 150, 'nuclei_light': 20, 'nuclei_targeted': 30, 'nuclei_deep': 60, 'nuclei_validate': 15, 'ssh_probe': 20}
@@ -88,7 +89,7 @@ NEVER_LOCAL = (
     'web_screenshot',
     'page_read',  # a validation re-test's HEAD of a URL and re-read of a host's pages and scripts (cveFeed.validation): a Sentinel's, this server fetches nothing
     'openvas',  # the Greenbone scan: a Sentinel's own GVM stack, this server opens no GMP session (cveFeed.openvas_scan)
-    'route_probe_signed',  # the web route check with a stored sign-in (cveFeed.auth_routes): built-in scanner only, this server sends no stored sign-in anywhere
+    'route_probe_signed',  # the web route check with a stored sign-in (cveFeed.auth_routes): the built-in scanner, or an external Sentinel the owner allowed
     'http_probe',  # the version and identity probes (cveFeed.probes): a Sentinel's requests, this server fetches no target page for them
     'route_probe',  # the anonymous web route check (cveFeed.route_auth): a Sentinel's requests
     'vhost_probe',  # the virtual host sweep (cveFeed.vhost_scan): a Sentinel's requests
@@ -127,7 +128,7 @@ def _no_local(kind, why, waiting=False):
     stay due and nothing is recorded as done. The scan running in this context is told it waited for ``kind`` (``scanner_wait.noted``): its hosts are
     queued again for when a scanner is back."""
     from cveFeed import scanner_wait
-    from reNgine.resources import ScannerUnavailable
+    from cvengine.resources import ScannerUnavailable
     scanner_wait.noted(kind)
     raise ScannerUnavailable(kind, why, waiting=waiting)
 
@@ -265,17 +266,31 @@ def _refuse(project, kind, target, host, ips, scan=None):
     that resolves into it, or when the list could not be read (``agentapi.address_guard``: fails closed). The one dispatch-side check; every path that
     makes a task goes through ``_Dispatch``, and ``SentinelTask.save`` asks the same question for any other."""
     from agentapi import address_guard
-    from reNgine.resources import AddressExcluded
+    from cvengine.resources import AddressExcluded
     refusal = address_guard.dispatch_refusal(project, kind, target, host, ips, scan=scan)
     if refusal:
         raise AddressExcluded(kind, refusal)
 
 
 def capacity_flags(secret_ref):
-    """The ``capacity_state`` arguments that count the right slots for a task with ``secret_ref``: a stored sign-in is the built-in scanner's alone (``builtin_only``), a\n    discovery's keys (``bbotkeys:``) go to the built-in scanner or a Sentinel that may be sent them (``bbot_keys``, the one gate ``sentinel_stream.key_delivery_decision``)."""
+    """The ``capacity_state`` arguments that count the right slots for a task with ``secret_ref``: a\n    discovery's keys (``bbotkeys:``) go to the built-in scanner or a Sentinel that may be sent them (``bbot_keys``, the one gate ``sentinel_stream.key_delivery_decision``),\n    and a stored sign-in (``authcred:``) to the built-in scanner or an external Sentinel its owner allowed (``signin``, the one gate ``signin_delivery.decision``).
+    Any other reference is the built-in scanner's alone."""
     if isinstance(secret_ref, str) and secret_ref.startswith('bbotkeys:'):
         return {'bbot_keys': True}
+    from agentapi import signin_delivery
+    if signin_delivery.is_ref(secret_ref):  # a stored sign-in: the built-in scanner, or an external Sentinel the owner allowed (``signin_delivery.decision``)
+        return {'signin': secret_ref}
     return {'builtin_only': bool(secret_ref), 'secret': bool(secret_ref)}
+
+
+def person_priority(scan, priority):
+    """``priority``, lifted to ``PERSON_PRIORITY`` for a stage of a host run a person asked for (``ScanHistory.initiated_by`` on a host pipeline run:
+    Rescan host, the REST and MCP host assessment), so a Sentinel takes its tasks before the top-up's. A full discovery a person started is not
+    lifted (it can hold many targets), nor a planner task (0)."""
+    if not priority or scan is None or not getattr(scan, 'initiated_by_id', None):
+        return priority
+    from cveFeed.discovery import HOST_PIPELINE_TASK
+    return max(priority, PERSON_PRIORITY) if HOST_PIPELINE_TASK in (getattr(scan, 'tasks', None) or []) else priority
 
 
 class _Dispatch:
@@ -287,6 +302,7 @@ class _Dispatch:
         from agentapi.models import SentinelTask
         from cveFeed import activity
         _refuse(project, kind, target, host, ips, scan)  # every task is made here: nothing is created for an address on the do-not-scan list
+        priority = person_priority(scan, priority)
         self.project, self.kind, self.scan, self.internal = project, kind, scan, internal
         self.capacity_flags = capacity_flags(secret_ref)  # signed-in work: only the built-in scanner's slots count, and only it may take the task; a discovery's keys: the ones that may be sent them
         self.siblings = siblings  # a callable for a fanned-out chunk: the other chunk tasks of the same stage, which a slot of this one's waits on
@@ -294,7 +310,7 @@ class _Dispatch:
         self.timeout = _dispatch_timeout(kind, targets) if timeout is None else timeout
         self.task = SentinelTask.objects.create(project=project, scan=scan, kind=kind, target=target, host=(host or '')[:500],
                                                 ips=list(ips or [])[:MAX_ADDRESSES], priority=priority, created_by=created_by,
-                                                secret_ref=secret_ref)  # set at creation: a task that names a secret is never offered to another Sentinel
+                                                secret_ref=secret_ref)  # set at creation: a task that names a secret is offered only to a Sentinel that may read it
         self.label = label or _label(host, ips)
         self.busy = capacity['state'] == 'busy'
         self.entry = activity.log('run_check', (f'Queued {kind} work for {self.label}: all {capacity["slots"]} Sentinel slot(s) are in use, waiting for one'
@@ -518,7 +534,7 @@ def dispatch_or_none(project, kind, target, host='', ips=None, scan=None, timeou
     from agentapi import sentinel_broker
     from agentapi.models import SentinelTask
     from agentapi import stage_runs
-    from reNgine.resources import AddressExcluded
+    from cvengine.resources import AddressExcluded
     try:
         _refuse(project, kind, target, host, ips, scan)
     except AddressExcluded:
@@ -529,8 +545,8 @@ def dispatch_or_none(project, kind, target, host='', ips=None, scan=None, timeou
     if run is not None:  # inside a StageRun: the task is created and the worker given back, or the task made on an earlier pass is read
         return _dispatch_async(run, project, kind, target, host, ips, scan, timeout, created_by, priority, redact_target, internal, outcome,
                                secret_ref=secret_ref)
-    builtin_only = bool(secret_ref)
-    capacity = sentinel_broker.capacity_state(project, kind, internal, why=True, builtin_only=builtin_only, secret=builtin_only)  # why: a ``none`` carries the reason, for the message below
+    flags = capacity_flags(secret_ref)  # signed-in work: only the slots of the Sentinels that may read its secret count
+    capacity = sentinel_broker.capacity_state(project, kind, internal, why=True, **flags)  # why: a ``none`` carries the reason, for the message below
     if capacity['state'] == 'none':
         if outcome is not None:
             outcome['no_scanner'] = True
@@ -548,8 +564,7 @@ def dispatch_or_none(project, kind, target, host='', ips=None, scan=None, timeou
         if now - last_reap >= REAP_EVERY:  # a Sentinel that stopped heartbeating loses its lease here, not only when something else asks
             sentinel_broker.reap_expired()
             last_reap = now
-            none_left = work.task.status == 'queued' and sentinel_broker.capacity_state(project, kind, internal,
-                                                                                        builtin_only=builtin_only, secret=builtin_only)['state'] == 'none'
+            none_left = work.task.status == 'queued' and sentinel_broker.capacity_state(project, kind, internal, **flags)['state'] == 'none'
         if work.step(now, none_left):
             break
         _wait([work.task.pk], min(work.pause(now, _poll_interval()), max(0.0, last_reap + REAP_EVERY - now) or REAP_EVERY))
@@ -579,7 +594,7 @@ def _stopped(scan):
         return False
     from cveFeed.discovery import stopped
     from cveFeed.scan_control import update_hold
-    from reNgine import resources
+    from cvengine import resources
     # an update's drain pause does not stop a stage that waits on Sentinels: its tasks keep running there, and the answer is taken when the server is
     # back (a StageRun resumes, anything else is adopted, ``agentapi.sentinel_adopt``). Only a person's pause or stop does
     return stopped(scan.id) or (resources.global_pause_requested(fail_closed=False) and not update_hold())
@@ -648,7 +663,7 @@ def dispatch_many(project, kind, chunks, prepare=None, scan=None, timeout=None, 
         return
     from agentapi import sentinel_broker
     from agentapi.models import SentinelTask
-    from reNgine import resources
+    from cvengine import resources
     total = sentinel_broker.total_slots()
     pending = list(range(len(chunks)))  # chunk indexes not sent yet, in order
     flying = {}  # index -> _Dispatch
@@ -748,8 +763,8 @@ def _dispatch_async(run, project, kind, target, host, ips, scan, timeout, create
     key = stage_runs.task_key(kind, target, host, ips, internal, secret_ref=secret_ref)
     work = run.work(key)
     if work is None:
-        builtin_only = bool(secret_ref)  # signed-in work: only the built-in scanner's slots count, as in the blocking path
-        capacity = sentinel_broker.capacity_state(project, kind, internal, why=True, builtin_only=builtin_only, secret=builtin_only)
+        flags = capacity_flags(secret_ref)  # signed-in work: only the slots of the Sentinels that may read its secret count, as in the blocking path
+        capacity = sentinel_broker.capacity_state(project, kind, internal, why=True, **flags)
         if capacity['state'] == 'none':
             if outcome is not None:
                 outcome['no_scanner'] = True
@@ -785,7 +800,7 @@ def _many_async(run, project, kind, chunks, prepare, scan, timeout, created_by, 
     chunk's result twice, however many passes its chunks took. ``CVENGINE_STAGE_PARALLEL=1`` keeps one chunk in flight and, with ``stop_on_none``,
     stops at the first chunk nobody did, as the serial loop does."""
     from agentapi import sentinel_broker
-    from reNgine import resources
+    from cvengine import resources
     gid = _group_id(kind, chunks)
     group = run.group(gid)
     group.setdefault('ceiling', stage_parallel())
@@ -881,7 +896,7 @@ def prefetch(project, kind, items, scan=None, timeout=None, internal=False):
     once and handles all of them in one pass, so its own summary covers every item. The window is the free slots, as for ``dispatch_many``; with no
     live Sentinel left nothing more is sent and the loop's own calls decide, as they would have. Outside a StageRun it does nothing."""
     from agentapi import sentinel_broker, stage_runs
-    from reNgine.resources import AddressExcluded
+    from cvengine.resources import AddressExcluded
     run = stage_runs.current()
     if run is None or not items:
         return
@@ -1008,7 +1023,7 @@ def try_nmap(project, scan, targets, org_id=None, timeout=None):
     addresses a Sentinel did cover (persisted already), so the caller marks only those done and the rest stay due.
     """
     from cveFeed.port_inventory import persist_inventory
-    from reNgine.resources import ScannerUnavailable
+    from cvengine.resources import ScannerUnavailable
     targets = list(targets)
     if not any_scanner_for(project, 'nmap'):
         _no_scanner('nmap', project)  # raises: this kind never runs here
@@ -1067,7 +1082,7 @@ def try_nmap_udp(project, ip_address, scan=None, timeout=None):
     XML text, not pre-parsed JSON: UDP's own state vocabulary (``open|filtered``, extraports summarisation) and the NSE script output
     ``cveFeed.udp_scan.identify`` reads are read correctly only by the scanner library's ``parse_xml`` (hardened against a custom ENTITY declaration
     because it reads a Sentinel's report), so that is the one function that ever turns the XML into a record. Never chunked: one address per task."""
-    from reNgine.resources import ScannerUnavailable
+    from cvengine.resources import ScannerUnavailable
     if not any_scanner_for(project, 'nmap_udp'):
         _no_scanner('nmap_udp', project)
     try:
@@ -1098,7 +1113,7 @@ def wrap_naabu_runner(project, scan, timeout=None):
     """A ``runner(ips) -> {ip: [open ports]}`` for ``port_stage.discover``. Every address is dispatched to a Sentinel in chunks (several at once when
     slots are free); an address a Sentinel attempted has an entry only when it had an open port. Nothing runs here: with no Sentinel able to take
     it, ``ScannerUnavailable`` is raised and the addresses stay due."""
-    from reNgine.resources import ScannerUnavailable
+    from cvengine.resources import ScannerUnavailable
     if not any_scanner_for(project, 'naabu'):
         _no_scanner('naabu', project)  # raises: this kind never runs here
 
@@ -1127,7 +1142,7 @@ def _bare_host(target):
 
 
 def _finding_to_nuclei_line(finding):
-    """One Sentinel-reported template finding, reshaped into the same dict ``reNgine.tasks.parse_nuclei_result`` and
+    """One Sentinel-reported template finding, reshaped into the same dict ``cvengine.tasks.parse_nuclei_result`` and
     ``cveFeed.nuclei_scan.host_of`` read from the scanner's own ``-jsonl`` output. Fields the full output carries
     that a Sentinel's typed, clipped result does not carry (a curl command; the request/response transcript, ``type`` from a client that
     does not send these optional fields) are left out, not guessed: the untyped result line already tolerates them being absent, and a
@@ -1167,9 +1182,13 @@ def _nuclei_target(kind, targets, kwargs, scan=None, labels=None, internal=False
     if kind == 'nuclei_light':
         tags, severities = ([] if detection else ['tech']), ['info']
     etags = list(scan_flags.NUCLEI_EXCLUDED_TAGS)
-    if not validation.credential_checks_allowed():  # the Sentinel leaves these out of its own runs too (``flags.NUCLEI_CREDENTIAL_TAGS``): the task says so
+    # a printer (``printer=True``, cveFeed.internal_scan's gentle profile) gets the read-only template set and no credential check, whatever the
+    # administrator allowed elsewhere, and its targets carry no service label, so every one is a web target (no raw tcp template)
+    printer = kwargs.get('printer') is True
+    credentials = validation.credential_checks_allowed() and not printer
+    if not credentials:  # the Sentinel leaves these out of its own runs too (``flags.NUCLEI_CREDENTIAL_TAGS``): the task says so
         etags += list(scan_flags.NUCLEI_CREDENTIAL_TAGS)
-    rev = nuclei_scan.policy_rev()
+    rev = nuclei_scan.TEMPLATE_POLICY_REV if printer else nuclei_scan.policy_rev()
     target = {'targets': targets, 'tags': tags, 'severities': severities, 'etags': etags,
               'template_policy': {'rev': rev, 'read_only': rev == nuclei_scan.TEMPLATE_POLICY_REV, 'source': scan_flags.TEMPLATE_INDEX_SOURCE},
               'budget': dict(scan_flags.NUCLEI_DETECTION_BUDGET if detection else scan_flags.NUCLEI_SERVICE_BUDGET)}
@@ -1177,8 +1196,10 @@ def _nuclei_target(kind, targets, kwargs, scan=None, labels=None, internal=False
         target['network_detection'] = True
     if not internal:  # contract 11: outside work is judged as on a Sentinel that is not internal, so a name that now points inside is refused there (this server looks none up)
         target['external'] = True
-    if validation.credential_checks_allowed():  # only when an App Admin turned it on: absent means off, and a Sentinel that does not know the field never runs them
+    if credentials:  # only when an App Admin turned it on: absent means off, and a Sentinel that does not know the field never runs them
         target['allow_credential_checks'] = True
+    if printer:
+        return target
     if labels is None:
         labels = nuclei_services.labels_for(scan, targets) if scan is not None else {}
     services = {t: labels[t] for t in targets if t in labels}
@@ -1208,7 +1229,7 @@ def _require_network_detection(project, kind, kwargs, internal=False):
     if not sentinel_broker.network_detection_scanner(project, internal=internal):
         # not ``_no_local``: a light-pass scanner is there, only an older one, so the scanner-wait re-test (``scanner_wait``) would send the hosts through the
         # pipeline again every few minutes until someone updates it. The ports stay due for the next scan instead.
-        from reNgine.resources import ScannerUnavailable
+        from cvengine.resources import ScannerUnavailable
         raise ScannerUnavailable(kind, NETWORK_DETECTION_WAIT.format(since=scan_flags.NUCLEI_DETECTION_SINCE))
 
 
@@ -1341,7 +1362,7 @@ def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
             for index, result in results:
                 if result is None:
                     # the dispatcher raises ScannerUnavailable for a chunk no Sentinel finished; one that comes back empty anyway is never read as scanned
-                    from reNgine.resources import ScannerUnavailable
+                    from cvengine.resources import ScannerUnavailable
                     raise ScannerUnavailable(kind, 'no scanner returned a result for a chunk')
                 stream.unreached.update(_unreachable_of(result, chunks[index]))
                 named = _not_checked_of(result)
@@ -1360,9 +1381,9 @@ def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
 def signed_in_stream(scan, kind, timeout=None):
     """``run(items, **kwargs) -> iterable of result-line dicts``: a signed-in pass (``cveFeed.auth_nuclei``) over ``items`` (``auth_checks.PlanItem``:
     an origin URL and the stored credential that covers it) through the built-in scanner. One task per credential and chunk of origins, carrying
-    ``secret_ref`` (a reference to the credential, never its value): only the built-in scanner takes it, and reads the credential once through
-    ``POST sentinel/tasks/<id>/secret``. An external Sentinel is never offered it (``sentinel_broker.SentinelEff.refusal``). With no built-in
-    scanner that reads stored sign-ins live, the pass waits (``ScannerUnavailable``): nothing is recorded and the targets stay due. The lines are
+    ``secret_ref`` (a reference to the credential, never its value): the built-in scanner takes it, or an external Sentinel the credential's owner allowed
+    (``signin_delivery.decision``), and reads the credential once through ``POST sentinel/tasks/<id>/secret``. Any other Sentinel is never offered it
+    (``sentinel_broker.SentinelEff.refusal``). With no Sentinel live that may read the stored sign-in, the pass waits (``ScannerUnavailable``): nothing is recorded and the targets stay due. The lines are
     redacted by the caller."""
     project = scan.domain.project
 
@@ -1376,7 +1397,7 @@ def signed_in_stream(scan, kind, timeout=None):
                 result = dispatch_or_none(project, kind, _nuclei_target(kind, chunk, kwargs), scan=scan, timeout=timeout,
                                           secret_ref=sentinel_broker.secret_ref_for(credential.pk))
                 if result is None:  # dispatch_or_none raised ScannerUnavailable when no scanner took it: this is only a task that ended without a result
-                    from reNgine.resources import ScannerUnavailable
+                    from cvengine.resources import ScannerUnavailable
                     raise ScannerUnavailable(kind, 'the built-in scanner returned no result for a signed-in pass')
                 for finding in result.get('findings', []):
                     yield _finding_to_nuclei_line(finding)
@@ -1559,7 +1580,7 @@ def _scanner_first(project, kind):
     """``scanner_or_local`` for work that has a project only when its address is attached to one: no project means ``ScannerUnavailable``."""
     if project is not None:
         return scanner_or_local(project, kind)
-    from reNgine.resources import ScannerUnavailable
+    from cvengine.resources import ScannerUnavailable
     raise ScannerUnavailable(kind, 'the address is attached to no project a scanner could take it for')
 
 
@@ -1570,7 +1591,7 @@ def try_nmap_full(project, address, scan=None):
 
 
 def _hosts_of_task(project, kind, target, address, scan=None):
-    from reNgine.resources import ScannerUnavailable
+    from cvengine.resources import ScannerUnavailable
     _scanner_first(project, kind)  # raises when no scanner can take it (these kinds never run here)
     result = dispatch_or_none(project, kind, target, ips=[address], scan=scan)
     if result is None:
@@ -1625,7 +1646,7 @@ def try_path_probe(groups):
     one; with none, the project's own Sentinels do, and each of their rows names the Sentinel that measured it (``sentinel``: its agent id), since
     that path is that machine's, not this install's (``cveFeed.path_probe.check`` keeps a verdict per Sentinel). Raises ``ScannerUnavailable`` when no
     scanner can take it: the survey never runs here."""
-    from reNgine.resources import ScannerUnavailable
+    from cvengine.resources import ScannerUnavailable
     projects = [(p, targets) for p, targets in ((_project_of(pid), t) for pid, t in groups.items()) if p is not None]
     if not projects:
         return None
@@ -1689,7 +1710,7 @@ def nuclei_validate_ready(project=None, cve=None):
     with no project, of a project that owns a target matched to ``cve`` (any project's own Sentinel when neither is named, which only answers
     whether anything could run checks at all; no task is filed by this)."""
     from agentapi import ai_checks
-    from reNgine.resources import ScannerUnavailable
+    from cvengine.resources import ScannerUnavailable
     if ai_checks.builtin_in_use():
         carrier = _carrier_project(project)
         ok = carrier is not None and any_scanner_for(carrier, 'nuclei_validate')
@@ -1723,7 +1744,7 @@ def try_nuclei_validate(text, project=None):
     answered here as not valid and never sent. Raises ``ScannerUnavailable`` when no scanner can take it: the check never runs on this server, and
     never on another tenant's Sentinel (it waits)."""
     from agentapi import ai_checks
-    from reNgine.resources import ScannerUnavailable
+    from cvengine.resources import ScannerUnavailable
     if not ai_checks.builtin_in_use():
         problem = ai_checks.content_problem('validate', text)
         if problem:
@@ -1762,7 +1783,7 @@ def try_installed_template_test(relative, sha256, hosts, project):
     from cvengine_scanner import flags as scan_flags
 
     from agentapi import ai_checks, sentinel_broker
-    from reNgine.resources import ScannerUnavailable
+    from cvengine.resources import ScannerUnavailable
     project = _project_of(project) if isinstance(project, int) else project
     hosts = list(hosts)
     builtin = ai_checks.builtin_in_use()
@@ -1809,7 +1830,7 @@ def try_template_test(text, hosts, project):
     A host a finished chunk left out, or one no scanner could take (the kind never runs here), is reported as not tested (an error outcome), so it
     stays due."""
     from agentapi import ai_checks
-    from reNgine.resources import ScannerUnavailable
+    from cvengine.resources import ScannerUnavailable
     project = _project_of(project) if isinstance(project, int) else project
     hosts = list(hosts)
     problem = _gate('test', text, project=project, targets=hosts)

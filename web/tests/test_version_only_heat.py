@@ -482,7 +482,8 @@ class StoredJqueryMatchTests(Fixture):
 	def test_a_rescan_that_carries_a_hit_rescores_and_is_not_paged(self):
 		Triage.objects.filter(match=self.match).update(validation_status='hit', validated_at=timezone.now(), status='triaged',
 														classification='confirmed')
-		later = Subdomain.objects.create(name=self.sub.name, target_domain=self.domain, scan_history=self.scan)
+		rescan = type(self.scan).objects.create(domain=self.domain, scan_type=self.scan.scan_type, scan_status=2, start_scan_date=timezone.now())
+		later = Subdomain.objects.create(name=self.sub.name, target_domain=self.domain, scan_history=rescan)  # a host is one row per scan
 		later.ip_addresses.add(self.ip)
 		twin = CVEMatch.objects.create(cve_entry=self.entry, subdomain=later, source=self.match.source, matched_product=self.match.matched_product,
 									   matched_version=self.match.matched_version, version_in_range=True, evidence=self.match.evidence)
@@ -546,7 +547,7 @@ class RescoreOnCapChangeTests(SimpleTestCase):
 				old, Redis.value = Redis.value, value
 				return old
 		store = SimpleNamespace(r=Redis())
-		with mock.patch('reNgine.resources.get_store', return_value=store), \
+		with mock.patch('cvengine.resources.get_store', return_value=store), \
 				mock.patch('cveFeed.tasks.rescore_all_hosts.apply_async') as queue:
 			# first sight (the upgrade, or a Redis with no volume after docker compose down/up): recorded, no forced full rescore
 			self.assertFalse(scoring.rescore_if_heat_cap_changed())
@@ -574,15 +575,15 @@ class RescoreOnCapChangeTests(SimpleTestCase):
 
 			def set(self, key, value):
 				Redis.value = value
-		with mock.patch('reNgine.resources.get_store', return_value=SimpleNamespace(r=Redis())), \
+		with mock.patch('cvengine.resources.get_store', return_value=SimpleNamespace(r=Redis())), \
 				mock.patch('cveFeed.tasks.rescore_all_hosts.apply_async', side_effect=RuntimeError('broker down')):
 			self.assertFalse(scoring.rescore_if_heat_cap_changed())
 		self.assertEqual(Redis.value, 'fire')
 
 	def test_no_redis_no_rescore_and_never_raises(self):
-		with mock.patch('reNgine.resources.get_store', return_value=SimpleNamespace()):
+		with mock.patch('cvengine.resources.get_store', return_value=SimpleNamespace()):
 			self.assertFalse(scoring.rescore_if_heat_cap_changed())
-		with mock.patch('reNgine.resources.get_store', side_effect=RuntimeError('down')):
+		with mock.patch('cvengine.resources.get_store', side_effect=RuntimeError('down')):
 			self.assertFalse(scoring.rescore_if_heat_cap_changed())
 
 

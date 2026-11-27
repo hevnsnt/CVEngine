@@ -12,10 +12,9 @@ turns into ``{"error": ...}`` and a line in ``problems`` (``<probe>: timed out a
 import json
 import logging
 import os
-import re
 import shutil
 import time
-from datetime import datetime, timedelta, timezone as dt_timezone
+from datetime import datetime, timedelta
 
 from django.conf import settings
 from django.utils import timezone
@@ -40,7 +39,7 @@ def _iso(value):
 
 
 def _version():
-    return getattr(settings, 'RENGINE_CURRENT_VERSION', None)
+    return getattr(settings, 'CVENGINE_CURRENT_VERSION', None)
 
 
 def _scanning():
@@ -117,8 +116,12 @@ def _shared_inputs(project_ids):
     try:
         ids = list(project_ids)
         current = inventory_counts.current_rows()  # the current inventory, worked out once and used by the host counts and the CVE match counts
-        shared = {**stats_history.shared_host_counts(current), 'web_hosts': web_shot.web_hosts_by_project(),
+        names = {}  # (project id, name) -> the host key of the Hosts page's fold, from the host counts' own collapse
+        shared = {**stats_history.shared_host_counts(current, names_out=names), 'web_hosts': web_shot.web_hosts_by_project(),
                   'findings': stats_history.shared_finding_counts(ids, [row[0] for row in current])}
+        # the distinct issues of the open findings: the CVE matches grouped as the Findings list groups them, the hosts read from the same collapse
+        shared['issues'] = stats_history.match_issue_counts(ids, [row[0] for row in current],
+                                                            site_of=lambda project_id, name: names.get((project_id, name)))
         shared['targets'] = {row['project_id']: row['n'] for row in Domain.objects.filter(project_id__in=ids).values('project_id').annotate(n=Count('id')).order_by()}
         window = counts.running_window()
         for name, scans in (('running', counts.running_scans(window=window)), ('queued', counts.queued_scans()), ('stalled', counts.stalled_scans())):
@@ -135,12 +138,49 @@ def _shared_inputs(project_ids):
         return None
 
 
+def _scoped_shared_inputs(project_ids):
+    """``_shared_inputs`` of these projects, read under a tenancy scope of exactly them (``tenancy.scope``), so the reads that are instance wide when
+    nothing scopes them (``inventory_counts.current_rows``: every finished scan, every target and every current host; the web hosts of every project) read
+    these projects' rows only. A project's numbers are its own rows' in either case: the rows are shared by every caller who may see the project, whatever
+    scope counted them. The scope is narrowed, never widened: ``project_ids`` are among the projects the caller may see."""
+    from tenancy import scope
+    ids = set(project_ids)
+    current = scope.current_allowed()
+    tokens = scope.set_scope(ids if current is None else ids & set(current), scope.current_user())
+    try:
+        return _shared_inputs(sorted(ids))
+    finally:
+        scope.reset_scope(tokens)
+
+
+def _uncached_ids(projects, seconds):
+    """The ids of ``projects`` (the first is the one being counted) whose row is not in the cache: those the shared numbers are read for. A row that a
+    renewal would keep is counted with them too (one more project in the grouped reads, never a missing one)."""
+    from django.core.cache import cache
+    ids = {projects[0].id}
+    for project in projects[1:]:
+        try:
+            held = cache.get(_row_keys(project)[0]) if seconds else None
+        except Exception:  # noqa: BLE001 - a cache outage only means counting it
+            held = None
+        if held is None:
+            ids.add(project.id)
+    return ids
+
+
 def _project_row(project, shared=None):
     from cveFeed import counts, subdir_apps, wpscan_scan
     from cveFeed.stats_history import compute_snapshot
     from startScan.models import ScanHistory
     from targetApp.models import Domain
     snap = compute_snapshot(project, with_fixed=False, shared=shared)  # the live counts only; never stored
+    open_total = sum(snap['open_findings'].values())
+    if shared is not None and 'issues' in shared:
+        matched, issues = shared['issues'].get(project.id, (0, 0))
+        open_issues = open_total - matched + issues  # counts.distinct_issues, from the shared grouped read
+    else:
+        from cveFeed.stats_history import open_issues as issues_of
+        open_issues = issues_of(project, open_total)
     if shared is not None and 'scans_running' in shared:
         pid = project.id
         targets = shared['targets'].get(pid, 0)
@@ -156,7 +196,9 @@ def _project_row(project, shared=None):
         'targets': targets,
         'hosts': snap['hosts'], 'exposed_hosts': snap['exposed_hosts'],
         'scans': scans,
-        'open_findings': snap['open_findings'], 'open_findings_total': sum(snap['open_findings'].values()),
+        'open_findings': snap['open_findings'], 'open_findings_total': open_total,
+        # the same open findings as distinct issues: version-only CVE matches on one product and version of a host are one fix (cveFeed.counts.match_issues)
+        'open_issues': open_issues,
         'cve_matches': snap['cve_matches'],
         # WordPress hosts: how many, how many the WordPress scan has covered, and why the rest were not (blocked by an edge, failed, waiting)
         'wordpress': wordpress,
@@ -213,12 +255,13 @@ ROW_RENEWAL_SECONDS = 300
 
 def row_fingerprint_tables():
     """The database tables the project rows (``_shared_inputs`` and ``_project_row``) are counted from."""
-    from cveFeed.models import CVEEntry, CVEMatch, HostScreenshot, HygieneFinding, ProbeObservation, Triage, TunableSettings
+    from cveFeed.models import CVEEntry, CVEMatch, HostScreenshot, HostState, HygieneFinding, ProbeObservation, Triage, TunableSettings
     from dashboard.models import Project, SystemTimings
     from startScan.models import IpAddress, Port, ScanHistory, Subdomain, Vulnerability
     from targetApp.models import Domain
-    models = (CVEEntry, CVEMatch, Domain, HostScreenshot, HygieneFinding, IpAddress, IpAddress.ports.through, Port, ProbeObservation, Project, ScanHistory, Subdomain,
-              Subdomain.ip_addresses.through, SystemTimings, Triage, TunableSettings, Vulnerability)
+    # HostState: an archived host is not counted (cveFeed.counts.archived_host_q)
+    models = (CVEEntry, CVEMatch, Domain, HostScreenshot, HostState, HygieneFinding, IpAddress, IpAddress.ports.through, Port, ProbeObservation, Project, ScanHistory,
+              Subdomain, Subdomain.ip_addresses.through, SystemTimings, Triage, TunableSettings, Vulnerability)
     return sorted({m._meta.db_table for m in models})
 
 
@@ -275,12 +318,13 @@ def _projects_partial(ctx, deadline=None):
     counted by the ``status_warm_rows`` Celery task (``_warm_rows``) so the next call finds it cached, instead of fifteen rows in
     a row inside one request."""
     from django.core.cache import cache
-    from django.db import connection
+    from django.db import connection, transaction
 
     from agentapi.services import _allowed_ids
     from dashboard.models import Project
 
-    seconds, rows, waiting, shared = _cache_seconds(), [], [], False
+    outer_atomic = connection.in_atomic_block  # a SET LOCAL inside a caller's transaction would outlive the count, so none is set there
+    seconds, rows, waiting, shared, shared_ids = _cache_seconds(), [], [], False, set()
     projects = list(Project.objects.filter(id__in=list(_allowed_ids(ctx.user))).order_by('name')[:MAX_PROJECTS])
     fingerprint = []  # read at most once per call, and before the first count of it
 
@@ -288,7 +332,7 @@ def _projects_partial(ctx, deadline=None):
         if not fingerprint:
             fingerprint.append(_row_fingerprint())
         return fingerprint[0]
-    for project in projects:
+    for index, project in enumerate(projects):
         key, last_key = _row_keys(project)
         row = None
         if seconds:
@@ -304,13 +348,17 @@ def _projects_partial(ctx, deadline=None):
                 waiting.append(project)
                 continue
             try:
-                if left is not None and not connection.in_atomic_block:
-                    from agentapi import status_probes
-                    status_probes._bound_database(left)
-                before = now_fp() if seconds else None  # the inputs as they are before this count starts
-                if shared is False:  # the first project that is not cached: the numbers every project shares are read once, for all of them
-                    shared = _shared_inputs([p.id for p in projects])
-                row = _project_row(project, shared)
+                # The count runs in a transaction (a savepoint inside a caller's) of its own: a count the time left cuts off rolls back only
+                # itself, so the statements after it still run, and the time limit is SET LOCAL, so it ends with the count instead of staying on
+                # the connection for every later statement of this request and of the next requests a kept connection serves.
+                with transaction.atomic():
+                    if left is not None and not outer_atomic:
+                        _bound_transaction(left)
+                    before = now_fp() if seconds else None  # the inputs as they are before this count starts
+                    if shared is False:  # the first project that is not cached: the numbers the projects share are read once, for every one still to count
+                        shared_ids = _uncached_ids(projects[index:], seconds)
+                        shared = _scoped_shared_inputs(shared_ids)
+                    row = _project_row(project, shared if project.id in shared_ids else None)
             except Exception:  # noqa: BLE001 - a row that does not fit the time left is counted in the background, the rest still answer
                 if deadline is None:
                     raise
@@ -334,6 +382,17 @@ def _projects_partial(ctx, deadline=None):
     return rows, [p.slug for p in waiting]
 
 
+def _bound_transaction(limit):
+    """No statement or lock wait longer than ``limit`` seconds until the current transaction ends (``SET LOCAL``, never the session)."""
+    from django.db import connection
+    if connection.vendor != 'postgresql':
+        return
+    ms = max(200, int(limit * 1000))
+    with connection.cursor() as cursor:
+        cursor.execute('SET LOCAL statement_timeout = %s', [ms])
+        cursor.execute('SET LOCAL lock_timeout = %s', [ms])
+
+
 def _projects(ctx):
     """The rows of ``_projects_partial`` without a deadline: every project is counted here."""
     return _projects_partial(ctx)[0]
@@ -344,7 +403,7 @@ WARM_DISPATCH_TIMEOUT = 1  # seconds each step of handing the task to the broker
 
 
 def _warm_lock_client():
-    from reNgine import resources
+    from cvengine import resources
     return resources.redis_client()
 
 
@@ -367,12 +426,12 @@ def warm_project_rows(project_ids, token=None):
     this run still holds it."""
 
     from dashboard.models import Project
-    from reNgine import resources
+    from cvengine import resources
     seconds = _cache_seconds()
     try:
         before = _row_fingerprint() if seconds else None  # the inputs as they are before the counts start
         try:
-            shared = _short_transaction(lambda: _shared_inputs(list(project_ids)))
+            shared = _short_transaction(lambda: _scoped_shared_inputs(project_ids))
         except Exception:  # noqa: BLE001
             logger.warning('status: the shared counts could not be read in the warm-up; each project counts for itself', exc_info=True)
             shared = None
@@ -409,7 +468,7 @@ def _warm_rows(project_ids):
         if client is not None and not client.set(WARM_LOCK, token, nx=True, ex=WARM_MAX_SECONDS + 60):
             return
         from cveFeed.tasks import status_warm_rows
-        from reNgine.celery import app
+        from cvengine.celery import app
         options = {'socket_timeout': WARM_DISPATCH_TIMEOUT, 'socket_connect_timeout': WARM_DISPATCH_TIMEOUT}
         with app.connection_for_write(transport_options=options, connect_timeout=WARM_DISPATCH_TIMEOUT) as broker:
             status_warm_rows.apply_async(args=[list(project_ids), token], queue='cve_feed_queue', expires=WARM_MAX_SECONDS, connection=broker, retry=False)
@@ -417,7 +476,7 @@ def _warm_rows(project_ids):
         logger.info('status: could not queue the counting of the projects', exc_info=True)
         try:
             if client is not None:
-                from reNgine import resources
+                from cvengine import resources
                 resources.claim_release(client, WARM_LOCK, token)
         except Exception:  # noqa: BLE001
             pass
@@ -436,9 +495,11 @@ def _inventory(ctx, problems):
 
 
 def _totals(rows):
-    total = {'projects': len(rows), 'targets': 0, 'hosts': 0, 'exposed_hosts': 0, 'open_findings': 0,
+    total = {'projects': len(rows), 'targets': 0, 'hosts': 0, 'exposed_hosts': 0, 'open_findings': 0, 'open_issues': 0,
              'scans_running': 0, 'scans_queued': 0, 'scans_stalled': 0}
     for row in rows:
+        if total['open_issues'] is not None:  # a row counted before the figure existed has none: the total then says nothing rather than a wrong sum
+            total['open_issues'] = None if row.get('open_issues') is None else total['open_issues'] + row['open_issues']
         total['targets'] += row['targets']
         total['hosts'] += row['hosts']
         total['exposed_hosts'] += row['exposed_hosts']
@@ -463,11 +524,11 @@ def _database():
 def _broker_client():
     """The Redis client of the broker, with socket timeouts (``resources.redis_client``: 2 s to connect, 3 s a read, one client per URL). The client of
     Celery's own connection has none, and each call of it opened a connection that nothing closed; it is only the fallback for a broker that is not Redis."""
-    from reNgine import resources
+    from cvengine import resources
     client = resources.redis_client()
     if client is not None:
         return client
-    from reNgine.celery import app
+    from cvengine.celery import app
     return app.connection_for_read().default_channel.client
 
 
@@ -534,7 +595,7 @@ def _critical_mb(total_mb):
 
 
 def _memory():
-    from reNgine import resources
+    from cvengine import resources
     snap = resources.cluster_snapshot()
     containers = []
     for c in snap.get('containers', []):
@@ -543,16 +604,16 @@ def _memory():
             'host': c.get('host'), 'total_mb': mem.get('total_mb'), 'used_mb': mem.get('used_mb'),
             'available_mb': mem.get('available_mb'), 'limit_mb': mem.get('limit_mb'), 'report_age_seconds': c.get('age_seconds'),
         })
-    from reNgine import lane_memory
+    from cvengine import lane_memory
     return {'store': snap.get('store'), 'containers': containers, 'lanes': lane_memory.report()}
 
 
 def _disk():
     import os
-    path = settings.RENGINE_RESULTS if os.path.isdir(settings.RENGINE_RESULTS) else settings.RENGINE_HOME
+    path = settings.CVENGINE_RESULTS if os.path.isdir(settings.CVENGINE_RESULTS) else settings.CVENGINE_HOME
     usage = shutil.disk_usage(path)
     mb = 1 << 20
-    return {'path': 'scan results' if path == settings.RENGINE_RESULTS else 'application', 'total_mb': usage.total // mb,
+    return {'path': 'scan results' if path == settings.CVENGINE_RESULTS else 'application', 'total_mb': usage.total // mb,
             'used_mb': usage.used // mb, 'free_mb': usage.free // mb,
             'free_percent': round(usage.free * 100 / usage.total, 1) if usage.total else None}
 
@@ -673,7 +734,7 @@ def _live_cache(notes):
     waited for another request's answer; ``refreshed`` is the refresher's own work). A poll should almost never be a ``miss`` while the
     refresher runs."""
     from cveFeed import snapshot_cache
-    from reNgine import livecache_config
+    from cvengine import livecache_config
     enabled, interval = livecache_config.refresh_enabled(), livecache_config.refresh_seconds()
     last = snapshot_cache.last_beat()
     out = {'refresher': 'off' if not enabled else ('running' if snapshot_cache.refresher_alive() else 'silent'),
@@ -834,7 +895,34 @@ def _system_probes(user):
         Probe('sentinels', lambda p, n, d: _sentinels(p)),
         Probe('live_cache', lambda p, n, d: _live_cache(n), db=False),
         Probe('tools', lambda p, n, d: _tools()),
+        Probe('finding_hosts', lambda p, n, d: _finding_hosts(p)),
+        Probe('ct_watch', lambda p, n, d: _ct_watch()),
+        Probe('client_address', lambda p, n, d: _client_address(n)),
     ]
+
+
+def _ct_watch():
+    """The certificate transparency watch per source (``cveFeed.ct_health``): today's lookups ok, failed and held back, the hosts they found,
+    the last success and its source, and ``line``, the sentence the Timings page shows. A stall is the ``ct_watch_stalled`` notice, not a problem here."""
+    from cveFeed import ct_health
+    return ct_health.summary()
+
+
+def _client_address(notes):
+    """The open client address notice (``cveFeed.client_address``: a host proxy in front whose client address is not believed yet), as
+    ``{notice}``; with a note when there is one. None when every check passed or nothing is in front of the bundled proxy."""
+    from cveFeed import client_address
+    found = client_address.notice()
+    if found:
+        notes.append(f"client address: {found['title']}. Settings, Updates shows the host nginx lines to install.")
+    return {'notice': found}
+
+
+def _finding_hosts(problems):
+    """Open findings by whether their host is in the current inventory (``cveFeed.finding_hosts``, counted at most every half hour): a problem line when
+    some point at hosts gone from the inventory or archived, so findings that outlive their host cannot creep back unseen."""
+    from cveFeed import finding_hosts
+    return finding_hosts.status_check(problems)
 
 
 def _taker(run, problems, notes):
@@ -916,6 +1004,9 @@ def _system(user, problems, notes, run=None):
     out['sentinels'] = take('sentinels')
     out['live_cache'] = take('live_cache')
     out['tools'] = take('tools')
+    out['finding_hosts'] = take('finding_hosts')
+    out['ct_watch'] = take('ct_watch')
+    out['client_address'] = take('client_address')
     out['timings'] = run.timings()
     problem = _template_problem((out['tools'] or {}).get('nuclei_templates') or {})
     if problem:

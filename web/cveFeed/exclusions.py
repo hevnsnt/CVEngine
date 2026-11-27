@@ -6,8 +6,8 @@ An exclusion made with ``include_subdomains`` (``-provider.example`` in Add targ
 boundary: ``www.provider.example`` and ``a.b.provider.example``, still never ``notprovider.example``.
 
 Everything here is read through the project's own org, so one org's list never reaches another's scans. A project without
-an org has no exclusions. All the NAME checks are non-fatal: if the lookup fails, nothing is excluded (the owner's explicit
-deletion has already removed the data; the lookup only prevents it from coming back).
+an org has no exclusions. A NAME list that cannot be read excludes nothing for the INVENTORY (``names_only``: the owner's explicit deletion has
+already removed the data, and a failed read must not hide hosts), and excludes everything for a SCAN decision (``unreadable``, as for the address list).
 
 The ADDRESS list (``ExcludedAddress``, "addresses we must never scan") is the opposite: a name list cannot protect an address, and a list that
 cannot be read must not let work through. ``address_excluded`` is the ONE decision function for it: it covers an address inside a listed network
@@ -16,10 +16,83 @@ a ``Refusal`` (a ``str`` with ``.unreadable``) for an excluded match AND for a l
 set ``excluded_names`` returns carries the same rule (``name in set``), so every scan path that already asks it is address-aware; the sites
 that decide what the INVENTORY keeps pass ``names_only=True`` (an address-excluded host stays visible, with the reason it is not scanned).
 """
+import contextlib
+import contextvars
 import ipaddress
 import logging
 
 logger = logging.getLogger(__name__)
+
+# The LISTS themselves (the org's excluded hosts, the hosts moved out of the project, the org's do-not-scan networks) are read from the database on every
+# call: they decide what may be scanned, so they are never cached across calls or processes (a copy that outlives a write, for instance because the reset
+# of a shared cache failed, would let an address that was just listed be scanned). Inside ``memo()`` (one streamed batch) each list of each project is read
+# once, and every write of HostExclusion, HostMove, ExcludedAddress (and a project changing organization) clears that memo at once (``forget``: a model
+# signal for a save or a delete, cascades included, and the models' own querysets for update, delete and bulk_create).
+_memo = contextvars.ContextVar('exclusion_memo', default=None)  # {(kind, project_id): value} inside ``memo()``: one batch reads each list once
+
+
+def _bump():
+    memo = _memo.get()
+    if memo is not None:
+        memo.clear()
+
+
+def forget(using=None):
+    """An exclusion list changed: the batch memo is dropped now, and again when the transaction commits (a lookup made in between read the rows
+    from before the commit and must not stay in the memo)."""
+    from django.db import transaction
+    _bump()
+    try:
+        transaction.on_commit(_bump, using=using)
+    except Exception:  # noqa: BLE001 - no database connection to wait for: the reset above stands
+        pass
+
+
+def _changed(sender=None, using=None, **kwargs):
+    forget(using=using)
+
+
+def _project_saved(sender=None, instance=None, update_fields=None, using=None, **kwargs):
+    if update_fields is not None and not {'org', 'org_id'} & set(update_fields):
+        return  # the project's organization (whose lists it reads) did not change
+    forget(using=using)
+
+
+def connect():
+    """Reset the batch memo on every save and delete (cascades included) of the list models and of a project (its organization picks its lists)."""
+    from django.db.models.signals import post_delete, post_save
+    from cveFeed.models import ExcludedAddress, HostExclusion, HostMove
+    from dashboard.models import Project
+    for model in (HostExclusion, HostMove, ExcludedAddress):
+        post_save.connect(_changed, sender=model, dispatch_uid=f'exclusions-cache-save-{model.__name__}')
+        post_delete.connect(_changed, sender=model, dispatch_uid=f'exclusions-cache-delete-{model.__name__}')
+    post_save.connect(_project_saved, sender=Project, dispatch_uid='exclusions-cache-project-save')
+    post_delete.connect(_changed, sender=Project, dispatch_uid='exclusions-cache-project-delete')
+
+
+@contextlib.contextmanager
+def memo():
+    """Inside, each list of each project is read once (one batch); a write made in this context still resets it. Nothing outlives the block."""
+    if _memo.get() is not None:
+        yield
+        return
+    token = _memo.set({})
+    try:
+        yield
+    finally:
+        _memo.reset(token)
+
+
+def _cached(kind, project_id, read):
+    """``read()`` (the rows of one list of one project), from the batch memo when inside ``memo()``, else from the database. ``read`` may raise: nothing
+    is kept then, and the caller decides (fail closed or open) exactly as without a memo."""
+    memo, key = _memo.get(), (kind, project_id)
+    if memo is not None and key in memo:
+        return memo[key]
+    value = read()
+    if memo is not None:
+        memo[key] = value
+    return value
 
 MAX_HOST_LENGTH = 500
 MAX_ENTRIES = 500  # the most addresses or networks one organization may list
@@ -94,6 +167,34 @@ def _containing(networks, ip):
     return next((net for net in networks if ip.version == net.version and ip in net), None)
 
 
+def own_server():
+    """``(names, networks)`` of this cvENGINE server (``cveFeed.self_exclusion``): refused for every project, whatever its lists say. Never raises: the
+    names come from settings, and an address lookup that fails keeps the last good answer (it only ever adds refusals)."""
+    from cveFeed import self_exclusion
+    try:
+        own_names = self_exclusion.names()
+    except Exception:  # noqa: BLE001 - settings that cannot be read add no name; the project's own lists still apply
+        logger.warning("could not read this server's own names", exc_info=True)
+        own_names = frozenset()
+    try:
+        own_networks = self_exclusion.networks()
+    except Exception:  # noqa: BLE001
+        logger.warning("could not read this server's own addresses", exc_info=True)
+        own_networks = ()
+    return own_names, own_networks
+
+
+def own_refusal(value, own=None):
+    """A ``Refusal`` when ``value`` (an address, a name, ``host:port`` or a URL) is this cvENGINE server itself, else None."""
+    own_names, own_networks = own_server() if own is None else own
+    ip = as_address(value) if isinstance(value, str) else None
+    if ip is not None:
+        net = _containing(own_networks, ip)
+        return Refusal(f'{ip} is this cvENGINE server (never scanned)', entry=str(net)) if net else None
+    name = normalize(value) if isinstance(value, str) else ''
+    return Refusal(f'{name} is this cvENGINE server (never scanned)', entry=name) if name and name in own_names else None
+
+
 class ExclusionSet(frozenset):
     """The names an organization excluded: ``name in excluded`` is true for an excluded name and for any name under an excluded
     domain (one made with ``include_subdomains``). A frozenset of the exact names, so every existing ``in`` check keeps working;
@@ -146,7 +247,7 @@ def address_networks(project_id):
     if not project_id:
         return ()
     from cveFeed.models import ExcludedAddress
-    return _networks_of(ExcludedAddress.objects.filter(org__projects__id=project_id).values_list('cidr', flat=True))
+    return _networks_of(_cached('networks', project_id, lambda: tuple(ExcludedAddress.objects.filter(org__projects__id=project_id).values_list('cidr', flat=True))))
 
 
 def stored_addresses(project_id, names):
@@ -178,25 +279,32 @@ def _names_resolving_into(project_id, networks):
     return {n.strip().lower().rstrip('.') for n in names}
 
 
-def address_refusals(project_id, values, resolved=None, networks=None, unknown=()):
+def address_refusals(project_id, values, resolved=None, networks=None, unknown=(), own=True):
     """``{value: Refusal}`` for each of ``values`` (addresses, ``host:port``, URLs, host names) that must not be worked on for this project: THE rule of the
     do-not-scan list, for one value or a whole task (the lookups are batched, not per name). A value inside a listed network is refused, and so is a name
     with a stored address inside one, or one that ``resolved`` (``{name: [addresses]}``, what a task resolved the name to itself) places inside one.
     ``unknown``: the names (of ``values``) that work is about to connect to: one with no known address at all (nothing stored, nothing resolved) cannot be checked
     against the list, so it is refused until a lookup has told where it points. Fails closed: a list that cannot be read refuses EVERY value, with a ``Refusal``
-    whose ``unreadable`` is set. A project without an org has no list."""
+    whose ``unreadable`` is set. A project without an org has no list. This cvENGINE server itself (``own_server``: its own names, and the addresses they
+    resolve to) is refused for every project; ``own=False`` leaves that out, for the addresses a sweep's result names (a range sweep may answer from the
+    server's address without the result being about the server's work)."""
     values = [v for v in values if isinstance(v, str) and v.strip()]
     if not project_id or not values:
         return {}
+    own_names, own_networks = own_server() if own else (frozenset(), ())
     try:
         networks = address_networks(project_id) if networks is None else networks  # ``networks``: a caller that already read the list for this project
     except Exception:  # noqa: BLE001 - fail closed: never let work through on a list that was not read
         logger.warning('could not read the do-not-scan address list for project %s', project_id, exc_info=True)
         return {v: Refusal(UNREADABLE, unreadable=True) for v in values}
-    if not networks:
+    if not networks and not own_names and not own_networks:
         return {}
     out, names = {}, {}
     for value in values:
+        mine = own_refusal(value, (own_names, own_networks))  # this cvENGINE server itself: refused for every project
+        if mine:
+            out[value] = mine
+            continue
         ip = as_address(value)
         if ip is not None:
             net = _containing(networks, ip)
@@ -204,6 +312,8 @@ def address_refusals(project_id, values, resolved=None, networks=None, unknown=(
                 out[value] = Refusal(f"{ip} is on the organization's do-not-scan list ({net})", entry=str(net))
         elif normalize(value):
             names[value] = normalize(value)
+    if names and not networks and not own_networks:
+        return out  # only the server's names to compare, done above: no address to look up
     if names:
         try:
             known = stored_addresses(project_id, names.values())
@@ -217,8 +327,13 @@ def address_refusals(project_id, values, resolved=None, networks=None, unknown=(
                 if net:
                     out[value] = Refusal(f"{name} resolves to {ip}, which is on the organization's do-not-scan list ({net})", entry=str(net))
                     break
+                net = _containing(own_networks, ip)
+                if net:
+                    out[value] = Refusal(f'{name} resolves to {ip}, which is this cvENGINE server (never scanned)', entry=str(net))
+                    break
             else:
-                if value in unknown and not told and not known.get(name):
+                # the wait for a lookup belongs to the organization's list: the server's own addresses alone never hold back a name nothing resolved yet
+                if networks and value in unknown and not told and not known.get(name):
                     out[value] = Refusal(f"{name} has no known address yet, so it cannot be checked against the organization's do-not-scan list; it is scanned once a lookup has resolved it",
                                          entry='')
     return out
@@ -234,28 +349,42 @@ def excluded_names(project_id, strict=False, names_only=False):
     """The ExclusionSet of lowercase names excluded for ``project_id`` (its org's list, plus the hosts moved out of the project), made address-aware
     (the do-not-scan networks, and the inventory names that resolve into them) unless ``names_only``: the sites that decide what the INVENTORY keeps ask
     for names only, so an address-excluded host stays visible. Empty for no project or no org. ``strict`` lets a failed NAME lookup raise (an
-    authorization check must stop, not carry on with nothing excluded); a failed ADDRESS lookup always fails closed (``unreadable``: everything is in the set)."""
+    authorization check must stop, not carry on with nothing excluded). Otherwise a failed lookup fails closed for a scan decision (``unreadable``:
+    everything is in the set), and for ``names_only`` a failed NAME lookup excludes nothing (the inventory keeps its hosts)."""
     if not project_id:
         return ExclusionSet()
     from cveFeed.models import HostExclusion, HostMove
-    try:
-        rows = list(HostExclusion.objects.filter(org__projects__id=project_id).values_list('host', 'include_subdomains'))
+    own_names, own_networks = own_server() if not names_only else (frozenset(), ())  # this cvENGINE server: never scanned, for every project
+    def read():
+        found = tuple(HostExclusion.objects.filter(org__projects__id=project_id).values_list('host', 'include_subdomains'))
         # a host moved out of this project into another stays out of this one (exact name), whatever its org's list says
-        rows += [(host, False) for host in HostMove.objects.filter(project_id=project_id).values_list('host', flat=True)]
-    except Exception:  # noqa: BLE001 - never let a lookup problem stop discovery
+        return found + tuple((host, False) for host in HostMove.objects.filter(project_id=project_id).values_list('host', flat=True))
+    unreadable = False
+    try:
+        rows = list(_cached('names', project_id, read))
+    except Exception:  # noqa: BLE001
         if strict:
             raise
         logger.warning('could not read the host exclusions for project %s', project_id, exc_info=True)
         rows = []
-    networks, by_address, unreadable = (), (), False
+        # a scan decision fails closed: a host the organization removed and excluded must not be scanned because its list could not be read. The
+        # sites that decide what the INVENTORY keeps (``names_only``) keep every host instead, so nothing is hidden or dropped for a failed read
+        unreadable = not names_only
+    networks, by_address = (), ()
     if not names_only:
         try:
             networks = address_networks(project_id)
-            by_address = _names_resolving_into(project_id, networks) if networks else ()
         except Exception:  # noqa: BLE001 - fail closed
             logger.warning('could not read the do-not-scan address list for project %s', project_id, exc_info=True)
             unreadable = True
-    return ExclusionSet((host for host, _ in rows), (host for host, subtree in rows if subtree), networks, by_address, unreadable)
+        networks = tuple(networks) + tuple(n for n in own_networks if n not in networks)  # the server's own addresses, whatever the list read gave
+        if networks and not unreadable:
+            try:
+                by_address = _names_resolving_into(project_id, networks)
+            except Exception:  # noqa: BLE001 - fail closed
+                logger.warning('could not read the stored addresses of the hosts of project %s', project_id, exc_info=True)
+                unreadable = True
+    return ExclusionSet([host for host, _ in rows] + sorted(own_names), (host for host, subtree in rows if subtree), networks, by_address, unreadable)
 
 
 def covers(pattern, name, subtree):

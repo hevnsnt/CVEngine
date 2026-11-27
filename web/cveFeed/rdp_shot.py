@@ -20,7 +20,7 @@ import re
 from django.conf import settings
 from django.utils import timezone
 
-from reNgine import ai_prompts
+from cvengine import ai_prompts
 
 logger = logging.getLogger(__name__)
 
@@ -173,7 +173,7 @@ def run_for_scan(scan_id, reader=None, force=False):
     from cveFeed.models import RdpScreenshot
     from startScan.models import ScanHistory
     from agentapi import sentinel_dispatch
-    from reNgine.resources import ScannerUnavailable
+    from cvengine.resources import ScannerUnavailable
     if not enabled():
         return {'attempted': 0, 'skipped': 'disabled'}
     scan = ScanHistory.objects.select_related('domain').get(pk=scan_id)
@@ -233,7 +233,7 @@ def run_for_scan(scan_id, reader=None, force=False):
 def _record_logged_in_finding(scan, sub, address, port, ai):
     """An informational finding when the screen shows an account already signed in: notable (an idle session, or a
     screen someone forgot to lock), but not itself the vulnerability (the NLA finding already covers that)."""
-    from reNgine.tasks import save_vulnerability
+    from cvengine.tasks import save_vulnerability
     username = ai['logged_in_user']
     save_vulnerability(
         target_domain=scan.domain, scan_history=scan, subdomain=sub, http_url=f'rdp://{address}:{port}',

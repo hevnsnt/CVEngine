@@ -143,11 +143,33 @@ def _current_states(scan):
     return current
 
 
+def _reopen_restored(project, hosts, seen=()):
+    """A scan found these archived hosts again and lifted their archive: what archiving them closed is open again (cveFeed.archive_closure), for this
+    scan's own results to confirm or close. So is what closed when a host of ``seen`` (every host the scan holds) had left the inventory. One read
+    of the project's host closures for all of them (``archive_closure.reopen_scan``), not three per restored host."""
+    from cveFeed import archive_closure
+    try:
+        archive_closure.reopen_scan(project, hosts, seen)
+    except Exception:  # a finding reported again by a later scan or check reopens by itself
+        logger.exception('could not reopen the findings of hosts back in the inventory of project %s', project)
+
+
+def _reset_unresolved(project, hosts):
+    """The archived hosts a scan found again with a scannable address start a fresh never-resolved streak (cveFeed.unresolved_archive), as a
+    restore by a person or by the daily rediscovery does: a streak left over from before the archive would make the next daily review archive
+    the host again and close its findings again, and the next scan restore it, every day. Only these rows: a streak a recheck is counting on
+    a host still in the inventory is left alone."""
+    from cveFeed.models import HostState
+    for part in _chunks(hosts):
+        HostState.objects.filter(project_id=project, host__in=part).update(unresolved_first_at=None, unresolved_last_at=None, unresolved_checks=0)
+
+
 def _record_baseline(scan, project, current, now):
     from cveFeed import activity
     from cveFeed.models import HostState
     rows = [HostState(project_id=project, domain_id=scan.domain_id, host=name, state=state, fingerprint=fingerprint(state),
                       scan=scan, last_seen=now) for name, state in current.items()]
+    restored = []
     with transaction.atomic():
         for part in _chunks(rows):
             HostState.objects.bulk_create(part, ignore_conflicts=True)  # the name may already be known from a parent target
@@ -162,6 +184,8 @@ def _record_baseline(scan, project, current, now):
                     existing[row.host].inactive_last_absent_at = None
                     existing[row.host].inactive_absent_checks = 0
                     if row.state.get('ips') and not existing[row.host].archived_by_user:  # a person's archive stays
+                        if existing[row.host].archived_at is not None:
+                            restored.append(row.host)
                         existing[row.host].archived_at, existing[row.host].archive_reason = None, ''
                         existing[row.host].archive_check_status = 'rediscovered_scan'
             HostState.objects.bulk_update(list(existing.values()), ['state', 'fingerprint', 'scan', 'last_seen', 'retired_at',
@@ -169,6 +193,8 @@ def _record_baseline(scan, project, current, now):
                                                                       'inactive_absent_checks',
                                                                       'archived_at', 'archive_reason', 'archive_check_status'],
                                           batch_size=CHUNK)
+        _reset_unresolved(project, restored)
+    _reopen_restored(project, restored, current)
     activity.log('changes', f'Baseline recorded for {scan.domain.name}: {len(current)} hosts', project=project, scan_id=scan.id)
     scoring.rescore_quietly(project, list(current), scan_id=scan.id)
     return {'hosts': len(current), 'changes': 0, 'baseline': True}
@@ -191,7 +217,7 @@ def _retire(scan, current, resolver, checker, now, tcp_checker=None):
                 break
     if not candidates:
         return [], 0, 0
-    from reNgine.resources import ScannerUnavailable
+    from cvengine.resources import ScannerUnavailable
     errored = {}
     try:
         if resolver is None:  # a Sentinel resolves them (dns_resolve, agentapi.probe_dispatch): the kind has no local path
@@ -286,7 +312,7 @@ def record_scan_changes(scan_id, resolver=None, checker=None, tcp_checker=None):
     known = {}
     for part in _chunks(current):
         known.update({h.host: h for h in HostState.objects.filter(project_id=project, host__in=part)})
-    rows, new_rows, changed_rows, unchanged, shot_diffs = [], [], [], [], []
+    rows, new_rows, changed_rows, unchanged, shot_diffs, restored = [], [], [], [], [], []
     limit = shots.threshold()
 
     def change(kind, host, ip='', port=None, before=None, after=None):
@@ -304,6 +330,7 @@ def record_scan_changes(scan_id, resolver=None, checker=None, tcp_checker=None):
         was_archived = row.archived_at is not None and bool(state.get('ips')) and not row.archived_by_user  # a person's archive stays
         if was_archived:
             row.archived_at, row.archive_reason, row.archive_check_status = None, '', 'rediscovered_scan'
+            restored.append(host)
             if row.retired_at is None:
                 change('host_returned', host, after={'evidence': 'scannable address in a new scan'})
         if was_zombie:
@@ -358,7 +385,9 @@ def record_scan_changes(scan_id, resolver=None, checker=None, tcp_checker=None):
             HostState.objects.filter(project_id=project, host__in=part).update(
                 last_seen=now, scan=scan, inactive_first_absent_at=None,
                 inactive_last_absent_at=None, inactive_absent_checks=0)
+        _reset_unresolved(project, restored)
 
+    _reopen_restored(project, restored, current)
     counts = {}
     for r in rows:
         counts[r.kind] = counts.get(r.kind, 0) + 1

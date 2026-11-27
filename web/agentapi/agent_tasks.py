@@ -13,7 +13,7 @@ import ipaddress
 import re
 
 from agentapi.services import ApiError
-from reNgine.ai_providers import clean_text
+from cvengine.ai_providers import clean_text
 
 OS_WORDS = (('windows', 'windows'), ('linux', 'linux'), ('ubuntu', 'linux'), ('debian', 'linux'), ('centos', 'linux'), ('red hat', 'linux'),
             ('rhel', 'linux'), ('fedora', 'linux'), ('suse', 'linux'), ('alpine', 'linux'), ('mac os', 'macos'), ('macos', 'macos'),

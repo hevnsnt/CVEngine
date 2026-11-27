@@ -1,4 +1,4 @@
-"""reNgine.gevent_gc: automatic collection off and a timer in a gevent worker, nothing changed anywhere else."""
+"""cvengine.gevent_gc: automatic collection off and a timer in a gevent worker, nothing changed anywhere else."""
 import gc
 import json
 from unittest import mock
@@ -6,14 +6,23 @@ from unittest import mock
 from django.core.cache import cache
 from django.test import SimpleTestCase
 
-from reNgine import gevent_db, gevent_gc, lane_memory
+from cvengine import gevent_db, gevent_gc, lane_memory
 
 
 def _fresh_state(case):
-    """The timer's counters start from zero in each test and are put back after it; nothing stays frozen."""
+    """The timer's counters start from zero in each test and are put back after it; nothing stays frozen.
+
+    A frozen count of zero is not a fixed point to assert against: on Python 3.12 the first full collection after ``gc.unfreeze()`` reports a few
+    hundred objects as frozen again (375 on CI and on a plain 3.12.3, none on 3.14), so a test compares the count with its own reading from before
+    the step it checks."""
+    from celery.signals import worker_ready
     saved = dict(gevent_gc._state)
     case.addCleanup(lambda: (gevent_gc._state.clear(), gevent_gc._state.update(saved)))
     case.addCleanup(gc.unfreeze)
+    # install() connects its worker_ready receiver once per dispatch_uid: one left by an earlier test would keep setting that test's event,
+    # and a later install() could not connect its own
+    worker_ready.disconnect(dispatch_uid='gevent-gc-loaded')
+    case.addCleanup(worker_ready.disconnect, dispatch_uid='gevent-gc-loaded')
     gevent_gc._state.update({'ticks': 0, 'frozen': False, 'collections': 0, 'last_s': None, 'last_full_s': None, 'worst_s': 0.0, 'freeze_s': None, 'slow_logged_at': None,
                              'slow_skipped': 0, 'loaded': None})
 
@@ -95,16 +104,20 @@ class FrozenStartupTests(SimpleTestCase):
         self.was_enabled = gc.isenabled()
         self.addCleanup(lambda: gc.enable() if self.was_enabled else gc.disable())
         _fresh_state(self)
+        # an earlier test's Cycle objects are garbage once it unfroze them: collect them now, or the first collection of this test frees
+        # them too and counts 201 where it freed one (a shuffled order runs the 200 object freeze test first)
+        gc.collect()
         gc.disable()
         Cycle.freed = 0
 
     def test_install_waits_for_the_worker_to_have_loaded(self):
         from celery.signals import worker_ready
+        before = gc.get_freeze_count()
         with mock.patch.object(gevent_db, 'gevent_patched', return_value=True), mock.patch('gevent.spawn'):
             self.assertTrue(gevent_gc.install())
         loaded = gevent_gc._state['loaded']
         self.assertFalse(loaded.is_set())
-        self.assertEqual(gc.get_freeze_count(), 0)  # install itself freezes nothing: the task modules are not imported yet
+        self.assertEqual(gc.get_freeze_count(), before)  # install itself freezes nothing: the task modules are not imported yet
         self.addCleanup(worker_ready.disconnect, dispatch_uid='gevent-gc-loaded')
         ours = [r for r in worker_ready.receivers if r[0][0] == 'gevent-gc-loaded']
         self.assertEqual(len(ours), 1)
@@ -117,9 +130,14 @@ class FrozenStartupTests(SimpleTestCase):
         before = gc.get_freeze_count()
         frozen = gevent_gc.freeze_after_load()
         self.assertGreaterEqual(frozen, before + 200)
-        self.assertEqual(gc.get_freeze_count(), frozen)
-        self.assertEqual(gevent_gc.freeze_after_load(), 0)  # never a second time
-        self.assertEqual(gc.get_freeze_count(), frozen)
+        # The freeze count is live: a frozen object that another thread frees leaves the permanent generation, so the count may drop but never rise.
+        after = gc.get_freeze_count()
+        self.assertLessEqual(after, frozen)
+        self.assertGreaterEqual(after, 200)  # the start-up objects are still alive and still frozen
+        with mock.patch.object(gevent_gc.gc, 'freeze', wraps=gc.freeze) as freeze:
+            self.assertEqual(gevent_gc.freeze_after_load(), 0)  # never a second time
+        freeze.assert_not_called()
+        self.assertLessEqual(gc.get_freeze_count(), after)
         del startup
 
     def test_the_timer_freezes_on_its_first_wake_after_load_and_ticks_after_that(self):
@@ -154,7 +172,7 @@ class FrozenStartupTests(SimpleTestCase):
         gevent_gc.tick()  # the full one
         self.assertEqual(gc.get_stats()[2]['collections'], full_before + 1)
         self.assertEqual(Cycle.freed, 1)  # a full collection leaves the frozen ones alone too
-        self.assertEqual(gc.get_freeze_count(), frozen_count)  # and never freezes again
+        self.assertLessEqual(gc.get_freeze_count(), frozen_count)  # and never freezes again (a frozen object freed elsewhere only lowers it)
 
     def test_a_cycle_that_outlives_a_young_collection_is_freed_by_the_next_full_one(self):
         gevent_gc.freeze_after_load()
@@ -174,13 +192,14 @@ class FrozenStartupTests(SimpleTestCase):
 
     def test_switching_off_the_timer_restores_the_interpreters_collector_and_freezes_nothing(self):
         gc.enable()
+        before = gc.get_freeze_count()
         with mock.patch.dict('os.environ', {'CVENGINE_GC_MANUAL': '0'}), mock.patch.object(gevent_db, 'gevent_patched', return_value=True), \
                 mock.patch('gevent.spawn') as spawn:
             self.assertFalse(gevent_gc.install())
         spawn.assert_not_called()
         self.assertTrue(gc.isenabled())
         self.assertIsNone(gevent_gc._state['loaded'])
-        self.assertEqual(gc.get_freeze_count(), 0)
+        self.assertEqual(gc.get_freeze_count(), before)
 
     def test_no_collection_starts_inside_a_greenlet_switch(self):
         import gevent
@@ -247,3 +266,53 @@ class FrozenStartupTests(SimpleTestCase):
     def test_publishing_never_fails_the_timer(self):
         with mock.patch.object(lane_memory, 'lane_name', return_value='classic'), mock.patch('django.core.cache.cache.set', side_effect=OSError('redis down')):
             gevent_gc.publish()
+
+
+class YoungTickTests(SimpleTestCase):
+    """On Python 3.14.0 to 3.14.4 ``gc.collect(1)`` is a step of the incremental collector, which may collect nothing: the young tick collects generation 0 there."""
+
+    def setUp(self):
+        self.was_enabled = gc.isenabled()
+        self.addCleanup(lambda: gc.enable() if self.was_enabled else gc.disable())
+        _fresh_state(self)
+        gc.disable()
+
+    def test_the_generation_of_a_young_tick_follows_the_python_version(self):
+        for version, generation in (((3, 12, 3), 1), ((3, 13, 7), 1), ((3, 14, 0), 0), ((3, 14, 4), 0), ((3, 14, 5), 1), ((3, 15, 0), 1)):
+            self.assertEqual(gevent_gc.young_generation(version), generation, version)
+        self.assertEqual(gevent_gc.YOUNG_GENERATION, gevent_gc.young_generation())
+
+    def test_a_young_tick_collects_the_young_generation_and_a_full_tick_everything(self):
+        with mock.patch.object(gc, 'collect', return_value=0) as collect, mock.patch.object(gevent_gc, 'publish'):
+            gevent_gc.tick()
+            gevent_gc._state['ticks'] = gevent_gc.FULL_EVERY - 1
+            gevent_gc.tick()
+        self.assertEqual([c.args[0] for c in collect.call_args_list], [gevent_gc.YOUNG_GENERATION, 2])
+
+    def test_every_young_tick_frees_the_sockets_left_in_cycles_beside_a_large_live_heap(self):
+        # the classic lane's shape: an unfrozen heap the worker holds, and sockets dropped inside reference cycles between two ticks. With gc.collect(1) on
+        # Python 3.14.4 none of them was freed for 200 ticks in a row, so each socket waited for the full collection, up to 10 minutes.
+        import os
+        import socket
+
+        class Holder:
+            pass
+
+        def fds():
+            return len(os.listdir('/proc/self/fd')) if os.path.isdir('/proc/self/fd') else 0
+
+        gevent_gc.freeze_after_load()
+        live = [{'i': i} for i in range(150_000)]  # noqa: F841 - held on purpose
+        start = fds()
+        worst = 0
+        with mock.patch.object(gevent_gc, 'publish'):
+            for _ in range(30):
+                for _ in range(5):
+                    h = Holder()
+                    h.sock, h.me = socket.socket(), h
+                    del h
+                gevent_gc._state['ticks'] = 0  # young ticks only
+                gevent_gc.tick()
+                worst = max(worst, fds() - start)
+        if start:
+            self.assertLessEqual(worst, 5)

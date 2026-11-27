@@ -581,7 +581,7 @@ class ScopePolicyTests(ScopeFixture, TestCase):
     def test_an_address_a_name_resolved_to_is_never_tailnet_authority(self):
         # the server looks no name up (the Sentinel judges what a name resolves to, never with tailnet authority); an address a scan stored for a name
         # is not stored with it either
-        from reNgine.tasks import save_ip_address
+        from cvengine.tasks import save_ip_address
         sub = Subdomain.objects.create(target_domain=self.domain, name='evil.example.test')
         self.assertEqual(save_ip_address('100.64.0.5', subdomain=sub, project_id=self.project.id), (None, False))
         own = Subdomain.objects.create(target_domain=self.domain, name='100.64.0.5')
@@ -591,8 +591,8 @@ class ScopePolicyTests(ScopeFixture, TestCase):
 
     def test_bbot_port_events_for_a_name_that_resolves_into_a_tailnet_store_nothing(self):
         """Old code: a port event whose host was the address (no subdomain) was stored with tailnet authority for any scan."""
-        from reNgine import discovery_events as bbot_lib
-        from reNgine.tasks import persist_bbot_result
+        from cvengine import discovery_events as bbot_lib
+        from cvengine.tasks import persist_bbot_result
         EngineType.objects.get_or_create(engine_name='e', defaults={'yaml_configuration': 'x', 'default_engine': True})
         attacker = Domain.objects.create(name='evil.example.test', project=self.other_project, insert_date=timezone.now())
         scan = ScanHistory.objects.create(domain=attacker, scan_type=EngineType.objects.first(), start_scan_date=timezone.now(), scan_status=1,
@@ -761,7 +761,7 @@ class SyncBase(TestCase):
         patches = [mock.patch('cveFeed.tailscale_api.Client.devices', self.fake_devices), mock.patch('cveFeed.tailscale_api.Client.policy', self.fake_policy),
                    mock.patch('cveFeed.tailscale_local.available', return_value=False),
                    mock.patch('cveFeed.discovery.start_discoveries', side_effect=lambda domains, **k: list(domains)),
-                   mock.patch('reNgine.resources.redis_claim', self.fake_claim)]
+                   mock.patch('cvengine.resources.redis_claim', self.fake_claim)]
         self.start_discoveries = patches[3].start()
         for p in patches[:3] + patches[4:]:
             p.start()
@@ -1028,7 +1028,7 @@ class SyncTests(SyncBase):
         @contextmanager
         def busy(key, owner, ttl):
             yield 'another-job'
-        with mock.patch('reNgine.resources.redis_claim', busy):
+        with mock.patch('cvengine.resources.redis_claim', busy):
             self.assertEqual(self.sync()['status'], 'busy')
         self.assertEqual(tailscale_sync.sync_link(999999)['status'], 'missing')
 
@@ -1594,7 +1594,7 @@ class ScheduleAndComposeTests(TestCase):
         self.assertEqual((task.task, task.queue, task.enabled, task.interval.every, task.interval.period), ('sync_tailscale', 'cve_feed_queue', True, 15, 'minutes'))
 
     def test_the_tasks_are_registered(self):
-        from reNgine.celery import app
+        from cvengine.celery import app
         import cveFeed.tasks  # noqa: F401
         self.assertIn('sync_tailscale', app.tasks)
         self.assertIn('sync_tailscale_link', app.tasks)
@@ -1641,11 +1641,11 @@ class ComposeProfileTests(SimpleTestCase):
 
     def test_the_rest_of_the_stack_is_unchanged_without_the_profile(self):
         services = self.compose['services']
-        self.assertEqual({n for n, s in services.items() if 'profiles' not in s}, {'db', 'redis', 'celery', 'celery-beat', 'web', 'proxy', 'reviewer', 'scanner'})  # the AI reviewer and the built-in scanner are part of the default stack
+        self.assertEqual({n for n, s in services.items() if 'profiles' not in s}, {'db', 'redis', 'migrate', 'celery', 'celery-beat', 'web', 'proxy', 'reviewer', 'scanner', 'ownership'})  # the AI reviewer and the built-in scanner are part of the default stack; migrate is the one-off owner service web, celery and celery-beat wait for; ownership is the one-off service that hands the volumes to uid 10002 before migrate runs
         for name in ('celery', 'web'):
             self.assertNotIn('cap_add', services[name])
             self.assertNotIn('network_mode', services[name])
-        self.assertEqual(services['celery']['networks'], ['rengine_network'])
+        self.assertEqual(services['celery']['networks'], ['cvengine_network', 'data_network'])  # data_network: the database and Redis
 
     def test_env_example_documents_the_profile_without_a_secret(self):
         text = (ROOT / '.env.example').read_text()

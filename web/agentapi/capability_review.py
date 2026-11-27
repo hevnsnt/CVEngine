@@ -22,6 +22,7 @@ def route_key(method, pattern):
 # (verdict, reason, [MCP tool names and REST route keys])
 REVIEW = [
     ('refuse', 'a person decides this in the web interface', [
+        'PUT reporting/zero-wire',  # switches a fetch of a public feed on; the handler refuses a token
         'apply_tuning_suggestion', 'revert_tuning_decision', 'release_tuning_pin',
         'POST tuning/decisions/{decision_id}/apply', 'POST tuning/decisions/{decision_id}/revert', 'POST tuning/release',
         'remove_exclusion', 'DELETE P/exclusions/{host}',
@@ -57,7 +58,7 @@ REVIEW = [
         'assess_host', 'POST P/host-assessments', 'request_host_review', 'POST P/hosts/{host_id}/review', 'start_host_review_step', 'POST P/hosts/{host_id}/review/step',
         'screenshot_host', 'POST P/hosts/{host_id}/screenshot', 'run_hygiene_checks', 'POST P/hygiene/run', 'run_runzero_sync', 'POST P/runzero/sync', 'sync_tailscale',
         'POST P/tailscale/sync', 'validate_cve_match', 'POST P/matches/{match_id}/validate', 'retriage_finding', 'POST P/findings/{kind}/{finding_id}/retriage',
-        'retest_finding', 'POST P/findings/{kind}/{finding_id}/retest', 'run_saved_search', 'POST P/saved-searches/{search_id}/run', 'POST P/reports',
+        'retest_finding', 'POST P/findings/{kind}/{finding_id}/retest', 'run_saved_search', 'POST P/saved-searches/{search_id}/run', 'POST P/reports', 'POST orgs/{org}/reports',
         'POST P/internal-ranges/{range_id}/discover', 'queue_agent_work', 'POST P/agent-tasks',
         'request_secret_validation', 'POST P/secrets/{secret_id}/validate',  # only in a project where a person switched validation on
     ]),
@@ -68,8 +69,14 @@ REVIEW = [
         'PATCH P/saved-searches/{search_id}', 'set_secret_status', 'POST P/secrets/{secret_id}/status', 'POST P/secrets/{secret_id}/assign', 'update_remediation_status',
         'PATCH P/matches/{match_id}', 'update_finding_status', 'PATCH P/findings/{kind}/{finding_id}', 'bulk_update_finding_status', 'POST P/findings/status',
         'set_finding_assignee', 'set_finding_heat', 'POST P/findings/{kind}/{finding_id}/heat', 'POST P/findings/heat', 'add_finding_comment',
-        'POST P/findings/{kind}/{finding_id}/comments', 'add_supplier', 'POST P/suppliers', 'set_supplier_finding_status', 'PATCH P/suppliers/findings/{finding_id}',
+        'POST P/findings/{kind}/{finding_id}/comments', 'add_host_note', 'POST P/hosts/{host_id}/notes', 'add_supplier', 'POST P/suppliers', 'set_supplier_finding_status', 'PATCH P/suppliers/findings/{finding_id}',
         'update_cve_detection', 'PUT cves/{cve_id}/detection', 'PUT secrets/rules',
+    ]),
+    ('allow', 'email reports: a summary of what the token\'s owner can already read, sent by email through the server an App Admin set up. It widens no scan, spends nothing, '
+     'raises no autonomy and sends no credentials; a write role (project) or an Org Admin (organization) is needed, a read-only token is refused, at most 10 recipients, 20 per '
+     'scope and 50 per person, a test goes only to the owner of the token, and every change is audited with its recipients', [
+        'create_report_subscription', 'POST report-subscriptions', 'update_report_subscription', 'PATCH report-subscriptions/{subscription_id}',
+        'delete_report_subscription', 'DELETE report-subscriptions/{subscription_id}', 'send_report_subscription_test', 'POST report-subscriptions/{subscription_id}/test',
     ]),
     ('allow', 'App Admin only (refused to every other role): a verdict on an AI-written template or a revision of it. Retiring only stops a check '
      'and withdraws what it confirmed; a revision is a new draft that passes every automatic gate an AI draft passes before it may run (its '

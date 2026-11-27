@@ -13,7 +13,7 @@ def read(*parts):
 
 class NginxTests(SimpleTestCase):
 	def test_body_size_is_small_and_tls13_is_on(self):
-		conf = read('config', 'nginx', 'rengine.conf')
+		conf = read('config', 'nginx', 'cvengine.conf')
 		size = re.search(r'client_max_body_size\s+(\d+)([MKG])', conf)
 		self.assertEqual(size.group(2), 'M')
 		self.assertLessEqual(int(size.group(1)), 8)
@@ -21,14 +21,14 @@ class NginxTests(SimpleTestCase):
 		self.assertIn('client_body_timeout', conf)
 
 	def test_scan_results_are_served_sandboxed_and_not_sniffed(self):
-		conf = read('config', 'nginx', 'rengine.conf')
+		conf = read('config', 'nginx', 'cvengine.conf')
 		block = conf[conf.index('location /protected_media/'):]
 		block = block[:block.index('}')]
 		self.assertIn('sandbox', block)
 		self.assertIn('nosniff', block)
 
 	def test_json_and_assets_are_gzipped_but_html_and_binaries_are_not(self):
-		conf = read('config', 'nginx', 'rengine.conf')
+		conf = read('config', 'nginx', 'cvengine.conf')
 		self.assertRegex(conf, r'(?m)^\s*gzip\s+on;')
 		types = re.search(r'gzip_types\s+([^;]+);', conf).group(1).split()
 		self.assertIn('application/json', types)
@@ -69,6 +69,41 @@ class WorkflowTests(SimpleTestCase):
 		cleanup = read('.github', 'workflows', 'branch-cleanup.yml')
 		self.assertIn('Refusing to delete', cleanup)
 		self.assertIn('not a plain branch name', cleanup)
+
+	def workflow_files(self):
+		folder = os.path.join(REPO, '.github')
+		for root, _dirs, files in os.walk(folder):
+			for name in sorted(files):
+				if name.endswith(('.yml', '.yaml')) and (os.sep + 'workflows' in root or name in ('action.yml', 'action.yaml')):
+					yield os.path.relpath(os.path.join(root, name), REPO)
+
+	def test_every_action_is_pinned_to_a_commit(self):
+		"""A tag can be moved to other code by whoever controls the action's repository; a full commit sha cannot. Each pin keeps its tag in a comment."""
+		uses = re.compile(r'^\s*(?:- )?uses:\s*(\S+)(.*)$')
+		pinned = re.compile(r'^[\w.-]+/[\w.-]+(?:/[\w./-]+)?@[0-9a-f]{40}$')
+		seen = 0
+		for path in self.workflow_files():
+			for number, line in enumerate(read(path).splitlines(), 1):
+				match = uses.match(line)
+				if not match or match.group(1).startswith('./'):
+					continue
+				seen += 1
+				self.assertRegex(match.group(1), pinned, f'{path}:{number} names an action by tag; pin the commit sha and keep the tag in a comment')
+				self.assertRegex(match.group(2), r'#\s*v\d', f'{path}:{number}: say which release the sha is in a comment')
+		self.assertGreater(seen, 10)
+
+	def test_checkout_does_not_leave_the_token_behind_unless_the_job_pushes(self):
+		"""actions/checkout writes the job token into .git/config unless told not to; only the release job pushes (the tag), so only it keeps it."""
+		for path in self.workflow_files():
+			text = read(path)
+			steps = re.split(r'(?m)^\s*- ', text)
+			for step in steps:
+				if 'actions/checkout@' not in step:
+					continue
+				if path.endswith('release.yml'):
+					self.assertNotIn('persist-credentials: false', step)
+					continue
+				self.assertIn('persist-credentials: false', step, f'{path}: a checkout keeps the job token in .git/config')
 
 
 class ReleaseNotesLimitTests(SimpleTestCase):

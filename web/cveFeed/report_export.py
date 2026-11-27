@@ -1,13 +1,14 @@
-"""One-click PDF reports: queue a report, poll it, download it, and clean up.
+"""One-click reports: queue a report, poll it, download it, and clean up.
 
-A report is built in a celery task (``generate_report`` on its own ``report_queue``, served by the classic worker, so a long feed or certificate lookup cannot hold it) from ``cveFeed.report_data``, rendered by
-``cveFeed.report_pdf`` in a child process, and written under the report directory with a random file name. A ``ReportExport`` row
+A report is of one project or of an organization (the organization's projects the person can read), a findings report or a hosts report, as a PDF
+or a CSV file. It is built in a celery task (``generate_report`` on its own ``report_queue``, served by the classic worker, so a long feed or certificate lookup cannot hold it) from ``cveFeed.report_data``, rendered by
+``cveFeed.report_pdf`` in a child process (or written by ``cveFeed.report_csv``), and written under the report directory with a random file name. A ``ReportExport`` row
 says who asked, for what, how it went and when the file expires (24 hours). The only way to read the file is ``download``, an
-authenticated view of the user who asked, which checks the project role again. Expired files are removed on access and in the weekly
+authenticated view of the user who asked, which checks the access again. Expired files are removed on access and in the weekly
 maintenance (``cveFeed.maintenance``).
 
 Permissions follow the project roles: any role that can read the project (audit included) can export it, and the report holds only
-that project's rows. The task checks the role again when it runs, so a user who lost access in the meantime gets nothing. A report is
+that project's rows; an organization report holds the organization's projects the person can read (``agentapi.report_scope``). The task checks the access again when it runs, so a user who lost access in the meantime gets nothing. A report is
 a read, so a read-only token may ask for one. Nothing here contacts a host, so the scan safety gates (exclusions, scannable_hosts,
 pause) do not apply; a host removed or excluded is simply not in the inventory the report reads.
 """
@@ -22,7 +23,9 @@ from django.db.models import Q
 from django.http import FileResponse
 from django.utils import timezone
 
-from agentapi.services import ALL_PROJECTS, ApiError, Ctx, get_one_project, get_project
+from agentapi import report_scope
+from agentapi.services import ALL_PROJECTS, ApiError
+from tenancy import scope as tenancy_scope
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +36,8 @@ ACTIVE_TOTAL_DEFAULT = 8
 QUEUE = 'report_queue'
 STUCK_AFTER = timedelta(hours=2)  # a running report this old lost its worker
 UNTAKEN_AFTER = timedelta(minutes=10)  # a report no worker has taken in this long is not going to be: say so, the page stops waiting
-FILE_RE = re.compile(r'^[0-9a-f]{48}\.pdf$')
+FILE_RE = re.compile(r'^[0-9a-f]{48}\.(pdf|csv)$')
+CONTENT_TYPES = {'pdf': 'application/pdf', 'csv': 'text/csv; charset=utf-8'}
 ACTIVE = ('queued', 'running')
 
 
@@ -74,28 +78,36 @@ def _remove_file(job):
 
 # --- requesting ----------------------------------------------------------------------------------------------------------------
 
-def enqueue(ctx, slug, host=None, include_closed=False):
-    """Queue a report of the project (or of one host of it) for the caller. Returns ``(job, created)``: asking again for the same
-    report while one is queued or running gives that one back."""
+def enqueue(ctx, slug=None, host=None, include_closed=False, org=None, kind='findings', fmt='pdf'):
+    """Queue a report of a project (or of one host of it) or of an organization for the caller: ``kind`` findings or hosts, ``fmt`` pdf or csv. Returns
+    ``(job, created)``: asking again for the same report while one is queued or running gives that one back."""
     from agentapi.host_manage import clean_host
     from cveFeed.models import ReportExport
     from tenancy import audit
     if slug == ALL_PROJECTS:  # the all-projects view has no single project to report on
         raise ApiError(400, 'pick a project to make changes')
-    project, _ = get_project(ctx, slug)  # any role that reads the project; 404 for one the caller cannot see
+    if kind not in ReportExport.KINDS:
+        raise ApiError(400, f'kind must be {" or ".join(ReportExport.KINDS)}')
+    if fmt not in ReportExport.FORMATS:
+        raise ApiError(400, f'format must be {" or ".join(ReportExport.FORMATS)}')
+    scope = report_scope.resolve(ctx, project=slug, org=org)  # any role that reads the project; 404 for one the caller cannot see
     if include_closed not in (True, False):
         raise ApiError(400, 'include_closed must be true or false')
     host = clean_host(host) if host not in (None, '') else ''
+    if host and (scope.kind != 'project' or kind != 'findings'):
+        raise ApiError(400, 'a report of one host is a findings report of one project')
     if host:
         from agentapi import services as svc
         from cveFeed.correlation import latest_scan_q
         from startScan.models import Subdomain
-        if not svc._scoped(Subdomain.objects.all(), project, 'target_domain__project').filter(latest_scan_q()).filter(name__iexact=host).exists():
+        if not svc._scoped(Subdomain.objects.all(), scope.project, 'target_domain__project').filter(latest_scan_q()).filter(name__iexact=host).exists():
             raise ApiError(404, 'host not found')
+    include_closed = bool(include_closed) and kind == 'findings'  # a hosts report has no closed findings to include
+    owner = {'project': scope.project} if scope.kind == 'project' else {'org': scope.org}
     now = timezone.now()
     _expire_stuck(now)
-    twin = ReportExport.objects.filter(project=project, requested_by=ctx.user, host=host, include_closed=bool(include_closed),
-                                       status__in=ACTIVE).first()
+    twin = ReportExport.objects.filter(**{'project': None, 'org': None, **owner}, requested_by=ctx.user, host=host, include_closed=include_closed,
+                                       kind=kind, format=fmt, status__in=ACTIVE).first()
     if twin:
         return twin, False
     # the caps count rows across every user: _base_manager is not narrowed to the caller's projects by the tenancy scope
@@ -104,9 +116,10 @@ def enqueue(ctx, slug, host=None, include_closed=False):
             mine.filter(created_at__gte=now - timedelta(hours=1)).count() >= _env_int('CVENGINE_REPORT_PER_HOUR', PER_HOUR_DEFAULT, 1000) or \
             ReportExport._base_manager.filter(status__in=ACTIVE).count() >= _env_int('CVENGINE_REPORT_ACTIVE_TOTAL', ACTIVE_TOTAL_DEFAULT, 200):
         raise ApiError(429, 'too many reports are being made; wait for one to finish and try again')
-    job = ReportExport.objects.create(token=secrets.token_urlsafe(32), project=project, requested_by=ctx.user, host=host,
-                                      include_closed=bool(include_closed), expires_at=now + ttl())
-    audit.record(ctx.user, 'report.export', project.slug, org=project.org_id, host=host, include_closed=bool(include_closed))
+    job = ReportExport.objects.create(token=secrets.token_urlsafe(32), **owner, requested_by=ctx.user, host=host, include_closed=include_closed,
+                                      kind=kind, format=fmt, expires_at=now + ttl())
+    audit.record(ctx.user, 'report.export', scope.slug, org=scope.org.pk if scope.kind == 'org' else scope.project.org_id, host=host,
+                 include_closed=include_closed, kind=kind, format=fmt, scope=scope.kind)
     from cveFeed.tasks import generate_report
     try:
         task = generate_report.apply_async(args=[job.pk], queue=QUEUE)
@@ -131,31 +144,55 @@ def _expire_stuck(now):
 
 # --- reading -------------------------------------------------------------------------------------------------------------------
 
+def _scope_of(job):
+    """``(kind, slug, name)`` of what a report is about."""
+    return ('project', job.project.slug, job.project.name) if job.project_id else ('org', job.org.slug, job.org.name)
+
+
 def serialize(job, now=None):
     now = now or timezone.now()
     ready = job.status == 'done' and job.expires_at > now
-    base = f'/api/v1/projects/{job.project.slug}/reports/{job.token}'
-    return {'id': job.token, 'status': 'expired' if job.status == 'done' and not ready else job.status, 'project': job.project.slug,
+    kind, slug, name = _scope_of(job)
+    base = f'/api/v1/{"projects" if kind == "project" else "orgs"}/{slug}/reports/{job.token}'
+    return {'id': job.token, 'status': 'expired' if job.status == 'done' and not ready else job.status, 'scope': {'kind': kind, 'slug': slug, 'name': name},
+            'project': slug if kind == 'project' else None, 'org': slug if kind == 'org' else None, 'kind': job.kind, 'format': job.format,
             'host': job.host or None, 'include_closed': job.include_closed, 'created': job.created_at.isoformat(),
             'finished': job.finished_at.isoformat() if job.finished_at else None, 'expires': job.expires_at.isoformat(),
             'size_bytes': job.size_bytes if ready else None, 'summary': job.summary if ready else {}, 'error': job.error,
             'status_url': base, 'download_url': f'{base}/download' if ready else None}
 
 
-def _mine(ctx, slug, token):
-    """The caller's own report of this project, or 404 (the same answer for another user's, another project's and a missing one)."""
+def _mine(ctx, slug, token, org=None):
+    """The caller's own report of this project (or organization), or 404 (the same answer for another user's, another scope's and a missing one)."""
     from cveFeed.models import ReportExport
-    project, _ = get_one_project(ctx, slug)
-    job = ReportExport.objects.select_related('project').filter(token=str(token)[:64], project=project, requested_by=ctx.user).first()
+    scope = report_scope.resolve(ctx, project=slug, org=org)
+    owner = {'project': scope.project} if scope.kind == 'project' else {'org': scope.org}
+    job = ReportExport.objects.select_related('project', 'org').filter(token=str(token)[:64], **owner, requested_by=ctx.user).first()
     if job is None:
         raise ApiError(404, 'report not found')
     return job
 
 
-def status(ctx, slug, token):
+def recent(ctx, limit=20):
+    """The caller's own reports that have not expired, newest first, for the Reporting page (a report whose project or organization they can no longer read is not listed)."""
+    from cveFeed.models import ReportExport
+    now = timezone.now()
+    out = []
+    for job in ReportExport.objects.select_related('project', 'org').filter(requested_by=ctx.user, expires_at__gt=now).exclude(status='done', filename='')[:limit * 3]:
+        try:
+            report_scope.resolve(ctx, project=job.project.slug if job.project_id else None, org=job.org.slug if job.org_id else None)
+        except ApiError:
+            continue
+        out.append(serialize(job, now))
+        if len(out) >= limit:
+            break
+    return out
+
+
+def status(ctx, slug, token, org=None):
     now = timezone.now()
     _expire_stuck(now)
-    job = _mine(ctx, slug, token)
+    job = _mine(ctx, slug, token, org=org)
     if job.status == 'done' and job.expires_at <= now:
         _remove_file(job)
         job.filename = ''
@@ -163,19 +200,21 @@ def status(ctx, slug, token):
     return serialize(job, now)
 
 
-def download(ctx, slug, token):
-    """The PDF as an attachment for the user who asked, while it has not expired."""
+def download(ctx, slug, token, org=None):
+    """The file as an attachment for the user who asked, while it has not expired."""
     now = timezone.now()
-    job = _mine(ctx, slug, token)
+    job = _mine(ctx, slug, token, org=org)
     if job.status != 'done':
         raise ApiError(409, 'the report is not ready' if job.status in ACTIVE else 'the report could not be made; ask for it again')
     path = _path(job.filename)
     if job.expires_at <= now or not path or not os.path.isfile(path):
         _remove_file(job)
         raise ApiError(410, 'the report has expired; ask for it again')
-    stem = re.sub(r'[^A-Za-z0-9._-]+', '-', f'cvengine-report-{job.project.slug}-{job.host or "project"}')[:100].strip('-')
-    response = FileResponse(open(path, 'rb'), content_type='application/pdf', as_attachment=True,
-                            filename=f'{stem}-{job.created_at:%Y%m%d}.pdf')
+    kind, slug, _ = _scope_of(job)
+    what = job.host or ('hosts' if job.kind == 'hosts' else kind)
+    stem = re.sub(r'[^A-Za-z0-9._-]+', '-', f'cvengine-report-{slug}-{what}')[:100].strip('-')
+    response = FileResponse(open(path, 'rb'), content_type=CONTENT_TYPES.get(job.format, 'application/octet-stream'), as_attachment=True,
+                            filename=f'{stem}-{job.created_at:%Y%m%d}.{job.format}')
     response['Cache-Control'] = 'private, no-store'
     response['X-Content-Type-Options'] = 'nosniff'
     return response
@@ -189,10 +228,26 @@ def _fail(job, message):
     return {'status': 'failed', 'error': message}
 
 
+def build_file(scope, kind, fmt, include_closed, out_path, now, host=''):
+    """Write one report of ``scope`` (an ``agentapi.report_scope.ReportScope``) to ``out_path`` and return what it holds (the summary a report row keeps).
+    Raises LookupError for a host the inventory no longer holds and ``report_pdf.RenderError`` for a PDF that could not be laid out."""
+    from cveFeed import report_csv, report_data, report_pdf
+    target = scope.svc_scope()
+    if fmt == 'csv':
+        organization = scope.org.name if scope.kind == 'org' else (scope.project.org.name if scope.project.org_id else '')
+        written = report_csv.write(target, kind, include_closed, out_path, now, organization=organization)
+        return {'rows': written['rows'], 'omitted': {'rows': written['omitted']}}
+    data = report_data.collect(target, host=host or None, include_closed=include_closed, now=now, kind=kind, org=scope.org, whole=scope.whole)
+    report_pdf.render_pdf(report_pdf.build_html(data), out_path)
+    return {'hosts': len(data['hosts']), 'findings': data['summary']['findings'], 'findings_total': data['summary']['findings'],
+            'hygiene': data['summary']['hygiene'], 'issues': data['summary']['issues'], 'detailed': len(data['detailed']),
+            'omitted': {k: data['caps'][k] for k in ('hosts_omitted', 'writeups_omitted', 'minor_omitted')}}
+
+
 def execute(job_id, celery_id=None):
-    """Make one queued report. Runs in a worker, as the user who asked: the role is checked again, the report is read for that
-    project only, and the PDF is written to a random file name that becomes visible only when it is complete."""
-    from cveFeed import report_data, report_pdf
+    """Make one queued report. Runs in a worker, as the user who asked: the access is checked again, the report is read for that
+    project (or the organization's projects they can read now) only, and the file is written to a random file name that becomes visible only when it is complete."""
+    from cveFeed import report_pdf
     from cveFeed.models import ReportExport
     now = timezone.now()
     claimed = ReportExport._base_manager.filter(pk=job_id, status='queued').update(status='running', started_at=now, celery_id=celery_id or '')
@@ -202,22 +257,21 @@ def execute(job_id, celery_id=None):
         prune_expired(now)
     except Exception:  # noqa: BLE001 - housekeeping must never stop a report
         logger.warning('could not remove expired reports', exc_info=True)
-    job = ReportExport._base_manager.select_related('project__org', 'requested_by').get(pk=job_id)
+    job = ReportExport._base_manager.select_related('project__org', 'org', 'requested_by').get(pk=job_id)
     user = job.requested_by
     if not user.is_active:
         return _fail(job, 'the account that asked for this report is disabled')
-    try:
-        get_project(Ctx(user=user), job.project.slug)
-    except ApiError:
-        return _fail(job, 'you no longer have access to this project')
+    scope = report_scope.for_worker(user, 'project' if job.project_id else 'org', project_id=job.project_id, org_id=job.org_id)
+    if scope is None:
+        return _fail(job, f'you no longer have access to this {"project" if job.project_id else "organization"}')
     directory = report_dir()
     os.makedirs(directory, mode=0o700, exist_ok=True)
-    filename = secrets.token_hex(24) + '.pdf'
+    filename = secrets.token_hex(24) + '.' + job.format
     final = os.path.join(directory, filename)
     partial = final + '.partial'
     try:
-        data = report_data.collect(job.project, host=job.host or None, include_closed=job.include_closed, now=now)
-        report_pdf.render_pdf(report_pdf.build_html(data), partial)
+        with tenancy_scope.as_user(user):  # a second guard: every read below already filters by the report's projects
+            summary = build_file(scope, job.kind, job.format, job.include_closed, partial, now, host=job.host)
         os.chmod(partial, 0o600)
         os.replace(partial, final)
     except LookupError:
@@ -228,8 +282,6 @@ def execute(job_id, celery_id=None):
         logger.exception('report %s failed', job.pk)
         _remove_partial(partial)
         return _fail(job, 'the report could not be generated; see the worker log')
-    summary = {'hosts': len(data['hosts']), 'findings': len(data['findings']), 'findings_total': data['summary']['findings'],
-               'hygiene': data['caps']['hygiene_shown'], 'omitted': {k: data['caps'][k] for k in ('hosts_omitted', 'findings_omitted', 'hygiene_omitted')}}
     finished = timezone.now()
     ReportExport.objects.filter(pk=job.pk).update(status='done', filename=filename, size_bytes=os.path.getsize(final), summary=summary,
                                                   finished_at=finished, expires_at=finished + ttl())

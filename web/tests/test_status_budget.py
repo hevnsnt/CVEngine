@@ -22,12 +22,21 @@ def waiting(release):
     return lambda p, n, d: release.wait(30) and None
 
 
+def end_probe_threads(release):
+    """Let every probe thread a test left waiting end, and wait for it: a thread that wakes later runs its ``connections.close_all()`` inside
+    the next test, which then sees a call it never made."""
+    release.set()
+    for thread in threading.enumerate():
+        if thread.name.startswith('status-probe-'):
+            thread.join(5)
+    status_probes.reset()
+
+
 class EngineTests(SimpleTestCase):
     def setUp(self):
         status_probes.reset()
         self.release = threading.Event()
-        self.addCleanup(self.release.set)
-        self.addCleanup(status_probes.reset)
+        self.addCleanup(end_probe_threads, self.release)
 
     def test_a_probe_that_hangs_is_named_and_the_others_answer(self):
         probes = [Probe('hangs', waiting(self.release), limit=0.5, db=False), Probe('fine', lambda p, n, d: {'ok': 1}, db=False)]
@@ -75,8 +84,9 @@ class EngineTests(SimpleTestCase):
 
     def test_the_threads_database_connection_is_bounded_and_closed(self):
         calls = []
+        mine = lambda: threading.current_thread().name == 'status-probe-db'  # any other thread still ending is not this probe's
         with mock.patch('agentapi.status_probes._bound_database', lambda limit: calls.append(limit)), \
-                mock.patch('django.db.connections.close_all', lambda: calls.append('closed')):
+                mock.patch('django.db.connections.close_all', lambda: mine() and calls.append('closed')):
             status_probes.run([Probe('db', lambda p, n, d: 1, limit=2)], budget=3)
         self.assertEqual(calls, [2, 'closed'])
 
@@ -97,7 +107,7 @@ class StatusTests(TransactionTestCase):
 
     def test_a_hanging_probe_does_not_hang_the_status_and_is_named(self):
         release = threading.Event()
-        self.addCleanup(release.set)
+        self.addCleanup(end_probe_threads, release)
         with mock.patch.dict(os.environ, {'CVENGINE_STATUS_PROBE_SECONDS': '1', 'CVENGINE_STATUS_BUDGET_SECONDS': '4'}), \
                 mock.patch.object(system_status, '_feeds', lambda: release.wait(30)), \
                 mock.patch.object(system_status, '_broker_client', lambda: mock.Mock(ping=lambda: True, llen=lambda n: 0, hlen=lambda n: 0)):
@@ -169,7 +179,7 @@ class ColdInventoryTests(TestCase):
 class RedisScanTests(SimpleTestCase):
     def test_the_status_scans_ask_for_a_thousand_keys_at_a_time(self):
         """SCAN with no COUNT hint reads ten keys a call: 300000 keys (a day of Celery results) took 3.2 s against 0.28 s with the hint."""
-        from reNgine import resources
+        from cvengine import resources
         client = mock.Mock()
         client.scan_iter.return_value = iter(())
         store = mock.Mock(r=client)

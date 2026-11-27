@@ -43,7 +43,7 @@ from django.db import transaction
 from django.db.models import F, Q
 from django.utils import timezone
 
-from reNgine.state_machines import RUN_DONE, RUN_FAILED, RUN_READY, RUN_RUNNING, RUN_WAITING, STAGE_RUN
+from cvengine.state_machines import RUN_DONE, RUN_FAILED, RUN_READY, RUN_RUNNING, RUN_WAITING, STAGE_RUN
 
 logger = logging.getLogger(__name__)
 
@@ -165,6 +165,7 @@ class Pass:
         self.activity_new = []
         self.groups = dict(engine.get('groups') or {})
         self.claims = [tuple(c) for c in engine.get('claims') or []]
+        self._held = None  # the set of self.claims, built on the first hold_claim
         self.token = engine.get('token') or uuid.uuid4().hex[:16]
         self.refill = False
         self.works = {}  # key -> restored _Dispatch, for this pass
@@ -257,8 +258,12 @@ class Pass:
 
     def hold_claim(self, key, owner):
         """A Redis claim (key, owner) this pass holds that must outlive it: kept by the drive while the run waits, released when the run ends."""
-        if (key, owner) not in self.claims:
-            self.claims.append((key, owner))
+        pair = (key, owner)
+        if self._held is None:  # a set beside the list (only this method adds to it): a test on the list scanned every claim held, per claim
+            self._held = set(self.claims)
+        if pair not in self._held:
+            self.claims.append(pair)
+            self._held.add(pair)
 
     def claim_owner(self, service):
         return f'stagerun:{self.token}:{service}'[:120]
@@ -500,7 +505,7 @@ def _settle_leftovers(p):
 
 
 def _redis():
-    from reNgine import resources
+    from cvengine import resources
     return getattr(resources.get_store(), 'r', None)
 
 
@@ -508,24 +513,30 @@ def _release_claims(claims):
     client = _redis()
     if client is None:
         return
-    from reNgine import resources
-    for key, owner in claims:
-        try:
-            resources.claim_release(client, key, owner)
-        except Exception:  # noqa: BLE001 - a claim left behind expires on its own
-            pass
+    from cvengine import resources
+    try:  # one call per chunk of claims; a chunk that fails is retried key by key inside, so one bad key never keeps the rest
+        resources.claim_release_many(client, claims)
+    except Exception:  # noqa: BLE001 - a claim left behind expires on its own
+        pass
 
 
 def _renew_claims(claims):
     client = _redis()
     if client is None:
         return
-    from reNgine import resources
-    for key, owner in claims:
-        try:
-            resources.claim_refresh(client, key, owner, HOLD_SECONDS)
-        except Exception:  # noqa: BLE001
-            pass
+    from cvengine import resources
+    # a run can hold tens of thousands of claims: one call per chunk, not one round trip per claim (see claim_refresh_many)
+    try:
+        results = resources.claim_refresh_many(client, claims, HOLD_SECONDS)
+    except Exception:  # noqa: BLE001 - a claim not renewed expires and may be taken; say so instead of hiding it
+        logger.warning('stage runs: %s held claim(s) could not be renewed', len(claims), exc_info=True)
+        return
+    failed = [key for (key, _owner), got in zip(claims, results) if got is None]
+    lost = [key for (key, _owner), got in zip(claims, results) if got == 'lost']
+    if failed:
+        logger.warning('stage runs: %s held claim(s) could not be renewed, first %s', len(failed), failed[0])
+    if lost:
+        logger.warning('stage runs: %s held claim(s) were taken by another job while the run waited, first %s', len(lost), lost[0])
 
 
 # --- waking ------------------------------------------------------------------------------------------------------------------------------
@@ -821,10 +832,13 @@ def open_scan_ids(scan_ids=None):
 
 
 def prune(now=None, days=7):
-    """Delete ended runs older than ``days`` (the weekly maintenance)."""
+    """Delete ended runs older than ``days``. The weekly maintenance (``cveFeed.maintenance.prune_operational``) calls it with
+    CVENGINE_STAGE_RUN_RETENTION_DAYS. Deleted in id order, ``maintenance.DELETE_CHUNK`` ids per statement. An open run is never touched,
+    and nothing reads an ended run once it ended: the metrics read the last hour, the reaper and the adopter read open runs only."""
     from agentapi.models import StageRun
+    from cveFeed.maintenance import keyset_delete
     now = now or timezone.now()
-    return StageRun.objects.filter(state__in=('done', 'failed', 'cancelled'), finished_at__lt=now - timedelta(days=days)).delete()[0]
+    return keyset_delete(StageRun._base_manager.filter(state__in=('done', 'failed', 'cancelled'), finished_at__lt=now - timedelta(days=days)))
 
 
 # --- metrics -----------------------------------------------------------------------------------------------------------------------------

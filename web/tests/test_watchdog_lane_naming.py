@@ -1,4 +1,4 @@
-"""R1 names itself and does not restart a lane that is alive (cveFeed.watchdog, reNgine.lane_memory).
+"""R1 names itself and does not restart a lane that is alive (cveFeed.watchdog, cvengine.lane_memory).
 
 On 11/15 the scanner host's watchdog had recreated the celery container 31 times since 11/9 and its log said only "restart-celery R1": the lane that was silent,
 for how long, what the ping returned and why were not recorded. The database held the lane (the classic lane, queue empty, on every restart since 11/13), and the
@@ -14,7 +14,7 @@ from django.test import SimpleTestCase, TestCase
 
 from cveFeed import watchdog as wd
 from cveFeed.models import WatchdogEvent
-from reNgine import lane_memory as lm
+from cvengine import lane_memory as lm
 from tests import test_watchdog as base
 
 LANE_NAMES = ('discovery', 'cve_feed', 'validation_priority', 'classic')

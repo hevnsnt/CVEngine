@@ -1,6 +1,6 @@
 """Celery tasks for syncing the cve.now feed.
 
-Autodiscovered by the reNgine.tasks celery app; routed to cve_feed_queue, which
+Autodiscovered by the cvengine.tasks celery app; routed to cve_feed_queue, which
 a dedicated worker consumes (see web/celery-entrypoint.sh). Schedule it with
 django_celery_beat (e.g. every 30 minutes).
 """
@@ -9,7 +9,7 @@ import os
 import re
 import time
 
-from reNgine.celery import app
+from cvengine.celery import app
 from cveFeed import cve_now
 from cveFeed.cve_now import CVENowClient
 from cveFeed.models import CVEEntry
@@ -254,7 +254,7 @@ def sync_cve_now_feed(max_new=200, catch_up_after=40, max_scan=5000, refresh_max
     * A few CVEs with open matches not read for a day are read again anyway (``refresh_max``): a safety net while the changes lag.
     One run at a time (a Redis claim): a run that finds another running returns at once.
     """
-    from reNgine import resources
+    from cvengine import resources
     with resources.redis_claim(SYNC_LOCK, _sync_owner(), SYNC_LOCK_TTL) as holder:
         if holder is not True:
             return {'status': 'running', 'holder': str(holder)}
@@ -1360,7 +1360,9 @@ def validate_match_on_demand(request_id):
         remaining = [check for check in available_checks if check['kind'] not in selected]
         if remaining and checks and not check_result.get('hits') and not check_result.get('stopped'):
             row.refresh_from_db()
-            observations = [{'kind': step.get('kind'), 'result': step.get('result'), 'summary': step.get('summary')}
+            # a step's summary can quote the URL it read ("Fetched https://<host>/..."): the host's own names out, as in the host context
+            names = host_context._names_of(match.subdomain)
+            observations = [{'kind': step.get('kind'), 'result': step.get('result'), 'summary': host_context._s(step.get('summary'), 300, names)}
                             for step in (row.validation_steps or [])[-6:]]
             second_step = activity.log('confirm', f'Validation request #{job.pk}: reviewing observations and choosing the next check',
                                        project=job.project_id, cve_id=cve_id, status='running', **detail)
@@ -1523,12 +1525,18 @@ def reconcile_invalid_correlations(limit=50):
             cursor.last_pk = 0
             batch = list(base[:batch_size])
         closed, by_reason = 0, {}
-        for match in batch:
-            reason = correlation.invalid_identity_reason(match)
-            if reason and correlation.close_invalid_correlation(match, reason):
-                closed += 1
-                kind = js_libraries.closure_kind(reason) or 'identity'
-                by_reason[kind] = by_reason.get(kind, 0) + 1
+        from cveFeed import match_policy
+        match_policy.prime_standing(batch)  # what invalid_identity_reason asks of each match, read for the batch at once
+        match_policy.prime_sightings(batch)
+        try:
+            for match in batch:
+                reason = correlation.invalid_identity_reason(match)
+                if reason and correlation.close_invalid_correlation(match, reason):
+                    closed += 1
+                    kind = js_libraries.closure_kind(reason) or 'identity'
+                    by_reason[kind] = by_reason.get(kind, 0) + 1
+        finally:
+            match_policy.forget_primed(batch)
         if batch:
             cursor.last_pk = batch[-1].pk
         cursor.save(update_fields=['last_pk', 'updated_at'])
@@ -1547,7 +1555,7 @@ SETTLE_SECONDS = 60  # one run of settle_library_proven_task works this long, th
 @app.task(name='settle_library_proven', bind=False, queue='cve_feed_queue')
 def settle_library_proven_task(seconds=SETTLE_SECONDS, clock=None):
     """Bring the CVE matches judged before the library rule in line with it (``triage.settle_library_proven``), once per install, off the
-    worker's start: queued by ``reNgine.celery.settle_library_proven_answers``. One worker at a time holds the cursor row (``SELECT ... FOR
+    worker's start: queued by ``cvengine.celery.settle_library_proven_answers``. One worker at a time holds the cursor row (``SELECT ... FOR
     UPDATE SKIP LOCKED``: another run that finds it held returns at once), works batches in pk order for ``seconds``, saves the cursor after
     each batch and queues the next run to resume from it; the last batch records the done lane, and any later run returns at once.
     Idempotent: a batch that is run twice writes nothing the second time. Returns the counts."""
@@ -1584,7 +1592,7 @@ def settle_library_proven_task(seconds=SETTLE_SECONDS, clock=None):
 @app.task(name='run_upgrade_backfills', bind=False, queue='cve_feed_queue', time_limit=3600, soft_time_limit=3300)
 def run_upgrade_backfills():
     """Apply the next backfill this install has not finished (``cveFeed.upgrade_backfills``), then queue the next run while any remain.
-    Queued by ``reNgine.celery.run_pending_backfills`` when a worker starts, so an update needs nobody to run a command. A run that finds
+    Queued by ``cvengine.celery.run_pending_backfills`` when a worker starts, so an update needs nobody to run a command. A run that finds
     another one holding the claim returns; that one queues the rest. Returns the outcome."""
     from cveFeed import upgrade_backfills
     result = upgrade_backfills.run_next()
@@ -1896,7 +1904,7 @@ def run_hygiene_all():
 
 @app.task(name="watch_certificate_transparency", bind=True, queue="ctwatch_queue")
 def watch_certificate_transparency(self, domain_id):
-    """Check one target against crt.sh for hosts not already known (see cveFeed.ctmonitor). When crt.sh could not be reached
+    """Check one target against crt.sh (Cert Spotter when crt.sh cannot answer) for hosts not already known (see cveFeed.ctmonitor). When no source could be reached
     (rate limit, timeout) the check is tried again later instead of the target being skipped. It has a queue of its own, off the
     feed queue that runs the work conductor, the reaper and the Sentinel feed: hundreds of lookups wait behind one shared rate limit,
     and a lookup that would sleep longer than a moment inside a slot goes back to the queue instead (``ctmonitor.CtBusy``).
@@ -2158,12 +2166,13 @@ def host_pipeline(self, domain_id, names, by_person=False):
 
 
 @app.task(name='assess_host', bind=True, queue='discovery_queue')
-def assess_host(self, assessment_id):
-    """Execute one stored, scope-checked host assessment; the broker carries no target text."""
+def assess_host(self, assessment_id, front=False):
+    """Execute one stored, scope-checked host assessment; the broker carries no target text. ``front``: a person asked for it
+    (``host_assessment.PERSON_PRIORITY``), so it is never put off for the scans' share of the pool."""
     from cveFeed import host_assessment
     if not host_assessment.still_queued([assessment_id]):
         return {'status': 'dropped', 'reason': 'the assessment already ended'}  # FC-4: its row is stopped, done, failed or gone: nothing to put off
-    if host_assessment.over_share() and host_assessment.deferral_count(self.request.id) <= host_assessment.SHARE_DEFER_LIMIT:  # a scan waits and assessments already hold their share of the pool: look again shortly (the row stays queued)
+    if not front and host_assessment.over_share() and host_assessment.deferral_count(self.request.id) <= host_assessment.SHARE_DEFER_LIMIT:  # a scan waits and assessments already hold their share of the pool: look again shortly (the row stays queued)
         assess_host.apply_async(args=[assessment_id], task_id=self.request.id, countdown=host_assessment.SHARE_DEFER_SECONDS, queue='discovery_queue', priority=host_assessment.ASSESS_PRIORITY)
         return {'status': 'deferred', 'reason': 'scans are waiting and host assessments hold their share of the discovery pool'}
     return host_assessment.execute(assessment_id, celery_id=self.request.id)
@@ -2335,7 +2344,7 @@ def weekly_deep_nuclei():
 def _weekly_deep_host(context):
     """One host of the weekly deep Nuclei pass (``weekly_deep_nuclei``), and the completion callback of one that waited on Sentinels."""
     from cveFeed import activity, ledger, nuclei_scan
-    from reNgine import resources
+    from cvengine import resources
     from startScan.models import Subdomain
     sub = Subdomain.objects.select_related('scan_history', 'target_domain').filter(pk=context['sub_id']).first()
     if sub is None:
@@ -2495,9 +2504,12 @@ def status_warm_rows(project_ids, token=None):
 @app.task(name="reviewer_ops_checks", bind=False, queue="cve_feed_queue", time_limit=600, soft_time_limit=540)
 def reviewer_ops_checks():
     """Every half hour: the operations checks of docs/AI-REVIEWER.md, raising and resolving the admin alerts (``cveFeed.reviewer``). No AI is
-    involved; the reviewer container adds its diagnosis a few times a day."""
-    from cveFeed import reviewer
-    return reviewer.run_ops_checks()
+    involved; the reviewer container adds its diagnosis a few times a day. While a client address notice is open its check runs again here, at
+    most once an hour, so the notice clears itself soon after the host nginx lines are installed (``cveFeed.client_address.recheck_if_open``)."""
+    from cveFeed import client_address, reviewer
+    result = reviewer.run_ops_checks()
+    client_address.recheck_if_open()
+    return result
 
 
 @app.task(name="apply_ai_job", bind=False, queue="cve_feed_queue", time_limit=900, soft_time_limit=840)
@@ -2629,8 +2641,8 @@ def write_cve_guidance_now(count=200):
 @app.task(name="report_resources", bind=False, queue="cve_feed_queue")
 def report_resources():
     """Every 30 seconds: publish this container's memory and budget so Settings > Resources (served by another
-    container) can show it. See reNgine/resources.py."""
-    from reNgine import resources
+    container) can show it. See cvengine/resources.py."""
+    from cvengine import resources
     resources.report_state()
     from cveFeed import scan_concurrency
     scan_concurrency.reconcile()  # republish the saved scan concurrency and resize the discovery worker if it differs (never raises)
@@ -2716,6 +2728,12 @@ def _reap_stuck_jobs():
         activity.log('discovery', 'Closed scans/assessments a restarted worker left running with no Celery task behind: '
                      + ', '.join(f'{n} {key}' for key, n in orphaned.items()), status='failed', **orphaned)
         counts.update({f'{key}:orphaned': n for key, n in orphaned.items()})
+    stuck = reaper.expire_stuck_queued()  # before the redispatch below, so a row closed here is never sent again in the same tick
+    if stuck:
+        ids = [pk for pk, _ in stuck]
+        activity.log('discovery', f'Closed {len(ids)} queued scan{"s" if len(ids) != 1 else ""} that nothing would ever start, marked failed with the reason '
+                     f'(#{", #".join(map(str, ids[:10]))}{", ..." if len(ids) > 10 else ""}): {stuck[0][1]}', status='notice', scan_ids=ids[:50])
+        counts['ScanHistory:queued_stuck'] = len(ids)
     again = reaper.redispatch_queued_assessments()
     if again:
         activity.log('discovery', f'Queued {again} host assessment{"s" if again != 1 else ""} again: their worker message was lost, most likely in a restart',
@@ -2837,6 +2855,36 @@ def evaluate_saved_searches():
         cache.delete("cvengine:saved-searches")
 
 
+@app.task(name="sync_zero_wire", bind=False, queue="cve_feed_queue", time_limit=300, soft_time_limit=240)
+def sync_zero_wire():
+    """Every six hours: read Cloudflare Radar's Zero Wire feed for the email reports (cveFeed.zero_wire). It fetches nothing while an App Admin has the switch
+    off, and a failure is stored for the Reporting page and retried at the next run."""
+    from cveFeed import zero_wire
+    return zero_wire.sync()
+
+
+@app.task(name="send_report_digests", bind=False, queue="report_queue", time_limit=3600, soft_time_limit=3300)
+def send_report_digests():
+    """Every 15 minutes: send the email reports whose time has come (cveFeed.report_digests), retry transient failures and expire sends a dead worker left
+    half done. One run at a time; each report is claimed before it is sent, so a repeated run never sends a period twice."""
+    from django.core.cache import cache
+
+    from cveFeed import report_digests
+    if not cache.add("cvengine:report-digests", 1, timeout=3600):
+        return {"skipped": "another run is sending"}
+    try:
+        return report_digests.send_due()
+    finally:
+        cache.delete("cvengine:report-digests")
+
+
+@app.task(name="send_report_test", bind=False, queue="report_queue", time_limit=1800, soft_time_limit=1700)
+def send_report_test(subscription_id, user_id):
+    """One test send of an email report to the person who asked (cveFeed.report_digests.send_test_by_id)."""
+    from cveFeed import report_digests
+    return report_digests.send_test_by_id(subscription_id, user_id)
+
+
 @app.task(name="weekly_maintenance", bind=False, queue="cve_feed_queue")
 def weekly_maintenance():
     """Weekly: archive the AI activity feed, AI call leases and AI usage rows past their retention to a tar.gz and delete them
@@ -2866,7 +2914,9 @@ def weekly_maintenance():
                           f'({", ".join(f"{k} {v:,}" for k, v in result["archived"].items() if v)}) into '
                           f'{os.path.basename(result["archive"])}' if archived else
                           'Weekly log maintenance: no log rows were past their retention')
-                 + (f'; {result["archives_removed"]} expired archive(s) deleted' if result['archives_removed'] else ''),
+                 + (f'; {result["archives_removed"]} expired archive(s) deleted' if result['archives_removed'] else '')
+                 + (f'; pruned {", ".join(f"{k} {v:,}" for k, v in result.get("pruned", {}).items() if v)}'
+                    if any(result.get('pruned', {}).values()) else ''),
                  archived=result['archived'], deleted=result['deleted'])
     return result
 

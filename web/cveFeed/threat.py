@@ -193,15 +193,16 @@ def manual_heat(finding):
     return value if value in HEAT_RANK else ""
 
 
-def manual_heat_reason(finding):
+def manual_heat_reason(finding, person=True):
     """"set to smoke by alice: <their reason>" for a finding whose heat a person set (``manual_heat``), else ''. The user is
-    ``heat_override_by`` (load ``triage__heat_override_by`` with a list to save a query per overridden row)."""
+    ``heat_override_by`` (load ``triage__heat_override_by`` with a list to save a query per overridden row). ``person=False`` (what an AI prompt
+    is given) says "by a person" instead of the login: who set a heat is personal data no model needs."""
     heat = manual_heat(finding)
     if not heat:
         return ""
     row = finding.triage
     by = getattr(row, "heat_override_by", None) if getattr(row, "heat_override_by_id", None) else None
-    who = by.username if by is not None else "a user no longer here"
+    who = "a person" if not person else (by.username if by is not None else "a user no longer here")
     reason = (getattr(row, "heat_override_reason", "") or "").strip()
     return f"set to {heat} by {who}" + (f": {reason}" if reason else "")
 
@@ -223,6 +224,8 @@ def match_heat(match, capped=True):
         return manual
     cve = match.cve_entry
     policy = heat_policy()
+    if capped and match_policy.is_reported_only(match):
+        return ICE  # a third party's word for the version (runZero) is a candidate to check: ice until a first-party read or a check confirms it
     if policy != LEGACY_POLICY:
         if match.distro_status == "patched" or match_policy.version_unknown(match) or not is_hot(cve.kev, cve.exploit_db):
             return ICE
@@ -273,15 +276,16 @@ REASON_RANGE_READ = "only a range of the appliance's builds could be read from o
 REASON_BUNDLED = "the bundled component's version is only inferred from the product release: kept for review"
 REASON_WINDOWS_PATCH = "the Windows release is known, but its patch level cannot be read from outside: kept for review"
 REASON_NOT_HOT = "not on the KEV and no known exploit"
+REASON_REPORTED_ONLY = "the version was only reported by a third party: ice until our own read or a check confirms it"
 
 
-def heat_reason(match, heat=None):
+def heat_reason(match, heat=None, person=True):
     """One short sentence that says WHY a CVEMatch shows its heat, for tooltips, host reasons, the REST/MCP ``heat_reason`` field and the AI's
     context: "on the KEV; version proven (...)", "on the KEV; version not proven", "not on the KEV and no known exploit", "the host's
     distribution has patched it", ... ``heat`` is ``match_heat(match)`` when the caller has it. For a heat a person set: "set to smoke by
     alice: <their reason>" (``manual_heat_reason``)."""
     from cveFeed import match_policy
-    manual = manual_heat_reason(match)
+    manual = manual_heat_reason(match, person)
     if manual:
         return manual
     cve = match.cve_entry
@@ -298,6 +302,8 @@ def heat_reason(match, heat=None):
         if match_policy.evidence_flag(match.evidence, 'bundled_inferred'):
             return REASON_BUNDLED
         return REASON_RUNTIME_UNKNOWN if match_policy.evidence_flag(match.evidence, 'runtime_unknown') else REASON_VERSION_UNKNOWN
+    if heat == ICE and match_policy.is_reported_only(match) and (heat_policy() == LEGACY_POLICY or is_hot(cve.kev, cve.exploit_db)):
+        return REASON_REPORTED_ONLY
     capped_why = triage_cap_reason(match, heat)
     if heat_policy() == LEGACY_POLICY:
         why = "legacy heat policy: KEV, a public exploit, CVSS and EPSS"
@@ -333,6 +339,8 @@ def match_heat_rank_expr(capped=True):
              When(distro_status="patched", then=Value(HEAT_RANK[ICE])),
              When(version_unknown_q(), then=Value(HEAT_RANK[ICE]))]
     if capped:
+        from cveFeed.match_policy import reported_only_q
+        whens.append(When(reported_only_q(), then=Value(HEAT_RANK[ICE])))  # ``match_heat``: a reported-only version is ice
         whens.append(When(triage_clean_q(match=True), then=Value(HEAT_RANK[ICE])))
     if heat_policy() != LEGACY_POLICY:
         hot = hot_q("cve_entry__")
@@ -430,12 +438,12 @@ def finding_heat(vuln, capped=True, hot_names=None, policy=None):
     return capped_by_triage(heat, vuln)
 
 
-def finding_heat_reason(vuln, heat, hot_names=None):
+def finding_heat_reason(vuln, heat, hot_names=None, person=True):
     """Why a scanner finding has its heat: under the KEV policy for one that names CVEs, and for any finding a cap holds below its severity
     (a validation that came back clean, a triage still pending or needing validation, a template match no validation reproduced); else ''
     (a finding without CVEs is rated by its severity). A heat a person set says who set it and why, under either policy
     (``manual_heat_reason``)."""
-    manual = manual_heat_reason(vuln)
+    manual = manual_heat_reason(vuln, person)
     if manual:
         return manual
     if heat is None:

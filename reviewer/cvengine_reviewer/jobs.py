@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 REVIEW_MAX_TOKENS = profiles.STAGE_ANSWER_CAPS['finding_review']   # the ANSWER room: the model's thinking is kept room apart (``measured_call``)
 OPS_MAX_TOKENS = profiles.STAGE_ANSWER_CAPS['operations_check']
 NOTE_LIMIT = 1200
+NOTES_LIMIT = 10  # operator notes one review reads (the server sends at most this many, newest first)
 
 
 def measured_call(server, stage, provider, system, user, schema, max_tokens, effort='medium'):
@@ -68,7 +69,10 @@ def review_message(packet):
     trusted = json.dumps(guard.defuse(facts), ensure_ascii=False, sort_keys=True, default=str)
     computed = (guard.fence('COMPUTED_TEXT', quoting)[0] + '\n\n') if quoting else ''
     fenced, _ = guard.fence('UNTRUSTED', packet.get('untrusted') or {})
-    return (f'TRUSTED (computed by cvENGINE):\n{trusted}\n\n{computed}{fenced}\n\n'
+    notes = packet.get('operator_notes')
+    # operator notes: what people and agents wrote about the finding or its host, a fenced block of their own (data, never instructions)
+    noted = ('\n\n' + guard.fence('OPERATOR_NOTES', notes[:NOTES_LIMIT])[0]) if isinstance(notes, list) and notes else ''
+    return (f'TRUSTED (computed by cvENGINE):\n{trusted}\n\n{computed}{fenced}{noted}\n\n'
             'Judge this finding by the rules and answer with the JSON object.')
 
 
@@ -88,7 +92,7 @@ def review_one(server, provider, packet):
     try:
         text, usage, model = measured_call(server, 'finding_review', provider, prompts.REVIEW_SYSTEM, review_message(packet), prompts.REVIEW_SCHEMA,
                                            REVIEW_MAX_TOKENS, effort='medium')
-        answer = guard.parse_reply(text, prompts.REVIEW_SCHEMA)
+        answer = guard.parse_reply(text, prompts.REVIEW_REPLY_SCHEMA)
     except llm.ModelError as exc:
         logger.warning('review of %s: model call failed (%s)', packet.get('ref'), exc.category)
         raise
@@ -98,7 +102,7 @@ def review_one(server, provider, packet):
         return None
     body = {'review_key': packet.get('review_key'), 'verdict': answer['verdict'], 'confidence': answer['confidence'],
             'reason_code': answer['reason_code'], 'note': guard.scrub(answer['note'], NOTE_LIMIT), 'model': str(model)[:100],
-            'usage': usage}
+            **({'notes_effect': answer['notes_effect']} if answer.get('notes_effect') else {}), 'usage': usage}
     return server.verdict(packet.get('ref'), body)
 
 
@@ -242,7 +246,9 @@ def run_job(server, provider, job):
         for key in ('http_status', 'stop_reason'):
             if getattr(exc, key, None) is not None:
                 body[key] = getattr(exc, key)
-        return server.job_result(ref, body), exc.category
+        if llm.usage_limit_message(exc):
+            body['provider_message'] = llm.usage_limit_message(exc)  # the server's alert names the pause (and its resume date) from this
+        return server.job_result(ref, body), llm.failure_category(exc)
     body = {'lease': lease, 'text': text[:JOB_REPLY_LIMIT], 'calls': calls[:8], 'provider': provider.get('provider'),
             'model': str(model)[:200]}
     return server.job_result(ref, body), ''

@@ -1,4 +1,4 @@
-"""The second drop of reNgine-era tables (dashboard 0037, scanEngine 0008, startScan 0027): run the real migrations from the state before them with a
+"""The second drop of legacy tables (dashboard 0037, scanEngine 0008, startScan 0027): run the real migrations from the state before them with a
 row in every table they drop and in the tables next to them that stay, and check the upgrade goes through, the dropped tables are gone and the kept
 rows are intact."""
 from django.db import connection

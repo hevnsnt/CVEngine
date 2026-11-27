@@ -113,7 +113,7 @@ def _product_key(match):
 
 def _plain(text, limit=80):
     """A product name from a scanner or a feed, reduced to the characters a product name uses (shown as text, never run)."""
-    from reNgine.ai_providers import clean_text
+    from cvengine.ai_providers import clean_text
     return clean_text(str(text or ''), limit, strict=True)
 
 
@@ -274,6 +274,9 @@ def _where_version(match, key):
             return 'the version in the Server header'
         if ev.get('version_source') == 'body':
             return 'the version the library file states'
+        if ev.get('reported'):
+            from cveFeed import source_versions
+            return f'the version {source_versions.PROVIDER_LABELS.get(ev.get("reported_by"), "a third-party data source")} reported'
         return 'the version the technology fingerprint read'
     if match.source == 'wp-plugin':
         return 'the version the plugin\'s readme states'
@@ -632,6 +635,10 @@ def _found(match, family, key, label, version):
         port = confirm_guide._port(ev.get('port'))
         proto = 'udp' if str(ev.get('protocol') or '').lower() == 'udp' else 'tcp'
         head = (f'The service on port {port}/{proto} says it is {named}{on}.' if port else f'A service on this host says it is {named}{on}.')
+    elif match.source == 'tech' and ev.get('reported'):
+        from cveFeed import source_versions
+        who = source_versions.PROVIDER_LABELS.get(ev.get('reported_by'), 'a third-party data source')
+        head = f'{who} reports {named}{on}. cvENGINE\'s own checks have not read it on this host.'
     elif match.source == 'tech':
         if 'Server header' in _where_version(match, key):
             head = f'The web server says it is {named}{on}.'
@@ -939,7 +946,7 @@ def precondition_words(match):
         seen = stored.get(key) if isinstance(stored.get(key), dict) else {}
         state = seen.get('state') if seen.get('state') in service_features.STATES else 'unknown'
         reading = _plain(seen.get('detail'), 120)
-        from reNgine.ai_providers import clean_text
+        from cvengine.ai_providers import clean_text
         said = clean_text(str(need.get('quote') or ''), 300) or ''  # the advisory's sentence: feed prose, shown as text
         if closed_reason and service_features._words(key, 'ruled_out') in closed_reason:
             state, closed = 'ruled_out', True

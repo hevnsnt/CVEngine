@@ -14,8 +14,8 @@ from cveFeed.exclusions import drop_excluded, excluded_names, is_excluded, norma
 from cveFeed.models import (AssetChange, CVEEntry, CVEMatch, FindingComment, HostExclusion, HostLabel, HostProfile, HostState, RouteAuth)
 from cveFeed.nuclei_scan import scan_targets
 from dashboard.models import AuditLog, Org, OrgMembership, Project, ProjectMembership
-from reNgine import discovery_events as bbot_lib, resources
-from reNgine.tasks import persist_bbot_result, save_subdomain
+from cvengine import discovery_events as bbot_lib, resources
+from cvengine.tasks import persist_bbot_result, save_subdomain
 from scanEngine.models import EngineType
 from startScan.models import EndPoint, IpAddress, Port, ScanHistory, Subdomain, Vulnerability
 from targetApp.models import Domain
@@ -199,13 +199,21 @@ class DeleteHostTests(Base):
 		self.assertTrue(Domain.objects.filter(name=HOST).exists())
 		self.assertEqual(list(Subdomain.objects.filter(target_domain=target).values_list('name', flat=True)), [f'www.{HOST}'])
 
-	def test_it_is_all_or_nothing(self):
+	def test_a_failure_keeps_the_batches_done_and_the_rest_whole_and_running_it_again_finishes(self):
+		"""The host's copies go first in bounded batches of their own transactions (_drain_host); the rest is one transaction. A failure
+		in it keeps the copies already gone and rolls back the rest whole, and the same delete run again finishes the job."""
 		self.populate(self.a1)
 		before = self.remaining(self.a1)
 		with mock.patch('cveFeed.models.HostProfile.objects.filter', side_effect=RuntimeError('boom')):  # fails after the findings went
 			with self.assertRaises(RuntimeError):
 				hm.delete_host(self.ctx(self.admin), 'a1', HOST)
-		self.assertEqual(self.remaining(self.a1), before)
+		after = self.remaining(self.a1)
+		self.assertEqual(after['subs'], sorted(LOOKALIKES))  # the host's copy and its finding went in their own batch
+		self.assertEqual(after['vulns'], before['vulns'] - 1)
+		self.assertEqual((after['labels'], after['profiles']), (before['labels'], before['profiles']))  # the rest rolled back whole
+		hm.delete_host(self.ctx(self.admin), 'a1', HOST)
+		self.assertEqual(self.remaining(self.a1)['labels'], sorted(LOOKALIKES))
+		self.assertEqual(self.remaining(self.a1)['profiles'], sorted(LOOKALIKES))
 
 	def test_permissions(self):
 		self.populate(self.a1)

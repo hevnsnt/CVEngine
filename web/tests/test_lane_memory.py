@@ -1,10 +1,10 @@
-"""Each worker lane reports its memory and the tasks it held it after (reNgine/lane_memory.py)."""
+"""Each worker lane reports its memory and the tasks it held it after (cvengine/lane_memory.py)."""
 from unittest import mock
 
 from django.core.cache import cache
 from django.test import SimpleTestCase
 
-from reNgine import lane_memory as lm
+from cvengine import lane_memory as lm
 
 
 class LaneMemoryTests(SimpleTestCase):
@@ -40,8 +40,8 @@ class LaneMemoryTests(SimpleTestCase):
 
     def test_the_system_status_carries_the_lanes(self):
         from agentapi import system_status
-        with mock.patch('reNgine.resources.cluster_snapshot', return_value={'store': 'redis', 'containers': []}), \
-                mock.patch('reNgine.lane_memory.report', return_value=[{'lane': 'classic', 'rss_mb': 1.0}]):
+        with mock.patch('cvengine.resources.cluster_snapshot', return_value={'store': 'redis', 'containers': []}), \
+                mock.patch('cvengine.lane_memory.report', return_value=[{'lane': 'classic', 'rss_mb': 1.0}]):
             self.assertEqual(system_status._memory()['lanes'], [{'lane': 'classic', 'rss_mb': 1.0}])
 
 

@@ -1,17 +1,22 @@
 """Situations: what needs a person, one host at a time, ranked.
 
-A **situation** is one host of a project together with everything open on it that needs a person, in four tiers:
+A **situation** is one host of a project together with everything open on it that needs a person, in five tiers:
 
 1. **proven**: a CVE match or scanner finding that one of cvENGINE's own checks reproduced (``Triage.validation_status == 'hit'``, the "Proven
    on this host" card), unless a person set its heat to ice;
 2. **likely**: a CVE match or scanner finding that shows fire or smoke (``cveFeed.threat``: the one definition of heat, including a heat a
    person set by hand), not proven, and not called a false positive by the AI reviewer;
-3. **exposure**: an open database (``source == 'db_exposure'``), a dangling DNS record (the dangling-DNS check), an open admin or cleartext service
-   (Telnet, FTP, r-services, a tailnet admin port) or an exposed secret that counts (not public by design, accepted, revoked or a false positive);
-4. **minor**: everything else that is still open: hygiene findings and ice-heat matches and findings.
+3. **hygiene, high** (``HYGIENE``): the hygiene slips that cost something now, and an exposed secret. An expired certificate, a certificate that
+   expires within 7 days (the ``tls_expired`` and ``tls_expiring`` checks at high severity or worse, which the hygiene rating has not lowered for a
+   development host or a managed platform), a mail domain anyone can spoof (``dmarc_missing`` on a domain that receives mail, or an SPF record that
+   allows every sender: ``spf_allow_all``), a dangling DNS record someone could take over (the dangling-DNS check rated it high or critical, i.e. the
+   target is claimable) and an exposed secret that counts (not public by design, accepted, revoked or a false positive);
+4. **exposure**: an open database (``source == 'db_exposure'``), a dangling DNS record nobody is known to be able to take over, an open admin or
+   cleartext service (Telnet, FTP, r-services, a tailnet admin port);
+5. **minor**: everything else that is still open: other hygiene findings and ice-heat matches and findings.
 
 What is closed is not part of it: fixed, accepted risk, false positive (``cveFeed.closure.CLOSED``), a CVE match the AI ruled out, a scanner
-finding the scans no longer see, informational findings. The sets are the Overview's own: ``counts.exposed_matches``,
+finding the scans no longer see, informational findings. Nor is an archived host (``counts.archived_host_q``: archiving closed its findings). The sets are the Overview's own: ``counts.exposed_matches``,
 ``counts.actionable_findings``, ``counts.actionable_hygiene``, so every host the Overview calls exposed has a situation (``tests/test_situations.py``).
 A situation can exist for a host with only hygiene findings, which the Overview does not call exposed.
 
@@ -20,11 +25,12 @@ page names it (``agentapi.services._one_per_host``); the other names are ``also_
 
 **The rank rule** (the order is the same in the page, REST and MCP; position 1 is the first thing to look at). A situation sorts by, in order:
 
-1. its worst tier: proven, then likely, then exposure, then minor (proof beats likelihood, likelihood beats exposure);
+1. its **lead**, the first of these it has: proven; likely with a known-exploited CVE (on the KEV); high hygiene; any other likely; exposure; minor
+   (proof beats likelihood, a known-exploited likely finding beats a hygiene slip, a hygiene slip beats the other likely findings, and those beat exposure);
 2. known exploited (the CVE is on the KEV) among its proven and likely CVE matches, yes before no (known-exploited beats severity alone);
 3. internet-facing before inside a declared internal network (``cveFeed.internal_view``);
 4. the worst severity among its items (a CVE by its CVSS band, as the Findings list bands it);
-5. how many proven, likely and exposure items it has, more first;
+5. how many proven, likely, high-hygiene and exposure items it has, more first;
 6. the oldest open item, oldest first (age breaks ties);
 7. the host name, then the project id, so the order is total and the same data always gives the same list.
 
@@ -36,25 +42,27 @@ is exposed, and what to do first. Same data, same text. Free text that came from
 invisible characters and cut short (``clean``), and a banner is used only when it looks like a product name (``product``), so a hostile string can
 neither break a page nor talk to an agent; the page draws every field with ``textContent``.
 
-Set-based: four grouped queries (matches, scanner findings, hygiene findings, secrets) give each host's counts, the two inventory queries give
-the hosts, and only the hosts of the page are read item by item (at most ``LIST_ITEMS`` each, one windowed query per source). The number of queries
-does not depend on the number of hosts.
+The ``tier`` of a situation (``top``, what the ``tier`` filter keeps) is its worst tier by number, ``lead`` is the tier that decides its rank above.
+
+Set-based: one pass over the four sources (matches, scanner findings, hygiene findings, secrets: one query each, row by row) gives each host's counts
+and its first ``LIST_ITEMS`` items, the two inventory queries give the hosts, and one small query reads which findings the AI reviewer demotes
+(``disputed_ids``). A list page reads no items of its own; the detail of a host reads its items (at most ``DETAIL_ITEMS``, one windowed query per
+source). The number of queries does not depend on the number of hosts.
 """
 import re
 from collections import defaultdict
-from urllib.parse import quote
 
-from django.db.models import BooleanField, Case, Count, F, IntegerField, Max, Min, Q, Value, When, Window
+from django.db.models import BooleanField, Case, F, IntegerField, Max, Q, Value, When, Window
 from django.db.models.functions import Coalesce, Lower, RowNumber
 
 from cveFeed import counts
 from cveFeed.closure import CLOSED, _CONTROL
 from cveFeed.threat import CRITICAL_CVSS, FIRE, HEAT_RANK, HIGH_CVSS, ICE, SMOKE, VALIDATION_HIT
 
-PROVEN, LIKELY, EXPOSURE, MINOR = 3, 2, 1, 0
-TIER_NAMES = {PROVEN: 'proven', LIKELY: 'likely', EXPOSURE: 'exposure', MINOR: 'minor'}
-TIER_ORDER = (PROVEN, LIKELY, EXPOSURE, MINOR)
-TIER_PHRASE = {PROVEN: 'Proven by a check', LIKELY: 'Likely real', EXPOSURE: 'Exposed', MINOR: 'Lower priority only'}
+PROVEN, LIKELY, HYGIENE, EXPOSURE, MINOR = 4, 3, 2, 1, 0
+TIER_NAMES = {PROVEN: 'proven', LIKELY: 'likely', HYGIENE: 'hygiene', EXPOSURE: 'exposure', MINOR: 'minor'}
+TIER_ORDER = (PROVEN, LIKELY, HYGIENE, EXPOSURE, MINOR)
+TIER_PHRASE = {PROVEN: 'Proven by a check', LIKELY: 'Likely real', HYGIENE: 'High-priority hygiene', EXPOSURE: 'Exposed', MINOR: 'Lower priority only'}
 
 LIST_ITEMS = 12  # items of one host a list row carries
 DETAIL_ITEMS = 200  # items of one host the detail carries
@@ -64,6 +72,10 @@ HEAT_NAMES = {rank: name for name, rank in HEAT_RANK.items()}
 
 # hygiene findings that are an open service (cveFeed.cleartext, cveFeed.tailscale_checks), not a configuration slip
 EXPOSURE_HYGIENE = ('cleartext_telnet', 'cleartext_ftp', 'cleartext_rservices', 'ts_remote_admin_exposed')
+# the hygiene findings that rank as HYGIENE (high hygiene): see the module text. Severity is the one the hygiene rating left (cveFeed.hygiene_rating lowers an
+# expired certificate of a development host and a vendor's own endpoint), so only a certificate that really is a problem now counts.
+HIGH_SEVERITY = 3
+HYGIENE_WHAT = {'tls_expired': 'cert_expired', 'tls_expiring': 'cert_expiring', 'dmarc_missing': 'mail', 'spf_allow_all': 'mail'}
 SOURCE_DB = 'db_exposure'
 DANGLING_NAMES = ('dangling ns', 'dangling cname')  # the names the dangling-DNS check gives its findings (cveFeed.dangling_dns)
 
@@ -92,8 +104,10 @@ def _cve_band():
                 When(cve_entry__cvss__gte=4.0, then=Value(2)), default=Value(1), output_field=IntegerField())
 
 
-def _tier_case(proven, manual_ice, manual_hot, likely, exposure=None):
+def _tier_case(proven, manual_ice, manual_hot, likely, exposure=None, hygiene=None):
     whens = [When(manual_ice, then=Value(MINOR)), When(proven, then=Value(PROVEN))]
+    if hygiene is not None:
+        whens.append(When(hygiene, then=Value(HYGIENE)))
     if exposure is not None:
         whens.append(When(exposure, then=Value(EXPOSURE)))
     whens.append(When(manual_hot | likely, then=Value(LIKELY)))
@@ -119,38 +133,78 @@ def _disputed():
                      & ~Q(triage__retest_state='still_reproduces'), then=Value(True)), default=Value(False), output_field=BooleanField())
 
 
-def _matches(ids):
-    """The Overview's exposed CVE matches of the projects, annotated with ``pid``, ``lname``, ``tier``, ``sev``, ``heat`` and ``first``."""
+def disputed_ids():
+    """The ids of the Triage rows ``_disputed`` holds true for, in one small statement. Only a finding with a non-refused high-confidence false-positive review
+    can be one (a few dozen rows), so the rule runs over those instead of as a dozen correlated subqueries per finding in every ranking statement (they cost
+    the planner and the ORM's compiler more than the rows did). Not a cache: read once per ranking or item read, inside the same computation."""
     from cveFeed import reviewer
+    from cveFeed.models import FindingReview
+    candidates = FindingReview.objects.filter(verdict='false_positive', confidence='high').exclude(outcome=reviewer.REFUSED).values('triage_id')
+    newest = (FindingReview.objects.filter(triage_id__in=candidates).exclude(outcome=reviewer.REFUSED).order_by('triage_id', '-created_at', '-id')
+              .distinct('triage_id').values('pk'))  # each candidate's newest review, as ``reviewer.newest_review_q`` picks it
+    qs = FindingReview.objects.filter(pk__in=newest).annotate(review_verdict=F('verdict'), review_confidence=F('confidence'), review_outcome=F('outcome'),
+                                                             review_held=F('held_reason'), review_injection=F('injection'), review_host=F('host_review_id'))
+    return sorted(qs.annotate(disputed=_disputed()).filter(disputed=True).values_list('triage_id', flat=True))
+
+
+def _disputed_flag(ids):
+    """``_disputed`` as a flag over findings that reach their Triage row through ``triage__``, from ``disputed_ids``."""
+    if not ids:
+        return Value(False, output_field=BooleanField())
+    return Case(When(triage__id__in=list(ids), then=Value(True)), default=Value(False), output_field=BooleanField())
+
+
+def _match_rows(ids):
+    """The Overview's exposed CVE matches of the projects, annotated with ``pid``, ``lname``, ``sev``, ``heat`` and ``first`` (no tier)."""
     from cveFeed.threat import match_heat_rank_expr
-    qs = counts.exposed_matches().filter(subdomain__target_domain__project_id__in=ids).order_by()
-    qs = qs.annotate(pid=F('subdomain__target_domain__project_id'), lname=Lower('subdomain__name'), heat=match_heat_rank_expr(), sev=_cve_band(),
-                     first=Coalesce('triage__first_seen', 'created_at'), **reviewer.newest_review_q('triage__'))
-    qs = qs.annotate(disputed=_disputed())
+    qs = counts.exposed_matches().filter(subdomain__target_domain__project_id__in=ids).filter(~counts.archived_host_q('subdomain__')).order_by()
+    return qs.annotate(pid=F('subdomain__target_domain__project_id'), lname=Lower('subdomain__name'), heat=match_heat_rank_expr(), sev=_cve_band(),
+                       first=Coalesce('triage__first_seen', 'created_at'))
+
+
+def _matches(ids, disputed=None):
+    """``_match_rows`` annotated with ``disputed`` and ``tier`` too. ``disputed``: ``disputed_ids()`` when the caller has read it already."""
+    qs = _match_rows(ids)
+    qs = qs.annotate(disputed=_disputed_flag(disputed_ids() if disputed is None else disputed))
     manual_hot = Q(triage__heat_override__in=(FIRE, SMOKE))
     return qs.annotate(tier=_tier_case(Q(triage__validation_status=VALIDATION_HIT), Q(triage__heat_override=ICE), manual_hot,
                                        Q(disputed=False, heat__gte=HEAT_RANK[SMOKE]))), Q(triage__heat_override__in=(FIRE, SMOKE, ICE))
 
 
-def _exposure_q():
-    q = Q(source=SOURCE_DB)
+def _dangling_q():
+    q = Q(pk__in=[])
     for prefix in DANGLING_NAMES:
         q |= Q(name__istartswith=prefix)
     return q
 
 
-def _vulns(ids):
-    from cveFeed import reviewer
+def _exposure_q():
+    return Q(source=SOURCE_DB) | _dangling_q()
+
+
+def _takeover_q():
+    """A dangling DNS record the check rated high or critical: its target is one anyone can claim (cveFeed.dangling_dns), not merely a stale record."""
+    return _dangling_q() & Q(severity__gte=HIGH_SEVERITY)
+
+
+def _vuln_rows(ids):
+    """The actionable scanner findings of the projects' current hosts, annotated with ``pid``, ``lname``, ``sev``, ``heat`` and ``first`` (no tier)."""
     from cveFeed.threat import finding_heat_rank_expr
     from startScan.models import Vulnerability
-    qs = counts.actionable_findings(Vulnerability.objects.filter(subdomain__isnull=False, target_domain__project_id__in=ids)).order_by()
-    qs = qs.filter(counts_latest('subdomain__')).annotate(
+    qs = counts.actionable_findings(Vulnerability.objects.filter(subdomain__isnull=False, target_domain__project_id__in=ids)).filter(
+        ~counts.archived_host_q('subdomain__')).order_by()
+    return qs.filter(counts_latest('subdomain__')).annotate(
         pid=F('target_domain__project_id'), lname=Lower('subdomain__name'), heat=finding_heat_rank_expr(), sev=F('severity'),
-        first=Coalesce('triage__first_seen', 'discovered_date'), **reviewer.newest_review_q('triage__'))
-    qs = qs.annotate(disputed=_disputed())
+        first=Coalesce('triage__first_seen', 'discovered_date'))
+
+
+def _vulns(ids, disputed=None):
+    """``_vuln_rows`` annotated with ``disputed`` and ``tier`` too."""
+    qs = _vuln_rows(ids)
+    qs = qs.annotate(disputed=_disputed_flag(disputed_ids() if disputed is None else disputed))
     manual_hot = Q(triage__heat_override__in=(FIRE, SMOKE))
     return qs.annotate(tier=_tier_case(Q(triage__validation_status=VALIDATION_HIT), Q(triage__heat_override=ICE), manual_hot,
-                                       Q(disputed=False, heat__gte=HEAT_RANK[SMOKE]), exposure=_exposure_q())), Q(triage__heat_override__in=(FIRE, SMOKE, ICE))
+                                       Q(disputed=False, heat__gte=HEAT_RANK[SMOKE]), exposure=_exposure_q(), hygiene=_takeover_q())), Q(triage__heat_override__in=(FIRE, SMOKE, ICE))
 
 
 def counts_latest(prefix):
@@ -158,48 +212,166 @@ def counts_latest(prefix):
     return latest_scan_q(prefix)
 
 
+def _high_hygiene_q():
+    """The hygiene findings that are HYGIENE (see the module text): an expired certificate or one that expires within 7 days, a mail domain anyone can spoof."""
+    return (Q(check_name__in=('tls_expired', 'tls_expiring'), severity__gte=HIGH_SEVERITY)
+            | Q(check_name='dmarc_missing', severity__gte=HIGH_SEVERITY) | Q(check_name='spf_allow_all'))
+
+
 def _hygiene(ids):
     from cveFeed.models import HygieneFinding
-    qs = counts.actionable_hygiene(HygieneFinding.objects.filter(domain__project_id__in=ids)).order_by()
+    qs = counts.actionable_hygiene(HygieneFinding.objects.filter(domain__project_id__in=ids)).filter(~_archived_named('domain__project_id')).order_by()
     return qs.annotate(pid=F('domain__project_id'), lname=Lower('host'), sev=F('severity'), first=F('first_seen'), heat=Value(0, output_field=IntegerField()),
-                       tier=Case(When(check_name__in=EXPOSURE_HYGIENE, then=Value(EXPOSURE)), default=Value(MINOR), output_field=IntegerField()))
+                       tier=Case(When(check_name__in=EXPOSURE_HYGIENE, then=Value(EXPOSURE)), When(_high_hygiene_q(), then=Value(HYGIENE)),
+                                 default=Value(MINOR), output_field=IntegerField()))
 
 
 def _secrets(ids):
-    """One row per (secret, host) that counts: the Hosts page's Secrets chip, minus the secrets no person needs to act on."""
+    """One row per (secret, host) that counts: the Hosts page's Secrets chip, minus the secrets no person needs to act on. An exposed secret is high hygiene."""
     from cveFeed import secrets_catalog
     from cveFeed.models import SecretOccurrence
     qs = (SecretOccurrence.objects.filter(project_id__in=ids, retired_at__isnull=True, finding__severity__gte=1).exclude(finding__status__in=secrets_catalog.QUIET_STATUSES)
-          .exclude(finding__remediation_status__in=CLOSED).order_by())
+          .exclude(finding__remediation_status__in=CLOSED).filter(~_archived_named('project_id')).order_by())
     return qs.annotate(pid=F('project_id'), lname=Lower('host'), sev=F('finding__severity'), first=F('finding__first_seen'), heat=Value(0, output_field=IntegerField()),
-                       tier=Value(EXPOSURE, output_field=IntegerField()))
+                       tier=Value(HYGIENE, output_field=IntegerField()))
 
 
-def _group_rows(qs, kev=None, manual=None, distinct=None):
-    """``[(pid, lname, tier, n, sev, first, kev, manual)]``: the source grouped by host and tier, in one query."""
-    aggregates = {'n': Count(distinct or 'pk', distinct=bool(distinct)), 'worst': Max('sev'), 'oldest': Min('first')}
-    aggregates['kev_n'] = Count('pk', filter=Q(**{kev: True})) if kev else Value(0, output_field=IntegerField())
-    aggregates['manual_n'] = Count('pk', filter=manual) if manual is not None else Value(0, output_field=IntegerField())
-    for r in qs.values('pid', 'lname', 'tier').annotate(**aggregates):
-        yield r['pid'], r['lname'], r['tier'], r['n'], r['worst'] or 0, r['oldest'], r['kev_n'], r['manual_n']
+def _archived_named(project):
+    """A Q over rows that name their host in ``host`` (a hygiene finding, a secret's occurrence) and reach its project through ``project``: the host
+    is archived (``counts.archived_host_q`` for a host row). Part of the grouped query, not a query of its own."""
+    from django.db.models import Exists, OuterRef
+
+    from cveFeed.models import HostState
+    return Q(Exists(HostState.objects.filter(project_id=OuterRef(project), host=Lower(OuterRef('host')), archived_at__isnull=False)))
+
+
+MANUAL_HEAT = (FIRE, SMOKE, ICE)  # a heat a person set: the ``set_by_you`` of an item and the ``manual`` count of a host
+FIELDS = {  # what one row of each source carries: enough to count its host (``_aggregate``) and to draw it as an item (``ITEM_OF``)
+    'match': ('pk', 'pid', 'lname', 'tier', 'sev', 'heat', 'first', 'cve_entry__cve_id', 'cve_entry__kev', 'matched_product', 'triage__heat_override', 'triage__id'),
+    'vulnerability': ('pk', 'pid', 'lname', 'tier', 'sev', 'heat', 'first', 'name', 'source', 'triage__heat_override', 'triage__id'),
+    'hygiene': ('pk', 'pid', 'lname', 'tier', 'sev', 'heat', 'first', 'title', 'check_name'),
+    'secret': ('pid', 'lname', 'finding_id', 'finding__masked', 'finding__provider', 'finding__kind', 'sev', 'first'),
+}
+KINDS = ('match', 'vulnerability', 'hygiene', 'secret')
+
+
+def _sources(ids, disputed, tiers=True):
+    """``{kind: queryset}`` of the four sources of the projects, ``disputed`` from ``disputed_ids``. ``tiers=False``: a match and a scanner finding without
+    their SQL tier (``_ranking_values`` works it out)."""
+    if not tiers:
+        return {'match': _match_rows(ids), 'vulnerability': _vuln_rows(ids), 'hygiene': _hygiene(ids), 'secret': _secrets(ids)}
+    return {'match': _matches(ids, disputed)[0], 'vulnerability': _vulns(ids, disputed)[0], 'hygiene': _hygiene(ids), 'secret': _secrets(ids)}
+
+
+def _values(kind, qs):
+    """The rows of one source as ``FIELDS`` names them: one per finding, and one per secret and host for a secret (the Hosts page's Secrets chip),
+    in the order the items of a host are cut in."""
+    if kind == 'secret':
+        return _secret_rows(qs.order_by('pid', 'lname', '-finding__severity', 'finding_id').values(*FIELDS[kind]).distinct())
+    return qs.values(*FIELDS[kind])
+
+
+def _flag(q):
+    return Case(When(q, then=Value(True)), default=Value(False), output_field=BooleanField())
+
+
+def _ranking_values(kind, qs, disputed):
+    """``_values`` for the ranking's one pass. A match's and a scanner finding's tier is worked out here from the columns ``_tier_case`` reads
+    (``tier_of``) instead of in SQL: the tier CASE repeats the whole heat expression (a dozen subqueries for a scanner finding), so Postgres planned
+    it twice per statement. The exposure and takeover tests stay SQL (``exposed``, ``takeover``), so a name is matched exactly as before."""
+    if kind not in ('match', 'vulnerability'):
+        return list(_values(kind, qs))
+    fields = [f for f in FIELDS[kind] if f != 'tier'] + ['triage__validation_status']
+    if kind == 'vulnerability':
+        qs = qs.annotate(takeover=_flag(_takeover_q()), exposed=_flag(_exposure_q()))
+        fields += ['takeover', 'exposed']
+    rows = list(qs.values(*fields))
+    disputed = set(disputed)
+    for r in rows:
+        r['tier'] = tier_of(r, disputed)
+    return rows
+
+
+def tier_of(row, disputed):
+    """The tier of one match or scanner finding row, exactly as ``_tier_case`` gives it in SQL (``tests/test_situations_fast.py`` compares the two): a heat a
+    person set to ice is minor, a check's hit proven, a takeover-able dangling record high hygiene, an exposure exposure, then likely when a person set
+    fire or smoke or the heat is smoke or worse and the AI reviewer does not demote it (``disputed``: ``disputed_ids``)."""
+    override = row['triage__heat_override']
+    if override == ICE:
+        return MINOR
+    if row['triage__validation_status'] == VALIDATION_HIT:
+        return PROVEN
+    if row.get('takeover'):
+        return HYGIENE
+    if row.get('exposed'):
+        return EXPOSURE
+    heat = row['heat']
+    if override in (FIRE, SMOKE) or (row['triage__id'] not in disputed and heat is not None and heat >= HEAT_RANK[SMOKE]):
+        return LIKELY
+    return MINOR
+
+
+def _aggregate(rows):
+    """``[(pid, lname, tier, n, worst, oldest, kev, manual)]``: one source's rows counted by host and tier, as a GROUP BY would (``n`` rows, the
+    highest ``sev`` and the oldest ``first`` ignoring blanks, ``kev`` known-exploited CVE matches, ``manual`` rows whose heat a person set)."""
+    acc = {}
+    for r in rows:
+        key = (r['pid'], r['lname'], r['tier'] if 'tier' in r else HYGIENE)
+        a = acc.get(key)
+        if a is None:
+            a = acc[key] = [0, None, None, 0, 0]
+        a[0] += 1
+        sev, first = r['sev'], r['first']
+        if sev is not None and (a[1] is None or sev > a[1]):
+            a[1] = sev
+        if first is not None and (a[2] is None or first < a[2]):
+            a[2] = first
+        if r.get('cve_entry__kev'):
+            a[3] += 1
+        if r.get('triage__heat_override') in MANUAL_HEAT:
+            a[4] += 1
+    for (pid, lname, tier), (n, worst, oldest, kev, manual) in acc.items():
+        yield pid, lname, tier, n, worst or 0, oldest, kev, manual
+
+
+def _secret_rows(rows):
+    """The rows of a secrets values query in its order, one per (project, host, secret)."""
+    seen = set()
+    for r in rows:
+        key = (r['pid'], r['lname'], r['finding_id'])
+        if key not in seen:
+            seen.add(key)
+            yield r
+
+
+def _desc(value):
+    return (0, 0) if value is None else (1, -value)  # Postgres DESC puts NULL first
+
+
+def _row_order(r):
+    """The order a host's items of one source are cut in (``_windowed``: tier, severity and heat descending, oldest first with blanks last, then the id)."""
+    first = r['first']
+    return (_desc(r['tier']), _desc(r['sev']), _desc(r['heat']), (1, 0) if first is None else (0, first), r['pk'])
+
+
+def _secret_order(r):
+    return (_desc(r['sev']), r['finding_id'])
 
 
 # ----------------------------------------------------------------------------------------------------------------- hosts
 
 def _inventory(ids):
-    """``(reps, names)``: ``reps`` is ``{host key: {id, name, pid, http, server}}``, one entry per host exactly as the Hosts page collapses them, and
-    ``names`` maps ``(project id, lower-case name)`` to its host key. Two queries however many hosts."""
-    from agentapi.services import _one_per_host
-    from cveFeed.correlation import latest_scan_q
+    """``(inventory, reps)``: ``inventory`` is the current inventory's hosts by name (``host_resolver.Inventory``: the one answer to "which host is this
+    name", aliases and ``name:port`` included), ``reps`` is ``{host row id: {id, name, pid, http, server}}``, one entry per host exactly as the Hosts page
+    lists them. Two queries however many hosts."""
+    from cveFeed import host_resolver
     from startScan.models import Subdomain
-    current = Subdomain.objects.filter(latest_scan_q(), target_domain__project_id__in=ids)
-    reps = {}
-    for r in counts.with_host_key(_one_per_host(current, per_project=True)).values('id', 'name', 'target_domain__project_id', 'http_status', 'webserver', 'host_key'):
-        reps[r['host_key']] = {'id': r['id'], 'name': r['name'], 'pid': r['target_domain__project_id'], 'http': r['http_status'] or 0, 'server': r['webserver'] or ''}
-    names = {}
-    for pid, name, key in counts.with_host_key(current).values_list('target_domain__project_id', 'name', 'host_key').distinct():
-        names[(pid, name.lower())] = key
-    return reps, names
+    inventory = host_resolver.Inventory(ids)
+    rep_ids = {rep['id'] for rep in inventory.hosts.values()}
+    reps = {r['id']: {'id': r['id'], 'name': r['name'], 'pid': r['target_domain__project_id'], 'http': r['http_status'] or 0, 'server': r['webserver'] or ''}
+            for r in Subdomain.objects.filter(pk__in=sorted(rep_ids)).values('id', 'name', 'target_domain__project_id', 'http_status', 'webserver')} \
+        if rep_ids else {}
+    return inventory, reps
 
 
 # ----------------------------------------------------------------------------------------------------------------- ranking and words
@@ -224,19 +396,25 @@ def _is_internal(pid, names):
 
 
 def _build_groups(ids):
-    """``(groups, hosts)``: every situation of the projects in rank order (no items yet) and the number of hosts of the inventory."""
-    reps, names = _inventory(ids)
+    """``(groups, hosts)``: every situation of the projects (not yet in rank order) and the number of hosts of the inventory. A finding is grouped
+    under the host the Hosts page lists for its name (``host_resolver``): ``name:443`` under ``name``, an alias under the host it is folded into. A name
+    that was a host and is not in the current inventory any more (gone from the latest full scan) has no situation: its findings close by themselves
+    (``archive_closure.close_gone``). A name that never was a host (a DNS record, a mail domain) keeps one, linked to its first finding.
+
+    One pass: each source is read once, row by row (``_sources``), and the same rows give each host's counts and its first ``LIST_ITEMS`` items
+    (``items``, what a list row shows), so a list page reads no items of its own."""
+    from cveFeed import host_resolver
+    inventory, reps = _inventory(ids)
     groups = {}
 
     def group_of(pid, lname):
-        key = names.get((pid, lname))
-        gid = key if key is not None else (pid, lname)
+        found = inventory.resolve(pid, lname)
+        gid = found['id'] if found else (pid, host_resolver.base_name(lname))
         g = groups.get(gid)
         if g is None:
-            rep = reps.get(key) if key is not None else None
-            g = groups[gid] = {'pid': pid, 'rep': rep, 'names': set(), 'n': dict.fromkeys(TIER_ORDER, 0), 'sev': dict.fromkeys(TIER_ORDER, 0),
-                               'kev': 0, 'manual': 0, 'oldest': None}
-        g['names'].add(lname)
+            g = groups[gid] = {'pid': pid, 'rep': reps.get(found['id']) if found else None, 'names': set(), 'n': dict.fromkeys(TIER_ORDER, 0),
+                               'sev': dict.fromkeys(TIER_ORDER, 0), 'kev': 0, 'manual': 0, 'oldest': None}
+        g['names'].add(lname)  # as the findings store it (``name:443`` too): the items are read by it
         return g
 
     def add(rows):
@@ -250,35 +428,82 @@ def _build_groups(ids):
             if oldest is not None and (g['oldest'] is None or oldest < g['oldest']):
                 g['oldest'] = oldest
 
-    qs, manual = _matches(ids)
-    add(_group_rows(qs, kev='cve_entry__kev', manual=manual))
-    qs, manual = _vulns(ids)
-    add(_group_rows(qs, manual=manual))
-    add(_group_rows(_hygiene(ids)))
-    add(_group_rows(_secrets(ids), distinct='finding_id'))
-    by_key = defaultdict(set)
-    for (pid, lname), key in names.items():
-        by_key[key].add(lname)
+    disputed = disputed_ids()
+    rows = {kind: _ranking_values(kind, qs, disputed) for kind, qs in _sources(ids, disputed, tiers=False).items()}
+    for kind in KINDS:
+        add(_aggregate(rows[kind]))
+    by_rep = defaultdict(set)
+    for (pid, name), found in inventory.hosts.items():
+        by_rep[found['id']].add(name)
+    gone = _gone(groups)
     out = []
     for gid, g in groups.items():
         rep = g['rep']
-        g['name'] = rep['name'] if rep else sorted(g['names'])[0]
-        g['all'] = g['names'] | (by_key[gid] if rep else set())
+        shown = {host_resolver.base_name(n) for n in g['names']}
+        first = min(shown)
+        if rep is None and (g['pid'], first) in gone:
+            continue
+        g['name'] = rep['name'] if rep else first
+        g['all'] = shown | (by_rep[gid] if rep else set())
         g['also'] = sorted(g['all'] - {g['name'].lower()})
         out.append(g)
+    items = _items_from_rows(rows, LIST_ITEMS, {(g['pid'], lname) for g in out for lname in g['names']})
+    for g in out:
+        g['items'] = _items_of(g, items)[:LIST_ITEMS]
+    _add_proof([g['items'] for g in out])
     return out, len(reps)
 
 
+def _gone(groups):
+    """``{(project id, name)}`` of the groups with no host that name a host row of their project all the same: hosts gone from the current
+    inventory. One query, only when such a group exists."""
+    from cveFeed import host_resolver
+    from startScan.models import Subdomain
+    unresolved = defaultdict(set)
+    for g in groups.values():
+        if g['rep'] is None:
+            unresolved[g['pid']] |= {host_resolver.base_name(n) for n in g['names']}
+    if not unresolved:
+        return set()
+    q = Q(pk__in=[])
+    for pid, names in unresolved.items():
+        q |= Q(target_domain__project_id=pid, name__in=sorted(names))
+    return {(pid, host_resolver.normalize(name)) for pid, name in Subdomain.objects.filter(q).values_list('target_domain__project_id', 'name').distinct()}
+
+
+def lead_of(n, kev):
+    """``(lead tier, rank class)`` of a host with ``n`` items per tier, ``kev`` of them known exploited among its proven and likely CVE matches: the first of proven,
+    likely and known exploited, high hygiene, any other likely, exposure, minor (the rank rule, first line). The class is 0 to 5 in that order."""
+    if n[PROVEN]:
+        return PROVEN, 0
+    if n[LIKELY] and kev:
+        return LIKELY, 1
+    if n[HYGIENE]:
+        return HYGIENE, 2
+    if n[LIKELY]:
+        return LIKELY, 3
+    if n[EXPOSURE]:
+        return EXPOSURE, 4
+    return MINOR, 5
+
+
+def item_class(tier, kev=False):
+    """The rank class of one item (``lead_of`` for a single item), so a host's items are ordered the way hosts are: its first item is what its first action is about."""
+    return lead_of({t: int(t == tier) for t in TIER_ORDER}, kev)[1]
+
+
 def _finish(g):
-    """Rank key, tier, counts and reason of one group."""
+    """Rank key, tier, lead, counts and reason of one group."""
     n = g['n']
     top = next(t for t in TIER_ORDER if n[t]) if any(n.values()) else MINOR
     g['top'] = top
+    lead, klass = lead_of(n, g['kev'])
+    g['lead'] = lead
     g['internal'] = _is_internal(g['pid'], g['all'])
     worst = max((g['sev'][t] for t in TIER_ORDER if n[t] and (t >= EXPOSURE or top == MINOR)), default=0)
-    g['key'] = (-top, -(1 if g['kev'] else 0), 1 if g['internal'] else 0, -worst, -(n[PROVEN] + n[LIKELY] + n[EXPOSURE]),
+    g['key'] = (klass, -(1 if g['kev'] else 0), 1 if g['internal'] else 0, -worst, -(n[PROVEN] + n[LIKELY] + n[HYGIENE] + n[EXPOSURE]),
                 g['oldest'].timestamp() if g['oldest'] else float('inf'), g['name'].lower(), g['pid'])
-    g['reason'] = _reason(top, g['kev'], g['internal'], g['manual'])
+    g['reason'] = _reason(lead, g['kev'], g['internal'], g['manual'])
     g['counts'] = {TIER_NAMES[t]: n[t] for t in TIER_ORDER}
     return g
 
@@ -310,52 +535,76 @@ def _item(kind, pk, title, tier, sev, heat, first, what, **extra):
             'what': what, **extra}
 
 
-def _read_items(groups, cap):
-    """``{(pid, lname): [item]}`` for the hosts of ``groups``: at most ``cap`` of each host's items per source, read in one query per source."""
+def _match_item(r):
+    return _item('match', r['pk'], r['cve_entry__cve_id'], r['tier'], r['sev'], r['heat'], r['first'], 'cve', kev=bool(r['cve_entry__kev']),
+                 product=product(r['matched_product']), manual=bool(r['triage__heat_override']), triage=r['triage__id'])
+
+
+def _vulnerability_item(r):
+    what = 'database' if r['source'] == SOURCE_DB else 'dns' if r['tier'] in (EXPOSURE, HYGIENE) else 'finding'
+    return _item('vulnerability', r['pk'], r['name'], r['tier'], r['sev'], r['heat'], r['first'], what, manual=bool(r['triage__heat_override']), triage=r['triage__id'])
+
+
+def _hygiene_item(r):
+    what = HYGIENE_WHAT.get(r['check_name'], 'hygiene') if r['tier'] == HYGIENE else 'admin' if r['tier'] == EXPOSURE else 'hygiene'
+    return _item('hygiene', r['pk'], r['title'], r['tier'], r['sev'], 0, r['first'], what, check=r['check_name'])
+
+
+def _secret_item(r):
+    label = ' '.join(filter(None, [clean(r['finding__provider'], 40) or clean(r['finding__kind'], 40), 'secret', clean(r['finding__masked'], 40)]))
+    return _item('secret', r['finding_id'], label, HYGIENE, r['sev'], 0, r['first'], 'secret')
+
+
+ITEM_OF = {'match': _match_item, 'vulnerability': _vulnerability_item, 'hygiene': _hygiene_item, 'secret': _secret_item}
+
+
+def _items_from_rows(rows, cap, keys=None):
+    """``{(pid, lname): [item]}`` from the rows of each source (``{kind: [values row]}``): at most ``cap`` of each host's items per source, cut in the
+    order the windowed read cuts them (``_row_order``; a secret by severity, then id), each host's list in item order (``_item_key``), no proof yet.
+    ``keys``: only these hosts."""
+    per = defaultdict(lambda: defaultdict(list))
+    for kind in KINDS:
+        for r in rows.get(kind, ()):
+            key = (r['pid'], r['lname'])
+            if keys is None or key in keys:
+                per[key][kind].append(r)
+    items = {}
+    for key, by_kind in per.items():
+        out = []
+        for kind, rows_ in by_kind.items():
+            rows_.sort(key=_secret_order if kind == 'secret' else _row_order)
+            out += [ITEM_OF[kind](r) for r in rows_[:cap]]
+        out.sort(key=_item_key)
+        items[key] = out
+    return items
+
+
+def _add_proof(item_lists):
+    """Set ``proof`` on every item of ``item_lists``: the newest check that reproduced a proven item (``validation_steps`` read in one query, only for
+    the proven items), None for the others."""
     from cveFeed.models import Triage
-    wanted = _wanted(groups)
-    items = defaultdict(list)
-    qs, manual = _matches(list(wanted))
-    rows = list(_windowed(qs, wanted, cap).values('pk', 'pid', 'lname', 'tier', 'sev', 'heat', 'first', 'cve_entry__cve_id', 'cve_entry__kev', 'matched_product',
-                                                  'triage__heat_override', 'triage__id'))
-    for r in rows:
-        items[(r['pid'], r['lname'])].append(_item('match', r['pk'], r['cve_entry__cve_id'], r['tier'], r['sev'], r['heat'], r['first'], 'cve',
-                                                   kev=bool(r['cve_entry__kev']), product=product(r['matched_product']), manual=bool(r['triage__heat_override']),
-                                                   triage=r['triage__id']))
-    qs, manual = _vulns(list(wanted))
-    rows = list(_windowed(qs, wanted, cap).values('pk', 'pid', 'lname', 'tier', 'sev', 'heat', 'first', 'name', 'source', 'triage__heat_override', 'triage__id'))
-    for r in rows:
-        what = 'database' if r['source'] == SOURCE_DB else 'dns' if r['tier'] == EXPOSURE else 'finding'
-        items[(r['pid'], r['lname'])].append(_item('vulnerability', r['pk'], r['name'], r['tier'], r['sev'], r['heat'], r['first'], what,
-                                                   manual=bool(r['triage__heat_override']), triage=r['triage__id']))
-    rows = list(_windowed(_hygiene(list(wanted)), wanted, cap).values('pk', 'pid', 'lname', 'tier', 'sev', 'first', 'title', 'check_name'))
-    for r in rows:
-        items[(r['pid'], r['lname'])].append(_item('hygiene', r['pk'], r['title'], r['tier'], r['sev'], 0, r['first'], 'admin' if r['tier'] == EXPOSURE else 'hygiene',
-                                                   check=r['check_name']))
-    qs = _secrets(list(wanted)).filter(_host_filter(wanted)).order_by('pid', 'lname', '-finding__severity', 'finding_id').values(
-        'pid', 'lname', 'finding_id', 'finding__masked', 'finding__provider', 'finding__kind', 'sev', 'first').distinct()
-    seen, per_host = set(), defaultdict(int)
-    for r in qs:
-        key = (r['pid'], r['lname'])
-        if (key, r['finding_id']) in seen or per_host[key] >= cap:
-            continue
-        seen.add((key, r['finding_id']))
-        per_host[key] += 1
-        label = ' '.join(filter(None, [clean(r['finding__provider'], 40) or clean(r['finding__kind'], 40), 'secret', clean(r['finding__masked'], 40)]))
-        items[key].append(_item('secret', r['finding_id'], label, EXPOSURE, r['sev'], 0, r['first'], 'secret'))
-    # the proof of a proven item: the newest check that reproduced it
-    proven = [i['triage'] for rows_ in items.values() for i in rows_ if i['tier'] == PROVEN and i.get('triage')]
+    proven = sorted({i['triage'] for rows_ in item_lists for i in rows_ if i['tier'] == PROVEN and i.get('triage')})
     steps = dict(Triage.objects.filter(pk__in=proven).values_list('pk', 'validation_steps')) if proven else {}
-    for rows_ in items.values():
+    for rows_ in item_lists:
         for i in rows_:
             i['proof'] = _proof(steps.get(i.get('triage'))) if i['tier'] == PROVEN else None
-    for key, rows_ in items.items():
-        rows_.sort(key=_item_key)
+
+
+def _read_items(groups, cap):
+    """``{(pid, lname): [item]}`` for the hosts of ``groups``: at most ``cap`` of each host's items per source, read in one query per source (the
+    detail of one host, and a list served from a ranking that carries no items)."""
+    wanted = _wanted(groups)
+    ids = list(wanted)
+    sources = _sources(ids, disputed_ids())
+    rows = {kind: list(_values(kind, _windowed(sources[kind], wanted, cap))) for kind in ('match', 'vulnerability', 'hygiene')}
+    rows['secret'] = list(_values('secret', sources['secret'].filter(_host_filter(wanted))))
+    items = _items_from_rows(rows, cap)
+    _add_proof(items.values())
     return items
 
 
 def _item_key(i):
-    return (-i['tier'], -i['severity_n'], -i['heat_n'], i['first'].timestamp() if i['first'] else float('inf'), ('match', 'vulnerability', 'hygiene', 'secret').index(i['kind']), i['id'])
+    return (item_class(i['tier'], bool(i.get('kev'))), -i['severity_n'], -i['heat_n'], i['first'].timestamp() if i['first'] else float('inf'), ('match', 'vulnerability', 'hygiene', 'secret').index(i['kind']), i['id'])
 
 
 def _proof(steps):
@@ -377,14 +626,15 @@ def _plural(n, one, many):
     return f'{n} {one if n == 1 else many}'
 
 
-EXPOSURE_WORDS = {'database': 'an open database port', 'dns': 'a dangling DNS record', 'secret': 'a secret that anyone can read',
-                  'admin': 'an open admin or cleartext service', 'finding': 'an exposed service'}
+EXPOSURE_WORDS = {'database': 'an open database port', 'dns': 'a dangling DNS record', 'admin': 'an open admin or cleartext service', 'finding': 'an exposed service'}
+HYGIENE_WORDS = {'cert_expired': 'an expired certificate', 'cert_expiring': 'a certificate that expires within a week', 'mail': 'a mail domain that anyone can spoof',
+                 'dns': 'a dangling DNS record that someone could take over', 'secret': 'a secret that anyone can read'}
 TOP = 5  # the items the words are built from: the same first five in a list row (12 items) and in the detail (200), so the text is the same in both
 
 
-def _exposed_phrase(exposed, total):
+def _exposed_phrase(exposed, total, words=EXPOSURE_WORDS):
     """'an open database port and a dangling DNS record (3 in all)': the kinds among the top items, in a fixed order, and how many there are in all."""
-    kinds = [EXPOSURE_WORDS[what] for what in EXPOSURE_WORDS if any(i['what'] == what for i in exposed)]
+    kinds = [words[what] for what in words if any(i['what'] == what for i in exposed)]
     if not kinds:
         return ''
     text = ' and '.join([', '.join(kinds[:-1]), kinds[-1]] if len(kinds) > 2 else kinds)
@@ -402,6 +652,12 @@ def _action(item):
         return 'Close the open database port or require a login'
     if what == 'dns':
         return 'Remove the dangling DNS record or claim its target'
+    if what == 'cert_expired':
+        return 'Renew the certificate'
+    if what == 'cert_expiring':
+        return 'Renew the certificate before it expires'
+    if what == 'mail':
+        return 'Publish SPF and DMARC records that reject spoofed mail'
     if what == 'admin':
         return f'Close or restrict the open service: {title}'
     return f'Fix {title}'
@@ -416,6 +672,8 @@ def _headline(top, shown, n):
         return f"Proven: {first['title']}{_more(n[PROVEN])}"
     if top == LIKELY:
         return f"Likely real: {first['title']}{_more(n[LIKELY])}"
+    if top == HYGIENE:
+        return f"Fix soon: {_exposed_phrase([i for i in shown if i['tier'] == HYGIENE], n[HYGIENE], HYGIENE_WORDS) or _plural(n[HYGIENE], 'item', 'items')}"
     if top == EXPOSURE:
         return f"Exposed: {_exposed_phrase([i for i in shown if i['tier'] == EXPOSURE], n[EXPOSURE]) or _plural(n[EXPOSURE], 'item', 'items')}"
     return _plural(n[MINOR], 'lower-priority item', 'lower-priority items')
@@ -433,7 +691,7 @@ def _what_it_is(g):
 
 def narrative(g, items):
     """Two to four plain sentences from a group's numbers and its top items: what the host is, what is proven or likely, what is exposed, what to do first."""
-    n, top = g['n'], g['top']
+    n, top = g['n'], g['lead']
     items = items[:TOP]
     parts = [_what_it_is(g)]
     proven = [i for i in items if i['tier'] == PROVEN]
@@ -450,12 +708,19 @@ def narrative(g, items):
             parts.append(f"Nothing is proven yet, but 1 finding looks real: {first['title']}{kev}.")
         else:
             parts.append(f"Nothing is proven yet, but {n[LIKELY]} findings look real, the first being {first['title']}{kev}.")
+    elif top == HYGIENE:
+        phrase = _exposed_phrase([i for i in items if i['tier'] == HYGIENE], n[HYGIENE], HYGIENE_WORDS)
+        parts.append(f"It has {phrase}." if phrase else f"It has {_plural(n[HYGIENE], 'high-priority hygiene issue', 'high-priority hygiene issues')}.")
+        if n[LIKELY]:
+            parts.append(f"Nothing is proven yet, but {_plural(n[LIKELY], 'finding looks', 'findings look')} real.")
     elif top == MINOR:
         parts.append(f"Only lower-priority items are open ({n[MINOR]}).")
+    if n[HYGIENE] and top in (PROVEN, LIKELY):
+        parts.append(f"It also has {_plural(n[HYGIENE], 'high-priority hygiene issue', 'high-priority hygiene issues')}.")
     exposed = [i for i in items if i['tier'] == EXPOSURE]
     if n[EXPOSURE]:
         phrase = _exposed_phrase(exposed, n[EXPOSURE])
-        also = 'also ' if top in (PROVEN, LIKELY) else ''
+        also = 'also ' if top in (PROVEN, LIKELY, HYGIENE) else ''
         parts.append(f"It {also}exposes {phrase}." if phrase else f"It also has {_plural(n[EXPOSURE], 'exposed item', 'exposed items')}.")
     parts.append(f"Do this first: {_action(items[0]) if items else 'look at the open findings'}.")
     return ' '.join(parts)
@@ -471,14 +736,23 @@ def _link(slug, item):
     return f"/cve/{slug}/vulns/#{item['kind']}-{item['id']}"
 
 
+def _host_link(slug, rep, shown):
+    """Where a situation's host name leads: the host on the Hosts page (``host_resolver.host_link``), or, for a name that is not a host of the
+    inventory, its first finding (an empty Hosts search helps nobody)."""
+    from cveFeed import host_resolver
+    if rep is not None:
+        return host_resolver.host_link(slug, rep)
+    return _link(slug, shown[0]) if shown else f'/cve/{slug}/vulns/'
+
+
 def _row(g, items, rank, slug, project_name, cap):
     from agentapi.services import SEVERITY_NAMES
     shown = items[:cap]
     rep = g['rep']
     return {
         'rank': rank, 'project': slug, 'project_name': project_name, 'host': g['name'], 'also_known_as': [n for n in g['also'] if n != g['name']],
-        'host_id': rep['id'] if rep else None, 'host_link': f"/cve/{slug}/hosts/?host={quote(g['name'], safe='')}", 'internal': g['internal'],
-        'headline': clean(_headline(g['top'], items, g['n']), 200), 'rank_reason': g['reason'], 'counts': g['counts'],
+        'host_id': rep['id'] if rep else None, 'host_link': _host_link(slug, rep, shown), 'internal': g['internal'],
+        'headline': clean(_headline(g['lead'], items, g['n']), 200), 'rank_reason': g['reason'], 'counts': g['counts'], 'lead': TIER_NAMES[g['lead']],
         'first_action': clean(_action(items[0]) if items else 'Look at the open findings', 200), 'narrative': narrative(g, items),
         'oldest': g['oldest'].isoformat() if g['oldest'] else None,
         'findings_total': sum(g['n'].values()), 'findings_truncated': sum(g['n'].values()) > len(shown),
@@ -510,22 +784,23 @@ def _rank(ids):
 
 
 def ranked(ids):
-    """Every situation of the projects in rank order, without items: ``(groups, hosts)``. Ranking every host is the dear part (the host collapse, four
-    grouped queries over all findings, a sort), and the list, the detail of a host and the REST and MCP calls all need all of it, so it is a shared snapshot
-    (``cveFeed.snapshot_cache``: one request computes while the others read the last copy, a finding closed drops it) keyed by the project ids and the
-    caller's allowed projects. Only the items of the hosts that are shown are read per request (``_read_items``)."""
+    """Every situation of the projects in rank order, each with the first ``LIST_ITEMS`` items a list row shows: ``(groups, hosts)``. Ranking every host
+    is the dear part (the host collapse, one pass over all findings, a sort), and the list, the detail of a host and the REST and MCP calls all need all of
+    it, so it is a shared snapshot (``cveFeed.snapshot_cache``: one request computes while the others read the last copy, a finding closed drops it) keyed
+    by the project ids and the caller's allowed projects. Only the detail of a host reads its items per request (``_read_items``, up to ``DETAIL_ITEMS``)."""
     from cveFeed import snapshot_cache
     ids = sorted(ids)
     scope = snapshot_cache.scope_hash('situations', ids)
     return snapshot_cache.snapshot('situations', scope, lambda: _rank(ids), SITUATIONS_SECONDS, etag_of=lambda _ranking: '')['payload']
 
 
-WORST_AT_LEAST = {'all': MINOR, 'exposure': EXPOSURE, 'likely': LIKELY, 'proven': PROVEN}  # the ``tier`` filter: keep a situation whose worst tier is at least this
+WORST_AT_LEAST = {'all': MINOR, 'exposure': EXPOSURE, 'hygiene': HYGIENE, 'likely': LIKELY, 'proven': PROVEN}  # the ``tier`` filter: keep a situation whose worst tier is at least this
 
 
-def listing(ids, q='', page=1, size=50, tier='all'):
+def listing(ids, q='', page=1, size=50, tier='all', info=None):
     """The list answer: ``{count, page, page_size, state, hosts, last_scan_at, situations, results}``. ``state`` is ``attention`` (something needs you,
-    even when the search matches none of it), ``clear`` (hosts were scanned and nothing needs you) or ``unscanned`` (no host has been scanned)."""
+    even when the search matches none of it), ``clear`` (hosts were scanned and nothing needs you) or ``unscanned`` (no host has been scanned).
+    ``info``: ``{project id: (slug, name)}`` of ``ids`` when the caller has read them already (``_scope_info``)."""
     ids = list(ids)
     groups, hosts = ranked(ids)
     total = len(groups)
@@ -540,10 +815,11 @@ def listing(ids, q='', page=1, size=50, tier='all'):
         last = _last_scan(ids)
         out['last_scan_at'] = last.isoformat() if last else None
     if slice_:
-        info = _scope_info(ids)
-        items = _read_items([g for _, g in slice_], LIST_ITEMS)
+        info = _scope_info(ids) if info is None else info
+        # the ranking carries each host's list items; one cached by an older release does not, and its page reads them as before
+        items = None if all('items' in g for _, g in slice_) else _read_items([g for _, g in slice_], LIST_ITEMS)
         for rank, g in slice_:
-            out['results'].append(_row(g, _items_of(g, items), rank, *info.get(g['pid'], ('', '')), LIST_ITEMS))
+            out['results'].append(_row(g, g['items'] if items is None else _items_of(g, items), rank, *info.get(g['pid'], ('', '')), LIST_ITEMS))
     return out
 
 
@@ -559,10 +835,28 @@ def one(ids, host):
     """The situation of ``host`` (a name of it) with up to ``DETAIL_ITEMS`` items, or None when nothing needs a person there."""
     ids = list(ids)
     groups, _ = ranked(ids)
-    wanted = str(host or '').strip().lower()
+    from cveFeed import host_resolver
+    wanted = host_resolver.base_name(host)
     for rank, g in enumerate(groups, 1):
         if wanted in g['all']:
             items = _read_items([g], DETAIL_ITEMS)
             info = _scope_info(ids)
             return _row(g, _items_of(g, items), rank, *info.get(g['pid'], ('', '')), DETAIL_ITEMS)
     return None
+
+
+def new_worth_a_look(ids, start, end):
+    """How many items first seen in ``[start, end)`` are in the proven, likely or high-hygiene tiers (a CVE match, a scanner finding or a hygiene finding): what is
+    new and worth a person's look, not every new low-level item. The sets are the ranking's own (same tiers, same closed rules)."""
+    ids = list(ids)
+    if not ids:
+        return 0
+    total, disputed = 0, disputed_ids()
+    for qs in (_matches(ids, disputed)[0], _vulns(ids, disputed)[0], _hygiene(ids)):
+        total += qs.filter(tier__gte=HYGIENE, first__gte=start, first__lt=end).count()
+    return total
+
+
+def last_scan(ids):
+    """When the newest finished scan of these projects started (``None`` when none has finished): the Overview says when nothing was scanned lately."""
+    return _last_scan(list(ids))

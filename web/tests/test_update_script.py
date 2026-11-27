@@ -48,7 +48,8 @@ case " $* " in
   *" config --services "*) if [[ "$*" == *"docker-compose.dev.yml"* ]]; then
       printf 'db\\nredis\\nweb\\ncelery\\ncelery-beat\\n';
     else printf 'db\\nredis\\nweb\\ncelery\\ncelery-beat\\nproxy\\n'; fi
-    if [ -e "$STUB_DIR/tailscale_profile" ]; then printf 'tailscale\\n'; fi; exit 0;;
+    if [ -e "$STUB_DIR/tailscale_profile" ]; then printf 'tailscale\\n'; fi
+    if [ -e "$STUB_DIR/has_migrate" ]; then printf 'migrate\\n'; fi; exit 0;;
   *" pull "*) test ! -e "$STUB_DIR/pull_fails"; exit $?;;
   *" cancel_consumer "*) if [ -e "$STUB_DIR/cancel_never_answers" ]; then exit 69; fi
     if [ -e "$STUB_DIR/cancel_slow_once" ]; then rm "$STUB_DIR/cancel_slow_once"; exit 69; fi
@@ -77,6 +78,7 @@ case " $* " in
   *" exec dbid "*) case "$*" in *pg_dump*) if [ -e "$STUB_DIR/dump_fails" ]; then exit 1; fi
       echo "-- a dump of the database, long enough to pass the size check of scripts/db-backup.sh";;
     esac; exit 0;;
+  *" db_app_role gate "*) if [ -e "$STUB_DIR/gate_fails" ]; then echo "Fix: make the database accept cvengine_app" >&2; exit 1; fi; exit 0;;
   *" showmigrations "*) if [ -f "$STUB_DIR/migrations_state" ]; then cat "$STUB_DIR/migrations_state"; else echo "[X]  app.0001_initial"; fi; exit 0;;
   *" migrate --noinput "*) if [ -e "$STUB_DIR/migrate_partial" ]; then
       printf '[X]  app.0001_initial\\n[X]  app.0002_first_of_the_batch\\n' > "$STUB_DIR/migrations_state"; exit 1; fi
@@ -304,6 +306,34 @@ class ManualUpdateTests(UpdateScriptCase):
                 process.kill()
                 process.communicate()
 
+    def with_owner_service(self):
+        (self.stub / 'has_migrate').touch()
+        for name in ('db-app-role.sh', 'redis-password.sh'):
+            shutil.copy(SCRIPT.with_name(name), self.work / 'scripts' / name)
+
+    def test_the_role_check_and_the_migration_run_in_the_migrate_service_before_the_apps_restart(self):
+        self.with_owner_service()
+        result = self.run_update(CVENGINE_UPDATE_BACKUPS='3')
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        calls = self.calls()
+        index = lambda text, start=0: next(i for i, c in enumerate(calls) if i >= start and text in c)
+        # (update.sh reads config --format json earlier too, for the PostgreSQL volume: the owner password check is the read after the dump)
+        order = [index('pg_dump'), index('config --format json', index('pg_dump')),
+                 index('run --rm --no-deps -T -e CVENGINE_DB_ALLOW_OWNER_FALLBACK=0 migrate python3 manage.py db_app_role gate'),
+                 index('run --rm --no-deps migrate python3 manage.py migrate --noinput'), index('--force-recreate web')]
+        self.assertEqual(order, sorted(order), calls)
+        self.assertFalse([c for c in calls if 'CVENGINE_DB_ROLE=owner' in c])
+
+    def test_a_failed_role_check_stops_before_the_migration_and_keeps_the_old_apps(self):
+        self.with_owner_service()
+        (self.stub / 'gate_fails').touch()
+        result = self.run_update()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Fix: make the database accept cvengine_app', result.stderr + result.stdout)
+        self.assertIn('database role the server runs as cannot be used', result.stderr + result.stdout)
+        self.assertFalse(any(' migrate --noinput' in c or '--force-recreate web' in c for c in self.calls()))
+        self.assertTrue(any(' add_consumer ' in c for c in self.calls()))  # the old workers are resumed
+
     def test_migration_failure_does_not_restart_apps(self):
         (self.stub / 'migrate_fail').touch()
         result = self.run_update()
@@ -468,9 +498,9 @@ class ManualUpdateTests(UpdateScriptCase):
         import re
         code = re.search(r'beat_ready\(\) \{\n.*?python3 -c \\\n\s+"(.*?)" \\', SCRIPT.read_text(), re.S).group(1)
         code = code.replace('\\\\0', '\\0')
-        for argv, ready in ((['/bin/bash', '/usr/src/app/beat-entrypoint.sh', 'celery', '-A', 'reNgine', 'beat'], False),
-                            (['/usr/local/bin/python3', '/usr/local/bin/celery', '-A', 'reNgine', 'beat', '-l', 'INFO'], True),
-                            (['/usr/local/bin/python3', '/usr/local/bin/celery', '-A', 'reNgine', 'worker'], False)):
+        for argv, ready in ((['/bin/bash', '/usr/src/app/beat-entrypoint.sh', 'celery', '-A', 'cvengine', 'beat'], False),
+                            (['/usr/local/bin/python3', '/usr/local/bin/celery', '-A', 'cvengine', 'beat', '-l', 'INFO'], True),
+                            (['/usr/local/bin/python3', '/usr/local/bin/celery', '-A', 'cvengine', 'worker'], False)):
             fake = self.tmp / 'cmdline'
             fake.write_bytes(b'\0'.join(a.encode() for a in argv) + b'\0')
             status = subprocess.run(['python3', '-c', code.replace('/proc/1/cmdline', str(fake))]).returncode
@@ -551,7 +581,7 @@ class ManualUpdateTests(UpdateScriptCase):
         self.assertFalse(any(' stop -t 30 celery-beat' in c for c in self.calls()))
 
     def test_workers_are_inspected_in_the_new_image_not_in_the_old_containers_that_read_the_new_code(self):
-        # 1.3.x to 1.4: the old image has no cvengine_scanner, the bind-mounted checkout already needs it, so `celery -A reNgine.tasks` run
+        # 1.3.x to 1.4: the old image has no cvengine_scanner, the bind-mounted checkout already needs it, so `celery -A cvengine.tasks` run
         # inside the running old container fails and every inspection reads as "worker state unknown" (the Upgrade rehearsal failure).
         (self.stub / 'old_image').touch()
         (self.stub / 'web_up').touch()
@@ -561,7 +591,7 @@ class ManualUpdateTests(UpdateScriptCase):
         calls = self.calls()
         before_recreate = calls[:next(i for i, c in enumerate(calls) if ' up -d ' in c and 'force-recreate' in c)]
         self.assertFalse(any('exec -T celery celery ' in c or 'exec -T web python3 manage.py shell' in c for c in before_recreate), before_recreate)
-        self.assertTrue(any('run --rm --no-deps -T --entrypoint celery celery -A reNgine.tasks inspect' in c and 'active_queues' in c for c in calls))
+        self.assertTrue(any('run --rm --no-deps -T --entrypoint celery celery -A cvengine.tasks inspect' in c and 'active_queues' in c for c in calls))
         # the scans are counted in the new image too
         self.assertIn('Scans: 1 running, 2 queued.', result.stdout)
 

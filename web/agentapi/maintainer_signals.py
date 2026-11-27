@@ -74,7 +74,7 @@ def _percent(used, limit):
 
 
 def _redis():
-    from reNgine import resources
+    from cvengine import resources
     client = resources.redis_client()
     if client is None:
         raise RuntimeError('the broker is not Redis')
@@ -83,12 +83,11 @@ def _redis():
 
 @contextmanager
 def _bounded():
-    """A transaction in which no statement may run longer than ``DB_STATEMENT_MS`` (``SET LOCAL`` ends with it). PostgreSQL only."""
+    """A transaction (a savepoint inside a caller's) in which no statement may run longer than ``DB_STATEMENT_MS``. PostgreSQL only."""
+    from agentapi import db_timeout
     if connection.vendor != 'postgresql':
         raise RuntimeError('not PostgreSQL')
-    with transaction.atomic():
-        with connection.cursor() as cur:
-            cur.execute('SET LOCAL statement_timeout = %s', [DB_STATEMENT_MS])
+    with db_timeout.bounded(DB_STATEMENT_MS):  # the caller's own limit is back when the block ends
         yield
 
 
@@ -96,8 +95,8 @@ def _bounded():
 
 def lanes(now=None):
     """Each Celery lane's resident memory against its container's limit, and the restarts seen on it in the last 24 hours. The record is the one the lane's
-    own worker writes after each task (``reNgine.lane_memory``); a lane that has finished no task since the record expired is ``unknown``, not 0."""
-    from reNgine import lane_memory
+    own worker writes after each task (``cvengine.lane_memory``); a lane that has finished no task since the record expired is ``unknown``, not 0."""
+    from cvengine import lane_memory
     now = time.time() if now is None else now
     rows = {r['lane']: r for r in lane_memory.report(now)}
     out = []
@@ -134,9 +133,9 @@ def lanes(now=None):
 # --- containers: web and worker memory, kernel oom kills ------------------------------------------------------------------------------
 
 def containers(now=None, client=None):
-    """The memory and the kernel's oom kills of the containers that publish them (``reNgine.container_signals``): the web container, from the watchdog tick,
+    """The memory and the kernel's oom kills of the containers that publish them (``cvengine.container_signals``): the web container, from the watchdog tick,
     and the worker container, from its resource tick."""
-    from reNgine import container_signals
+    from cvengine import container_signals
     now = time.time() if now is None else now
     records = container_signals.read(client or _redis(), now)
     out = []
@@ -165,14 +164,16 @@ def containers(now=None, client=None):
 # --- queues -------------------------------------------------------------------------------------------------------------------------
 
 def _oldest_db():
-    """How long the oldest queued scan, host assessment and Sentinel task has waited, from the database, one row each. Reused for a minute."""
+    """How long the oldest queued scan (one that waits for a worker, ``counts.waiting_scans``), host assessment and Sentinel task has waited, from the
+    database, one row each. Reused for a minute."""
     from agentapi.models import SentinelTask
     from cveFeed.models import HostAssessment
-    from startScan.models import ScanHistory
+    from cveFeed import counts
     now = timezone.now()
     out = {}
     with _bounded():
-        for name, query, field in (('scan', ScanHistory.objects.filter(scan_status=-1).order_by('id'), 'start_scan_date'),
+        # the scans that wait for a worker: a queued row nothing will start (counts.stuck_queued_q) is not a wait, and the reaper closes it
+        for name, query, field in (('scan', counts.waiting_scans(now=now).order_by('id'), 'start_scan_date'),
                                    ('assessment', HostAssessment.objects.filter(status='queued').order_by('created_at'), 'created_at'),
                                    ('sentinel_task', SentinelTask.objects.filter(status='queued').order_by('created_at'), 'created_at')):
             try:
@@ -187,10 +188,10 @@ def _oldest_db():
 
 def queues(depths, client, now=None):
     """Messages waiting per Celery queue (``depths``: the status's own queue read, passed in so the broker is not asked twice) and the age of the oldest
-    message of each queue that has any, from the time stamped on it when it was published (``reNgine.queue_age``), plus the oldest queued scan, host
+    message of each queue that has any, from the time stamped on it when it was published (``cvengine.queue_age``), plus the oldest queued scan, host
     assessment and Sentinel task from the database. A message from before the stamp existed has an unknown age."""
     from agentapi.system_status import PRIORITY_SUFFIXES
-    from reNgine import queue_age
+    from cvengine import queue_age
     if not isinstance(depths, dict) or not isinstance(depths.get('waiting'), dict):
         return unknown('the queue depths could not be read')
     waiting = depths['waiting']

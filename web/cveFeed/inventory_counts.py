@@ -23,7 +23,7 @@ def _breathe(i):
     """Let a gevent worker's other greenlets run every ``YIELD_EVERY`` rows of a loop; a no-op outside gevent."""
     if i % YIELD_EVERY:
         return
-    from reNgine import gevent_db
+    from cvengine import gevent_db
     if gevent_db.gevent_patched():
         import gevent
         gevent.sleep(0)
@@ -149,9 +149,10 @@ def _exposed_ids(ids):
             | set(findings.filter(subdomain_id__in=ids).values_list('subdomain_id', flat=True).distinct()))
 
 
-def _collapse(rows):
-    """``(best, host_key, links)``: ``best`` maps each host key to ``(rank, name, project_id, subdomain id)`` of the one row that stands for the host,
-    ``host_key(sub_id, name, project_id)`` is the key of any row and ``links`` the address links read for them."""
+def _collapse(rows, names_out=None):
+    """``(best, host_key)``: ``best`` maps each host key to ``(rank, name, project_id, subdomain id)`` of the one row that stands for the host,
+    ``host_key(sub_id, name, project_id)`` is the key of any row. ``names_out`` (a dict) receives ``{(project_id, name): host key}``: the key of the
+    row that stands for each name, so every copy of a name belongs to the machine the Hosts page folds it into (``counts.machines``)."""
     ids = [r[0] for r in rows]
     links = _links(ids)
     ports = _open_ports({ip for ls in links.values() for ip, _ in ls})
@@ -182,24 +183,36 @@ def _collapse(rows):
     for i, (_rank, sub_id, name, project_id, domain_name, open_count) in enumerate(by_name.values()):
         _breathe(i)
         key = host_key(sub_id, name, project_id)
+        if names_out is not None:
+            names_out[(project_id, name)] = key
         rank = (0 if name == domain_name else 1, len(name), name, -open_count, -sub_id)
         if key not in best or rank < best[key][0]:
             best[key] = (rank, name, project_id, sub_id)
     return best, host_key
 
 
+def _active(rows):
+    """``rows`` without the archived hosts (``counts.archived_host_q``, which ``counts.host_reps`` leaves out): one read of the archived states."""
+    from cveFeed.counts import archived_keys
+    archived = archived_keys()
+    if not archived:
+        return rows
+    return [row for row in rows if (row[3], (row[1] or '').lower()) not in archived]
+
+
 def rep_ids(rows=None):
     """The ids of the one row per host of the whole inventory: what ``counts.host_reps()`` selects with no narrowing (``counts.rep_ids``)."""
-    rows = current_rows() if rows is None else rows
+    rows = _active(current_rows() if rows is None else rows)
     best, _key = _collapse(rows)
     return [sub_id for _rank, _name, _project, sub_id in best.values()]
 
 
-def shared_host_counts(rows=None):
+def shared_host_counts(rows=None, names_out=None):
     """``{'hosts': {project_id: n}, 'exposed': {project_id: n}}`` for every project, the numbers ``compute_snapshot`` gets for each alone. ``rows``: the
-    current inventory (``current_rows``) when the caller has read it."""
-    rows = current_rows() if rows is None else rows
-    best, host_key = _collapse(rows)
+    current inventory (``current_rows``) when the caller has read it. ``names_out`` (a dict) receives the host key of every name from the same collapse
+    (``_collapse``), so a caller that also needs the Hosts page's fold of names (the distinct issues of the system status) does not collapse again."""
+    rows = _active(current_rows() if rows is None else rows)
+    best, host_key = _collapse(rows, names_out=names_out)
     exposed_ids = _exposed_ids([r[0] for r in rows])
     exposed_keys, exposed_names = set(), set()
     for i, (sub_id, name, _scan, project_id, _domain) in enumerate(rows):

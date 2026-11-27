@@ -95,7 +95,7 @@ class TargetingJobTests(Fresh):
 		self.assertIn('not asked again for', notes[-1])
 
 	def test_a_failed_call_rests_for_its_window(self):
-		from reNgine.ai_providers import AIProviderError
+		from cvengine.ai_providers import AIProviderError
 		notes = []
 
 		def refuse(system, user):
@@ -295,7 +295,7 @@ class SelectTagsTests(TestCase):
 	def test_fingerprinted_technology_maps_to_static_tags_with_ai_disabled(self):
 		sub = Subdomain.objects.create(scan_history=self.scan, name='www.example.test')
 		sub.technologies.add(Technology.objects.create(name='nginx'))
-		with mock.patch('reNgine.ai_settings.get_configured_provider', return_value=None):
+		with mock.patch('cvengine.ai_settings.get_configured_provider', return_value=None):
 			self.assertEqual(nt.select_tags(self.scan), {'nginx'})
 
 	def test_the_ai_is_not_asked_for_the_scan_wide_tags(self):

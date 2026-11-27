@@ -13,8 +13,8 @@ from agentapi.auth import create_token
 from cveFeed import ai_jobs, closure, fix_retest
 from cveFeed.models import CVEEntry, CVEMatch, FindingAuditEvent, FindingComment, FixRetest, SavedSearch, Triage
 from dashboard.models import Org, Project, ProjectMembership
-from reNgine.lifecycle import REGISTRY
-from reNgine.state_machines import REMEDIATION
+from cvengine.lifecycle import REGISTRY
+from cvengine.state_machines import REMEDIATION
 from startScan.models import Subdomain, Vulnerability
 from targetApp.models import Domain
 from tests import test_agent_broker as ab

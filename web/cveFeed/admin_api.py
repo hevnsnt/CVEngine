@@ -69,8 +69,10 @@ def _revoke_tokens(user):
     """A password or MFA reset must also cut off bearer tokens, which otherwise keep working."""
     from agentapi import agent_broker
     from dashboard.models import ApiToken
+    from cvengine.usage_stamps import durable_commit
     ids = list(ApiToken.objects.filter(user=user, revoked=False).values_list('pk', flat=True))
-    ApiToken.objects.filter(pk__in=ids).update(revoked=True)
+    with durable_commit():  # a revocation a crash could undo would let the token in again
+        ApiToken.objects.filter(pk__in=ids).update(revoked=True)
     agent_broker.release_for_tokens(ids)  # the agents' leases go back to the queue now, not when they run out
 
 
@@ -80,19 +82,31 @@ def _profile(user):
 
 # --- serialisation ----------------------------------------------------------------------
 
-def user_dict(actor, u):
-    managed = roles.managed_org_ids(actor)
+def _prefetched(u, name):
+    """The rows ``users_list`` prefetched for ``u`` under ``name``, or None when it did not (every other caller of ``user_dict``)."""
+    return getattr(u, '_prefetched_objects_cache', {}).get(name)
+
+
+def user_dict(actor, u, managed=None):
+    """``managed``: ``roles.managed_org_ids(actor)`` when the caller already read it. A user from ``users_list`` comes with their memberships and
+    profile prefetched, so a list of 500 users is a handful of queries instead of four per user."""
+    managed = roles.managed_org_ids(actor) if managed is None else managed
     memberships = []
-    for m in OrgMembership.objects.filter(user=u).select_related('org'):
+    org_rows = _prefetched(u, 'org_memberships')
+    project_rows = _prefetched(u, 'project_memberships')
+    for m in (OrgMembership.objects.filter(user=u).select_related('org') if org_rows is None else org_rows):
         if actor.is_superuser or m.org_id in managed:
             memberships.append({'kind': 'org', 'id': m.id, 'scope_id': m.org_id, 'scope_name': m.org.name, 'role': m.role,
                                 'label': roles.ROLE_LABELS.get(('org', m.role), m.role)})
-    for m in ProjectMembership.objects.filter(user=u).select_related('project__org'):
+    for m in (ProjectMembership.objects.filter(user=u).select_related('project__org') if project_rows is None else project_rows):
         if actor.is_superuser or m.project.org_id in managed:
             memberships.append({'kind': 'project', 'id': m.id, 'scope_id': m.project_id,
                                 'scope_name': f'{m.project.name}' + (f' ({m.project.org.name})' if m.project.org else ''),
                                 'role': m.role, 'label': roles.ROLE_LABELS.get(('project', m.role), m.role)})
-    p = UserProfile.objects.filter(user=u).first()
+    if getattr(u, '_profile_read', False):
+        p = u._profile
+    else:
+        p = UserProfile.objects.filter(user=u).first()
     return {'id': u.id, 'username': u.username, 'first_name': u.first_name, 'last_name': u.last_name,
             'name': u.get_full_name() or u.username, 'email': u.email, 'is_active': u.is_active, 'is_superuser': u.is_superuser,
             'last_login': u.last_login.isoformat() if u.last_login else None, 'date_joined': u.date_joined.isoformat(),
@@ -115,12 +129,21 @@ def users_list(request, actor):
     q = request.GET.get('q', '').strip()
     if q:
         qs = qs.filter(username__icontains=q) | qs.filter(email__icontains=q) | qs.filter(first_name__icontains=q) | qs.filter(last_name__icontains=q)
-    users = list(qs.distinct().order_by('username')[:500])
-    return {'results': [user_dict(actor, u) for u in users], 'actor': {'is_superuser': actor.is_superuser, 'id': actor.id},
+    from django.db.models import Prefetch
+    users = list(qs.distinct().order_by('username')
+                 .prefetch_related(Prefetch('org_memberships', queryset=OrgMembership.objects.select_related('org').order_by('id')),
+                                   Prefetch('project_memberships', queryset=ProjectMembership.objects.select_related('project__org').order_by('id')))[:500])
+    profiles = {p.user_id: p for p in UserProfile.objects.filter(user__in=[u.pk for u in users])}
+    for u in users:
+        u._profile, u._profile_read = profiles.get(u.pk), True
+    managed = roles.managed_org_ids(actor)
+    return {'results': [user_dict(actor, u, managed) for u in users], 'actor': {'is_superuser': actor.is_superuser, 'id': actor.id},
             'email_ready': mailer.ready()}
 
 
 def _membership_target(actor, scope, scope_id, role):
+    if not isinstance(scope, str) or not isinstance(role, str):
+        raise AdminError(400, 'scope and role must be text, such as "org" and "user"')
     if scope not in roles.ASSIGNABLE or role not in roles.ASSIGNABLE[scope]:
         raise AdminError(400, f'role must be one of {", ".join(roles.ASSIGNABLE.get(scope, ()))} for a {scope}')
     if scope == 'org':
@@ -446,7 +469,14 @@ def org_excluded_addresses_remove(request, actor, org_id, entry_id):
     return {'removed': cidr}
 
 
-@transaction.atomic
+def _drain_project(project):
+    """Everything under ``project`` but its memberships, a bounded batch per transaction (``cveFeed.bounded_delete``): the project's own
+    delete, the cache bump and the audit row then commit together in one short transaction, and a delete that failed part way is finished by
+    deleting again."""
+    from cveFeed import bounded_delete
+    bounded_delete.drain_below(Project, [project.pk], keep=(ProjectMembership,))
+
+
 def orgs_delete(request, actor, org_id):
     if not actor.is_superuser:
         raise AdminError(403, 'only an App Admin can delete organizations')
@@ -460,10 +490,15 @@ def orgs_delete(request, actor, org_id):
     if projects and not data.get('delete_projects'):
         raise AdminError(409, f'it still has {len(projects)} project(s); delete them too to continue')
     name = org.name
+    from cveFeed import bounded_delete
     for project in projects:
-        project.delete()
-    org.delete()
-    audit(actor, 'org.delete', name, projects=len(projects))
+        _drain_project(project)
+    bounded_delete.drain_below(Org, [org.pk], keep=(OrgMembership,))
+    with transaction.atomic():
+        for project in projects:
+            project.delete()
+        org.delete()
+        audit(actor, 'org.delete', name, projects=len(projects))
     return {'deleted': True, 'projects_deleted': len(projects)}
 
 
@@ -487,7 +522,6 @@ def projects_create(request, actor):
     return {'id': project.id, 'name': project.name, 'slug': project.slug, 'org_id': org.id, 'org_name': org.name}, 201
 
 
-@transaction.atomic
 def projects_delete(request, actor, project_id):
     project = Project.objects.filter(pk=project_id).select_related('org').first() if str(project_id).isdigit() else None
     if not project or not project.org_id or not roles.can_manage_org(actor, project.org_id):
@@ -495,10 +529,12 @@ def projects_delete(request, actor, project_id):
     if _body(request).get('confirm') != project.name:
         raise AdminError(400, 'type the project name to confirm')
     name, org = project.name, project.org
-    project.delete()  # cascades to its targets, scans and findings
-    from cveFeed import snapshot_cache
-    snapshot_cache.bump_on_commit()  # an All projects view counted them
-    audit(actor, 'project.delete', name, org=org)
+    _drain_project(project)  # its targets, scans and findings, in bounded batches
+    with transaction.atomic():
+        project.delete()  # cascades to whatever the drain left (its memberships, rows written meanwhile)
+        from cveFeed import snapshot_cache
+        snapshot_cache.bump_on_commit()  # an All projects view counted them
+        audit(actor, 'project.delete', name, org=org)
     return {'deleted': True}
 
 
@@ -508,9 +544,21 @@ TIMING_LIMITS = {'cve_sync_minutes': (5, 1440), 'hygiene_hour_utc': (0, 23), 'ct
                  'discovery_timeout_hours': (1, 48), 'nuclei_timeout_hours': (1, 24)}
 
 
+TIMING_SWITCHES = ('ct_fallback_source',)  # on or off: a lookup crt.sh cannot answer asks Cert Spotter (cveFeed.ctmonitor)
+
+
 def timings_get(request, actor):
     t = SystemTimings.current()
-    return {**{k: getattr(t, k) for k in TIMING_LIMITS}, 'limits': TIMING_LIMITS}
+    from cveFeed import ctmonitor
+    from cveFeed import ct_health
+    from cveFeed import license_safe
+    try:
+        ct_line = ct_health.summary()['line']  # how the watch is doing: two small reads of the daily rollup
+    except Exception:  # noqa: BLE001 - the timings page must open whatever the rollup says
+        ct_line = ''
+    return {**{k: getattr(t, k) for k in TIMING_LIMITS}, **{k: bool(getattr(t, k)) for k in TIMING_SWITCHES}, 'limits': TIMING_LIMITS,
+            'ct_fallback_forced_off': not ctmonitor.fallback_enabled() and bool(t.ct_fallback_source), 'ct_watch_status': ct_line,
+            'hosted_license_safe': license_safe.enabled()}
 
 
 def apply_timings(t):
@@ -543,9 +591,14 @@ def timings_put(request, actor):
             if not low <= value <= high:
                 raise AdminError(400, f'{key} must be between {low} and {high}')
             setattr(t, key, value)
+    for key in TIMING_SWITCHES:
+        if key in data:
+            if not isinstance(data[key], bool):
+                raise AdminError(400, f'{key} must be true or false')
+            setattr(t, key, data[key])
     t.save()
     apply_timings(t)
-    audit(actor, 'timings.update', '', **{k: getattr(t, k) for k in TIMING_LIMITS})
+    audit(actor, 'timings.update', '', **{k: getattr(t, k) for k in (*TIMING_LIMITS, *TIMING_SWITCHES)})
     return timings_get(request, actor)
 
 
@@ -720,7 +773,7 @@ def scheduler_health(request, actor):
     from django_celery_beat.models import PeriodicTask
     from cveFeed.models import (AutomaticValidation, DeferredRetest, OnDemandValidation, AgentActivity,
                                 ArchiveRediscovery, InactiveArchiveReview, HostAssessment, HostState)
-    from reNgine.celery import app
+    from cvengine.celery import app
     from startScan.models import ScanHistory
 
     now = timezone.now()
@@ -840,7 +893,7 @@ def scan_control_get(request, actor):
         raise AdminError(403, 'App Admin only')
     from cveFeed.models import ScanControl
     from startScan.models import ScanHistory
-    from reNgine.celery import app
+    from cvengine.celery import app
 
     row = ScanControl.current()
     active = None

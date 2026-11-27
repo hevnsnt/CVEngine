@@ -120,7 +120,7 @@ def _read_addresses(rows, errored):
     """``{(name, address)}`` of the names of ``rows``, read by a Sentinel (``identity_check``, one task per project). A name nobody answered (no
     Sentinel can take the kind and it never runs here, a timeout, a refusal) is put in ``errored`` and says nothing about the host."""
     from agentapi import probe_dispatch
-    from reNgine.resources import ScannerUnavailable
+    from cvengine.resources import ScannerUnavailable
     by_project = {}
     for row in rows:
         by_project.setdefault(row.project_id, (row.project, []))[1].append(row.host)
@@ -176,10 +176,14 @@ def check_one(row, *, now=None):
             ScanHistory.objects.filter(domain=domain, scan_status__in=(-1, 1), start_scan_date__gte=now - STUCK_SCAN_AGE).exists():
         return 'deferred'
     days = max(1, round(ttl().total_seconds() / 86400))
-    changed = HostState.objects.filter(pk=row.pk, unresolved_first_at=row.unresolved_first_at,
-                                       archived_at__isnull=True, pinned=False).update(
-        archived_at=now, archived_by_user=False,
-        archive_reason=f'Automatically archived after {days} day{"s" if days != 1 else ""} without once resolving to a scannable IP')
+    from cveFeed import archive_closure
+    with transaction.atomic():  # the archive and the closure of what is open on the host (cveFeed.archive_closure) together
+        changed = HostState.objects.filter(pk=row.pk, unresolved_first_at=row.unresolved_first_at,
+                                           archived_at__isnull=True, pinned=False).update(
+            archived_at=now, archived_by_user=False,
+            archive_reason=f'Automatically archived after {days} day{"s" if days != 1 else ""} without once resolving to a scannable IP')
+        if changed:
+            archive_closure.close_host(row.project_id, host, why=archive_closure.WHY_UNRESOLVED, when=now)
     if changed:
         activity.log('inventory', f'{host} archived after {days} days without a scannable IP',
                      project=row.project_id, status='done', host=host)
@@ -244,6 +248,7 @@ def run_page(run_id=None):
         try:
             review_unresolved_hosts.apply_async(args=[run.pk], queue='cve_feed_queue', countdown=1)
         except Exception:
+            logger.warning('unresolved host review run %s: the next batch could not be queued; the run stops as partial', run.pk, exc_info=True)
             run.status = 'partial'
             run.save(update_fields=['status'])
         return {'run_id': run.pk, 'status': run.status, 'checked': run.checked, 'more': True}

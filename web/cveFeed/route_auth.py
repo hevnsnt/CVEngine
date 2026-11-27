@@ -13,7 +13,7 @@ from urllib.parse import urljoin, urlparse
 
 from cvengine_scanner import fingerprint, soft404
 
-from cveFeed import js_libraries
+from cveFeed import js_libraries, php_tells
 
 logger = logging.getLogger(__name__)
 
@@ -246,6 +246,8 @@ def classify(probe):
     if found:
         evidence['fingerprints'] = found
         evidence['fingerprint_names'] = [f['name'] for f in found]  # flat text for search: the dicts also hold the word "source"
+        # a link to a .php URL is no evidence of PHP: one elsewhere is dropped, a same-origin one is a lead unless the server confirms PHP (cveFeed.php_tells)
+        php_tells.judge_evidence(evidence, probe.get('final_url') or page_url, body)
 
     def done(state, provider='', redirect_to=''):
         evidence['provider'] = provider
@@ -403,7 +405,7 @@ def _legacy_root_urls(project, urls):
 
 def run_route_auth(scan_id, force=False):
     """``_run_route_auth``, then, when the scan's target has a stored sign-in, the routes it covers once more signed in (cveFeed.auth_routes: on the
-    built-in scanner only, never from this server), recorded beside the anonymous answer in each route's evidence. A target with none runs exactly as before."""
+    built-in scanner, or an external Sentinel the owner allowed, never from this server), recorded beside the anonymous answer in each route's evidence. A target with none runs exactly as before."""
     from cveFeed import auth_routes
     out = _run_route_auth(scan_id, force)
     signed = auth_routes.run_signed_in(scan_id, force)
@@ -421,7 +423,7 @@ def _run_route_auth(scan_id, force=False):
     from django.utils import timezone
 
     from cveFeed import activity, ledger, scoring
-    from reNgine import resources
+    from cvengine import resources
     from startScan.models import ScanHistory
     scan = ScanHistory.objects.select_related('domain').get(pk=scan_id)
     domain, project = scan.domain, scan.domain.project_id
@@ -494,6 +496,7 @@ def _persist(scan, project, probed, now, retired_endpoints=None):
     previous = {}
     for part in _chunks(probed):
         previous.update({r.url: r for r in RouteAuth.objects.filter(project_id=project, url__in=part)})
+    _judge_php_links(project, probed)
     new_rows, old_rows, by_state = [], [], {}
     for url, result in probed.items():
         state, evidence, found = result['state'], result['evidence'], result['sensitive']
@@ -567,11 +570,30 @@ def _feed_inventory(scan, project, probed, now):
         logger.exception('could not retire route secrets of project %s', project)
 
 
+def _judge_php_links(project, probed):
+    """Apply ``cveFeed.php_tells`` to every answer's evidence before it is stored or read for technologies: a Sentinel reports PHP for any page that
+    links to a ``.php`` URL (``page:.php link``), and the server keeps that as a lead unless the host confirms PHP itself, on one of the routes just
+    checked or one stored for it (a 2xx answer, not a catch-all, with an X-Powered-By or Server header naming PHP or a PHPSESSID cookie)."""
+    from cveFeed.models import RouteAuth
+    hosts = {(urlparse(url).hostname or '').lower() for url, result in probed.items()
+             if any(php_tells.is_link_tell(f.get('name'), f.get('source')) for f in (result.get('evidence') or {}).get('fingerprints') or [] if isinstance(f, dict))}
+    hosts.discard('')
+    if not hosts:
+        return
+    stored = [(row.url, {'status': row.http_status, 'state': row.auth_state, 'evidence': row.evidence or {}})
+              for row in RouteAuth.objects.filter(project_id=project, host__in=sorted(hosts), retired_at__isnull=True).exclude(url__in=list(probed))]
+    confirmed = php_tells.host_confirmation([*probed.items(), *stored])
+    for url, result in probed.items():
+        host = (urlparse(url).hostname or '').lower()
+        if host in hosts and isinstance(result.get('evidence'), dict):
+            php_tells.judge_evidence(result['evidence'], url, confirmed=confirmed.get(host, ''))
+
+
 def link_technologies(scan, probed):
     """Record what each host's front page says it runs (see cvengine_scanner.fingerprint) as the host's technologies in this scan, so the
     correlation engine reads a PHP version from an X-Powered-By header like any other detected technology. Only the root page of a
     host speaks for the host; a name already on the host is confirmed (its link's time, source ``route``: cveFeed.tech_links). Returns the number of links added."""
-    from cveFeed import tech_links
+    from cveFeed import tech_links, tech_rows
     from startScan.models import Subdomain, Technology
     names = {}
     for url, result in probed.items():
@@ -587,7 +609,7 @@ def link_technologies(scan, probed):
         techs = []
         for name in sorted(names.get(sub.name.lower(), ())):
             if name not in cache:
-                cache[name] = Technology.objects.filter(name=name).first() or Technology.objects.create(name=name)
+                cache[name] = Technology.objects.filter(name=name).first() or tech_rows.create(name)
             techs.append(cache[name])
         added += tech_links.link_host(sub, techs, tech_links.ROUTE)  # source route; a name the host already has is confirmed (its link's time)
     return added

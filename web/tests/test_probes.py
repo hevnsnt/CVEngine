@@ -3,13 +3,14 @@ from unittest import mock
 from urllib.parse import urlsplit
 
 from django.test import SimpleTestCase, TestCase
+from django.utils import timezone
 
 from cvengine_scanner import flags as scan_flags
 from cvengine_scanner.probes import version_probes
 
 from cveFeed import port_inventory, probes
 from cveFeed.models import ProbeObservation, ServiceRun
-from startScan.models import IpAddress, Port, Subdomain, Technology
+from startScan.models import IpAddress, Port, ScanHistory, Subdomain, Technology
 from tests import probe_scanner
 from tests.fake_scanner import FakeScanner, assert_ran_nowhere_locally
 from tests.test_route_auth import RouteFixture
@@ -248,8 +249,9 @@ class RecordingTests(RouteFixture, TestCase):
 
     def test_known_observations_are_carried_onto_a_fresh_scan_row(self):
         self.run_one({probes.PROBE_PATH: page(404, body=NGINX_404)})
-        fresh = Subdomain.objects.create(name='www.rt.test', target_domain=self.domain, scan_history=self.scan_obj)
-        self.assertEqual(probes.apply_known(self.scan_obj), 1)
+        later = ScanHistory.objects.create(domain=self.domain, scan_type=self.scan_obj.scan_type, start_scan_date=timezone.now())  # a host is one row per scan
+        fresh = Subdomain.objects.create(name='www.rt.test', target_domain=self.domain, scan_history=later)
+        self.assertEqual(probes.apply_known(later), 1)
         self.assertTrue(fresh.technologies.filter(name='nginx:1.24.0').exists())
 
     def test_observations_of_one_project_never_reach_another(self):
@@ -306,9 +308,9 @@ class StageTests(RouteFixture, TestCase):
         self.assertFalse([u for u in self.requests if 'plain.rt.test' in u])
 
     def test_a_stopped_scan_or_a_pause_ends_the_stage_before_anything_is_handed_to_the_scanner(self):
-        with mock.patch('reNgine.resources.abort_requested', return_value=True):
+        with mock.patch('cvengine.resources.abort_requested', return_value=True):
             self.assertEqual(self.stage()['probes'], 0)
-        with mock.patch('reNgine.resources.global_pause_requested', return_value=True):
+        with mock.patch('cvengine.resources.global_pause_requested', return_value=True):
             self.assertEqual(self.stage()['probes'], 0)
         self.assertEqual((self.tasks, self.requests), ([], []))
 
@@ -332,6 +334,16 @@ class StageTests(RouteFixture, TestCase):
         with mock.patch('cveFeed.probes.max_hosts', return_value=1):
             out = self.stage()
         self.assertEqual(out['hosts'], 1)
+
+    def test_the_hosts_and_their_prefetches_are_read_once(self):
+        """The feature lookup takes the scan's names from a names only read: the host rows and their technology, address and WAF prefetches are read
+        once, by the loop, not a second time to collect the names."""
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+        with mock.patch('cveFeed.probes.features_needed', wraps=probes.features_needed) as needed, CaptureQueriesContext(connection) as seen:
+            self.stage()
+        self.assertEqual(needed.call_args.args[1], {'www.rt.test', 'plain.rt.test'})
+        self.assertEqual(len([q for q in seen if 'startScan_subdomain_waf' in q['sql']]), 1)
 
 
 # The shape of the port in #408: a DNS server on a non-standard port that nmap only soft-matched, stored with the port table's name

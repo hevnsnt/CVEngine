@@ -4,6 +4,8 @@ One row per cve.now entry, carrying the merged severity, exploitation
 (CISA KEV / EPSS / Exploit-DB) and affected-product data that the AI
 correlation engine matches against the discovered asset inventory.
 """
+import datetime
+
 from django.contrib.postgres.fields import ArrayField
 from django.db import models
 from django.db.models.signals import post_delete
@@ -11,7 +13,7 @@ from django.dispatch import receiver
 from django.db.models import Value
 from django.db.models.functions import Lower, Now
 
-from reNgine.crypto_fields import ENCRYPTED_COLUMN_LENGTH, EncryptedCharField, EncryptedJSONField
+from cvengine.crypto_fields import ENCRYPTED_COLUMN_LENGTH, EncryptedCharField, EncryptedJSONField
 from django.utils import timezone
 from targetApp.alias_note import ALIAS_MAX, NOTE_MAX
 from django.utils.dateparse import parse_datetime
@@ -91,16 +93,13 @@ class CVEEntry(models.Model):
             models.Index(fields=["kev"], name="cvefeed_kev_idx"),
             models.Index(fields=["cvss"], name="cvefeed_cvss_idx"),
             models.Index(fields=["published_at"], name="cvefeed_pub_idx"),
+            # the CVE explorer's order (cve_explorer.search): newest first, undated last, then by id. The index above is ascending with nulls last,
+            # so it cannot give this order and the list sorted the whole catalogue for every page (migration 0192)
+            models.Index(models.F("published_at").desc(nulls_last=True), models.F("id").desc(), name="cvefeed_pub_id_desc_idx"),
         ]
 
     def __str__(self):
         return f"{self.cve_id} (cvss={self.cvss}, kev={self.kev})"
-
-    @property
-    def is_critical(self):
-        """cve.now's 'critical' rule: in KEV, or CVSS >= 9, or CVSS >= 7 with EPSS >= 0.1."""
-        cvss = self.cvss or 0.0
-        return bool(self.kev) or cvss >= 9.0 or (cvss >= 7.0 and bool(self.epss_reached))
 
     @property
     def attention_tier(self):
@@ -207,6 +206,28 @@ class IntelSource(models.Model):
 
     def __str__(self):
         return self.name
+
+
+class CtLookupDay(models.Model):
+    """One day of one certificate transparency source's lookups for the standalone watch (cveFeed.ct_health): how many answered, failed or
+    were held by pacing, the names they gave and the hosts that were new. One row per source and UTC day, kept ``ct_health.KEEP_DAYS``."""
+    day = models.DateField()
+    source = models.CharField(max_length=20)
+    ok = models.PositiveIntegerField(default=0, db_default=0)
+    failed = models.PositiveIntegerField(default=0, db_default=0)
+    busy = models.PositiveIntegerField(default=0, db_default=0)
+    names = models.PositiveIntegerField(default=0, db_default=0)
+    new_hosts = models.PositiveIntegerField(default=0, db_default=0)
+    last_ok_at = models.DateTimeField(null=True, blank=True)
+    last_attempt_at = models.DateTimeField(null=True, blank=True)
+    last_failed_at = models.DateTimeField(null=True, blank=True)
+    last_error = models.CharField(max_length=300, blank=True, default="", db_default="")
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["day", "source"], name="ctlookupday_day_source_uniq")]
+
+    def __str__(self):
+        return f"{self.day} {self.source}"
 
 
 class CVEMatch(models.Model):
@@ -546,7 +567,9 @@ class DiscoveryEvent(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        indexes = [models.Index(fields=["scan", "id"]), models.Index(fields=["domain", "id"])]
+        indexes = [models.Index(fields=["scan", "id"]), models.Index(fields=["domain", "id"]),
+                   # the names an IP host answers to (agentapi.services._host_names_for): few rows, so the index is small
+                   models.Index(fields=["domain", "host"], name="discevent_dom_host_names_idx", condition=models.Q(module__in=["ptr", "tls-san"]))]
         ordering = ["id"]
 
     def __str__(self):
@@ -828,10 +851,48 @@ class HostProfile(models.Model):
         return f"{self.host}: {self.criticality}"
 
 
+class ExclusionListQuerySet(models.QuerySet):
+    """The queryset of the exclusion list models: a bulk write that sends no model signal (``update``, ``bulk_create``, ``bulk_update``) also resets
+    the cached lists (``cveFeed.exclusions.forget``), so no write path can leave a stale copy. A save or a delete resets them through the signals."""
+
+    def _forget(self):
+        from cveFeed import exclusions
+        exclusions.forget(using=self.db)
+
+    def update(self, **kwargs):
+        try:
+            return super().update(**kwargs)
+        finally:
+            self._forget()
+
+    def bulk_create(self, *args, **kwargs):
+        try:
+            return super().bulk_create(*args, **kwargs)
+        finally:
+            self._forget()
+
+    def bulk_update(self, *args, **kwargs):
+        try:
+            return super().bulk_update(*args, **kwargs)
+        finally:
+            self._forget()
+
+    def delete(self):
+        try:
+            return super().delete()
+        finally:
+            self._forget()
+
+    update.alters_data = bulk_create.alters_data = bulk_update.alters_data = delete.alters_data = True
+    delete.queryset_only = True  # as on QuerySet: ``Model.objects.delete()`` stays undefined
+
+
 class HostMove(models.Model):
     """A host moved out of this project into another ("Move host"). The source project never brings it back: its discovery and
     scans treat the name as excluded (cveFeed.exclusions.excluded_names), while the destination scans it as its own target.
     Exact name only, lowercase. Moving the host back into this project deletes the row."""
+
+    objects = ExclusionListQuerySet.as_manager()
 
     project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
     host = models.CharField(max_length=500)  # lowercase, no trailing dot
@@ -856,6 +917,8 @@ class HostExclusion(models.Model):
     and the agentapi services, which always filter by the caller's own org, so it cannot leak across orgs. Scanners read it
     unscoped (Celery has no request scope), always through the project's own org."""
 
+    objects = ExclusionListQuerySet.as_manager()
+
     org = models.ForeignKey("dashboard.Org", on_delete=models.CASCADE, related_name="host_exclusions")
     host = models.CharField(max_length=500)  # lowercase, no trailing dot
     include_subdomains = models.BooleanField(default=False, db_default=False)  # a whole domain: the name and every name under it ("-example.com")
@@ -877,6 +940,8 @@ class ExcludedAddress(models.Model):
     a bare address is a /32 or /128, host bits are cleared, IPv6 is compressed), so the same network is one row however it was typed. Private
     ranges are valid entries. Read and written only through cveFeed.exclusions and agentapi.excluded_addresses, which always filter by the
     organization, so it cannot leak across orgs; scanners read it unscoped (Celery has no request scope) through the project's own org."""
+
+    objects = ExclusionListQuerySet.as_manager()
 
     org = models.ForeignKey("dashboard.Org", on_delete=models.CASCADE, related_name="excluded_addresses")
     cidr = models.CharField(max_length=64, default="", db_default="")
@@ -1049,6 +1114,7 @@ class HostAssessment(models.Model):
     host = models.CharField(max_length=500)
     source = models.CharField(max_length=20, default='manual')
     requested_by = models.ForeignKey('auth.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    front = models.BooleanField(default=False, db_default=False)  # a person asked for it (Rescan host): sent at the front of the queue, its Sentinel tasks first
     status = models.CharField(max_length=16, default='queued')  # queued | running | completed | inconclusive | failed | stopped
     scan = models.ForeignKey('startScan.ScanHistory', on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
     celery_id = models.CharField(max_length=100, blank=True, default='')
@@ -1059,7 +1125,8 @@ class HostAssessment(models.Model):
     finished_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
-        indexes = [models.Index(fields=['project', 'status', 'created_at'], name='hostassess_project_idx')]
+        indexes = [models.Index(fields=['project', 'status', 'created_at'], name='hostassess_project_idx'),
+                   models.Index(fields=['project', 'host', 'created_at'], name='hostassess_proj_host_idx')]  # a host's recent and last assessment
         constraints = [models.UniqueConstraint(fields=['project', 'host'], condition=models.Q(status__in=['queued', 'running']),
                                            name='one_active_host_assessment')]
 
@@ -1262,6 +1329,32 @@ class TriageCall(models.Model):
                                                condition=models.Q(status="running"), name="one_running_triage_signature")]
 
 
+class McpCall(models.Model):
+    """One MCP tool call (``agentapi.mcp_log``): who called which tool through which API key, with what arguments (secret-masked and clipped),
+    whether it worked and how long it took. Never the result. Read by the MCP page's History (/cve/mcp/#history); kept
+    ``CVENGINE_MCP_LOG_RETENTION_DAYS`` (90) days (``cveFeed.maintenance``)."""
+
+    at = models.DateTimeField(default=timezone.now, db_index=True)
+    user = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    username = models.CharField(max_length=150, blank=True, default="")  # kept when the user is deleted
+    token = models.ForeignKey("dashboard.ApiToken", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    token_name = models.CharField(max_length=100, blank=True, default="")  # '' for a signed-in browser session
+    agent_name = models.CharField(max_length=100, blank=True, default="")  # the registered agent that holds the key, if any
+    tool = models.CharField(max_length=64, db_index=True)
+    writes = models.BooleanField(default=False)
+    project = models.CharField(max_length=100, blank=True, default="")  # the project the call named (its slug argument), if any
+    arguments = models.JSONField(default=dict, blank=True)
+    ok = models.BooleanField(default=True)
+    error = models.CharField(max_length=300, blank=True, default="")
+    duration_ms = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        indexes = [models.Index(fields=["user", "-at"], name="mcpcall_user_at")]
+
+    def __str__(self):
+        return f"{self.username} {self.tool} {self.at:%Y-%m-%d %H:%M}"
+
+
 class AIUsage(models.Model):
     """One provider completion attempt; no prompt, response, URL, or credential content."""
 
@@ -1280,7 +1373,9 @@ class AIUsage(models.Model):
     started_at = models.DateTimeField(default=timezone.now)
 
     class Meta:
-        indexes = [models.Index(fields=['started_at', 'provider', 'model'], name='aiusage_time_model_idx')]
+        indexes = [models.Index(fields=['started_at', 'provider', 'model'], name='aiusage_time_model_idx'),
+                   # the AI and your data page groups the last 30 days by stage: with stage in the index that is an index-only scan
+                   models.Index(fields=['started_at', 'stage'], name='aiusage_time_stage_idx')]
 
 
 class AIJob(models.Model):
@@ -1423,6 +1518,9 @@ class Triage(models.Model):
     retest_at = models.DateTimeField(null=True, blank=True)
     retest_reason = models.CharField(max_length=300, blank=True, default="", db_default="")
     retest_sentinel = models.CharField(max_length=120, blank=True, default="", db_default="")
+    # The id of the newest operator note (a FindingComment with an observation, or a HostNote of its host) that queued this finding for a
+    # fresh AI review (cveFeed.notes.queue_rereview): part of the review key when set, so a new note is reviewed again. 0 = none.
+    notes_mark = models.PositiveIntegerField(default=0, db_default=0)
     first_seen = models.DateTimeField(default=timezone.now)
     last_seen = models.DateTimeField(default=timezone.now)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -1754,6 +1852,7 @@ class StatsSnapshot(models.Model):
     cve_matches = models.JSONField(default=dict, blank=True)  # {fire, smoke, ice: n}, actionable (not ruled-out) matches
     fixed = models.IntegerField(default=0)  # findings of any kind currently marked remediation_status=fixed
     mean_days_to_fix = models.FloatField(null=True, blank=True)  # over currently-fixed findings; null when there are none
+    needs_hosts = models.IntegerField(null=True, blank=True)  # hosts with a proven, likely or high-priority hygiene situation (cveFeed.overview.needs_hosts); null for a day before this was recorded
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -1763,6 +1862,10 @@ class StatsSnapshot(models.Model):
 
 
 FINDING_KINDS = ("match", "vulnerability", "hygiene")  # a finding kind with a remediation workflow; same set as agentapi.services.STATUS_KINDS
+
+
+NOTE_OBSERVATIONS = ("confirmed", "not_reproduced", "false_positive", "fixed_verified", "needs_more_info", "info")  # what a note says it saw
+NOTE_SOURCES = ("ui", "mcp", "rest")  # where a note was written: the web interface, an MCP tool call or the REST API
 
 
 class FindingComment(models.Model):
@@ -1775,12 +1878,40 @@ class FindingComment(models.Model):
     finding_id = models.PositiveIntegerField()
     author = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
     text = models.TextField(max_length=4000)
+    # A structured note: what the writer observed (NOTE_OBSERVATIONS, '' for a plain comment), the evidence behind it, where it came from
+    # (NOTE_SOURCES) and, for a call made with an API token, that token's name. The AI reviewer reads the newest notes as data (cveFeed.notes).
+    observation = models.CharField(max_length=20, blank=True, default="", db_default="", choices=[(o, o) for o in NOTE_OBSERVATIONS])
+    evidence = models.TextField(max_length=4000, blank=True, default="", db_default="")
+    source = models.CharField(max_length=8, default="ui", db_default="ui", choices=[(s, s) for s in NOTE_SOURCES])
+    via = models.CharField(max_length=100, blank=True, default="", db_default="")
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         indexes = [models.Index(fields=["project", "finding_kind", "finding_id", "created_at"], name="findingcomment_target_idx"),
                    # the comment count of a findings page names (kind, id) with no project (agentapi.services._comment_count_annotation)
                    models.Index(fields=["finding_kind", "finding_id"], name="findingcomment_kind_id_idx")]
+        ordering = ["created_at", "id"]
+
+
+class HostNote(models.Model):
+    """An operator's note on one stored host: what they observed (``observation``), in their words (``text``), with the evidence behind it,
+    who wrote it and through what (``source``, and ``via``: the API token's name). ``subdomain`` is the inventory row the note was written
+    on; ``host`` is its name, which is what the note is read by, so a rescan that replaces the row keeps the note with its host. A note is
+    data: it never changes a finding's status by itself (the AI reviewer weighs it, cveFeed.notes)."""
+
+    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
+    subdomain = models.ForeignKey("startScan.Subdomain", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    host = models.CharField(max_length=500)
+    author = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    observation = models.CharField(max_length=20, blank=True, default="", db_default="", choices=[(o, o) for o in NOTE_OBSERVATIONS])
+    text = models.TextField(max_length=4000)
+    evidence = models.TextField(max_length=4000, blank=True, default="", db_default="")
+    source = models.CharField(max_length=8, default="ui", db_default="ui", choices=[(s, s) for s in NOTE_SOURCES])
+    via = models.CharField(max_length=100, blank=True, default="", db_default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["project", "host", "-created_at"], name="hostnote_host_idx")]
         ordering = ["created_at", "id"]
 
 
@@ -2025,7 +2156,9 @@ class HostInventory(models.Model):
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=["project", "key"], name="uniq_hostinventory_project_key")]
-        indexes = [models.Index(fields=["project", "host"], name="hostinv_project_host_idx")]
+        indexes = [models.Index(fields=["project", "host"], name="hostinv_project_host_idx"),
+                   # the list of a project's reports, newest first (agentapi.inventory.list_inventories): read in order, not sorted
+                   models.Index(fields=["project", "-reported_at", "-id"], name="hostinv_proj_reported_idx")]
 
     def __str__(self):
         return f"{self.hostname or self.key}: {self.os_name} {self.os_version}".strip()
@@ -2063,6 +2196,9 @@ class AuthCredential(models.Model):
     # The owner's choice, per target: send the values over a TLS connection whose certificate does not verify (self-signed, expired, wrong name).
     # Off by default: then a sign-in goes only to a server that proves its name, and anyone in the network path could read it otherwise.
     allow_untrusted_certificate = models.BooleanField(default=False, db_default=False)
+    # The owner's choice, per stored sign-in: an external Sentinel may also read it for a signed-in task (agentapi.signin_delivery). Off by default:
+    # then only the built-in scanner, which runs next to this server, ever receives it.
+    allow_external_sentinels = models.BooleanField(default=False, db_default=False)
     updated_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
     last_used_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -2077,14 +2213,20 @@ class AuthCredential(models.Model):
 
 
 class ReportExport(models.Model):
-    """One requested PDF report (cveFeed.report_export): who asked for what, how it went, and the random file name it was written to.
+    """One requested report (cveFeed.report_export): who asked for what, how it went, and the random file name it was written to.
 
-    The file lives under the report directory and is served only by an authenticated view to the user who asked, until ``expires_at``.
-    ``token`` is the id a client sees; ``filename`` is a second random value that never leaves the server."""
+    A report is of one project or of an organization (``org`` is set and ``project`` is empty: the organization's projects the person can read),
+    a findings report or a hosts report, as a PDF or a CSV file. The file lives under the report directory and is served only by an authenticated
+    view to the user who asked, until ``expires_at``. ``token`` is the id a client sees; ``filename`` is a second random value that never leaves the server."""
 
     STATUSES = ("queued", "running", "done", "failed")
+    KINDS = ("findings", "hosts")
+    FORMATS = ("pdf", "csv")
     token = models.CharField(max_length=64, unique=True)
-    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
+    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, null=True, blank=True, related_name="+")
+    org = models.ForeignKey("dashboard.Org", on_delete=models.CASCADE, null=True, blank=True, related_name="+")  # set only for an organization report
+    kind = models.CharField(max_length=10, default="findings", db_default="findings")  # findings | hosts
+    format = models.CharField(max_length=4, default="pdf", db_default="pdf")  # pdf | csv
     requested_by = models.ForeignKey("auth.User", on_delete=models.CASCADE, related_name="+")
     host = models.CharField(max_length=500, blank=True, default="")  # empty: the whole project
     include_closed = models.BooleanField(default=False)  # also list fixed and accepted-risk findings
@@ -2102,10 +2244,132 @@ class ReportExport(models.Model):
     class Meta:
         indexes = [models.Index(fields=["status", "expires_at"], name="reportexport_status_exp_idx"),
                    models.Index(fields=["requested_by", "created_at"], name="reportexport_user_created_idx")]
+        constraints = [models.CheckConstraint(condition=models.Q(project__isnull=False, org__isnull=True) | models.Q(project__isnull=True, org__isnull=False),
+                                              name="reportexport_one_scope")]
         ordering = ["-id"]
 
     def __str__(self):
-        return f"report {self.pk} {self.project_id} {self.host or 'project'} [{self.status}]"
+        return f"report {self.pk} {self.project_id or 'org ' + str(self.org_id)} {self.kind} {self.format} {self.host or 'scope'} [{self.status}]"
+
+
+def _unsub_key():
+    import secrets
+    return secrets.token_hex(16)
+
+
+class ReportSubscription(models.Model):
+    """A weekly or monthly email summary of one project or one whole organization (cveFeed.report_digests).
+
+    It runs with the access of ``owner``, the last person who saved it: when that person can no longer manage the scope, the subscription switches
+    itself off and says why (``last_error``). ``next_run_at`` is the slot the next email is for; it is moved with a compare-and-set before a send, so
+    two workers never send the same period."""
+
+    CADENCES = ("weekly", "monthly")
+    ATTACH = ("none", "pdf", "csv")
+    STATUSES = ("sent", "partial", "failed", "skipped", "disabled", "unknown")
+    MAX_RECIPIENTS, MAX_PER_SCOPE, MAX_PER_OWNER, MAX_NAME = 10, 20, 50, 80
+
+    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, null=True, blank=True, related_name="+")
+    org = models.ForeignKey("dashboard.Org", on_delete=models.CASCADE, null=True, blank=True, related_name="+")  # set only for a whole-organization report
+    name = models.CharField(max_length=MAX_NAME)
+    recipients = models.JSONField(default=list)  # lower-cased, unique, mailer.EMAIL_RE, at most MAX_RECIPIENTS
+    opted_out = models.JSONField(default=list, blank=True)  # [{"email", "at"}]: addresses that used the unsubscribe link
+    cadence = models.CharField(max_length=8, default="weekly")
+    weekday = models.PositiveSmallIntegerField(default=0)  # 0 Monday .. 6 Sunday (weekly)
+    day_of_month = models.PositiveSmallIntegerField(default=1)  # 1..28 (monthly)
+    send_time = models.TimeField(default=datetime.time(8, 0))
+    timezone = models.CharField(max_length=64, default="UTC")  # an IANA name, checked with zoneinfo
+    attach = models.CharField(max_length=4, default="none")
+    enabled = models.BooleanField(default=True)
+    owner = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, related_name="+")  # whose access it runs with: the last person who saved it
+    created_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, related_name="+")
+    unsubscribe_key = models.CharField(max_length=32, default=_unsub_key)  # part of every unsubscribe token; rotating it voids old links
+    next_run_at = models.DateTimeField(null=True, blank=True)  # None while switched off
+    last_sent_at = models.DateTimeField(null=True, blank=True)
+    last_status = models.CharField(max_length=10, blank=True, default="")
+    last_error = models.CharField(max_length=200, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(condition=models.Q(project__isnull=False, org__isnull=True) | models.Q(project__isnull=True, org__isnull=False), name="reportsub_one_scope"),
+            models.CheckConstraint(condition=models.Q(weekday__lte=6), name="reportsub_weekday"),
+            models.CheckConstraint(condition=models.Q(day_of_month__gte=1, day_of_month__lte=28), name="reportsub_day"),
+        ]
+        indexes = [models.Index(fields=["enabled", "next_run_at"], name="reportsub_due_idx"),
+                   models.Index(fields=["project"], name="reportsub_project_idx"),
+                   models.Index(fields=["org"], name="reportsub_org_idx")]
+        ordering = ["name", "id"]
+
+    def __str__(self):
+        return f"{self.name} [{self.cadence}]"
+
+
+class ReportDelivery(models.Model):
+    """One email of a subscription for one period (or one test send). The unique (subscription, period_start) row of a real send is what keeps a
+    period from being sent twice."""
+
+    subscription = models.ForeignKey(ReportSubscription, on_delete=models.CASCADE, related_name="deliveries")
+    period_start = models.DateTimeField()
+    period_end = models.DateTimeField()
+    test = models.BooleanField(default=False)
+    requested_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")  # a test send
+    status = models.CharField(max_length=10, default="sending")  # sending | sent | partial | failed | skipped | unknown
+    recipients = models.JSONField(default=list)  # [{"email", "status": "pending"|"sent"|"failed"|"refused", "error": a short sentence, "transient": bool}]
+    attempts = models.PositiveSmallIntegerField(default=1)
+    next_retry_at = models.DateTimeField(null=True, blank=True)
+    attachment = models.CharField(max_length=10, blank=True, default="")  # pdf | csv | too_large | failed | ''
+    attachment_bytes = models.PositiveBigIntegerField(default=0)
+    summary = models.JSONField(default=dict, blank=True)  # the headline numbers that were sent
+    error = models.CharField(max_length=200, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["subscription", "period_start"], condition=models.Q(test=False), name="uniq_reportdelivery_period")]
+        indexes = [models.Index(fields=["status", "next_retry_at"], name="reportdelivery_retry_idx")]
+        ordering = ["-id"]
+
+
+class ReportingSettings(models.Model):
+    """Single-row switches of the Reporting page (an App Admin sets them there). ``zero_wire_enabled``: fetch Cloudflare Radar's Zero Wire briefings every
+    six hours (``cveFeed.zero_wire``) so email reports can name them; on by default. With no row stored the defaults apply."""
+
+    zero_wire_enabled = models.BooleanField(default=True)
+    zero_wire_synced_at = models.DateTimeField(null=True, blank=True)
+    zero_wire_error = models.CharField(max_length=200, blank=True, default="")  # why the last fetch failed; empty after a good one
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+
+    @classmethod
+    def current(cls):
+        return cls.objects.first() or cls()
+
+    def __str__(self):
+        return f"Reporting settings (Zero Wire {'on' if self.zero_wire_enabled else 'off'})"
+
+
+class ZeroWireBriefing(models.Model):
+    """One briefing of Cloudflare Radar's Zero Wire feed, as ``cveFeed.zero_wire`` keeps it: the title, the link, a short plain summary and the CVE ids
+    and tags the briefing names. Only these: the briefing's own HTML is never stored or shown. All of it is third-party text, escaped wherever it is shown."""
+
+    guid = models.CharField(max_length=200, unique=True)
+    slug = models.CharField(max_length=100)
+    title = models.CharField(max_length=200)
+    link = models.CharField(max_length=300)  # always https://radar.cloudflare.com/zero-wire/<slug>
+    published_at = models.DateTimeField()
+    summary = models.TextField(blank=True, default="")  # the feed's short description, tags removed, at most 400 characters
+    cve_ids = models.JSONField(default=list, blank=True)  # at most 30
+    categories = models.JSONField(default=list, blank=True)  # at most 15, each at most 40 characters
+    fetched_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["-published_at"], name="zerowire_published_idx")]
+        ordering = ["-published_at", "-id"]
+
+    def __str__(self):
+        return self.title
 
 
 class OpenvasSettings(models.Model):
@@ -2595,7 +2859,7 @@ class AdminAlert(models.Model):
     resolved_at = models.DateTimeField(null=True, blank=True)
     dismissed_at = models.DateTimeField(null=True, blank=True)
     dismissed_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
-    dismissed_digest = models.CharField(max_length=40, blank=True, default="")
+    dismissed_digest = models.CharField(max_length=40, blank=True, default="")  # the severity letter and the digest a dismissal was given for (cveFeed.reviewer.dismissal_mark)
 
     class Meta:
         indexes = [models.Index(fields=["code", "resolved_at"], name="adminalert_code_open_idx")]

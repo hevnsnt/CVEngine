@@ -79,7 +79,7 @@ class ModelsEndpointTests(TestCase):
 
     def test_the_saved_key_goes_only_to_the_provider_and_address_it_was_saved_for(self):
         self.save_connection(provider='openai', base_url='https://gw.example.com/v1')
-        with mock.patch('reNgine.ai_providers.get_provider') as get_provider:
+        with mock.patch('cvengine.ai_providers.get_provider') as get_provider:
             get_provider.return_value.list_models.return_value = []
             self.models(provider='anthropic')
             self.assertIsNone(get_provider.call_args.kwargs['api_key'])
@@ -190,7 +190,8 @@ class ModelsEndpointTests(TestCase):
         real = cache.set
 
         def spy(key, value, *args, **kwargs):
-            stored.append((key, value))
+            if not str(key).startswith('guard-source:'):  # the input guard notes a signed-in App Admin's address (cvengine.guard_sources)
+                stored.append((key, value))
             return real(key, value, *args, **kwargs)
         with mock.patch('requests.get', return_value=openai_list('gpt-a')), mock.patch('django.core.cache.cache.set', side_effect=spy):
             self.models(provider='openai')
@@ -208,7 +209,11 @@ class ModelsEndpointTests(TestCase):
         self.assertLess(settings_api.MODELS_FAIL_SECONDS, settings_api.MODELS_CACHE_SECONDS)
         self.save_connection()
         ttls = []
-        with mock.patch('django.core.cache.cache.set', side_effect=lambda k, v, ttl=None, *a, **kw: ttls.append(ttl)), \
+
+        def spy(key, value, ttl=None, *args, **kwargs):
+            if not str(key).startswith('guard-source:'):  # the input guard notes a signed-in App Admin's address (cvengine.guard_sources)
+                ttls.append(ttl)
+        with mock.patch('django.core.cache.cache.set', side_effect=spy), \
                 mock.patch('requests.get', side_effect=[openai_list('a'), requests.ConnectionError('x')]):
             self.models(provider='openai')
             self.models(provider='openai', refresh=True)
@@ -334,6 +339,11 @@ class ReviewerModelsStillSaveThroughTheReviewerApiTests(TestCase):
 
     def test_on_anthropic_an_empty_model_is_the_built_in_one_which_the_page_says_so(self):
         AIProviderSettings.objects.all().update(provider='anthropic')
+        data = send(self.c, 'GET', 'reviewer')[1]
+        # the finding review is a high-volume stage: while the bulk model is on, empty is the bulk model (cvengine.ai_routing)
+        self.assertEqual(data['default_models'], {'review': 'claude-haiku-5-5', 'ops': 'claude-haiku-5-5'})
+        self.assertEqual(data['models_in_force'], {'review': 'claude-haiku-5-5', 'ops': 'claude-haiku-5-5'})
+        AIProviderSettings.objects.all().update(use_bulk_model=False)
         data = send(self.c, 'GET', 'reviewer')[1]
         self.assertEqual(data['default_models'], {'review': 'claude-sonnet-5-5', 'ops': 'claude-haiku-5-5'})
         self.assertEqual(data['models_in_force'], {'review': 'claude-sonnet-5-5', 'ops': 'claude-haiku-5-5'})

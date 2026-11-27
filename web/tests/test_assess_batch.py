@@ -14,11 +14,11 @@ from agentapi import sentinel_dispatch
 from agentapi.auth import create_token
 from agentapi.models import Agent
 from cveFeed import coverage_topup, discovery, host_assessment, reaper
-from cveFeed.host_assessment import ASSESS_PRIORITY, BATCH_STOPPED, batch_size, batches, enqueue, enqueue_batch, execute_batch
+from cveFeed.host_assessment import ASSESS_PRIORITY, PERSON_PRIORITY, BATCH_STOPPED, batch_size, batches, enqueue, enqueue_batch, execute_batch
 from cveFeed.models import HostAssessment, HostState
 from dashboard.models import Org, Project, ProjectMembership
 from scanEngine.models import EngineType
-from reNgine.resources import ScannerUnavailable
+from cvengine.resources import ScannerUnavailable
 from startScan.models import ScanActivity, ScanHistory, Subdomain
 from targetApp.models import Domain
 from tests.test_agentapi import call
@@ -322,7 +322,9 @@ class TenancyTests(Base):
         self.assertTrue(created)
         one.assert_called_once()
         many.assert_not_called()
-        self.assertEqual(one.call_args.kwargs, {'args': [job.pk], 'queue': 'discovery_queue', 'priority': ASSESS_PRIORITY})
+        # a person's request goes to the front of the queue (the top-up's wait at ASSESS_PRIORITY) and is never put off for the scans' share
+        self.assertEqual(one.call_args.kwargs, {'args': [job.pk], 'kwargs': {'front': True}, 'queue': 'discovery_queue', 'priority': PERSON_PRIORITY})
+        self.assertLess(PERSON_PRIORITY, ASSESS_PRIORITY)
 
     def test_assessments_queue_behind_scans_on_the_shared_discovery_queue(self):
         """Scans and assessments share ``discovery_queue``; a scan sent without a priority is served before any assessment (the broker
@@ -517,7 +519,7 @@ class StopTests(Base):
 
     def test_stopping_one_host_stops_the_run_and_the_others_are_due_again(self):
         scan, jobs = self.running_batch(3)
-        with mock.patch('reNgine.celery.app.control.revoke'):
+        with mock.patch('cvengine.celery.app.control.revoke'):
             status, body = call(self.token, 'POST', f'/api/v1/projects/batch/host-assessments/{jobs[0].pk}/stop', {})
         self.assertEqual((status, body['status']), (200, 'stopped'))
         self.assertEqual(ScanHistory.objects.get(pk=scan.pk).scan_status, 3)
@@ -532,7 +534,7 @@ class StopTests(Base):
 
     def test_the_worker_finishing_later_does_not_overwrite_a_stopped_row(self):
         scan, jobs = self.running_batch(2)
-        with mock.patch('reNgine.celery.app.control.revoke'):
+        with mock.patch('cvengine.celery.app.control.revoke'):
             call(self.token, 'POST', f'/api/v1/projects/batch/host-assessments/{jobs[0].pk}/stop', {})
         host_assessment._finish(HostAssessment.objects.get(pk=jobs[1].pk), {'status': discovery.SUCCESS, 'failed_stages': [], 'scan_id': scan.pk})
         self.assertEqual(HostAssessment.objects.get(pk=jobs[1].pk).status, 'stopped')
@@ -554,7 +556,7 @@ class ReaperAndLimitsTests(Base):
         self.assertEqual({HostAssessment.objects.get(pk=r.pk).status for r in pair}, {'failed'})
 
     def test_a_batch_never_outlives_the_discovery_queues_time_limit(self):
-        from reNgine import time_limits
+        from cvengine import time_limits
         now = timezone.now()
         hard = time_limits.limits_for('discovery_queue')[1]
         self.assertGreater(hard, 6 * 3600)  # a task of this queue may run longer than the single-host limit...
@@ -581,7 +583,7 @@ class ReaperAndLimitsTests(Base):
         store = mock.Mock()
         store.r.set.return_value = True
         sent = []
-        with mock.patch('cveFeed.broker_recovery.live_task_ids', return_value=set()), mock.patch('reNgine.resources.get_store', return_value=store), \
+        with mock.patch('cveFeed.broker_recovery.live_task_ids', return_value=set()), mock.patch('cvengine.resources.get_store', return_value=store), \
                 mock.patch('cveFeed.tasks.assess_host.apply_async', side_effect=lambda *a, **k: sent.append(k['args'][0]) or unique_ids()):
             self.assertEqual(reaper.redispatch_queued_assessments(), 3)  # the batch's task is gone: each row gets a single-host task
         self.assertEqual(sorted(sent), sorted(j.pk for j in jobs))
@@ -625,7 +627,7 @@ class ReaperAndLimitsTests(Base):
         one.assert_not_called()
 
     def test_the_batch_task_has_the_discovery_queues_limits(self):
-        from reNgine.celery import app
+        from cvengine.celery import app
         import cveFeed.tasks  # noqa: F401 - registers the tasks
         single, many = app.tasks['assess_host'], app.tasks['assess_hosts']
         self.assertEqual(many.queue, 'discovery_queue')

@@ -1,4 +1,4 @@
-"""The hermetic guards of reNgine/test_runner.py (CVENGINE_TEST_BLOCK_NETWORK, the per-test environment restore), tested through their functions so
+"""The hermetic guards of cvengine/test_runner.py (CVENGINE_TEST_BLOCK_NETWORK, the per-test environment restore), tested through their functions so
 the cases do not depend on the runner that is running them being hermetic."""
 import os
 import socket
@@ -9,7 +9,7 @@ import requests
 from django.conf import settings
 from django.test import SimpleTestCase, override_settings
 
-from reNgine import test_runner as runner
+from cvengine import test_runner as runner
 
 
 class Guarded(SimpleTestCase):
@@ -353,12 +353,12 @@ class SavedSettingsCopyTests(SimpleTestCase):
 
     def test_the_keys_are_the_ones_the_settings_publish_to(self):
         from cveFeed import tunables
-        from reNgine import resources
+        from cvengine import resources
         self.assertEqual(set(runner.SAVED_SETTINGS_KEYS), {tunables.VALUES_KEY, resources.SAVED_VALUES_KEY, resources.AUTO_VALUES_KEY})
 
     def test_clearing_before_a_test_removes_a_published_triage_cap(self):
         from cveFeed import tunables, triage
-        from reNgine import resources
+        from cvengine import resources
         client = resources.redis_client()
         if client is None:
             self.skipTest('no Redis in this run')

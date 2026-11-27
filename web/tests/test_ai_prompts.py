@@ -1,4 +1,4 @@
-"""Every model prompt is framed by one shared module (reNgine.ai_prompts): the preamble is in each system prompt, no model call skips the module
+"""Every model prompt is framed by one shared module (cvengine.ai_prompts): the preamble is in each system prompt, no model call skips the module
 or leaves its usage stage unnamed, untrusted data stays fenced and cleaned, no prompt carries an em or en dash, and no job's system prompt
 grows past its budget (token cost). The reviewer container is a separate image: its two prompts carry copies of the shared text, and the
 copies are compared here.
@@ -13,7 +13,7 @@ from django.core.cache import cache
 from django.test import SimpleTestCase, TestCase
 
 from cveFeed import autotune, detection_author, nuclei_templates as nt, rdp_shot, templategen, templatevalidate, validation_plan
-from reNgine import ai_prompts, ai_providers
+from cvengine import ai_prompts, ai_providers
 
 ROOT = Path(__file__).resolve().parents[2]
 WEB = ROOT / 'web'
@@ -59,9 +59,10 @@ def system_prompts():
 
 # Budgets in characters of the system prompt (about 3.5 characters a token for this English and JSON text): the size at the time of the
 # change plus a little room. A job whose prompt grows past its budget fails here, so a longer prompt is a decision, not an accident.
+# finding_review grew by about 600 characters for the operator notes (OPERATOR_NOTES and rule 7, notes_effect).
 SYSTEM_BUDGET = {
     'finding_triage': 4720, 'local_check_suggestion': 2190, 'validation_plan': 2950, 'cve_detection': 7600,
-    'template_generation': 3400, 'template_validation': 1550, 'autotune_advisor': 1560, 'rdp_screenshot': 680, 'finding_review': 3780, 'operations_check': 2850,
+    'template_generation': 3400, 'template_validation': 1550, 'autotune_advisor': 1560, 'rdp_screenshot': 680, 'finding_review': 4450, 'operations_check': 2850,
 }
 
 
@@ -157,7 +158,7 @@ class NoBypassTests(SimpleTestCase):
     def test_every_provider_complete_caller_is_a_known_one_and_sends_no_literal_prompt(self):
         # only the Settings page's connection test (views and settings API) still calls a provider from the server: every pipeline call is an AI
         # job the reviewer container makes (cveFeed.ai_jobs), validation planning and nuclei targeting included
-        allowed = {'reNgine/ai_providers.py', 'cveFeed/views.py', 'cveFeed/settings_api.py'}
+        allowed = {'cvengine/ai_providers.py', 'cveFeed/views.py', 'cveFeed/settings_api.py'}
         found = set()
         for path, text in self.sources(WEB):
             rel = str(path.relative_to(WEB))
@@ -167,8 +168,8 @@ class NoBypassTests(SimpleTestCase):
                 if 'def ' in before or before.lstrip().startswith(('#', '"', "'")) or rel in ('cveFeed/js_libraries.py',):
                     continue
                 found.add(rel)
-                self.assertIn(rel, allowed, f'{rel}:{line} calls a provider outside the allowed modules: build the prompt in reNgine/ai_prompts.py')
-                if rel != 'reNgine/ai_providers.py':
+                self.assertIn(rel, allowed, f'{rel}:{line} calls a provider outside the allowed modules: build the prompt in cvengine/ai_prompts.py')
+                if rel != 'cvengine/ai_providers.py':
                     self.assertNotRegex(match.group(1).strip(), r'^[\'"]', f'{rel}:{line} sends a literal system prompt')
                     self.assertIn('ai_prompts', text, f'{rel} does not use the shared prompt module')
                     self.assertIn('usage_stage(', text, f'{rel}:{line} calls the model without naming its usage stage')
@@ -274,7 +275,7 @@ class TextRulesTests(SimpleTestCase):
         for name, text in texts.items():
             for dash in DASHES:
                 self.assertNotIn(dash, text, name)
-        for path in (WEB / 'reNgine' / 'ai_prompts.py', REVIEWER / 'cvengine_reviewer' / 'prompts.py'):
+        for path in (WEB / 'cvengine' / 'ai_prompts.py', REVIEWER / 'cvengine_reviewer' / 'prompts.py'):
             for dash in DASHES:
                 self.assertNotIn(dash, path.read_text(), path.name)
 
@@ -358,7 +359,7 @@ class UnnamedStageTests(TestCase):
     def test_an_unnamed_call_is_logged_once_with_its_caller_and_no_text(self):
         ai_providers._UNNAMED_SEEN.clear()
         self.addCleanup(ai_providers._UNNAMED_SEEN.clear)
-        with self.assertLogs('reNgine.ai_usage_stage', 'WARNING') as logs:
+        with self.assertLogs('cvengine.ai_usage_stage', 'WARNING') as logs:
             self.run_call(named=False)
         self.assertEqual(len(logs.records), 1)
         self.assertIn('test_ai_prompts.py', logs.output[0])
@@ -366,7 +367,7 @@ class UnnamedStageTests(TestCase):
 
     def test_a_named_call_logs_nothing(self):
         ai_providers._UNNAMED_SEEN.clear()
-        with self.assertNoLogs('reNgine.ai_usage_stage', 'WARNING'):
+        with self.assertNoLogs('cvengine.ai_usage_stage', 'WARNING'):
             self.run_call(named=True)
 
 

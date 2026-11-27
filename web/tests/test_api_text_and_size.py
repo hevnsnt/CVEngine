@@ -6,7 +6,7 @@ from django.http import JsonResponse
 from django.test import RequestFactory, SimpleTestCase
 
 from agentapi import mcp, rest
-from reNgine import input_guard
+from cvengine import input_guard
 
 
 class CleanedAtTheDoorTests(SimpleTestCase):

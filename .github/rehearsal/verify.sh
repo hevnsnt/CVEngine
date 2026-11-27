@@ -18,7 +18,15 @@ if [ "$(head -n1 web/.commit 2>/dev/null)" != "$(cat "$HOME/candidate.sha")" ]; 
 fi
 if [ "$(git rev-parse HEAD)" != "$(cat "$HOME/candidate.sha")" ]; then bad "the checkout is at $(git rev-parse --short HEAD), not the candidate"; fi
 
-pending=$(dc exec -T web python3 manage.py showmigrations --plan | grep -c '^\[ \]' || true)
+# showmigrations needs the database owner, which only the one-off migrate service holds from 1.5 on (web runs as the app role and fails it, which
+# read as 0 pending); a candidate without that service is asked in web, as before
+if grep -qx migrate < <(dc config --services 2>/dev/null); then
+  plan=$(dc run --rm --no-deps -T migrate python3 manage.py showmigrations --plan) || bad "showmigrations failed in the migrate service"
+else
+  plan=$(dc exec -T web python3 manage.py showmigrations --plan) || bad "showmigrations failed in web"
+fi
+grep -q '^\[X\]' <<<"${plan:-}" || bad "showmigrations listed no applied migration"
+pending=$(grep -c '^\[ \]' <<<"${plan:-}" || true)
 [ "$pending" = 0 ] || bad "$pending migrations are not applied"
 dc exec -T web python3 manage.py check || bad "manage.py check failed"
 # The workers were restarted by the update and take as long to come up as after any restart.
@@ -65,7 +73,7 @@ print('WORDING OK', new)
 PY
 fi
 # captured first: `inspect | grep -q` fails under pipefail when grep exits early and the producer gets SIGPIPE, even though it matched
-queues=$(dc exec -T celery celery -A reNgine.tasks inspect active_queues -t 20 2>/dev/null || true)
+queues=$(dc exec -T celery celery -A "$(app_package).tasks" inspect active_queues -t 20 2>/dev/null || true)
 grep -q wpscan_queue <<<"$queues" || { bad "no worker consumes wpscan_queue"; grep -oE "'name': '[a-z_]+'" <<<"$queues" | sort -u | head -20; }
 
 if [ "$(mode)" = overlay ]; then

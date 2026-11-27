@@ -40,7 +40,9 @@ def connect():
 
 
 def _load():
-    """``{project_id: {'nets': [network...], 'names': {name: cidr}}}`` for every project that declared an internal range."""
+    """``{project_id: {'nets': [network...], 'names': {name: cidr}, 'labels': {name: display name}, 'printers': {name: evidence}}}`` for every
+    project that declared an internal range. The display name and the printer mark are the target row's (``targetApp.Domain``), read in the
+    same query as its name."""
     from cveFeed.models import InternalRange
     from startScan.models import Subdomain
     from targetApp.models import Domain
@@ -49,19 +51,38 @@ def _load():
     for project_id, cidr in InternalRange.objects.order_by('project_id', 'cidr').values_list('project_id', 'cidr'):
         table.setdefault(project_id, {'nets': [], 'names': {}})['nets'].append(ipaddress.ip_network(cidr, strict=False))
     for project_id, entry in table.items():
-        names = set(Domain.objects.filter(project_id=project_id, name__regex=_IP_LITERAL).values_list('name', flat=True))
+        entry.update(labels={}, printers={})
+        rows = list(Domain.objects.filter(project_id=project_id, name__regex=_IP_LITERAL).values_list('name', 'display_name', 'printer', 'printer_evidence'))
+        names = {r[0] for r in rows}
         names |= set(Subdomain._base_manager.filter(target_domain__project_id=project_id, name__regex=_IP_LITERAL).values_list('name', flat=True).distinct())
         for name in names:
             if sentinel_only_target(name, project_id, entry['nets']):
                 net = next((n for n in entry['nets'] if in_internal_range(name, [n])), None)
                 entry['names'][name.strip().lower()] = str(net) if net else ''
+        for name, display, printer, evidence in rows:
+            key = name.strip().lower()
+            if key not in entry['names']:
+                continue
+            if display:
+                entry['labels'][key] = display
+            if printer:
+                entry['printers'][key] = evidence or 'printer'
     return table
 
 
 def table():
+    """The table of every project, whoever asks first. It is built with the request's tenancy scope lifted: the table is kept per process and
+    shared by every caller, so a table built inside one caller's scope would hold only that caller's projects, and every other caller would
+    find no internal host until it was rebuilt. Lifting the scope leaks nothing: a caller only ever looks up a name of its own rows in it."""
     now = time.monotonic()
     if _cache['at'] is None or now - _cache['at'] > CACHE_SECONDS:
-        _cache.update(at=now, table=_load())
+        from tenancy import scope
+        tokens = scope.set_scope(None, None)
+        try:
+            built = _load()
+        finally:
+            scope.reset_scope(tokens)
+        _cache.update(at=now, table=built)
     return _cache['table']
 
 
@@ -77,6 +98,29 @@ def is_internal(project_id, name):
     return network_of(project_id, name) is not None
 
 
+def display_name(project_id, name):
+    """The name an internal host goes by (``targetApp.Domain.display_name``: reverse DNS, mDNS or NetBIOS, read inside the network), or ''."""
+    entry = table().get(project_id)
+    if not entry or not name:
+        return ''
+    return entry.get('labels', {}).get(str(name).strip().lower(), '')
+
+
+def host_label(project_id, name):
+    """How a host is written on every page, report and MCP answer: ``hostname (192.168.1.5)`` for an internal host whose name is known, else
+    ``name`` as it is. The address stays the identity: links, filters and exports keep using ``name``."""
+    from cveFeed.host_names import label
+    return label(display_name(project_id, name), name or '')
+
+
+def printer_of(project_id, name):
+    """What showed an internal host is a printer (scanned gently), or '' when it is not one."""
+    entry = table().get(project_id)
+    if not entry or not name:
+        return ''
+    return entry.get('printers', {}).get(str(name).strip().lower(), '')
+
+
 def internal_q(prefix='', name_field='name', project_field='target_domain__project_id'):
     """A Q matching rows whose host is internal: ``prefix`` reaches the row from a related model (``'subdomain__'``), ``name_field`` and
     ``project_field`` name the host and its project on it. Matches nothing when no project declared a range."""
@@ -87,10 +131,11 @@ def internal_q(prefix='', name_field='name', project_field='target_domain__proje
     return q
 
 
-def _sentinel_state(project):
+def _sentinel_state(project, names=False):
     """``{'state', 'online', 'total', 'last_seen'}`` of the Sentinels inside the project's internal networks: those covering the project
     that declare ``network:internal``. ``online`` (one is live), ``offline`` (some are registered, none live: the network is not being
-    scanned, a quiet page there is not a clean one) or ``none``."""
+    scanned, a quiet page there is not a clean one) or ``none``. ``names`` adds ``sentinels``: the name and state of each one whose own scope
+    names the project or its organization (an instance-wide Sentinel is counted but not named, as it belongs to no organization)."""
     from django.utils import timezone
 
     from agentapi import sentinel_broker
@@ -101,17 +146,21 @@ def _sentinel_state(project):
               if sentinel_broker.INTERNAL_CAPABILITY in sentinel_broker.effective_capabilities(a)]
     live = [a for a in agents if a.status == 'active' and a.last_seen and now - a.last_seen <= sentinel_broker.LIVE_WINDOW]
     seen = max((a.last_seen for a in agents if a.last_seen), default=None)
-    return {'state': 'online' if live else ('offline' if agents else 'none'), 'online': len(live), 'total': len(agents),
-            'last_seen': seen.isoformat() if seen else None}
+    out = {'state': 'online' if live else ('offline' if agents else 'none'), 'online': len(live), 'total': len(agents),
+           'last_seen': seen.isoformat() if seen else None}
+    if names:
+        out['sentinels'] = [{'name': a.name, 'state': 'online' if a in live else 'offline', 'last_seen': a.last_seen.isoformat() if a.last_seen else None}
+                            for a in sorted(agents, key=lambda a: a.name.lower()) if not (a.scope or {}).get('instance')]
+    return out
 
 
-def declared_networks():
+def declared_networks(names=False):
     """Every internal network a project the caller can see declared, oldest project first: its organization and project, the
     addresses in it, the last internal scan that finished, the error of the latest one when it failed, the last live-host sweep of the range, and the state of the Sentinels
     inside it. The ``networks`` of ``summary`` and the organization groups of the Sentinels page."""
     from cveFeed.models import InternalRange
     from dashboard.models import Project
-    from reNgine.definitions import FAILED_TASK, SUCCESS_TASK
+    from cvengine.definitions import FAILED_TASK, SUCCESS_TASK
     from startScan.models import ScanHistory
     projects = {p.pk: p for p in Project.objects.filter(pk__in=InternalRange.objects.values('project_id')).select_related('org')}
     if not projects:
@@ -126,8 +175,8 @@ def declared_networks():
         last = scans.filter(scan_status=SUCCESS_TASK).order_by('-start_scan_date').values_list('start_scan_date', flat=True).first() if names else None
         latest = scans.filter(scan_status__in=(SUCCESS_TASK, FAILED_TASK)).order_by('-start_scan_date').values_list('scan_status', 'error_message').first() if names else None
         if rng.project_id not in sentinels:
-            sentinels[rng.project_id] = _sentinel_state(project)
-        out.append({'org': project.org.slug if project.org_id else None, 'project': project.slug, 'cidr': rng.cidr, 'description': rng.description,
+            sentinels[rng.project_id] = _sentinel_state(project, names=names)
+        out.append({'org': project.org.slug if project.org_id else None, 'project': project.slug, 'project_name': project.name, 'cidr': rng.cidr, 'description': rng.description,
                     'hosts': len(names), 'last_scan_at': last.isoformat() if last else None,
                     'last_error': (latest[1] or 'the last internal scan failed') if latest and latest[0] == FAILED_TASK else '',
                     'sentinel': sentinels[rng.project_id],

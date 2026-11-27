@@ -15,13 +15,19 @@ STUBS = {
 echo "make $1" >> "$STUB_DIR/calls"
 case "$1" in
  admin) printf 'docker compose exec -T web python3 manage.py create_admin\\n====\\n  CVEngine admin account\\n    Password  : Abc123Xyz\\n====\\n';;
- certs) mkdir -p secrets/certs; echo x > secrets/certs/rengine.pem;;
+ certs) mkdir -p secrets/certs; echo x > secrets/certs/cvengine.pem;;
  build) [ -e "$STUB_DIR/build_fails" ] && exit 2;;
 esac
 exit 0
 ''',
     'curl': '#!/bin/sh\ncase "$*" in *http_code*) printf "%s" "${STUB_HTTP:-302}";; esac\nexit 0\n',
     'sleep': '#!/bin/sh\nexit 0\n',
+    # the host's interfaces as `ip -o addr show scope global` prints them (scripts/self-addresses.sh): one public address, one private, one Docker bridge
+    'ip': ('#!/bin/sh\ncase "$*" in *"addr show scope global"*)\n'
+           'echo "2: eth0    inet 8.8.4.4/24 brd 8.8.4.255 scope global eth0\\       valid_lft forever preferred_lft forever"\n'
+           'echo "3: eth1    inet 10.0.0.5/24 brd 10.0.0.255 scope global eth1\\       valid_lft forever preferred_lft forever"\n'
+           'echo "4: docker0    inet 172.17.0.1/16 brd 172.17.255.255 scope global docker0\\       valid_lft forever preferred_lft forever";;\n'
+           'esac\nexit 0\n'),
 }
 
 
@@ -32,7 +38,7 @@ class InstallScriptTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.repo = self.tmp / 'repo'
         (self.repo / 'scripts').mkdir(parents=True)
-        for rel in ('install.sh', 'scripts/init-env.sh', 'scripts/host-fit.sh', '.env.example'):
+        for rel in ('install.sh', 'scripts/init-env.sh', 'scripts/host-fit.sh', 'scripts/self-addresses.sh', '.env.example'):
             shutil.copy(ROOT / rel, self.repo / rel)
         self.stub = self.tmp / 'stub'
         self.stub.mkdir()
@@ -61,6 +67,14 @@ class InstallScriptTests(unittest.TestCase):
         order = [c for c in calls if c in ('certs', 'build', 'up', 'migrate', 'admin')]
         self.assertEqual(order[:2] + order[-2:], ['certs', 'build', 'migrate', 'admin'])
         self.assertLess(order.index('build'), order.index('up'))
+
+    def test_the_install_writes_the_hosts_own_public_address_as_a_managed_line(self):
+        proc, _ = self.run_install()
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        lines = (self.repo / '.env').read_text().splitlines()
+        self.assertEqual([line for line in lines if line.startswith('CVENGINE_SELF_ADDRESSES')],
+                         ['CVENGINE_SELF_ADDRESSES=8.8.4.4', 'CVENGINE_SELF_ADDRESSES_DETECTED=8.8.4.4'])
+        self.assertIn('CVENGINE_SELF_ADDRESSES=8.8.4.4 was written to .env', proc.stdout)
 
     def test_a_domain_option_is_used(self):
         proc, _ = self.run_install('--domain', 'scanner.example.com')

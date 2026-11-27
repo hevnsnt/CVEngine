@@ -25,8 +25,9 @@ from agentapi import services as svc
 from agentapi.auth import SCOPE_SENTINEL
 from agentapi.models import ACTIVE_TASK_STATUSES, Agent, AgentTask
 from agentapi.services import ApiError, AssetFilter
-from reNgine.lifecycle import Refused
-from reNgine.state_machines import AGENT
+from cvengine.lifecycle import Refused
+from cvengine.usage_stamps import durable_commit
+from cvengine.state_machines import AGENT
 from tenancy import audit, roles
 
 logger = logging.getLogger(__name__)
@@ -55,7 +56,7 @@ MAX_CHECK_OUTPUT = 2000
 MAX_CHECKS = 20
 MAX_NOTE = 200
 RATES = {'register': (30, 3600), 'heartbeat': (120, 60), 'claim': (60, 60), 'report': (120, 60), 'release': (120, 60), 'queue': (30, 60)}
-ADMIN_STATUSES = ('active', 'suspended', 'revoked')  # what a person may set (reNgine.state_machines.AGENT says from which state)
+ADMIN_STATUSES = ('active', 'suspended', 'revoked')  # what a person may set (cvengine.state_machines.AGENT says from which state)
 # ``code`` in the body of a 403 an agent acts on (beside ``error``, which stays the sentence it always was). ``token_revoked``: an administrator
 # revoked this agent; its token will never work again, so a Sentinel has to be enrolled again. ``agent_blocked``: the agent is fine and its token
 # too, but no work can be assigned now (it is pending or suspended, or its user is disabled, has to set up two-step sign-in, or its token is read
@@ -161,9 +162,37 @@ def _agent_of(ctx, usable=True, write=True):
     return agent
 
 
+TOUCH_EVERY = timedelta(seconds=15)  # ``last_seen`` is written at most this often per agent: far below ``LIVE_WINDOW``, so liveness reads the same
+POLL_REAP_EVERY = 5  # seconds between the reaper runs of the later rounds of the long polls (fleet wide); the first round of every call always reaps
+
+
 def _touch(agent, now=None):
-    agent.last_seen = now or timezone.now()
-    Agent.objects.filter(pk=agent.pk).update(last_seen=agent.last_seen)
+    """Mark the agent as heard from now. A long poll, a heartbeat and every report each said so, one UPDATE of the agent row each (several a second for
+    a Sentinel with many slots, each waiting behind a claim that holds the row). It is written only when the stored time is older than ``TOUCH_EVERY``
+    (or missing, or ahead of ``now``), with the same condition in the UPDATE, so a call that finds a fresh time costs nothing. Of the calls that read
+    the same stale time, one at a time writes (``usage_stamps.one_writer``; the others set the time on their own copy only) and its commit does not wait for the
+    WAL flush (``usage_stamps.relaxed_commit``): liveness telemetry, which the next call writes again if a crash loses it. Never called inside a
+    claim's transaction; if it were, it would simply join it."""
+    from cvengine import usage_stamps
+    now = now or timezone.now()
+    seen = agent.last_seen
+    if seen is not None and now - TOUCH_EVERY <= seen <= now:
+        return
+    with usage_stamps.one_writer('agent', agent.pk, seen, TOUCH_EVERY.total_seconds()) as mine:
+        if mine:
+            stale = Q(last_seen__isnull=True) | Q(last_seen__lt=now - TOUCH_EVERY) | Q(last_seen__gt=now)
+            with usage_stamps.relaxed_commit():
+                Agent.objects.filter(stale, pk=agent.pk).update(last_seen=now)
+    agent.last_seen = now  # also when another call of the same agent writes it: this call's own reads (liveness) see it heard from now, as before
+
+
+def poll_reap_due(key):
+    """Whether a later round of a long poll should run its reaper now: at most once per ``POLL_REAP_EVERY`` across every process (``cache.add``).
+    Without the cache it always does, as before."""
+    try:
+        return bool(cache.add(key, 1, POLL_REAP_EVERY))
+    except Exception:  # noqa: BLE001 - without the cache every round reaps, as it did
+        return True
 
 
 def _parse_registration(body, creating):
@@ -528,7 +557,8 @@ def queue_work(ctx, slug, kind, match_ids=None, mode=None, tier=None, host=None,
     active = AgentTask.objects.filter(project=project, status__in=ACTIVE_TASK_STATUSES).count()
     if active >= MAX_ACTIVE_PER_PROJECT:
         raise ApiError(429, f'this project already has {MAX_ACTIVE_PER_PROJECT} agent tasks waiting or in progress')
-    qs = svc._matches_qs(project).select_related('cve_entry__detection', 'subdomain').prefetch_related('subdomain__ip_addresses__ports')
+    qs = svc._matches_qs(project, svc._current_named_ids(project, str(host)[:200]) if host and match_ids is None else None) \
+        .select_related('cve_entry__detection', 'subdomain').prefetch_related('subdomain__ip_addresses__ports')
     if match_ids is not None:
         qs = qs.filter(pk__in=match_ids)
     else:
@@ -784,10 +814,14 @@ def next_task(ctx, body=None):
     effs_cache = {}
     with _waiter_slot(wait > 0, agent.token) as slot:
         deadline = deadline if slot else 0
+        first = True
         while True:
             now = timezone.now()
             _touch(agent, now)
-            reap_expired(now)
+            due = poll_reap_due('agentapi:poll-reap')  # asked every round, so the first one's reaping holds the later ones off too
+            if due or first:
+                reap_expired(now)
+            first = False
             claimed, why = _try_claim(agent, kinds, now, effs_cache)
             if claimed or time.monotonic() >= deadline:
                 break
@@ -853,7 +887,7 @@ def _int(value):
 # --- results ----------------------------------------------------------------------------------------
 
 def _text(value, limit):
-    from reNgine.ai_providers import clean_text
+    from cvengine.ai_providers import clean_text
     return clean_text(value, limit) if isinstance(value, str) else ''
 
 
@@ -892,7 +926,7 @@ def _apply_result(task, agent, user, result):
     if task.kind == 'remediate' and result['outcome'] == 'fixed':
         # The task ran for a while: a person may have closed the finding meanwhile (a false positive, an accepted risk). Their decision
         # stands; the comment above still says what the agent reported.
-        from reNgine.state_machines import AGENT_MAY_FIX
+        from cvengine.state_machines import AGENT_MAY_FIX
         before = match.remediation_status
         if svc._apply_remediation(match, 'fixed', f'Fixed by agent {agent.name}: {summary}', user, only_from=AGENT_MAY_FIX):
             svc._record_status_change(task.project, 'match', match.pk, before, 'fixed', user, match.remediation_note)
@@ -1333,7 +1367,8 @@ def delete_agent(ctx, agent_id):
         raise ApiError(409, f'only a revoked agent can be deleted; this one is {agent.status} (revoke it first)')
     token, owner = agent.token, agent.token.user
     released = release_agent_tasks(agent, 'the agent was deleted', actor=ctx.user)
-    ApiToken.objects.filter(pk=token.pk).update(revoked=True)
+    with durable_commit():  # a revocation a crash could undo would let the token in again
+        ApiToken.objects.filter(pk=token.pk).update(revoked=True)
     held = list(Agent.objects.filter(held_by=agent, status__in=('suspended', 'pending'), status_inherited=True).order_by('id').values('id', 'name'))
     audit.record_for_user(ctx.user, 'agent.delete', owner, target=agent.name, agent_id=agent.pk, kind=agent.kind, token_id=token.pk,
                           revoked_since=svc._iso(agent.status_changed_at), released_tasks=released, still_held=[h['id'] for h in held])

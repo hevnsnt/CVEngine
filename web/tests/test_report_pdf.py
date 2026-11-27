@@ -187,6 +187,17 @@ class ReportBase(TestCase):
         VulnerabilityReportSetting.objects.create(company_name='Blue Ridge Security', primary_color='#0F766E', show_footer=True, footer_text='Confidential')
 
 
+def body(text):
+    """The report after its table of contents (which names every section), so a section is found by its heading."""
+    return text[re.search(r'Page 2 of \d+', text).end():]
+
+
+def section(text, start, end=None):
+    text = body(text)
+    begin = text.index(start)
+    return text[begin:text.index(end, begin) if end else None]
+
+
 class ReportContentTests(ReportBase):
     """The PDF itself: one project report, one with closed findings, one host report, generated once and read many times."""
     keep_files = True
@@ -194,7 +205,12 @@ class ReportContentTests(ReportBase):
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
+        before = timezone.now()
         cls.project_job = queued(cls.worker, 'acme')
+        after = timezone.now()
+        # the cover's date is the day the report was rendered, read from the clock then: a run that passes midnight between importing this
+        # module (NOW) and rendering would otherwise look for yesterday's date
+        cls.rendered_on = {f'{d:%B} {d.day}, {d:%Y}'.lower() for d in (before, after)}
         cls.closed_job = queued(cls.worker, 'acme', include_closed=True)
         cls.host_job = queued(cls.worker, 'acme', host='www.acme.test')
         cls.text = pdf_text(os.path.join(cls.reports_dir, cls.project_job.filename))
@@ -211,61 +227,84 @@ class ReportContentTests(ReportBase):
         self.assertEqual(oct(os.stat(os.path.join(self.reports_dir, self.project_job.filename)).st_mode & 0o777), '0o600')
         self.assertTrue(re.fullmatch(r'[0-9a-f]{48}\.pdf', self.project_job.filename))
 
-    def test_cover_names_the_project_the_date_and_the_scope(self):
-        for text in ('Security exposure report', 'Acme Exposure', 'Acme Org', f'{NOW:%Y-%m-%d}', 'blue ridge security',
-                     '1 target, 2 hosts in the current inventory', 'acme.test', 'Open findings only', f'{(NOW - timedelta(days=2)):%Y-%m-%d}'):
+    def test_cover_names_the_client_the_window_the_date_and_who_prepared_it(self):
+        scanned = NOW - timedelta(days=2)
+        self.assertTrue(any(day in self.text.lower() for day in self.rendered_on), self.rendered_on)
+        for text in ('External Attack Surface Assessment', 'Acme Exposure', 'Acme Org', 'blue ridge security',
+                     '1 target, 2 hosts in the current inventory', 'Open findings only', f'Assessment window {scanned:%B} {scanned.day}, {scanned:%Y}',
+                     'Prepared by Blue Ridge Security, with cvENGINE', 'Confidential'):
             self.assertIn(text.lower(), self.text.lower())  # the cover sets some of it in capitals
 
-    def test_executive_summary_counts_by_heat_and_severity_and_lists_top_risks(self):
-        summary = self.text[self.text.index('Executive summary'):self.text.index('Hosts Highest score first')]
-        # open and not ruled out: the KEV match (fire), the critical scanner finding (smoke until a validation reproduces it: 1.3.5), the 7.5
-        # match (ice under the KEV heat rule: it is neither on the KEV nor exploited; the legacy rule made it smoke), and the legend says which
-        # rule the counts follow
-        self.assertIn('This report lists 3 open findings across 2 hosts: 1 fire, 1 smoke and 1 ice', summary)
-        self.assertIn('Ice: not on the KEV and no public exploit', summary)
-        self.assertIn('A further 2 TLS, certificate or email hygiene findings are listed separately', summary)
-        for severity in ('Critical 2', 'High 1', 'Medium 0', 'Low 0'):  # the bars: one critical match, one critical finding, one 7.5 match
-            self.assertIn(severity, summary)
-        top = summary[summary.index('Top risks'):]
-        self.assertLess(top.index('CVE-2099-1001'), top.index('CVE-2099-1002'))  # hottest first
-        self.assertIn('Exposed admin panel', top)
+    def test_the_sections_come_in_report_order_with_a_table_of_contents(self):
+        contents = self.text[:re.search(r'Page 2 of \d+', self.text).end()]
+        order = ['Executive summary', 'Summary of findings', 'Detailed findings', '1. CVE-2099-1001 in nginx', 'Scope and methodology',
+                 'Appendix A. Low and informational findings', 'Appendix B. Asset inventory']
+        self.assertEqual([contents.index(x) for x in order], sorted(contents.index(x) for x in order))
+        self.assertRegex(contents, r'Executive summary \.+ 3')  # a page number from the layout itself
+        rest = body(self.text)
+        self.assertEqual([rest.index(x) for x in order[:3]], sorted(rest.index(x) for x in order[:3]))
+        self.assertLess(rest.index('Detailed findings'), rest.index('Scope and methodology'))  # the findings first, the method after
+        self.assertRegex(self.text, r'External Attack Surface Assessment · Acme Exposure .* Page 3 of \d+')  # the running header and footer
+
+    def test_executive_summary_names_the_issues_and_counts_them_by_severity(self):
+        summary = section(self.text, 'Executive summary', 'Summary of findings')
+        # open and not ruled out: the KEV match a template confirmed (critical), the critical scanner finding (high until a validation reproduces it),
+        # the expired certificate (a configuration finding: high at most), the missing SPF record (medium), and the 7.5 match that rests on its
+        # version and is not exploited (low)
+        self.assertIn('cvENGINE grouped 5 open findings on 2 hosts in scope into 5 distinct issues: 1 critical, 2 high, 1 medium', summary)
+        self.assertIn('A further 1 low or informational issue is listed in Appendix A', summary)
+        self.assertIn('The most serious issue is CVE-2099-1001 in nginx (Critical, on 1 host), confirmed by a check.', summary)
+        self.assertIn('An attacker can smuggle requests past the front proxy.', summary)
+        for row in ('Critical 1 1 1', 'High 2 1 2', 'Medium 1 1 1', 'Low 1 1 1', 'Informational 0 0 0'):
+            self.assertIn(row, summary)
+        self.assertIn('Key recommendations', summary)
+        self.assertIn('Upgrade nginx on 1 host to 1.20.0 or later', summary)
+        self.assertIn('Restrict /admin to the office network'.lower(), summary.lower())
         self.assertIn('1 candidate finding that the AI triage classed as a likely false positive', summary)
+        self.assertNotIn('Positive observations', summary)  # a KEV match, a confirmed issue, a critical one: nothing positive the data supports
 
-    def test_host_table_has_score_and_exposure(self):
-        table = self.text[self.text.index('Hosts Highest score first'):self.text.index('Findings CVE matches')]
-        self.assertIn('www.acme.test', table)
-        self.assertIn('80', table)
-        self.assertIn('22/tcp, 443/tcp', table)
-        self.assertLess(table.index('www.acme.test'), table.index('quiet.acme.test'))  # by score
-        self.assertNotIn('app.other.test', table)
+    def test_summary_of_findings_is_numbered_by_severity_and_sends_the_low_ones_to_the_appendix(self):
+        table = section(self.text, 'Summary of findings', 'Detailed findings')
+        self.assertRegex(table, r'1 CVE-2099-1001 in nginx CRITICAL Confirmed 1 5')
+        rows = [table.index(x) for x in ('CVE-2099-1001 in nginx', 'Exposed admin panel', 'Expired TLS certificate', 'No SPF record')]
+        self.assertEqual(rows[0], min(rows))
+        self.assertEqual(rows[-1], max(rows))
+        self.assertNotIn('CVE-2099-1002', table)  # low: one line in the appendix, not a row here
+        self.assertIn('A further 1 low and informational issue (number 5 onwards) is listed in Appendix A', table)
+        appendix = section(self.text, 'Appendix A. Low and informational findings', 'Appendix B')
+        self.assertRegex(appendix, r'5 CVE-2099-1002 in OpenSSH LOW Version match 1')
 
-    def test_each_finding_has_its_evidence_remediation_and_tracking(self):
-        findings = self.text[self.text.index('Findings CVE matches'):self.text.index('Hygiene: TLS')]
-        self.assertIn('CVE-2099-1001 in nginx 1.18.0', findings)
-        self.assertIn('CVSS 9.8', findings)
-        self.assertIn('listed as exploited (CISA KEV)', findings)
-        self.assertIn('Confirmed: a check on the host reproduced it', findings)
-        self.assertIn(self.proof_cmd, findings)  # the exact command that proved it
-        self.assertIn('Template nginx-smuggle', findings)
-        self.assertIn('Fixed in 1.20.0', findings)
-        self.assertIn('Upgrade nginx to 1.20.0 or later and reload the service.', findings)
-        self.assertIn('An attacker can smuggle requests past the front proxy.', findings)
-        self.assertIn('In progress', findings)
-        self.assertIn('Dana Ops', findings)  # the assignee
-        self.assertIn('Waiting for the 1.20 package. Ticket OPS-4821.', findings)
-        self.assertIn('by worker', findings)
-        # a version-only match says so, and a scanner finding carries its own remediation and the request it sent
-        self.assertIn('Version-based: the detected version is inside the advisory range; not reproduced', findings)
-        self.assertIn('Restrict /admin to the office network.', findings)
-        self.assertIn("curl -sk 'https://www.acme.test/admin'", findings)
-        self.assertIn('Admin Console v3', findings)
-        self.assertIn('Open', findings)
+    def test_each_written_up_issue_has_its_evidence_hosts_recommendation_and_tracking(self):
+        details = section(self.text, 'Detailed findings', 'Scope and methodology')
+        self.assertIn('1. CVE-2099-1001 in nginx', details)
+        self.assertIn('SEVERITY: CRITICAL', details)
+        self.assertIn('CVSS 9.8', details)
+        self.assertIn('Listed as exploited (CISA KEV)', details)
+        self.assertIn('Basis Confirmed', details)
+        self.assertIn('CVSS 9.8 (Critical on its own); listed by CISA as exploited in the wild; a check reproduced it on 1 host.', details)
+        self.assertIn(self.proof_cmd, details)  # the exact command that proved it
+        self.assertIn('Template nginx-smuggle', details)
+        self.assertIn('Upgrade nginx to 1.20.0 or later and reload the service.', details)
+        self.assertIn('An attacker can smuggle requests past the front proxy.', details)
+        self.assertIn('www.acme.test nginx 1.18.0 In progress', details)  # the affected hosts table
+        self.assertIn('Dana Ops', details)  # the assignee
+        self.assertIn('Waiting for the 1.20 package. Ticket OPS-4821.', details)
+        self.assertIn('by worker', details)
+        self.assertIn('https://nvd.nist.gov/vuln/detail/CVE-2099-1001', details)
+        # a scanner finding carries its own remediation and the request it sent
+        self.assertIn('Restrict /admin to the office network.', details)
+        self.assertIn("curl -sk 'https://www.acme.test/admin'", details)
+        self.assertIn('Admin Console v3', details)
+        self.assertIn('Held at High until a check on the host confirms it.', details)
+        for heading in ('Finding information', 'Impact', 'Evidence', 'Affected hosts', 'Recommendations', 'References'):
+            self.assertIn(heading, details)
 
-    def test_hygiene_findings_are_grouped_into_tls_and_email(self):
-        hygiene = self.text[self.text.index('Hygiene: TLS'):self.text.index('Method and validity')]
-        self.assertLess(hygiene.index('TLS and certificates'), hygiene.index('Certificate for www.acme.test:443 expired'))
-        self.assertLess(hygiene.index('Certificate for www.acme.test:443 expired'), hygiene.index('Email'))
-        self.assertIn('No SPF record', hygiene)
+    def test_hygiene_findings_are_issues_named_by_their_check(self):
+        details = section(self.text, 'Detailed findings', 'Scope and methodology')
+        self.assertIn('Expired TLS certificate SEVERITY: HIGH Configuration · 1 host · TLS and certificates', details)
+        self.assertIn('Renew the certificate and install it with its full chain.', details)
+        self.assertIn('No SPF record SEVERITY: MEDIUM Configuration · 1 host · Email', details)
+        self.assertIn('The configuration check rates it High.', details)
 
     def test_testssl_findings_belong_to_the_tls_section(self):
         # testssl names its checks tlsa_<test> (cveFeed.tls_audit)
@@ -274,34 +313,41 @@ class ReportContentTests(ReportBase):
         self.assertEqual(report_data._hygiene_group('dmarc_missing'), 'Email')
         self.assertEqual(report_data._hygiene_group('caa_missing'), 'Other configuration')
 
-    def test_method_page_says_what_was_scanned_and_when_and_the_validity_caveats(self):
-        method = self.text[self.text.index('Method and validity'):]
+    def test_method_page_says_what_was_scanned_when_how_severity_is_rated_and_the_caveats(self):
+        method = section(self.text, 'Scope and methodology', 'Appendix A')
         self.assertIn('Completed scans 1', method)
         self.assertIn('nuclei template checks', method)
         self.assertIn('nmap service detection on the common ports', method)
         self.assertNotIn('bbot discovery', method)  # another project's run
-        self.assertIn('Version-based findings', method)
+        self.assertIn('Sentinels', method)
+        self.assertIn('version match', method)
         self.assertIn('backported patch', method)
         self.assertIn('Outside-in and unauthenticated', method)
         self.assertIn('Point in time', method)
-        self.assertIn('Up to 500 hosts, 1000 detailed findings and 500 hygiene findings', method)
+        self.assertIn('Severity ratings', method)
+        for level in ('CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFORMATIONAL'):
+            self.assertIn(level, method)
+        self.assertIn('never Critical unless the CVE is on the KEV list', method)
+        self.assertIn('One report writes up at most 50 critical, high and medium issues', method)
         self.assertIn('Nothing was left out of this report by those limits', method)
 
-    def test_closed_findings_are_left_out_by_default_and_listed_on_request(self):
-        for text in (self.text,):
-            self.assertNotIn('CVE-2099-1003', text)
-            self.assertNotIn('CVE-2099-1004', text)
-            self.assertNotIn('Internal tool, accepted by the CISO.', text)
-        self.assertIn('CVE-2099-1003', self.closed_text)
-        self.assertIn('Fixed', self.closed_text)
-        self.assertIn('CVE-2099-1004', self.closed_text)
-        self.assertIn('Accepted risk', self.closed_text)
-        self.assertIn('Internal tool, accepted by the CISO.', self.closed_text)
+    def test_closed_findings_are_left_out_by_default_and_listed_in_an_appendix_on_request(self):
+        self.assertNotIn('CVE-2099-1003', self.text)
+        self.assertNotIn('CVE-2099-1004', self.text)
+        self.assertNotIn('Internal tool, accepted by the CISO.', self.text)
+        self.assertNotIn('Closed findings', self.text)
+        closed = section(self.closed_text, 'Appendix C. Closed findings')
+        self.assertIn('CVE-2099-1003', closed)
+        self.assertIn('Marked fixed', closed)
+        self.assertIn('CVE-2099-1004', closed)
+        self.assertIn('Accepted risk', closed)
+        self.assertIn('Internal tool, accepted by the CISO.', closed)
+        self.assertIn('why it was closed', closed.lower())  # the column heading
+        self.assertIn('DMARC policy is p=none', closed)
+        self.assertIn('Mail moves next quarter.', closed)
         self.assertIn('Open, fixed, accepted-risk and false-positive findings', self.closed_text)
-        self.assertIn('Why it was closed', self.closed_text)  # an accepted risk's note is printed as why it was closed
-        self.assertIn('lists 5 findings', self.closed_text)
-        self.assertIn('DMARC policy is p=none', self.closed_text)
-        self.assertIn('Mail moves next quarter.', self.closed_text)
+        self.assertIn('grouped 5 open findings', self.closed_text)  # the closed ones are not issues
+        self.assertNotIn('CVE-2099-1003', section(self.closed_text, 'Executive summary', 'Appendix C. Closed findings'))
         self.assertNotIn('DMARC policy is p=none', self.text)
 
     def test_ruled_out_and_false_positive_findings_are_never_listed(self):
@@ -311,21 +357,23 @@ class ReportContentTests(ReportBase):
 
     def test_host_report_is_about_that_host_only(self):
         self.assertEqual(self.host_job.status, 'done', self.host_job.error)
-        self.assertIn('Host security report', self.host_text)
+        self.assertIn('Host Security Assessment', self.host_text)
         self.assertIn('www.acme.test', self.host_text)
-        self.assertIn('This report lists 3 open findings on this host', self.host_text)
+        self.assertIn('grouped 4 open findings on this host', self.host_text)
+        self.assertIn('Appendix B. Host detail', self.host_text)
         self.assertIn('Why the score is 80', self.host_text)
         self.assertIn('Fire CVE match', self.host_text)
         self.assertIn('OpenSSH 8.9', self.host_text)  # the services table
         self.assertIn('SSH-2.0-OpenSSH_8.9', self.host_text)
-        self.assertIn('Certificate for www.acme.test:443 expired', self.host_text)
+        self.assertIn('Expired TLS certificate', self.host_text)
         self.assertNotIn('quiet.acme.test', self.host_text)
         self.assertNotIn('No SPF record', self.host_text)  # the domain's mail record belongs to acme.test, not this host
 
     def test_summary_is_recorded_on_the_row(self):
         self.assertEqual(self.project_job.summary['findings'], 3)
         self.assertEqual(self.project_job.summary['hosts'], 2)
-        self.assertEqual(self.project_job.summary['omitted'], {'hosts_omitted': 0, 'findings_omitted': 0, 'hygiene_omitted': 0})
+        self.assertEqual((self.project_job.summary['issues'], self.project_job.summary['detailed']), (5, 4))
+        self.assertEqual(self.project_job.summary['omitted'], {'hosts_omitted': 0, 'writeups_omitted': 0, 'minor_omitted': 0})
 
 
 class TenantIsolationTests(ReportBase):
@@ -465,7 +513,7 @@ class PermissionTests(ReportBase):
         queued(self.auditor, 'acme', host='quiet.acme.test', include_closed=True, run=False)
         row = AuditLog.objects.get(action='report.export')
         self.assertEqual((row.actor, row.target, row.org_id), (self.auditor, 'acme', self.pa.org_id))
-        self.assertEqual(row.detail, {'host': 'quiet.acme.test', 'include_closed': True})
+        self.assertEqual(row.detail, {'host': 'quiet.acme.test', 'include_closed': True, 'kind': 'findings', 'format': 'pdf', 'scope': 'project'})
 
     def test_making_a_report_also_removes_the_expired_ones(self):
         old = queued(self.worker, 'acme')
@@ -740,36 +788,40 @@ class CapTests(ReportBase):
             ip.ports.add(Port.objects.create(number=8000 + i, service_name='http'))
 
     def test_defaults_and_hard_ceilings(self):
-        self.assertEqual(report_data.limits(), {'hosts': 500, 'findings': 1000, 'hygiene': 500})
-        with mock.patch.dict(os.environ, {'CVENGINE_REPORT_MAX_HOSTS': '10 ** 9', 'CVENGINE_REPORT_MAX_FINDINGS': '999999', 'CVENGINE_REPORT_MAX_HYGIENE': '0'}):
-            self.assertEqual(report_data.limits(), {'hosts': 500, 'findings': report_data.CEILING_FINDINGS, 'hygiene': 1})
+        self.assertEqual(report_data.limits(), {'hosts': 500, 'writeups': 50, 'issue_hosts': 25, 'minor': 200, 'inventory': 200, 'closed': 300, 'rows': 20000})
+        with mock.patch.dict(os.environ, {'CVENGINE_REPORT_MAX_HOSTS': '10 ** 9', 'CVENGINE_REPORT_MAX_WRITEUPS': '999999', 'CVENGINE_REPORT_MAX_ISSUE_HOSTS': '0',
+                                          'CVENGINE_REPORT_MAX_INVENTORY': '12'}):
+            caps = report_data.limits()
+        self.assertEqual((caps['hosts'], caps['writeups'], caps['issue_hosts'], caps['inventory']), (500, 500, 1, 12))
 
-    def test_the_host_table_is_capped_paginated_and_says_what_it_left_out(self):
+    def test_the_inventory_is_capped_paginated_and_says_what_it_left_out(self):
         self.extra_hosts(7)
-        with mock.patch.object(report_data, 'HOST_PAGE', 3), mock.patch.dict(os.environ, {'CVENGINE_REPORT_MAX_HOSTS': '8'}):
+        with mock.patch.object(report_data, 'HOST_PAGE', 3), mock.patch.dict(os.environ, {'CVENGINE_REPORT_MAX_INVENTORY': '8'}):
             data = report_data.collect(self.pa)
+            html = report_pdf.build_html(data)
         self.assertEqual((data['scope']['hosts_total'], data['scope']['hosts_listed'], data['caps']['hosts_omitted']), (9, 8, 1))
         names = [h['host'] for h in data['hosts']]
         self.assertEqual(len(set(names)), 8)  # three pages of 3, 3 and 2, no host twice
         self.assertEqual(names[0], 'www.acme.test')
         self.assertEqual([h['score'] for h in data['hosts']], sorted((h['score'] for h in data['hosts']), reverse=True))
+        self.assertIn('Showing the top 8 of 9 hosts, plus 1 more in cvENGINE.', html)
 
-    @mock.patch.dict(os.environ, {'CVENGINE_HEAT_POLICY': 'legacy'})  # the counts rest on a CVSS-rated smoke: the legacy rule
-    def test_findings_beyond_the_cap_are_counted_but_not_detailed(self):
-        with mock.patch.dict(os.environ, {'CVENGINE_REPORT_MAX_FINDINGS': '2', 'CVENGINE_REPORT_MAX_HYGIENE': '1'}):
+    @mock.patch.dict(os.environ, {'CVENGINE_HEAT_POLICY': 'legacy'})  # the 7.5 match is smoke, so High: five issues to write up
+    def test_write_ups_beyond_the_cap_are_listed_but_not_detailed(self):
+        with mock.patch.dict(os.environ, {'CVENGINE_REPORT_MAX_WRITEUPS': '2'}):
             data = report_data.collect(self.pa)
             job = queued(self.worker, 'acme')
-        self.assertEqual(len(data['findings']), 2)
         self.assertEqual(data['summary']['findings'], 3)  # the counts cover everything
         self.assertEqual(data['summary']['heat'], {'fire': 1, 'smoke': 2, 'ice': 0})  # the scanner finding waits for a validation (1.3.5)
-        self.assertEqual(data['caps']['findings_omitted'], 1)
-        self.assertEqual(data['caps']['hygiene_omitted'], 1)
-        self.assertEqual([f['heat'] for f in data['findings']], ['fire', 'smoke'])  # hottest kept
+        self.assertEqual(len(data['major']), 5)
+        self.assertEqual([i['number'] for i in data['detailed']], [1, 2])  # the most severe kept
+        self.assertEqual(data['caps']['writeups_omitted'], 3)
         self.assertEqual(job.status, 'done', job.error)
         text = pdf_text(os.path.join(self.reports_dir, job.filename))
-        self.assertIn('Showing the 2 hottest of 3', text)
-        self.assertIn('Showing 1 of 2; the report limit is 1', text)
-        self.assertEqual(job.summary['omitted']['findings_omitted'], 1)
+        self.assertEqual(text.count('not detailed'), 4)  # three rows and the note under the table
+        self.assertIn('past the report’s limit of 2 write-ups', text)
+        self.assertIn('the limits left out 3 write-ups', text)
+        self.assertEqual(job.summary['omitted']['writeups_omitted'], 3)
 
     def test_a_big_project_still_renders(self):
         self.extra_hosts(60)
@@ -779,9 +831,10 @@ class CapTests(ReportBase):
         job = queued(self.worker, 'acme')
         self.assertEqual(job.status, 'done', job.error)
         text = pdf_text(os.path.join(self.reports_dir, job.filename))
-        self.assertIn('Bulk finding 59', text)
+        self.assertIn('Bulk finding 59', text)  # a row of the summary of findings, past the write-up cap
         self.assertIn('h59.acme.test', text)
-        self.assertIn('This report lists 63 open findings', text)
+        self.assertIn('cvENGINE grouped 65 open findings', text)
+        self.assertLess(len(PdfReader(os.path.join(self.reports_dir, job.filename)).pages), 45)
 
 
 class UntrustedTextTests(ReportBase):
@@ -873,7 +926,7 @@ class UntrustedTextTests(ReportBase):
         self.assertFalse(os.path.exists(out))
 
     def test_clean_strips_control_characters_and_clips(self):
-        self.assertEqual(report_data.clean('a\x00b\x1b[31mred\x07‮ x'), 'ab[31mredx'.replace('‮', '‮'))
+        self.assertEqual(report_data.clean('a\x00b\x1b[31mred\x07\u202e\u2028x'), 'ab[31mredx'.replace('\u202e', '\u202e'))
         self.assertEqual(report_data.clean('  many   spaces\r\nnext  line  '), 'many spaces\nnext line')
         self.assertEqual(report_data.clean('x' * 50, 10), 'x' * 9 + '…')
         self.assertEqual(report_data.clean(None), '')

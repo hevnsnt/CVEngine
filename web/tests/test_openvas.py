@@ -182,7 +182,7 @@ class OffByDefaultTests(Fixture, TestCase):
         self.assertIn('openvas_queue', entry.split('classic_queues+=')[1].splitlines()[0])
         from agentapi import system_status
         self.assertIn('openvas_queue', system_status.QUEUES)
-        from reNgine.celery import app
+        from cvengine.celery import app
         import cveFeed.tasks  # noqa: F401
         self.assertEqual(app.tasks['openvas_sweep'].queue, 'openvas_queue')
         self.assertNotIn('openvas_check', app.tasks)  # no worker opens a GMP session any more
@@ -915,7 +915,7 @@ class ComposeTests(SimpleTestCase):
         self.services = self.compose['services']
 
     def test_no_greenbone_service_volume_or_network_remains(self):
-        self.assertEqual({n for n, s in self.services.items() if 'profiles' not in s}, {'db', 'redis', 'celery', 'celery-beat', 'web', 'proxy', 'reviewer', 'scanner'})
+        self.assertEqual({n for n, s in self.services.items() if 'profiles' not in s}, {'db', 'redis', 'celery', 'celery-beat', 'web', 'proxy', 'reviewer', 'scanner', 'migrate', 'ownership'})  # ownership: the one-off root service that hands the volumes to uid 10002 (web/ownership.sh)
         self.assertFalse([n for n in self.services if n.startswith('openvas')])
         self.assertFalse([v for v in self.compose['volumes'] if 'openvas' in v])
         self.assertNotIn('openvas_network', self.compose['networks'])

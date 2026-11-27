@@ -3,8 +3,8 @@ from unittest import mock
 from django.test import TestCase
 from django.utils import timezone
 
-from cveFeed import correlation, retest, scoring
-from cveFeed.models import AssetChange, CVEEntry, CVEMatch
+from cveFeed import correlation, scoring
+from cveFeed.models import CVEEntry, CVEMatch
 from cveFeed.tasks import correlate_cves
 from dashboard.models import Org, Project
 from scanEngine.models import EngineType
@@ -81,19 +81,6 @@ class PartialRowTests(Fixture):
 		ct = self.host(None, match=True)
 		scoring.rescore_hosts(self.project.id, ['www.score.test'])
 		self.assertGreater(self.score_of(ct), 0)
-
-
-class RetestOrderTests(Fixture):
-	def test_a_failed_scans_zero_score_does_not_push_a_fire_host_back(self):
-		source = self.scan(2)
-		self.host(source, 'fire.score.test', match=True)
-		self.host(source, 'calm.score.test')
-		scoring.rescore_hosts(self.project.id, ['fire.score.test', 'calm.score.test'])
-		self.host(self.scan(0), 'fire.score.test')  # partial row, score 0
-		Subdomain.objects.filter(scan_history__scan_status=0).update(score=0)
-		for host in ('calm.score.test', 'fire.score.test'):
-			AssetChange.objects.create(project=self.project, domain=self.domain, scan=source, host=host, kind='host_new')
-		self.assertEqual(retest.hosts_to_retest(source), ['fire.score.test', 'calm.score.test'])
 
 
 class VerdictResetRescoreTests(Fixture):

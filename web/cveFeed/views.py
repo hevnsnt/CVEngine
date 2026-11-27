@@ -14,6 +14,7 @@ from django.db.models import Count
 from django.http import JsonResponse
 from django.http import Http404, HttpResponseBadRequest
 from django.shortcuts import redirect, render
+from django.urls import reverse
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from django.views.decorators.http import require_GET, require_POST
@@ -26,7 +27,7 @@ from cveFeed.models import (AgentActivity, AutoFireRun, CVEEntry, CVEMatch, Disc
 from cveFeed.threat import FIRE, HEAT_RANK, ICE, SMOKE, classify_threat_tier, host_heat, match_heat
 from startScan.models import OPEN_PORT_STATES, open_services
 from targetApp.target_types import is_public_address
-from reNgine.definitions import FOUR_OH_FOUR_URL, PERM_MODIFY_SYSTEM_CONFIGURATIONS
+from cvengine.definitions import FOUR_OH_FOUR_URL, PERM_MODIFY_SYSTEM_CONFIGURATIONS
 
 logger = logging.getLogger(__name__)
 
@@ -86,9 +87,10 @@ def score_part(line):
             'text': str(line.get('text') or '')[:600], 'ref': ref if isinstance(ref, dict) else None}
 
 
-def _host_tip(sub, live_matches, severities, aliases=()):
+def _host_tip(sub, live_matches, severities, aliases=(), addresses=None):
     """A compact summary for the attack-surface hover card: no extra queries, only the prefetched matches/ips and the
-    host's stored score reasons. Severities is the list of open-finding severities already gathered for this host."""
+    host's stored score reasons. Severities is the list of open-finding severities already gathered for this host. ``addresses``: the host's
+    IP addresses when the caller already read them as values (else the prefetched ``ip_addresses``)."""
     worst = None
     for match in live_matches:
         tier = match_heat(match)
@@ -102,7 +104,7 @@ def _host_tip(sub, live_matches, severities, aliases=()):
         'project': sub.target_domain.project.name if sub.target_domain_id and sub.target_domain.project_id else '',
         'org': (sub.target_domain.project.org.name if sub.target_domain_id and sub.target_domain.project_id
                 and sub.target_domain.project.org_id else ''),
-        'ips': len({ip.address for ip in sub.ip_addresses.all()}),
+        'ips': len(set(addresses) if addresses is not None else {ip.address for ip in sub.ip_addresses.all()}),
         'cves': len(live_matches),
         'top_cve': worst[0] if worst else '',
         'top_tier': worst[1] if worst else '',
@@ -116,20 +118,30 @@ def _host_tip(sub, live_matches, severities, aliases=()):
     }
 
 
+# what graph_payload reads of a host row and its target, project and organization (the wide columns of a host are never loaded)
+GRAPH_SUB_FIELDS = ('name', 'score', 'score_detail', 'scan_history', 'target_domain', 'target_domain__name', 'target_domain__alias', 'target_domain__note',
+                    'target_domain__scope_mode', 'target_domain__project', 'target_domain__project__slug', 'target_domain__project__name',
+                    'target_domain__project__org', 'target_domain__project__org__name')
+# a match needs its CVE's tier fields only: never the prose columns
+# (and what decides whether it is version-only: its source, evidence and Triage validation status, threat.match_heat)
+GRAPH_MATCH_FIELDS = ('subdomain_id', 'ai_verdict', 'evidence', 'version_in_range', 'template_result', 'distro_status', 'source', 'cve_entry__cve_id',
+                      'cve_entry__kev', 'cve_entry__epss_reached', 'cve_entry__exploit_db', 'cve_entry__cvss', 'remediation_status',
+                      'triage__validation_status', 'triage__heat_override', 'triage__status', 'triage__classification')
+
+
 def graph_payload(domain_id=None, scan_id=None):
     """Nodes/edges for the asset graph: domain > subdomain > ip, and subdomain > cve. Only live hosts are drawn (they resolved
-    to an IP, or something saw them answer); names that never resolved are left out. Ports belong on the host's detail card."""
-    from startScan.models import Subdomain, Vulnerability
+    to an IP, or something saw them answer); names that never resolved are left out. Ports belong on the host's detail card.
+
+    Every read is one statement over all the drawn hosts, never one per host: the hosts (only the columns drawn), their addresses (as
+    plain values), the live CVE matches of the hosts and of their other names in one statement, the findings of both in one statement (whether
+    each is open and actionable, and its heat, are worked out by the database in the same read), and the projects with their hygiene counts in one."""
+    from django.db.models import BooleanField, Case, Exists, IntegerField, OuterRef, Q, Value, When
+    from startScan.models import IpAddress, Subdomain, Vulnerability
     from cveFeed import internal_view
     from cveFeed.graph_overview import root_for
 
-    from django.db.models import Prefetch
-    # a match needs its CVE's tier fields only: never the prose columns
-    # (and what decides whether it is version-only: its source, evidence and Triage validation status, threat.match_heat)
-    matches = CVEMatch.objects.only('subdomain_id', 'ai_verdict', 'evidence', 'version_in_range', 'template_result', 'distro_status', 'source', 'cve_entry__cve_id', 'cve_entry__kev',
-                                    'cve_entry__epss_reached', 'cve_entry__exploit_db', 'cve_entry__cvss', 'remediation_status', 'triage__validation_status', 'triage__heat_override', 'triage__status', 'triage__classification').select_related('cve_entry', 'triage')
-    subs = Subdomain.objects.select_related('target_domain__project__org').prefetch_related(
-        'ip_addresses', Prefetch('cve_matches', queryset=matches))
+    subs = Subdomain.objects.all()
     if domain_id:
         subs = subs.filter(target_domain_id=domain_id)
     if scan_id:
@@ -147,48 +159,61 @@ def graph_payload(domain_id=None, scan_id=None):
             return True
         return False
 
-    from cveFeed.counts import CLOSED, LIVE_HOST_Q, match_is_live
+    from cveFeed.counts import CLOSED, LIVE_HOST_Q, RULED_OUT
     from django.db.models import F
-    subs = subs.filter(LIVE_HOST_Q).distinct()
+    through = Subdomain.ip_addresses.through
+    # LIVE_HOST_Q as an EXISTS: the same rows, each once, without joining every address row and then DISTINCT over every column of the host
+    listed = subs.filter(Q(Exists(through.objects.filter(subdomain_id=OuterRef('pk')))) | Q(http_status__gt=0))
     # the riskiest hosts first, then by name: past the node cap the drawn hosts are the ones that matter, and the same ones on every poll
-    sub_list = list(subs.order_by(F('score').desc(nulls_last=True), 'name', 'pk')[:GRAPH_NODE_CAP])
+    sub_list = list(listed.select_related('target_domain__project__org').only(*GRAPH_SUB_FIELDS)
+                    .order_by(F('score').desc(nulls_last=True), 'name', 'pk')[:GRAPH_NODE_CAP])
     sub_ids = [s.pk for s in sub_list]
-    # "scanned" = at least one finding exists at all, even an info-only one (something looked); a
-    # second query narrows to the ones severe enough, open, and not ruled out, to call "vulnerable".
-    scanned_ids = set(Vulnerability.objects.filter(subdomain_id__in=sub_ids).values_list('subdomain_id', flat=True))
-    vulnerable_ids = set(Vulnerability.objects.filter(
-        subdomain_id__in=sub_ids, open_status=True, severity__gte=1).exclude(remediation_status__in=CLOSED).values_list('subdomain_id', flat=True))
-    vulnerable_ids |= {s.pk for s in sub_list if any(match_is_live(m) for m in s.cve_matches.all())}
-
-    # each open finding's severity (the tip) and heat (threat.finding_heat_rank_expr: under the KEV policy a finding that names CVEs follows the
-    # CVE rule, any other its severity)
-    from cveFeed.threat import finding_heat_rank_expr
-    heat_names = {rank: heat for heat, rank in HEAT_RANK.items()}
-    severities, finding_heats = {}, {}
-    for sub_id, severity, rank in Vulnerability.objects.filter(subdomain_id__in=sub_ids, open_status=True, severity__gte=1).exclude(remediation_status__in=CLOSED) \
-            .annotate(heat_rank=finding_heat_rank_expr()).values_list('subdomain_id', 'severity', 'heat_rank'):
-        severities.setdefault(sub_id, []).append(severity)
-        if rank in heat_names:
-            finding_heats.setdefault(sub_id, []).append(heat_names[rank])
+    # each host's addresses, as values, in address id order: a join has no order of its own, so without it a host's addresses (and which of
+    # them fit under the node cap) could come back in a different order on each read
+    ips = {}
+    for sub_id, ip_id, address in (IpAddress.objects.filter(ip_addresses__id__in=sub_ids).order_by('id')
+                                   .values_list('ip_addresses__id', 'id', 'address')):
+        ips.setdefault(sub_id, []).append((ip_id, address))
 
     # one host, several names: the evidence of the other names on the same addresses counts for the host drawn
     from cveFeed.counts import host_siblings
     siblings = host_siblings(sub_ids)
-    sibling_ids = {i for rows in siblings.values() for i, _ in rows}
-    sibling_matches, sibling_findings = {}, {}
-    if sibling_ids:
-        for m in CVEMatch.objects.filter(subdomain_id__in=sibling_ids).exclude(ai_verdict='not_affected').exclude(remediation_status__in=CLOSED).only(
-                'subdomain_id', 'ai_verdict', 'evidence', 'version_in_range', 'template_result', 'distro_status', 'source', 'cve_entry__cve_id', 'cve_entry__kev', 'cve_entry__epss_reached',
-                'cve_entry__exploit_db', 'cve_entry__cvss', 'remediation_status', 'triage__validation_status', 'triage__heat_override', 'triage__status', 'triage__classification').select_related('cve_entry', 'triage'):
-            sibling_matches.setdefault(m.subdomain_id, []).append(m)
-        for sid, severity, name, rank in Vulnerability.objects.filter(subdomain_id__in=sibling_ids, open_status=True, severity__gte=1).exclude(remediation_status__in=CLOSED) \
-                .annotate(heat_rank=finding_heat_rank_expr()).values_list('subdomain_id', 'severity', 'name', 'heat_rank'):
-            sibling_findings.setdefault(sid, []).append((severity, name, heat_names.get(rank)))
-    own_findings = {}
-    if sibling_ids:
-        for sid, severity, name in Vulnerability.objects.filter(subdomain_id__in=sub_ids, open_status=True, severity__gte=1).exclude(remediation_status__in=CLOSED) \
-                .values_list('subdomain_id', 'severity', 'name'):
-            own_findings.setdefault(sid, set()).add((severity, name))
+    sibling_ids = {i for rows in siblings.values() for i, _ in rows}  # never one of sub_ids (host_siblings leaves those out)
+    wanted_ids = [*sub_ids, *sorted(sibling_ids)]
+
+    # the live CVE matches (not ruled out, not closed: counts.match_is_live) of the drawn hosts and of their other names, in one statement and in
+    # the model's order, which is the order each host's own list had when it was prefetched
+    own_matches, sibling_matches = {}, {}
+    for m in CVEMatch.objects.filter(subdomain_id__in=wanted_ids).exclude(ai_verdict=RULED_OUT).exclude(remediation_status__in=CLOSED) \
+            .only(*GRAPH_MATCH_FIELDS).select_related('cve_entry', 'triage'):
+        (sibling_matches if m.subdomain_id in sibling_ids else own_matches).setdefault(m.subdomain_id, []).append(m)
+
+    # every finding of the drawn hosts and their other names in one statement. "scanned" = at least one finding exists at all, even an info-only one
+    # (something looked); an open one of low or above that is not closed is actionable and makes the host "vulnerable". Each actionable finding's
+    # severity (the tip) and heat (threat.finding_heat_rank_expr: under the KEV policy a finding that names CVEs follows the CVE rule, any other its
+    # severity), worked out by the database for those rows only
+    from cveFeed.threat import finding_heat_rank_expr
+    heat_names = {rank: heat for heat, rank in HEAT_RANK.items()}
+    actionable = Q(open_status=True, severity__gte=1) & ~Q(remediation_status__in=CLOSED)
+    scanned_ids, vulnerable_ids = set(), set()
+    severities, finding_heats, own_findings, sibling_findings = {}, {}, {}, {}
+    for sub_id, severity, name, live, rank in Vulnerability.objects.filter(subdomain_id__in=wanted_ids).annotate(
+            _graph_live=Case(When(actionable, then=Value(True)), default=Value(False), output_field=BooleanField()),
+            _graph_heat=Case(When(actionable, then=finding_heat_rank_expr()), default=Value(None), output_field=IntegerField())) \
+            .values_list('subdomain_id', 'severity', 'name', '_graph_live', '_graph_heat'):
+        if sub_id in sibling_ids:
+            if live:
+                sibling_findings.setdefault(sub_id, []).append((severity, name, heat_names.get(rank)))
+            continue
+        scanned_ids.add(sub_id)
+        if not live:
+            continue
+        vulnerable_ids.add(sub_id)
+        severities.setdefault(sub_id, []).append(severity)
+        if rank in heat_names:
+            finding_heats.setdefault(sub_id, []).append(heat_names[rank])
+        own_findings.setdefault(sub_id, set()).add((severity, name))
+    vulnerable_ids |= set(own_matches)
 
     from startScan.models import ScanActivity
     nuclei_done = set(ScanActivity.objects.filter(scan_of_id__in={s.scan_history_id for s in sub_list if s.scan_history_id},
@@ -198,13 +223,15 @@ def graph_payload(domain_id=None, scan_id=None):
     from agentapi.services import alias_and_note
     from cveFeed.models import HostProfile
     wanted = {s.name.lower() for s in sub_list} | {n.lower() for rows in siblings.values() for _, n in rows}
-    tags = {(row.project_id, row.host): {'alias': row.alias, 'note': row.note}
-            for row in HostProfile.objects.filter(host__in=wanted).exclude(alias='', note='')}
+    tags = {(project_id, host): {'alias': alias, 'note': note}
+            for project_id, host, alias, note in HostProfile.objects.filter(host__in=wanted).exclude(alias='', note='')
+            .values_list('project_id', 'host', 'alias', 'note')}
     cut = False  # the node cap stopped the drawing before every host was in
     for sub in sub_list:
         sid = f'sub:{sub.pk}'
         status = asset_status(sub, scanned_ids, vulnerable_ids, nuclei_done)
-        live = [m for m in sub.cve_matches.all() if match_is_live(m)]
+        mine = own_matches.get(sub.pk, [])
+        live = list(mine)
         sev = list(severities.get(sub.pk, []))
         temps = list(finding_heats.get(sub.pk, []))
         sibs = siblings.get(sub.pk, [])
@@ -226,10 +253,12 @@ def graph_payload(domain_id=None, scan_id=None):
         tiers = [match_heat(m) for m in live] + temps
         heat = host_heat(status, tiers, [])
         given = alias_and_note(sub, [SimpleNamespace(name=n, target_domain=sub.target_domain) for _, n in sibs], tags)
+        host_ips = ips.get(sub.pk, [])
         if not node(sid, 'subdomain', sub.name, target=sub.target_domain.name if sub.target_domain_id else '',
                     **{k: given[k] for k in ('alias', 'note') if given[k]},
                     project=sub.target_domain.project.slug if sub.target_domain_id and sub.target_domain.project_id else '',
-                    status=status, heat=heat, score=sub.score, info=_host_tip(sub, live, sev, [n for _, n in sibs if n.lower() != sub.name.lower()]),
+                    status=status, heat=heat, score=sub.score,
+                    info=_host_tip(sub, live, sev, [n for _, n in sibs if n.lower() != sub.name.lower()], addresses=[a for _, a in host_ips]),
                     internal=internal_view.is_internal(sub.target_domain.project_id if sub.target_domain_id else None, sub.name),
                     network=internal_view.network_of(sub.target_domain.project_id if sub.target_domain_id else None, sub.name)):
             cut = True
@@ -241,12 +270,10 @@ def graph_payload(domain_id=None, scan_id=None):
                 project_name=sub.target_domain.project.name if sub.target_domain.project_id else '',
                 root=root_for(sub.target_domain)):
             edges.add((f'dom:{sub.target_domain_id}', sid))
-        for ip in sub.ip_addresses.all():
-            if node(f'ip:{ip.pk}', 'ip', ip.address):
-                edges.add((sid, f'ip:{ip.pk}'))
-        for match in sub.cve_matches.all():
-            if not match_is_live(match):
-                continue
+        for ip_id, address in host_ips:
+            if node(f'ip:{ip_id}', 'ip', address):
+                edges.add((sid, f'ip:{ip_id}'))
+        for match in mine:
             cve = match.cve_entry
             if node(f'cve:{cve.pk}', 'cve', cve.cve_id, tier=_tier(cve)):
                 edges.add((sid, f'cve:{cve.pk}'))
@@ -270,7 +297,10 @@ def graph_payload(domain_id=None, scan_id=None):
     total_hosts, per_project = drawn_hosts, {}
     if capped:
         from django.db.models import Count
-        per_project = {slug or '': n for slug, n in subs.order_by().values_list('target_domain__project__slug').annotate(n=Count('pk', distinct=True))}
+        # sorted by project: a GROUP BY with no ORDER BY comes back in whatever order the plan finds the groups, so the same data could draw
+        # the project counts in a different order from one request to the next
+        per_project = dict(sorted({slug or '': n for slug, n in subs.filter(LIVE_HOST_Q).distinct().order_by().values_list('target_domain__project__slug')
+                                   .annotate(n=Count('pk', distinct=True))}.items()))
         total_hosts = max(sum(per_project.values()), drawn_hosts)
     return {'nodes': list(nodes.values()), 'edges': [{'from': a, 'to': b} for a, b in sorted(edges)],
             'hosts': {'drawn': drawn_hosts, 'total': total_hosts, 'projects': per_project},
@@ -280,17 +310,21 @@ def graph_payload(domain_id=None, scan_id=None):
 def _graph_projects(domain_id=None, scan_id=None):
     """``{slug: {'name', 'hygiene'}}`` for every project the caller sees: its open, actionable hygiene findings (the dashboard's Hygiene
     tile), which the graph hangs off the project's cloud beside its fire, smoke and ice hosts. Hygiene findings belong to a target, not
-    a host row, so they are counted here rather than from the drawn hosts. One query."""
-    from django.db.models import Count
+    a host row, so they are counted here rather than from the drawn hosts. One query: each project with its count beside it (the hygiene rows are
+    read through their own scoped manager, as before)."""
+    from django.db.models import Count, IntegerField, OuterRef, Subquery, Value
+    from django.db.models.functions import Coalesce
     from cveFeed import counts
     from dashboard.models import Project
-    hygiene = counts.actionable_hygiene(HygieneFinding.objects.all())
-    if domain_id:
-        hygiene = hygiene.filter(domain_id=domain_id)
     if scan_id:
-        hygiene = hygiene.none()  # one scan's graph: its hosts only
-    found = dict(hygiene.order_by().values_list('domain__project__slug').annotate(n=Count('id')))
-    return {slug: {'name': name, 'hygiene': found.get(slug, 0)} for slug, name in Project.objects.values_list('slug', 'name')}
+        hygiene = Value(0)  # one scan's graph: its hosts only
+    else:
+        found = counts.actionable_hygiene(HygieneFinding.objects.filter(domain__project_id=OuterRef('pk')))
+        if domain_id:
+            found = found.filter(domain_id=domain_id)
+        hygiene = Coalesce(Subquery(found.order_by().values('domain__project_id').annotate(n=Count('id')).values('n'), output_field=IntegerField()),
+                           Value(0))
+    return {slug: {'name': name, 'hygiene': n} for slug, name, n in Project.objects.annotate(_graph_hygiene=hygiene).values_list('slug', 'name', '_graph_hygiene')}
 
 
 def _running_scans(ScanHistory):
@@ -298,20 +332,56 @@ def _running_scans(ScanHistory):
     return running_scans(ScanHistory.objects.all())
 
 
-def tier_counts():
-    """fire / smoke / ice over every stored CVE, counted by the database (see cveFeed.threat.classify_threat_tier)."""
-    from cveFeed.threat import fire_tier_q, hot_tier_q
-    total, n_fire, n_hot = (CVEEntry.objects.count(), CVEEntry.objects.filter(fire_tier_q()).count(),
-                            CVEEntry.objects.filter(hot_tier_q()).count())
-    return {FIRE: n_fire, SMOKE: n_hot - n_fire, ICE: total - n_hot}
+TIER_COUNTS_SECONDS = 30  # the catalogue's tier counts are the same for every scope: one count of it is shared this long by all of them
+
+
+def _catalog_counts():
+    """``{'total', 'fire', 'hot'}`` over every stored CVE: one pass over the catalogue for the three counts.
+
+    The catalogue belongs to no project, so the answer is the same for every scope, and the headline snapshot of each scope used to count it
+    again (four whole-catalogue counts per scope every ten seconds). It is kept ``TIER_COUNTS_SECONDS`` under a key of the heat policy (which
+    decides the tiers), the live screen's revision (``bump_stats_revision`` drops it with the snapshots) and the newest CVE id (a new CVE
+    shows at once). Without a cache it is counted every time, as before."""
+    from django.core.cache import cache
+    from django.db.models import Count, Max
+    from cveFeed.threat import fire_tier_q, heat_policy, hot_tier_q
+    policy = heat_policy()
+
+    def count():
+        return CVEEntry.objects.aggregate(total=Count('id'), fire=Count('id', filter=fire_tier_q(policy=policy)),
+                                          hot=Count('id', filter=hot_tier_q(policy=policy)))
+    key = f"cve:catalog-counts:{policy}:{snapshot_cache.revision()}:{CVEEntry.objects.aggregate(m=Max('id'))['m']}"
+    try:
+        got = cache.get(key)
+    except Exception:  # noqa: BLE001 - a cache outage counts directly
+        return count()
+    if got is None:
+        got = count()
+        try:
+            cache.set(key, got, TIER_COUNTS_SECONDS)
+        except Exception:  # noqa: BLE001
+            pass
+    return got
+
+
+def tier_counts(catalog=None):
+    """fire / smoke / ice over every stored CVE, counted by the database (see cveFeed.threat.classify_threat_tier). ``catalog``: what
+    ``_catalog_counts`` returned, when the caller already read it."""
+    got = catalog or _catalog_counts()
+    return {FIRE: got['fire'], SMOKE: got['hot'] - got['fire'], ICE: got['total'] - got['hot']}
 
 
 def live_scan_counts():
     """Running and queued scans, and the background jobs in progress under finished scan records, read fresh on every poll (they are cheap and
     the first thing a person watches). The running window (a settings lookup) is read once for all three."""
+    from django.db.models import Count, Q
     from cveFeed import counts
+    from startScan.models import ScanHistory
     window = counts.running_window()
-    return {'scans_running': counts.running_scans(window=window).count(), 'scans_queued': counts.queued_scans().count(),
+    # running and queued in one read of ScanHistory, as counts.running_scans and counts.queued_scans define them
+    scans = ScanHistory.objects.aggregate(running=Count('id', filter=Q(scan_status=1, start_scan_date__gte=timezone.now() - window)),
+                                          queued=Count('id', filter=Q(scan_status=-1)))
+    return {'scans_running': scans['running'], 'scans_queued': scans['queued'],
             'scans_background_running': counts.background_running(window=window).count()}
 
 
@@ -340,13 +410,17 @@ def stats_payload():
     from cveFeed import counts, internal_view
     from startScan.models import Vulnerability
     from targetApp.models import Domain
-    tiers = tier_counts()
+    catalog = _catalog_counts()
+    tiers = tier_counts(catalog)
     # the inventory is collapsed to one row per host ONCE; the host counts, the exposed count and the internal share are all read from those ids
     # (each used to collapse it again). While a snapshot is being built the ids are shared with the other snapshots of the scope (counts.snapshot_rep_ids)
     reps = counts.reps_of(counts.snapshot_rep_ids())
     from django.db.models import Count
     host_counts = reps.aggregate(total=Count('pk', distinct=True), live=Count('pk', filter=counts.LIVE_HOST_Q, distinct=True))  # one pass over the hosts, not two
     oldest = counts.oldest_open()
+    # the exposed CVE matches and the distinct issues they are, from ONE grouped read (cveFeed.counts.match_issues): the count it replaces was a COUNT
+    # over the same rows, so the number beside it costs no extra statement unless two names of one project share a product version
+    matches, match_issues = counts.match_issues(counts.exposed_matches())
     return {
         'targets': Domain.objects.count(),
         'certs_expiring': counts.expiring_certificates(TlsCertificate.objects.all()).count(),
@@ -357,11 +431,14 @@ def stats_payload():
         'hosts_live': host_counts['live'],
         **live_scan_counts(),
         'tiers': {FIRE: tiers[FIRE], SMOKE: tiers[SMOKE], ICE: tiers[ICE]},
-        'cves': CVEEntry.objects.count(),
-        'matches': counts.exposed_matches().count(),
+        'cves': catalog['total'],
+        'matches': matches,
         # the same matches as the Findings list draws them grouped: one script on sibling hosts is one row (cveFeed.finding_groups).
         # 'matches' stays the per-host count it always was; this is the number beside it that says how many distinct findings that is
         **dict(zip(('match_groups', 'match_groups_truncated'), counts.match_group_count())),
+        # the same matches as distinct issues, as the Findings list's default view (group=product) shows them: the version-only matches of one
+        # product and version on one host are one fix (cveFeed.counts.match_issues). Part of this snapshot, so it is as fresh as 'matches' beside it
+        'match_issues': match_issues,
         'scanner_findings': counts.actionable_findings(Vulnerability.objects.all()).count(),
         'exposed_hosts': counts.exposed_host_count(reps),
         'oldest_open_days': oldest['days'],  # the longest a critical or high item has sat open, across CVE matches, scanner and hygiene findings
@@ -392,6 +469,7 @@ SECTIONS = {
     'situations': 'Situations',
     'keys': 'API keys',
     'sentinels': 'Sentinels',
+    'internal': 'Internal network',
 }
 
 # The one plain sentence under each page title: what the page is for, in words a person who has never opened it can use.
@@ -407,6 +485,7 @@ SECTION_PURPOSE = {
     'secrets': 'API keys, tokens and private keys your websites and scripts give away, and where each one was seen.',
     'suppliers': 'Outside companies your hosts depend on and what each one shows to the internet; these are never your own hosts.',
     'situations': 'What needs you, one host at a time: what is proven, likely or exposed on each, with the first thing to do, most urgent first.',
+    'internal': 'The hosts inside your internal networks, which only a Sentinel inside the network scans: what was found on them and what runs now.',
 }
 # The same sentences for the all-projects view, which has no single project to point at.
 ALL_PROJECTS_PURPOSE = {
@@ -421,6 +500,7 @@ ALL_PROJECTS_PURPOSE = {
     'secrets': 'API keys, tokens and private keys your websites and scripts give away, and where each one was seen.',
     'suppliers': 'Outside companies your hosts depend on and what each one shows to the internet; these are never your own hosts.',
     'situations': 'What needs you across your projects, one host at a time, with the first thing to do, most urgent first.',
+    'internal': 'The hosts inside the internal networks of your projects, which only a Sentinel inside each network scans: what was found and what runs now.',
 }
 SCAN_PURPOSE = 'What this one scan did and what it found.'
 
@@ -482,11 +562,19 @@ def ui_context(request, active, slug=None, remember=True):
     from cveFeed import nav as navmod
     bounty_on = _bounty_allowed(request.user)
     sentinels_on = bool(here and has_sentinels(here['slug'], here['org_slug']))
-    nav = navmod.build(active, current, bounty_enabled=bounty_on, sentinels_enabled=sentinels_on, all_projects=slug == ALL_PROJECTS)
-    return {'nav': nav, 'active': active, 'slug': current, 'projects': projects, 'orgs': orgs if len(orgs) >= 2 else [], 'current_org': current_org, 'sections': SECTIONS, 'is_admin': is_admin_anywhere(request.user),
+    from cveFeed import internal_page
+    # the Internal network entry: the selected project, or every project of All projects (one organization when the switcher narrowed it)
+    internal_on = internal_page.nav_visible([here] if here else (in_scope if slug == ALL_PROJECTS else []))
+    nav = navmod.build(active, current, bounty_enabled=bounty_on, sentinels_enabled=sentinels_on, all_projects=slug == ALL_PROJECTS,
+                       internal_enabled=internal_on)
+    is_admin = is_admin_anywhere(request.user)
+    from tenancy import mfa_nag
+    return {'nav': nav, 'active': active, 'slug': current, 'projects': projects, 'orgs': orgs if len(orgs) >= 2 else [], 'current_org': current_org, 'sections': SECTIONS, 'is_admin': is_admin,
             'is_app_admin': request.user.is_superuser,
+            'mfa_nag': mfa_nag.for_request(request, is_admin, active),  # an administrator without two-step sign-in is reminded on every page
             'bounty_enabled': bounty_on,
             'sentinels_enabled': sentinels_on,
+            'internal_enabled': internal_on,
             'ai_usage_connected': ai_connected,
             'ai_usage_provider': ai_cfg.provider if ai_connected else '',
             'ai_usage_model': ai_cfg.model if ai_connected else '',
@@ -537,9 +625,22 @@ def dashboard(request):
         slug = ALL_PROJECTS
     else:
         slug = projects[0] if projects else None
+    shell = ui_context(request, 'dashboard', slug)
     return render(request, 'cveFeed/dashboard.html', {
-        'ai_ready': bool(cfg and cfg.enabled), **ui_context(request, 'dashboard', slug),
+        'ai_ready': bool(cfg and cfg.enabled), 'email_href': _email_report_href(slug, shell), **shell,
     })
+
+
+def _email_report_href(slug, shell):
+    """Where "Email this weekly" goes: the Reporting page on its Email tab with the scope the Overview shows preselected (the project, or the organization the
+    All projects view is narrowed to; nothing when it spans every organization)."""
+    from urllib.parse import urlencode
+    base = reverse('cve_reports')
+    if slug and slug != ALL_PROJECTS:
+        return f"{base}?{urlencode({'project': slug})}#email"
+    if shell.get('scope_org'):
+        return f"{base}?{urlencode({'org': shell['scope_org']})}#email"
+    return f'{base}#email'
 
 
 def graph(request):
@@ -589,6 +690,10 @@ def project_page(request, slug, section):
         project = Project.objects.filter(slug=slug).first()
     if not project:
         raise Http404
+    if section == 'internal':
+        shell = ui_context(request, 'internal', slug)
+        purpose = (ALL_PROJECTS_PURPOSE if slug == ALL_PROJECTS else SECTION_PURPOSE)[section]
+        return render(request, 'cveFeed/internal.html', {'title': SECTIONS[section], 'project': project, 'purpose': purpose, **shell})
     if section == 'sentinels':
         if slug == ALL_PROJECTS:
             raise Http404  # a Sentinel's scope is per project; there is no combined view
@@ -745,7 +850,7 @@ def account_page(request):
 
 # The version this page's claims were last checked against. Bump it, after rereading cveFeed/how.html, whenever web/.version moves
 # (tests/test_how_it_works.py fails until it matches, so a release cannot ship a stale page).
-HOW_REVIEWED_VERSION = '1.4.2'
+HOW_REVIEWED_VERSION = '1.5.0'
 
 
 def how_page(request):
@@ -761,13 +866,32 @@ def about_page(request):
     return render(request, 'cveFeed/about.html', {**ui_context(request, 'about'), **context, 'no_scanner_bar': True})  # reference text: no scanner status strip
 
 
+def ai_data_page(request):
+    """"AI and your data": what each AI job sends, what an MCP agent can read, and which jobs are on here (cveFeed.ai_disclosure). Every
+    signed-in person may read it: they are the ones whose data it is about. The calls of each job are shown to App Admins only."""
+    from cveFeed import ai_disclosure
+    return render(request, 'cveFeed/ai_data.html', {**ui_context(request, 'ai'), **ai_disclosure.page_context(request.user), 'no_scanner_bar': True})
+
+
+def mcp_page(request):
+    """The MCP page: connect an agent (snippets that name this server's /mcp/ address), what to ask it, and the History of MCP tool calls made
+    as the viewer (an App Admin sees everyone's). Every signed-in person may open it: the History is filtered to what they may read
+    (``agentapi.mcp_log.visible_to``)."""
+    from cveFeed import mcp_page as page
+    url = request.build_absolute_uri('/mcp/')
+    return render(request, 'cveFeed/mcp.html', {**ui_context(request, 'mcp'), 'mcp_url': url, 'mcp_clients': page.clients(url),
+                                                'mcp_examples': page.EXAMPLES, 'mcp_fix_loop': page.FIX_LOOP, **page.history(request),
+                                                'no_scanner_bar': True})
+
+
 def admin_page(request):
     from django.core.exceptions import PermissionDenied
 
     from tenancy.roles import is_admin_anywhere
     if not is_admin_anywhere(request.user):
         raise PermissionDenied
-    return render(request, 'cveFeed/admin.html', ui_context(request, 'admin'))
+    from tenancy import mfa_nag
+    return render(request, 'cveFeed/admin.html', {**ui_context(request, 'admin'), 'admins_without_mfa': mfa_nag.admins_without_mfa(request.user)})
 
 
 def settings_page(request):
@@ -792,6 +916,20 @@ def scanners_page(request):
     """Scanners: whether the scanners are working, in one click (static/cve/scanners.js). The Sentinels, the workers and scheduler (App Admin) and the
     scan pause are read from the endpoints they already have; the Sentinels list and Provision form stay at /cve/sentinels/."""
     return render(request, 'cveFeed/scanners.html', ui_context(request, 'scanners'))
+
+
+def reports_page(request):
+    """Reporting: findings and hosts reports of a project or an organization, as a PDF or a CSV file (static/cve/reports.js). The scope picker reads
+    /api/v1/reporting/scopes; ``?project=`` or ``?org=`` preselects it. A project the caller cannot see is a 404 before this runs (the tenancy
+    middleware reads ``?project=``); one that is not a real project falls back to the remembered one."""
+    from dashboard.models import Project
+    visible = list(Project.objects.values_list('slug', flat=True))  # scoped to the caller
+    want = request.GET.get('project') or ''
+    chosen = want in visible and want != ALL_PROJECTS
+    slug = want if chosen else remembered_scope(request, visible)
+    ctx = ui_context(request, 'reports', slug, remember=chosen)
+    initial_org = (request.GET.get('org') or '') or ctx['scope_org']
+    return render(request, 'cveFeed/reports.html', {**ctx, 'initial_project': want if chosen else '', 'initial_org': initial_org[:80]})
 
 
 def cve_explorer_page(request):
@@ -945,13 +1083,29 @@ def api_alive(request):
     return response
 
 
+def ai_budget_notice():
+    """The AI money budget's line for the page's strip (an App Admin's only: it names amounts): ``ai_budget_message`` and ``ai_budget_level``
+    ('reached' or 'warn'), or nothing when no budget is set or less than 80 percent of it is spent (``cveFeed.ai_budget.state``)."""
+    from cveFeed import ai_budget
+    try:
+        current = ai_budget.state()
+    except Exception:  # noqa: BLE001 - the strip never breaks a page; the queue holds the work when the ledger cannot be read
+        return {}
+    if not current['message']:
+        return {}
+    return {'ai_budget_message': current['message'], 'ai_budget_level': 'reached' if current['reached'] else 'warn'}
+
+
 @require_GET
 def api_scanner(request):
     """The derived "scanner offline" state for the page's strip (static/cve/scannerbar.js): which kinds are waiting for a scanner and the sentence to
     show, from ``agentapi.scanner_state`` (cached for 15 seconds, no query at all until the built-in scanner has enrolled). Read only. The sentence
     about a scanner that never registered names a server setting, so only an App Admin gets it."""
     from agentapi import scanner_state
-    response = JsonResponse(scanner_state.status(admin=request.user.is_superuser))
+    body = scanner_state.status(admin=request.user.is_superuser)
+    if request.user.is_superuser:
+        body = {**body, **ai_budget_notice()}
+    response = JsonResponse(body)
     response['Cache-Control'] = 'no-store'
     return response
 
@@ -965,7 +1119,71 @@ def api_stats(request):
     return snapshot_cache.respond(request, snapshot_cache.token_of([snap['etag'], live]), lambda: {**snap['payload'], **live})
 
 
+@require_GET
+@project_scoped
+def api_overview(request):
+    """The Overview's summary (``cveFeed.overview``): the status sentences, the four tiles, this week's threats, Fix first and What changed, as JSON. Same scope and the
+    same permission model as ``api_stats`` (``project_scoped``: ``?project=<slug>`` or ``_all``, narrowed to the caller's projects); shared for a minute by every viewer
+    of the same projects. The Sentinel line is added for an App Admin only. A poll that finds nothing new gets a 304."""
+    from cveFeed import overview
+    from dashboard.models import Project
+    ids = sorted(Project.objects.values_list('id', flat=True))  # scoped to the caller
+    stats = cached_stats_snapshot((request.GET.get('project', ''), _live_org(request)))['payload']
+    payload = overview.summary(ids, live={'hosts': stats.get('hosts'), 'exposed_hosts': stats.get('exposed_hosts')}, sentinels_too=request.user.is_superuser)
+    # the ETag leaves out the build time: a summary that says the same again is a 304
+    return snapshot_cache.respond_payload(request, payload, etag=snapshot_cache.token_of({k: v for k, v in payload.items() if k != 'updated_at'}))
+
+
+@require_GET
+@project_scoped
+def api_internal(request):
+    """The Internal network page's answer (``cveFeed.internal_page``): the four tiles, the internal networks, the open findings on internal hosts and the
+    internal scan work, for ``?project=<slug>`` or ``_all`` (narrowed to the caller's projects by ``project_scoped``, and to one organization when the
+    switcher chose one). Read only."""
+    from agentapi.services import ApiError, Ctx
+    from cveFeed import internal_page
+    from tenancy.roles import scope_org
+    slug = request.GET.get('project') or ALL_PROJECTS
+    try:
+        data = internal_page.payload(Ctx(user=request.user, org=scope_org(request) if slug == ALL_PROJECTS else ''), slug)
+    except ApiError as e:
+        return JsonResponse({'error': e.message}, status=e.status)
+    response = JsonResponse(data)
+    response['Cache-Control'] = 'no-store'
+    return response
+
+
 GRAPH_CACHE_SECONDS = 30
+# The dashboard's host map (static/cve/dashboard.js MAP_SCORE_OVER) draws only the hosts that score more than this, and the map's tiles are the only
+# reader of a host node's ``info`` (the hover card and the score dialog). The graph page reads none of it. tests/test_graph_payload_size.py holds the two equal.
+GRAPH_INFO_SCORE_OVER = 40
+GRAPH_JSON = {'separators': (',', ':')}  # the graph is the largest live answer: no blank after each comma and colon
+
+
+def compact_graph(payload):
+    """The graph as it is cached and sent: what ``graph_payload`` built, less what no page reads. A host's ``info`` (the hover card, up to 16 score
+    lines of 600 characters each) only on a host the dashboard map can draw (score above ``GRAPH_INFO_SCORE_OVER``), and ``internal`` and ``network``
+    only on an internal host (graph.js tests both for truth). The other keys and every node, edge and count are unchanged."""
+    nodes = payload.get('nodes')
+    if not nodes:
+        return payload
+
+    def lean(node):
+        if node.get('kind') != 'subdomain':
+            return node
+        drop = {k for k in ('internal', 'network') if k in node and not node[k]}
+        if 'info' in node and (node.get('score') or 0) <= GRAPH_INFO_SCORE_OVER:
+            drop.add('info')
+        return {k: v for k, v in node.items() if k not in drop} if drop else node
+    return {**payload, 'nodes': [lean(n) for n in nodes]}
+
+
+def without_info(payload):
+    """``payload`` with no host ``info`` at all: what the graph page asks for (``?info=0``), which never reads it."""
+    nodes = payload.get('nodes')
+    if not nodes:
+        return payload
+    return {**payload, 'nodes': [{k: v for k, v in n.items() if k != 'info'} if 'info' in n else n for n in nodes]}
 GRAPH_LIVE_SECONDS = 2  # how long what the running scans are doing is shared between tabs
 GRAPH_VERSION_SECONDS = 5  # the version token is itself kept this long per scope: the 304 path of every open graph asked eight aggregate queries per poll
 GRAPH_VERSION_WINDOW = 300  # a graph that "has not changed" is still re-sent this often: edits to existing rows move no id
@@ -1048,7 +1266,7 @@ def cached_graph(scope, version, domain_id=None, scan_id=None, wait=True):
             return None
 
     def build():
-        payload = {**graph_payload(domain_id, scan_id), 'version': version}
+        payload = {**compact_graph(graph_payload(domain_id, scan_id)), 'version': version}
         try:
             cache.set(key, payload, GRAPH_CACHE_SECONDS)
             cache.set(last_key, payload, GRAPH_LAST_SECONDS)
@@ -1101,7 +1319,8 @@ def api_graph(request):
     """The asset graph. ``?v=<version>`` equal to the current version answers 304, so the dashboard's poller costs a few
     aggregate queries when nothing changed; otherwise the payload is served from a short per-scope cache (shared by every viewer of the
     same projects). The version is itself a snapshot kept GRAPH_VERSION_SECONDS per scope, so a change shows within that many seconds (at once
-    after ``bump_stats_revision``) and a poll in between costs no aggregate query at all."""
+    after ``bump_stats_revision``) and a poll in between costs no aggregate query at all. The payload is ``compact_graph``'s; ``?info=0`` (the graph
+    page) leaves out every host's ``info`` too."""
     from django.http import HttpResponseNotModified
     domain, scan = request.GET.get('domain', ''), request.GET.get('scan', '')
     domain_id, scan_id = int(domain) if domain.isdigit() else None, int(scan) if scan.isdigit() else None
@@ -1111,7 +1330,10 @@ def api_graph(request):
                                       hot={'params': params, 'args': {'domain_id': domain_id, 'scan_id': scan_id}, 'check': _hot_check(domain_id, scan_id)})['payload']
     if request.GET.get('v') == version:
         return HttpResponseNotModified()
-    return JsonResponse(cached_graph(scope, version, domain_id, scan_id))  # one viewer builds a cold graph, the others wait for it
+    payload = cached_graph(scope, version, domain_id, scan_id)  # one viewer builds a cold graph, the others wait for it
+    if request.GET.get('info') == '0':  # the graph page: it draws no hover card, so it is sent none
+        payload = without_info(payload)
+    return JsonResponse(payload, json_dumps_params=GRAPH_JSON)
 
 
 @require_GET
@@ -1254,10 +1476,13 @@ def node_detail(node_id):
         c = CVEEntry.objects.filter(pk=int(rest)).first()
         if not c:
             return None
-        hosts = list(CVEMatch.objects.filter(cve_entry=c).exclude(ai_verdict='not_affected')
-                     .select_related('subdomain__target_domain__project'))
-        slugs = sorted({m.subdomain.target_domain.project.slug for m in hosts if m.subdomain and m.subdomain.target_domain_id
-                        and m.subdomain.target_domain.project_id})
+        matches = CVEMatch.objects.filter(cve_entry=c).exclude(ai_verdict='not_affected')
+        # a CVE common enough can match thousands of hosts: the card lists the first NODE_CVE_HOSTS and says how many more the matches page holds
+        hosts = list(matches.exclude(subdomain=None).select_related('subdomain__target_domain__project').order_by('id')[:NODE_CVE_HOSTS + 1])
+        more = matches.exclude(subdomain=None).count() - NODE_CVE_HOSTS if len(hosts) > NODE_CVE_HOSTS else 0
+        hosts = hosts[:NODE_CVE_HOSTS]
+        slugs = sorted(set(matches.filter(subdomain__target_domain__project__isnull=False).order_by()
+                           .values_list('subdomain__target_domain__project__slug', flat=True).distinct()))
         where = slugs[0] if len(slugs) == 1 else ALL_PROJECTS if slugs else ''
         return {'kind': 'cve', 'title': c.cve_id, 'link': f'/cve/{quote(where)}/matches/?cve={quote(c.cve_id)}' if where else '',
                 'link_label': 'Open the matches', 'rows': _kv(
@@ -1265,8 +1490,12 @@ def node_detail(node_id):
             ('KEV', 'yes' if c.kev else ''), ('Exploit-DB', 'yes' if c.exploit_db else ''),
             ('Matched hosts', [(m.subdomain.name, _host_href(m.subdomain.target_domain.project.slug, m.subdomain.name)
                                 if m.subdomain.target_domain_id and m.subdomain.target_domain.project_id else '')
-                               for m in hosts if m.subdomain]))}
+                               for m in hosts if m.subdomain]),
+            ('More matched hosts', f'{more} more on the matches page' if more > 0 else ''))}
     return None
+
+
+NODE_CVE_HOSTS = 50  # hosts a CVE node's card lists; the rest are on the matches page it links to
 
 
 SEVERITY_LABEL = {-1: 'unknown', 0: 'info', 1: 'low', 2: 'medium', 3: 'high', 4: 'critical'}
@@ -1367,6 +1596,9 @@ def cached_discovery_counts(params=()):
                                    hot={'params': params, 'args': {}})['payload']
 
 
+DISCOVERY_AFTER_MAX = 200
+
+
 @require_GET
 @project_scoped
 def api_discovery(request):
@@ -1375,15 +1607,18 @@ def api_discovery(request):
     from startScan.models import ScanHistory
     scan_id = request.GET.get('scan', '')
     if scan_id.isdigit():
-        scan = ScanHistory.objects.filter(id=int(scan_id)).select_related('domain', 'scan_type').first()
+        scan = ScanHistory.objects.filter(id=int(scan_id)).select_related('domain__project', 'scan_type').first()
     else:
-        qs = ScanHistory.objects.select_related('domain', 'scan_type')
+        qs = ScanHistory.objects.select_related('domain__project', 'scan_type')
         scan = _running_scans(qs.model).order_by('-id').first() or qs.order_by('-id').first()
     if not scan:
         return snapshot_cache.respond_payload(request, {'scan': None, 'events': [], 'counts': {}})
     after = request.GET.get('after', '')
     events = DiscoveryEvent.objects.filter(scan=scan)
-    events = events.filter(id__gt=int(after)) if after.isdigit() and int(after) else events.order_by('-id')[:60]  # after=0 is no cursor: the tail, not every event of the scan
+    # after=0 is no cursor: the tail, not every event of the scan. A cursor gets at most DISCOVERY_AFTER_MAX of the newest events past it (a tab that slept
+    # through a large scan used to be sent every event since): the ticker keeps only its last 100 lines, so what it draws is the same
+    events = (events.filter(id__gt=int(after)).order_by('-id')[:DISCOVERY_AFTER_MAX] if after.isdigit() and int(after)
+              else events.order_by('-id')[:60])
     events = sorted(events, key=lambda e: e.id)
     # The counts describe the same picture the graph above the ticker draws (every live host of the project, not only this
     # scan's own rows), so they read as a total of what's on screen rather than just this run's contribution.
@@ -1406,7 +1641,7 @@ def _json_body(request):
 @require_POST
 @has_permission_decorator(PERM_MODIFY_SYSTEM_CONFIGURATIONS, redirect_url=FOUR_OH_FOUR_URL)
 def api_detect(request):
-    from reNgine.ai_providers import ambiguous_key, detect_provider
+    from cvengine.ai_providers import ambiguous_key, detect_provider
     key = _json_body(request).get('key')
     return JsonResponse({'provider': detect_provider(key), 'ambiguous': ambiguous_key(key)})  # ambiguous: an sk- key more than one vendor issues
 
@@ -1417,8 +1652,8 @@ def api_onboarding_save(request):
     """Verify the key against the provider the user chose (or its unambiguous prefix names) with a live call, then save + enable it. A key
     whose vendor is not certain is never tried anywhere: the user is asked to pick the provider."""
     from dashboard.models import AIProviderSettings
-    from reNgine import ai_prompts
-    from reNgine.ai_providers import AIProviderError, detect_provider, get_provider, usage_stage
+    from cvengine import ai_prompts
+    from cvengine.ai_providers import AIProviderError, detect_provider, get_provider, usage_stage
 
     body = _json_body(request)
     key = (body.get('key') or '').strip()
@@ -1432,11 +1667,11 @@ def api_onboarding_save(request):
     model = (body.get('model') or '').strip()
     if not key and previous and previous.provider == provider_name:
         key = previous.api_key or ''
-    from reNgine.ai_providers import SELECTABLE
+    from cvengine.ai_providers import SELECTABLE
     needs_model = provider_name in SELECTABLE and not model
     try:
         base_url = previous.base_url if previous and previous.provider == provider_name else None
-        from reNgine.ai_profiles import AIRuntime
+        from cvengine.ai_profiles import AIRuntime
         provider = get_provider(provider_name, model=model or None, api_key=key or None, base_url=base_url,
                                 runtime=AIRuntime.from_row(previous) if previous else None)  # the timeouts saved in Settings apply to the first check too
         with usage_stage('connection_test'):

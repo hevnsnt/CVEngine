@@ -561,6 +561,26 @@ function openOrgExcludedAddresses(o) {
     async function draw() {
       list.textContent = "";
       const data = await api("GET", `${A}/orgs/${o.id}/excluded-addresses`);
+      const own = data.this_server;
+      if (own && (own.names.length || own.addresses.length)) {
+        // this cvENGINE server is never scanned, for every organization: shown here, never removable
+        if (own.names.length) {
+          const row = el("div", "access-row");
+          row.append(el("code", "", own.names.join(", ")), el("span", "note", `${own.label} (its names)`));
+          list.append(row);
+        }
+        (own.address_reasons || own.addresses.map((a) => ({ address: a, reason: "" }))).forEach((r) => {
+          const row = el("div", "access-row");
+          row.append(el("code", "", r.address), el("span", "note", r.reason ? `${own.label}: ${r.reason}` : own.label));
+          list.append(row);
+        });
+      }
+      (own && own.not_denied || []).forEach((r) => {
+        // the server's name resolves here, but the address is shared (a CDN edge), so other sites on it stay scannable
+        const row = el("div", "access-row");
+        row.append(el("code", "", r.address), el("span", "note", `Not excluded: ${r.reason}`));
+        list.append(row);
+      });
       if (!data.results.length) list.append(el("p", "empty", "No addresses listed."));
       data.results.forEach((r) => {
         const row = el("div", "access-row");
@@ -867,13 +887,32 @@ async function timingsTab(panel) {
       ),
     );
   });
+  // a lookup crt.sh cannot answer asks Cert Spotter instead (cveFeed/ctmonitor.py)
+  const fallback = el("input", "", null, {
+    type: "checkbox",
+    "aria-label": "CT fallback source",
+  });
+  fallback.checked = !!t.ct_fallback_source;
+  const fallbackLabel = el("label", "", " CT fallback source (Cert Spotter)");
+  fallbackLabel.prepend(fallback);
+  card.append(
+    field(
+      "Certificate transparency",
+      fallbackLabel,
+      t.hosted_license_safe
+        ? "Off on this hosted server: CVENGINE_HOSTED_LICENSE_SAFE keeps Cert Spotter off, because its API without a key is for personal or evaluation use."
+        : t.ct_fallback_forced_off
+        ? "Off on this server: CVENGINE_CT_FALLBACK turns it off whatever this box says."
+        : "When crt.sh cannot answer, ask Cert Spotter (a few lookups an hour) so new hosts are still found.",
+    ),
+  );
+  if (t.ct_watch_status) card.append(el("p", "note", t.ct_watch_status));
   card.append(
     button("Save timings", async () => {
-      await api(
-        "PUT",
-        `${A}/timings`,
-        Object.fromEntries(fields.map(([k]) => [k, inputs[k].value])),
-      );
+      await api("PUT", `${A}/timings`, {
+        ...Object.fromEntries(fields.map(([k]) => [k, inputs[k].value])),
+        ct_fallback_source: fallback.checked,
+      });
       toast("Timings saved");
     }),
   );

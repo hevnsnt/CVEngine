@@ -45,7 +45,7 @@ def repoint(source, dest, domains, hosts):
     """Point ``domains`` and everything keyed by their hosts at ``dest`` (the same organization as ``source``). Returns counts. Run it inside a
     transaction: it is all or nothing."""
     from cveFeed.models import (AssetChange, AutomaticValidation, CVEMatch, DeferredRetest, FindingAuditEvent, FindingComment, HostArchive,
-                                HostAssessment, HostLabel, HostProfile, HostState, HygieneFinding, OnDemandValidation, ProbeObservation,
+                                HostAssessment, HostLabel, HostNote, HostProfile, HostState, HygieneFinding, OnDemandValidation, ProbeObservation,
                                 RdpScreenshot, HostScreenshot, RouteAuth, Triage, AuthCredential, JavaRuntime)
     from cveFeed.models import BountyEngagementTarget
     from startScan.models import Vulnerability
@@ -58,6 +58,7 @@ def repoint(source, dest, domains, hosts):
     names = sorted(hosts)
     for start in range(0, len(names), HOST_CHUNK):
         _repoint(HostProfile.objects.filter(project=source, host__in=names[start:start + HOST_CHUNK]), dest)
+        _repoint(HostNote.objects.filter(project=source, host__in=names[start:start + HOST_CHUNK]), dest)  # operator notes are read by host name
     # comments and the audit trail name their finding by kind and id; validation requests name a match or a triage
     for model in (FindingComment, FindingAuditEvent):
         for kind, ids_of in (('vulnerability', Vulnerability.objects.filter(target_domain_id__in=ids).values('id')),

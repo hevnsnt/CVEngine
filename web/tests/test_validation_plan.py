@@ -33,7 +33,7 @@ class PlanParsingTests(TestCase):
     def test_provider_unavailable_only_allows_a_specific_vetted_template(self):
         row = mock.Mock(signature='sig')
         cve = mock.Mock()
-        with mock.patch('reNgine.ai_settings.get_configured_provider', return_value=None):
+        with mock.patch('cvengine.ai_settings.get_configured_provider', return_value=None):
             generic, _ = plan(1, row, cve, {}, [{'kind': 'nmap_sv'}, {'kind': 'http_head'}], ('', 'no template'))
             specific, _ = plan(1, row, cve, {}, [{'kind': 'nuclei_template'}, {'kind': 'http_head'}], ('/approved/cve.yaml', ''))
         self.assertEqual(generic['check_kinds'], [])
@@ -92,7 +92,7 @@ GOOD = '{"check_kinds":["nmap_sv"],"generate_template":false,"reason":"The servi
 
 
 def model(*replies, error=None):
-    from reNgine.ai_providers import AIProviderError
+    from cvengine.ai_providers import AIProviderError
     fake = mock.Mock(model='m')
     fake.name = 'anthropic'
     if error:
@@ -167,6 +167,25 @@ class PlanJobTests(TestCase):
         answer, _ = self.ask(waiting={'job': decision['job']})
         self.assertEqual(answer['source'], 'policy_fallback')
         self.assertIn('provider_network', answer['reason'])
+
+    def test_a_question_that_cannot_be_queued_is_logged_and_ends_in_the_policy_plan(self):
+        from cveFeed.models import TriageCall
+        with mock.patch('cveFeed.ai_jobs.enqueue', side_effect=RuntimeError('queue table gone')), \
+                self.assertLogs('cveFeed.validation_plan', 'WARNING') as logs:
+            decision, ai = self.ask()
+        self.assertTrue(ai)
+        self.assertIn('could not be queued', decision['reason'])
+        self.assertEqual(TriageCall.objects.get(kind='validation_plan').status, 'failed')
+        self.assertIn('queue table gone', '\n'.join(logs.output))
+
+    def test_a_template_draft_that_cannot_be_queued_is_logged_and_its_claim_fails(self):
+        from cveFeed import validation_plan
+        with mock.patch('cveFeed.templategen.generate_template', side_effect=RuntimeError('draft queue gone')), \
+                self.assertLogs('cveFeed.validation_plan', 'WARNING') as logs:
+            out = validation_plan.generate_candidate(self.project.id, self.cve, True)
+        self.assertEqual(out['status'], 'failed')
+        self.assertIn('CVE-2099-4242', logs.output[0])
+        self.assertIn('draft queue gone', '\n'.join(logs.output))
 
     def test_with_the_reviewer_off_nothing_is_queued_and_nothing_waits(self):
         from cveFeed.models import AIJob

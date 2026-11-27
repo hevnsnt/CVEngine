@@ -21,6 +21,10 @@ logger = logging.getLogger(__name__)
 # the top-up wait in front of every scan queued after them, and a scan can sit for hours behind them. The broker serves a lower number first (the
 # Redis transport keeps one list per step, 0 3 6 9): assessments go to the last step, scans and everything else keep the first.
 ASSESS_PRIORITY = 9
+# A person's own request (Rescan host, the REST and MCP calls) goes to the first step instead: in front of every assessment the top-up queued, never
+# refused for capacity, and never put off for the scans' share (``tasks.assess_host``). Its pipeline's Sentinel tasks are lifted the same way
+# (``agentapi.sentinel_dispatch.PERSON_PRIORITY``).
+PERSON_PRIORITY = 0
 ACTIVE = ('queued', 'running')
 
 
@@ -34,7 +38,7 @@ def serialize(job):
         for stage in stages:
             stage['time'] = stage['time'].isoformat() if stage['time'] else None
     return {'id': job.id, 'host': job.host, 'status': job.status, 'source': job.source,
-            'scan_id': job.scan_id, 'stages': stages, 'result': job.result, 'error': job.error,
+            'scan_id': job.scan_id, 'front': job.front, 'stages': stages, 'result': job.result, 'error': job.error,
             'created_at': job.created_at.isoformat(),
             'started_at': job.started_at.isoformat() if job.started_at else None,
             'finished_at': job.finished_at.isoformat() if job.finished_at else None}
@@ -112,7 +116,7 @@ def slots_held():
 def deferral_count(task_id):
     """How many times this task has been put off by the share limit (a Redis counter that outlives the re-queued copies and expires after six hours). 0 when it cannot be read."""
     try:
-        from reNgine import resources
+        from cvengine import resources
         client = resources.redis_client()
         if client is None or not task_id:
             return 0
@@ -137,8 +141,8 @@ def over_share():
         limit = share_limit()
         if limit is None or slots_held() < limit:
             return False
-        from startScan.models import ScanHistory
-        return ScanHistory.objects.filter(scan_status=-1).exists()
+        from cveFeed import counts
+        return counts.waiting_scans().exists()  # a queued row nothing will start (counts.stuck_queued_q) waits for no slot
     except Exception:  # noqa: BLE001
         logger.debug('assessment share: could not be checked, so not limited', exc_info=False)
         return False
@@ -315,23 +319,35 @@ def capacity_message(held, global_cap, mine, project_cap, scans):
 
 
 def enqueue(project, sub, *, source='manual', user=None, unattended=None):
-    """Accept only a stored host owned by this project; a model cannot supply a new target."""
-    domain, host = _admit(project, sub, unattended=(user is None) if unattended is None else unattended)
+    """Accept only a stored host owned by this project; a model cannot supply a new target.
+
+    A person's own request (``user`` given, not ``unattended``) is never refused for capacity: it goes to the front of the queue
+    (``PERSON_PRIORITY``). When the host already waits in the queue (the top-up queued it, alone or in a batch), that row is moved to the front
+    instead of a second one being made (``_to_front``); a row already running is returned as it is. Unattended callers keep the caps (a token
+    start of the AI host review keeps its user on the record, ``requested_by``, but is not a person's request: it is not ``front``)."""
+    unattended = (user is None) if unattended is None else unattended
+    person = user is not None and not unattended
+    domain, host = _admit(project, sub, unattended=unattended)
     existing = HostAssessment.objects.filter(project=project, host=host, status__in=ACTIVE).order_by('id').first()
     if existing:
+        if person and existing.status == 'queued' and not existing.front:
+            _to_front(existing, user)
+            existing.refresh_from_db()
         return existing, False
-    _require_capacity(project)
+    if not person:
+        _require_capacity(project)
     try:
         with transaction.atomic():
-            job = HostAssessment.objects.create(project=project, domain=domain, host=host, source=source, requested_by=user)
+            job = HostAssessment.objects.create(project=project, domain=domain, host=host, source=source, requested_by=user, front=person)
     except IntegrityError:
         return HostAssessment.objects.get(project=project, host=host, status__in=ACTIVE), False
     from cveFeed.tasks import assess_host
     try:
-        task = assess_host.apply_async(args=[job.pk], queue='discovery_queue', priority=ASSESS_PRIORITY)
+        task = _publish(assess_host, job.pk, person)
         HostAssessment.objects.filter(pk=job.pk, status='queued').update(celery_id=task.id)
         from cveFeed import activity
-        activity.log('discovery', f'Host assessment #{job.pk} queued for {host}', project=project.pk, status='queued')
+        activity.log('discovery', f'Host assessment #{job.pk} queued for {host}{" at the front of the queue" if person else ""}', project=project.pk,
+                     status='queued')
     except Exception as exc:
         logger.exception('could not enqueue host assessment %s', job.pk)
         HostAssessment.objects.filter(pk=job.pk).update(status='failed', finished_at=timezone.now(),
@@ -340,6 +356,32 @@ def enqueue(project, sub, *, source='manual', user=None, unattended=None):
         return job, True
     job.refresh_from_db()
     return job, True
+
+
+def _publish(assess_host, job_id, person):
+    """Send ``assess_host`` for one row: a person's at the front of the discovery queue, and marked so it is never put off for the scans' share."""
+    if person:
+        return assess_host.apply_async(args=[job_id], kwargs={'front': True}, queue='discovery_queue', priority=PERSON_PRIORITY)
+    return assess_host.apply_async(args=[job_id], queue='discovery_queue', priority=ASSESS_PRIORITY)
+
+
+def _to_front(job, user):
+    """Move a queued assessment to the front because a person asked for this host: a fresh message at ``PERSON_PRIORITY`` that becomes the row's
+    task, and the row becomes the person's (``requested_by`` and ``front``, so its pipeline runs as a person's and its Sentinel tasks are lifted too). A row of a
+    batch leaves the batch: it now has its own task id, so it holds its own slot. The old message is left where it is: whichever runs first takes
+    the row (``execute`` claims it only while it is queued) and the other finds it no longer queued and does nothing. ``created_at`` restarts, so
+    the row is not taken for an orphan of a task the broker no longer holds. Nothing when it already started."""
+    from cveFeed.tasks import assess_host
+    if not HostAssessment.objects.filter(pk=job.pk, status='queued').update(requested_by=user, front=True, created_at=timezone.now()):
+        return
+    try:
+        task = _publish(assess_host, job.pk, True)
+    except Exception:  # noqa: BLE001 - its old message still holds it: it runs in its turn
+        logger.exception('could not move host assessment %s to the front', job.pk)
+        return
+    HostAssessment.objects.filter(pk=job.pk, status='queued').update(celery_id=task.id)
+    from cveFeed import activity
+    activity.log('discovery', f'Host assessment #{job.pk} for {job.host} moved to the front of the queue', project=job.project_id, status='queued')
 
 
 def enqueue_batch(project, subs, *, source='topup'):
@@ -479,7 +521,7 @@ def execute(job_id, celery_id=None):
             result = dict(REFUSED)
         else:
             outcome = run_host_pipeline(job.domain_id, [job.host], celery_id=celery_id, retest=True, force=True, hygiene=True,
-                                        assessment_id=job_id, by_person=job.requested_by_id is not None,
+                                        assessment_id=job_id, by_person=job.requested_by_id is not None, initiated_by_id=job.requested_by_id if job.front else None,
                                         then=('host_assessment.one', {'job_id': job_id}))
             from agentapi import stage_runs
             if stage_runs.is_waiting(outcome):  # its stages wait on Sentinels without this worker: the callback finishes the assessment

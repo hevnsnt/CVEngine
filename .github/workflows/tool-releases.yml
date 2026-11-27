@@ -1,7 +1,8 @@
 name: 🔭 Scanner tool releases
 
-# Weekly: compare the versions of every tool this repository pins (the Tailscale image) with their newest releases and keep one open issue
-# listing the ones that are behind, closed again once none is. It changes nothing else.
+# Weekly: compare the versions of every tool this repository pins (the Tailscale image) with their newest releases, the digests of the pinned base images
+# with what their tags name now, and the pinned Sentinel commit with the Sentinel main branch, and keep one open issue listing what is behind, closed
+# again once nothing is. It changes nothing else: a pin moves by a pull request (docs/UPDATES.md, "Pinned images").
 on:
   schedule:
     - cron: '23 5 * * 1'
@@ -15,7 +16,9 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false  # no later step pushes with git, so the token is not left in .git/config
       - name: Compare pinned versions with the newest releases
         id: check
         env:
@@ -28,13 +31,25 @@ jobs:
           if python3 -c "import json,sys; sys.exit(0 if any(r['behind'] for r in json.load(open('$RUNNER_TEMP/tools.json'))) else 1)"; then
             echo "behind=true" >> "$GITHUB_OUTPUT"
           fi
+          # The base images and the built-in scanner are pinned by digest (scripts/image_pins.py, scanner.lock.json): list the pins whose tag names a newer
+          # image now, so a bump pull request is opened (docs/UPDATES.md, "Pinned images"). A digest that moved is behind like a version.
+          pins=$(python3 scripts/image_pins.py check --remote 2>&1) || { echo "$pins"; exit 1; }
+          if [ -n "$pins" ]; then
+            printf '\n### Images whose pinned digest is behind its tag\n\n```\n%s\n```\n' "$pins" | tee -a "$RUNNER_TEMP/tools.md"
+            echo "behind=true" >> "$GITHUB_OUTPUT"
+          fi
+          tip=$(git ls-remote https://github.com/hevnsnt/cvENGINE-sentinel refs/heads/main | cut -f1)
+          if [ -n "$tip" ] && [ "$tip" != "$(python3 scripts/scanner_lock.py floor)" ]; then
+            printf '\nThe Sentinel main branch is at %s; this repository pins %s (python3 scripts/scanner_lock.py bump).\n' "$tip" "$(python3 scripts/scanner_lock.py floor)" | tee -a "$RUNNER_TEMP/tools.md"
+            echo "behind=true" >> "$GITHUB_OUTPUT"
+          fi
       - name: Keep one issue open while something is behind
         if: steps.check.outputs.behind == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           title="Scanner tools behind their newest release"
-          body="$(printf 'The weekly check found a pinned tool behind its newest release. Bump it in web/Dockerfile, web/requirements.txt, docker-compose.yml or the CI workflow, rebuild, and run the tests. A pull request into master is blocked by the same check until this is done.\n\n'; cat "$RUNNER_TEMP/tools.md")"
+          body="$(printf 'The weekly check found a pinned tool behind its newest release. Bump it in web/Dockerfile, web/requirements.txt, docker-compose.yml or the CI workflow (a digest with python3 scripts/image_pins.py bump IMAGE, the Sentinel with python3 scripts/scanner_lock.py bump), rebuild, and run the tests. A pull request into master is blocked by the same check until this is done.\n\n'; cat "$RUNNER_TEMP/tools.md")"
           number=$(gh issue list --state open --search "$title in:title" --json number --jq '.[0].number' || true)
           if [ -n "$number" ]; then
             gh issue edit "$number" --body "$body"

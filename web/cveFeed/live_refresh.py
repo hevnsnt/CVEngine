@@ -27,7 +27,7 @@ import uuid
 from django.core.cache import cache
 
 from cveFeed import snapshot_cache
-from reNgine import livecache_config
+from cvengine import livecache_config
 from tenancy import scope as tenancy_scope
 
 logger = logging.getLogger(__name__)
@@ -56,7 +56,9 @@ def computers():
 # ``stats`` shows a Sentinel as online or offline from its last-seen time (``internal_view``) and counts certificates and open days against the clock, so
 # it is recomputed at least every minute; ``discovery-counts`` is only counts of stored hosts, addresses and ports, so five minutes. A write to any listed table
 # is seen within about ten seconds either way. ``tests/test_refresh_unchanged.py`` fails when a snapshot's computation reads a table that is not listed.
-RENEWAL_SECONDS = {'stats': 60, 'discovery-counts': 300}
+# ``graph-version`` is eight aggregates (some over unindexed columns) recomputed every 5 s for every open graph: it is renewed while nothing it reads was
+# written, for at most a minute (its token also carries a five minute clock bucket, which a renewal may hold up to that minute).
+RENEWAL_SECONDS = {'stats': 60, 'discovery-counts': 300, 'graph-version': 60}
 NOT_AN_INPUT = {'cveFeed_agentactivity'}  # the running-work counts of the stats are read again on every poll (``views.live_scan_counts``): a table that is written all the time
 
 
@@ -65,11 +67,16 @@ def fingerprint_tables(name):
     from agentapi.models import Agent
     from django.contrib.auth.models import User
 
-    from cveFeed.models import AutoFireRun, CVEEntry, CVEMatch, GeneratedTemplate, HygieneFinding, InternalRange, TlsCertificate, Triage, TunableSettings
+    from cveFeed.models import (AutoFireRun, CVEEntry, CVEMatch, DiscoveryEvent, GeneratedTemplate, HostProfile, HostState, HygieneFinding, InternalRange,
+                                TlsCertificate, Triage, TunableSettings)
     from dashboard.models import ApiToken, Org, Project, SystemTimings
-    from startScan.models import IpAddress, Port, ScanHistory, Subdomain, Vulnerability
+    from startScan.models import IpAddress, Port, ScanActivity, ScanHistory, Subdomain, Vulnerability
     from targetApp.models import Domain
-    hosts = (IpAddress, Port, ScanHistory, Subdomain, Domain, Project, Subdomain.ip_addresses.through, IpAddress.ports.through)
+    if name == 'graph-version':  # views.graph_version: what it aggregates, and the tables its scoped managers join to reach the project
+        return sorted({m._meta.db_table for m in (Subdomain, Subdomain.ip_addresses.through, Vulnerability, ScanActivity, ScanHistory, DiscoveryEvent,
+                                                  CVEMatch, HostProfile, Domain, Project)})
+    # HostState: an archived host is not one of the inventory's hosts (cveFeed.counts.archived_host_q)
+    hosts = (IpAddress, Port, ScanHistory, Subdomain, Domain, Project, HostState, Subdomain.ip_addresses.through, IpAddress.ports.through)
     if name == 'discovery-counts':
         return sorted({m._meta.db_table for m in hosts})
     return sorted({m._meta.db_table for m in hosts + (AutoFireRun, CVEEntry, CVEMatch, GeneratedTemplate, HygieneFinding, InternalRange, TlsCertificate, Triage,
@@ -77,8 +84,8 @@ def fingerprint_tables(name):
 
 
 def fingerprints():
-    """``name -> (function, renewal seconds)`` for the snapshots worth not recomputing when none of the tables they read changed (the headline counts and the
-    ticker; the others cost milliseconds). The function returns ``snapshot_cache.table_fingerprint`` of those tables."""
+    """``name -> (function, renewal seconds)`` for the snapshots worth not recomputing when none of the tables they read changed (the headline counts, the
+    ticker and the graph's version token; the others cost milliseconds). The function returns ``snapshot_cache.table_fingerprint`` of those tables."""
     return {name: ((lambda tables: lambda: snapshot_cache.table_fingerprint(*tables))(fingerprint_tables(name)), seconds) for name, seconds in RENEWAL_SECONDS.items()}
 
 
@@ -102,7 +109,7 @@ def backlog():
     """``(own, classic)``: refreshes waiting for a slot, and messages waiting in the other queues the classic worker consumes. ``(0, 0)`` when the
     broker cannot be asked (a refresh is then not held back for want of an answer)."""
     try:
-        from reNgine.celery import app
+        from cvengine.celery import app
         with app.connection_for_read() as connection:
             client = connection.default_channel.client
             return client.llen('live_cache_queue'), sum(client.llen(q) for q in CLASSIC_QUEUES)

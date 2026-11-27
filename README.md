@@ -9,20 +9,16 @@
 <p align="center">Assess each host with industry-standard scanners and fix what matters first.</p>
 
 <p align="center">
-  <sub>English | <a href="README.zh-CN.md">简体中文</a> | <a href="README.zh-TW.md">繁體中文</a> | <a href="README.ja.md">日本語</a> | <a href="README.ko.md">한국어</a> | <a href="README.es.md">Español</a> | <a href="README.fr.md">Français</a> | <a href="README.de.md">Deutsch</a> | <a href="README.pt-BR.md">Português (BR)</a> | <a href="README.ru.md">Русский</a> | <a href="README.ar.md">العربية</a> | <a href="README.hi.md">हिन्दी</a> | <a href="README.it.md">Italiano</a></sub>
-</p>
-
-<p align="center">
-  <a href="CHANGELOG.md"><img alt="Release 1.4.2" src="https://img.shields.io/badge/release-1.4.2-2ea44f"></a>
+  <a href="CHANGELOG.md"><img alt="Release 1.5.0" src="https://img.shields.io/badge/release-1.5.0-2ea44f"></a>
   <a href="LICENSE"><img alt="License GPL-3.0" src="https://img.shields.io/badge/license-GPL--3.0-blue"></a>
   <img alt="Self-hosted with Docker Compose" src="https://img.shields.io/badge/self--hosted-Docker%20Compose-blue">
 </p>
 
 <p align="center">
-  <img src="docs/images/cvengine-tour-1.4.gif" alt="A 48-second tour of cvENGINE on fictional demo companies: the Overview and its Live discovery card, the All-projects graph where every project is a constellation (click one for its hottest hosts), one constellation per domain inside a project and a dive in host by host, Shodan-style search typed on the Hosts page, CVE matches landing on the constellations while a scan runs (smoke turning to fire), and the Sentinels" width="880">
+  <img src="docs/images/cvengine-tour-1.5.gif" alt="A 49-second tour of cvENGINE on fictional demo companies: the Overview with its Hosts with open findings tile and Live discovery card, the All-projects graph where every project is a constellation (click one for its hottest hosts), one constellation per domain inside a project and a dive in host by host, Shodan-style search typed on the Hosts page, CVE matches landing on the constellations while a scan runs (smoke turning to fire) and the proof on the CVE matches page, the Internal network page with internal hosts written as name and address, a network printer marked Printer: scanned gently, and the Sentinels page with one Sentinel on the internet and two inside the network" width="880">
 </p>
 
-<p align="center"><sub>cvENGINE 1.4.1 on demo data.</sub></p>
+<p align="center"><sub>cvENGINE 1.5.0 on demo data.</sub></p>
 
 ---
 
@@ -58,7 +54,7 @@ More in [Pipeline](docs/PIPELINE.md#triage-and-validation), [CVE intelligence](d
 
 cvENGINE is a self-hosted external attack surface and vulnerability assessment platform. Give it your domains and it keeps discovering the subdomains, addresses and certificates you expose, in a searchable, Shodan-style inventory of every host, port, service, technology and certificate. Forgotten and shadow assets come to light, and new hosts, opened ports and version changes land on a timeline as soon as a scan sees them. Every host is assessed with industry-standard open-source scanners, and [Situations](docs/SITUATIONS.md) ranks what to fix first: proof before likelihood, known exploited before severity alone.
 
-## cvENGINE 1.4.0 is here
+## What you get
 
 | | |
 | --- | --- |
@@ -70,7 +66,15 @@ cvENGINE is a self-hosted external attack surface and vulnerability assessment p
 | **Nothing switches on unseen** | Credential checks, the AI reviewer and anything else that costs money or widens a scan stay off until an administrator says yes. API tokens and AI agents cannot turn them on. |
 | **Runs itself** | A [watchdog](docs/WATCHDOG.md) repairs stuck workers, auto-tuning checks every change it makes and undoes what hurt, and you can publish through a [Cloudflare Tunnel](docs/HOSTING-ONLINE.md) with no inbound port. |
 
-Upgrading from 1.3? Read [upgrading to 1.4](docs/UPGRADE.md#upgrading-to-14) and the [operator notes](docs/1.4-OPERATOR-NOTES.md) first: back up, check free disk, and update your Sentinels. Every change is in the [changelog](CHANGELOG.md).
+### New in 1.5.0
+
+- **Internal networks, done right.** An internal Sentinel scans only the ranges you declared, the new **Internal network** page shows those hosts by name (`printer-2 (192.168.1.71)`), and printers are scanned gently: no tool ever sends data to a raw print port.
+- **Never scans itself.** The server's own names and origin addresses are excluded for every project, found by the installer and every update, even behind Cloudflare.
+- **Hardened server.** The containers run Python 3.14.10 as a non-root account, the server uses a least-privilege database role, and `make rotate-secrets` and `make restore-check` cover secrets and backups.
+- **AI spend you can cap.** A monthly or daily dollar budget, and a cheaper bulk model for the high-volume stages.
+- **Safer updates.** The update checks the proxy configuration before it changes anything and puts the previous version back when it fails.
+
+Upgrading from 1.4.2? Read the [1.5 operator notes](docs/1.5-OPERATOR-NOTES.md) and [upgrading to 1.5.0](docs/UPGRADE.md#upgrading-to-150) first: back up, check free disk, clear hand edits in the checkout, and update your Sentinels afterwards. Every change is in the [changelog](CHANGELOG.md).
 
 ## From domain to verdict
 
@@ -98,6 +102,7 @@ cvENGINE runs the best open-source security tools. The scanner image pins each t
 | **Discovery** | [bbot](https://github.com/blacklanternsecurity/bbot) | Subdomain, address and asset discovery, streamed into the inventory as it runs |
 | | [baddns](https://github.com/blacklanternsecurity/baddns) | Dangling DNS and subdomain takeover candidates, run inside bbot |
 | | [crt.sh](https://crt.sh) | Certificate transparency lookups that catch new names between scans |
+| | [Cert Spotter](https://sslmate.com/ct_search_api/) | The second certificate transparency source, asked when crt.sh cannot answer |
 | **Inventory and fingerprinting** | [naabu](https://github.com/projectdiscovery/naabu) | A sweep of all 65,535 TCP ports of each address |
 | | [Nmap](https://nmap.org) | Service, version and OS fingerprints, reviewed scripts, and a slow UDP exposure scan |
 | | [Nuclei](https://github.com/projectdiscovery/nuclei) | A technology pass that names what each web host runs |
@@ -120,6 +125,8 @@ cvENGINE runs the best open-source security tools. The scanner image pins each t
 | **AI (bring your own, off until you choose)** | [Anthropic](https://www.anthropic.com), [OpenAI](https://openai.com), [OpenRouter](https://openrouter.ai), [Ollama](https://github.com/ollama/ollama), [LM Studio](https://lmstudio.ai), [vLLM](https://github.com/vllm-project/vllm) | Finding triage, Nuclei targeting and the [AI reviewer](docs/AI-REVIEWER.md) in its own container. Without a model cvENGINE still discovers, scans and matches |
 | | [Model Context Protocol](https://modelcontextprotocol.io) | An MCP server and a REST API for your own agents ([Agent API](docs/AGENT-API.md)) |
 
+cvENGINE uses the Nmap Security Scanner to perform its tasks ([nmap.org](https://nmap.org)). WPScan, Shodan InternetDB, the Internet Archive lookups, Cloudflare Radar Zero Wire and Cert Spotter without a key are free only for testing your own systems or for non-commercial use; a hosted service that sells cvENGINE sets `CVENGINE_HOSTED_LICENSE_SAFE=1` to turn them off ([Configuration](docs/CONFIGURATION.md#hosted-license-safe-mode)).
+
 ## Install in minutes
 
 You need a Linux server (Debian or Ubuntu is easiest) with at least 4 GB of RAM (8 GB for comfort) and 20 GB of free disk.
@@ -137,7 +144,7 @@ A public name with a trusted certificate, a Cloudflare Tunnel, Mac and Windows: 
 ## Safe by design
 
 - **Read-only by default.** No password lists. Checks that send credentials (Nuclei's default-login and brute-force templates) are off until an App Admin allows them, and denial-of-service templates are excluded.
-- **You draw the lines.** Loopback, link-local and cloud metadata addresses are never scanned, and each organization keeps a list of [addresses we must never scan](docs/1.4-OPERATOR-NOTES.md#addresses-we-must-never-scan) that holds whatever name leads there.
+- **You draw the lines.** Loopback, link-local and cloud metadata addresses are never scanned, nor is the cvENGINE server itself, and each organization keeps a list of [addresses we must never scan](docs/1.4-OPERATOR-NOTES.md#addresses-we-must-never-scan) that holds whatever name leads there. Printers are scanned gently.
 - **You hold the switches.** AI validation, the AI reviewer, OpenVAS and anything else that costs money start off, and an update asks before it changes them.
 - **Locked down.** Organization data is isolated, stored secrets are encrypted, and access is guarded by two-step sign-in, an IP allowlist and an audit log.
 
@@ -148,7 +155,7 @@ Only scan systems you own or are authorized to test.
 | Doc | What it covers |
 | --- | --- |
 | [Deployment](docs/DEPLOYMENT.md) and [Hosting online](docs/HOSTING-ONLINE.md) | Install, HTTPS, Cloudflare, backups, small hosts |
-| [Updates](docs/UPDATES.md), [Upgrade](docs/UPGRADE.md) and [1.4 operator notes](docs/1.4-OPERATOR-NOTES.md) | Staying current, and what 1.4 changes for an operator |
+| [Updates](docs/UPDATES.md), [Upgrade](docs/UPGRADE.md) and [1.5 operator notes](docs/1.5-OPERATOR-NOTES.md) | Staying current, and what 1.5.0 changes for an operator ([1.4 notes](docs/1.4-OPERATOR-NOTES.md)) |
 | [Sentinels](docs/SENTINELS.md) and [Built-in scanner](docs/BUILTIN-SCANNER.md) | Where every scan runs, scaling out and scanning private networks |
 | [Pipeline](docs/PIPELINE.md) and [Architecture](docs/ARCHITECTURE.md) | How it works, stage by stage |
 | [Search](docs/SEARCH.md), [Situations](docs/SITUATIONS.md) and [Fire, smoke, and ice](docs/FIRE-SMOKE-ICE.md) | Finding what matters, and how CVEs are rated |

@@ -56,7 +56,7 @@ class WorkerPanelTests(TestCase):
     def test_the_second_look_asks_no_worker(self):
         from cveFeed import admin_api
         cache.clear()
-        with mock.patch('reNgine.celery.app.control.inspect', return_value=self.inspector()) as inspect:
+        with mock.patch('cvengine.celery.app.control.inspect', return_value=self.inspector()) as inspect:
             first = admin_api.scheduler_health(None, mock.Mock(is_superuser=True))
             asked = inspect.call_count
             second = admin_api.scheduler_health(None, mock.Mock(is_superuser=True))
@@ -76,7 +76,7 @@ class ReaperProbeTests(TestCase):
         def inspect(timeout=1.0, destination=None, **kwargs):
             calls.append(destination)
             return mock.Mock(active=lambda: {'w@h': [{'id': 'a'}]}, reserved=lambda: {'w@h': []}, scheduled=lambda: {'w@h': []})
-        with mock.patch('reNgine.celery.app.control.inspect', side_effect=inspect), mock.patch('reNgine.celery.app.connection_for_read') as conn:
+        with mock.patch('cvengine.celery.app.control.inspect', side_effect=inspect), mock.patch('cvengine.celery.app.connection_for_read') as conn:
             conn.return_value.__enter__.return_value.default_channel = mock.Mock(client=mock.Mock(llen=lambda n: 0, hvals=lambda k: []), unacked_key='unacked')
             with broker_recovery.shared_probe():
                 first = broker_recovery.live_task_ids()

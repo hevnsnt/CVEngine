@@ -142,6 +142,7 @@ when it lands.
    limits, structured output with its step-down when a server refuses it, the reasoning setting, Ollama's context window and keep-alive, and
    the same error categories. The provider settings stay where they were (Settings > AI model); the server resolves them, the `CVENGINE_AI_*`
    variables of its `.env` included, and hands them over in the job block of `GET config`.
+   Operator notes travel apart from both: the newest 10 notes of the finding and of its host (each cut to 1,000 characters, the writer named only by channel) are a fenced block of their own, `OPERATOR_NOTES`, which the prompt calls data, never instructions. The model weighs them as claims and answers `notes_effect` (`no_notes`, `changed` or `unchanged`); the server starts the stored reason with one sentence saying whether a note changed the verdict. A note never changes a status by itself ([AGENT-API.md](AGENT-API.md#notes-on-findings-and-hosts)).
 4. **It posts the answer back.** `POST /api/v1/reviewer/jobs/<id>/result` carries the reply text, or the failure by category, and the
    token counts of each call (recorded as AI usage under the job's stage). An answer whose lease is not the job's current one is refused.
 5. **The server checks and applies it.** A Celery task continues the stage: the stage's own validator checks the reply (`validate_triage`
@@ -208,7 +209,7 @@ scan's activity. A reply that is not one JSON object is sent back once.
 
 ## How every prompt starts
 
-Every system prompt, in the server and in this container, is built from three parts (`web/reNgine/ai_prompts.py`; the container holds a copy of the
+Every system prompt, in the server and in this container, is built from three parts (`web/cvengine/ai_prompts.py`; the container holds a copy of the
 text it needs and a test fails when the copies differ):
 
 1. **The framing.** "cvENGINE is a vulnerability management product. Its operator is performing host validation checks on assets they have
@@ -226,7 +227,7 @@ is really there." (The scan-wide tag selection, `nuclei_tag_selection`, was meas
 the static table, and the stage only names older usage rows.) This sentence replaces only the first sentence of the old prompt; the output format, the allowed-tag list,
 the user message labels and the parsers are as before. Measured on the real provider (5 repeats per job and model): Sonnet answered
 `nuclei_targeting` 5 of 5 (the old text: 3 of 5) and `nuclei_tag_selection` 5 of 5 (the old text: 5 of 5); Haiku answered every wording 5 of 5. The
-shared preamble made Sonnet refuse these two jobs, so they do not get it. `reNgine/ai_prompts.py` lists them in `UNFRAMED` as "task line only,
+shared preamble made Sonnet refuse these two jobs, so they do not get it. `cvengine/ai_prompts.py` lists them in `UNFRAMED` as "task line only,
 measured", and a test pins their exact text. The probe script proves the shipped text: `PROBE_VARIANTS=A,S` runs the old text (A) and the text read
 from the running code (S).
 
@@ -267,7 +268,11 @@ Size of each system prompt, in characters (about 3.5 characters a token), before
   evidence makes a new key, and the finding is read again.
 - **What the model sees.** The finding kind and its heat, with the reason for that heat. The facts the triage built, with host names removed.
   The host context. The earlier triage classification, with its reason marked as model-written. The hard-evidence facts and the read-only
-  validation results, which cvENGINE computed itself. Any injection flags. Whether the server could close the finding at all.
+  validation results, which cvENGINE computed itself. Any injection flags. Whether the server could close the finding at all. The newest notes
+  on the finding and its host, in their own `OPERATOR_NOTES` block (see [The pipeline's AI jobs](#the-pipelines-ai-jobs)).
+- **Notes queue a fresh review.** A new note on a finding, or on its host, queues the finding (or the host's open findings) for a new review,
+  at most once in 15 minutes each (`cveFeed/notes.py`). The note itself never changes a status, and the stored reason says whether a note
+  changed the verdict.
 - **What it returns.** A verdict (`false_positive`, `true_open`, `true_in_progress`, `true_fixed`, `true_accepted_risk` or `uncertain`), a
   confidence, a reason code, and a closing note.
 - **What happens.**
@@ -292,16 +297,17 @@ the numbers behind that state, and the actions it allows:
 | `sentinels_offline` | A Sentinel is registered, approved and was heard from in the last week, and none is live now (with or without waiting tasks). Warning severity; `silent` lists the names | none |
 | `scan_errors` | Failed lines in the activity feed in the last six hours, by kind. Only status `failed` counts: `notice` (clean-up after a restart, a provider key over its plan's limit), `skipped` (a target refused by the private-address guard) and `deferred` (the checks ran, none failed or was blocked, and the AI step was put off) do not. A validation whose checks failed is a `failed` line whatever its AI step did. The activity statuses are `running`, `done`, `failed`, `waiting`, `notice`, `skipped` and `deferred` (REST `activity`, MCP `list_activity`; the status is passed through unchanged, and no filter or count treats the new ones as running or failed) | none |
 | `system` | Any problem `system_status` reports (workers, beat, disk, memory, feeds, certificates…) | none |
+| `ct_watch_stalled` | The certificate transparency watch attempted lookups in the last 3 hours and no source (crt.sh, Cert Spotter) answered one. The text names each source's failures today and its last error. Nothing attempted in that time (no target to watch, the sweep idle, scanning paused, a restart) is `ok`. Warning severity | none (the lookups are retried on their own) |
 | `generated_templates` | A real problem validating AI-written templates that the system cannot fix itself: drafts waiting more than six hours because no Sentinel that runs template checks is online (the text says whether the install has a built-in scanner and how many Sentinels are live, and only tells an install that has a built-in scanner to start it) or the AI provider is off, or every AI-written template rejected for a week (five or more, none valid). It never asks anyone to review a template; with nothing wrong there is no alert | none |
 | `ai_errors` | AI calls that failed in the last 24 hours, by stage and error category. A cut-off reply that the automatic retry answered is not a failure and is not counted (its number is in the facts as `cut_off_answered_by_retry`); `output_truncated` here means the reply was cut off again after the retry, and the alert says which stage and names the next step (lower **Reasoning**, or a model that thinks less). Warns from 10 failures | none |
-| `memory` | A worker lane or a container uses 85 percent (warning) or 95 percent (problem) of its memory limit, a container was killed by the kernel for memory at least once in 24 hours (`oom_kills_24h`), or one worker lane restarted 3 or more times in 24 hours. The text names the lane or container (the web container, the worker container, the lane), the numbers, and the `.env` limit to raise (`WEB_MEM_LIMIT`, `CELERY_MEM_LIMIT`). A reading that is missing, stale or has no limit gives no verdict (`not_read` in the facts) | none |
-| `queue_starvation` | A scan has waited an hour or more while host assessments are running or queued, or a Sentinel task kind's oldest queued task has waited at least an hour and six times its own median wait of the last day while the Sentinels claimed other kinds in the last 30 minutes. Not judged while scanning is paused | none |
+| `memory` | A worker lane or a container uses 85 percent (warning) or 95 percent (problem) of its memory limit, a container was killed by the kernel for memory at least once in 24 hours (`oom_kills_24h`), or one worker lane restarted 3 or more times in 24 hours. A lane that keeps restarting while it uses less than 85 percent of its limit, now and just before its last restart, is not called out of memory: the title reads "A worker lane keeps restarting" (or "The worker lanes keep restarting" for lanes that restarted together, as all four do when the celery container restarts), the text gives their memory and the worker restarts the watchdog made in the same 24 hours (its R1 and R2 events), and the next step points at the watchdog events and the celery log, not at a memory limit. The text names the lane or container (the web container, the worker container, the lane), the numbers, and the `.env` limit to raise (`WEB_MEM_LIMIT`, `CELERY_MEM_LIMIT`). A reading that is missing, stale or has no limit gives no verdict (`not_read` in the facts) | none |
+| `queue_starvation` | A scan that waits for a worker has waited an hour or more while host assessments are running or queued (a queued row nothing will start, such as a host pipeline whose worker stopped before starting it or a scan queued over 48 hours, is not counted: the text names such rows apart, alone they leave the check ok, and the stuck job cleanup closes them), or a Sentinel task kind's oldest queued task has waited at least an hour and six times its own median wait of the last day while the Sentinels claimed other kinds in the last 30 minutes. Not judged while scanning is paused | none |
 | `sentinel_claims_refused` | The server's own rate limiter refused claim calls: 10 or more in the last two clock hours is a warning, 100 or more a problem. The text names the Sentinels and says that adding Sentinels will not help | none |
 | `ai_budget` | An AI cap is used up, so that work stops until its window resets: the configMaxxing caps (triage, validation, template drafts, auto-tuning, nuclei), the per-project triage cap (the busiest project), the finding review and host review caps, the CVE guidance budget and the validation planning budgets. A warning that names each cap with its use; a cap of 0 (switched off) is not reported | none |
 | `triage_backlog` | Findings of the current inventory waiting for their AI triage: the oldest pending or error row has waited 6 hours (warning) or 48 hours (problem). Rows of matches a later scan replaced and of closed findings are not counted. The text gives the counts and the next step (an AI provider, the reviewer container, the AI budget check) | none |
 
 A check in `problem` opens an **admin alert**, a banner on every page for App Admins similar to the update banner. A check that is `ok` again
-resolves its alert. A check can also be `unknown` when the numbers it needs could not be read: that is no verdict, it opens and resolves nothing, and the model is not asked about it. The checks run from the outer watchdog's tick in the web container (every 30 minutes, with no Celery lane involved) as well as from the beat task, so they continue when the lane that dies in an incident is gone; an alert that has not been re-checked for an hour is shown with "Not re-checked for ..." in front of its text. An admin can dismiss an alert, and it stays dismissed until the problem changes.
+resolves its alert. A check can also be `unknown` when the numbers it needs could not be read: that is no verdict, it opens and resolves nothing, and the model is not asked about it. The checks run from the outer watchdog's tick in the web container (every 30 minutes, with no Celery lane involved) as well as from the beat task, so they continue when the lane that dies in an incident is gone; an alert that has not been re-checked for an hour is shown with "Not re-checked for ..." in front of its text. An admin can dismiss an alert, and it stays dismissed until the problem changes: a count, a time or a span moving inside its facts or its problem lines ("12 open findings", "last ran 14 minutes ago") is not a change, another Sentinel, kind or problem line, or a state turning true, is. For four hours after a dismissal (`ALERT_DISMISS_HOLD`) the alert stays hidden even when that changes, so the kinds that waited or a fact that comes and goes with the workload cannot bring it back within the hour; only a rise in severity (a warning turning critical) shows it again inside those four hours. A check that resolves and comes back within six hours (`ALERT_REOPEN_CARRY`) opens a new alert that keeps the dismissal of the last one when that dismissal would still hide it. For 15 minutes after an update ends (`ALERT_UPDATE_GRACE`, and while one runs), a check that would raise only because no Sentinel has been heard from yet (`sentinels_offline`, `sentinel_waiting`, `sentinel_errors` by the fleet rule, `generated_templates` with no live Sentinel) is `unknown`, and the first Sentinel heartbeat resolves an open `sentinels_offline` alert, and a `generated_templates` alert raised with no live Sentinel once a Sentinel that runs template checks is live, at once (at most one look a minute).
 
 The operations job then gives the model the checks. The model writes a diagnosis and next steps for each alert, and may ask for actions. A diagnosis (or a finding note) that is filler, such as "Placeholder", "TBD", "<diagnosis>" or fewer than three words, is dropped by the container and again by the server (`cveFeed/filler.py`): the alert then shows no reviewer line, never the filler, and a row stored earlier with filler is not shown. The
 server runs an action only when the check offered it at that moment, and no more often than its own minimum interval. To know whether a newer
@@ -353,16 +359,35 @@ The page has one **Connection** block (provider, API key, address, and a status 
 
 | Row | Setting | Used for | What it costs in practice |
 | --- | --- | --- | --- |
-| **Everything else** | `model` (AI model settings) | Triage of every finding, CVE match confirmation, validation and Nuclei planning, CVE guidance, template drafts. The pipeline's AI jobs run in the reviewer container but use this model. | Many small requests on every scan: most of the spend, so a cheap model. Empty: the newest cheapest model of the provider (a provider you host yourself must have one chosen). |
+| **High-volume stages (bulk model)** | `bulk_model` and `use_bulk_model` (AI model settings) | Triage of every finding, validation plans, CVE guidance (detection records), Nuclei targeting and the finding review ([which model each stage uses](#which-model-each-stage-uses)). | Thousands of small requests a day: most of the spend. Empty: the provider's cheapest current model. |
+| **Everything else** | `model` (AI model settings) | Host reviews, AI-written templates, local check suggestions, and every stage when the bulk model is switched off. The pipeline's AI jobs run in the reviewer container but use this model. | Fewer, larger requests. Empty: the newest cheapest model of the provider (a provider you host yourself must have one chosen). |
 | **Nuclei targeting and tag selection** | `nuclei_model` (AI model settings, `GET`/`PUT /cve/api/settings/ai`) | Which Nuclei templates apply to the software found (the stages `nuclei_targeting` and `nuclei_tag_selection`). The reviewer container makes these calls: the job carries this choice (`model`) and asks for the haiku default (`haiku`). | A few small requests per scan. A smaller, faster model works well and avoids refusals. |
 | **Finding review** | `review_model` | The finding review job. | One larger request per finding, up to the daily cap: a stronger model costs the most here. |
 | **Operations check** | `ops_model` | The operations check job. | A few small requests a day. |
+
+### Which model each stage uses
+
+The high-volume stages run on the **bulk model** (`bulk_model` in `GET`/`PUT /cve/api/settings/ai`, the row **High-volume stages (bulk model)**): empty means the provider's cheapest current model, the newest of the cheapest tier of the provider's own model list (`claude-haiku-5-5` on Anthropic, `gpt-5.4-nano` on OpenAI when the list has not been read). A self-hosted server keeps its configured model unless you choose one. The switch **Use the bulk model for high-volume stages** (`use_bulk_model`, default on) sends every stage to the main model when it is off. A model chosen for one job (the Nuclei model, the finding review model) wins over the bulk model. The table is `STAGE_MODEL` in `web/cvengine/ai_routing.py`; a stage it does not name uses the main model.
+
+| Stage | Model |
+| --- | --- |
+| `finding_triage`, `finding_triage_repair` | bulk |
+| `validation_plan` | bulk |
+| `cve_detection` | bulk |
+| `nuclei_targeting` | bulk (unless a Nuclei model is chosen) |
+| `finding_review` | bulk (unless a finding review model is chosen) |
+| `host_review`, `host_review_repair` | main |
+| `assessment_review` | main |
+| `template_generation` | main |
+| `local_check_suggestion` | main |
+
+The model is chosen when the job is handed to the reviewer container, so a change on the page applies to work already queued. The [AI budget](CONFIGURATION.md#ai-budget) stops every stage alike.
 
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | Enabled | **off** | The reviewer works only when an AI provider is configured (enabled, with its key, or with its server address for a self-hosted one) and this is on. It ships off: the review and the operations check are billed by the provider, so an App Admin answers "Do you want AI validation?" (see [UPGRADE.md](UPGRADE.md#questions-after-an-update)) or switches it on here. |
-| Review model | empty: `claude-sonnet-5-5` on Anthropic, else the default model | The model for finding review. The page offers it as "Same as the default model" (on Anthropic: "Built-in: claude-sonnet-5-5", because that is what empty means there). |
+| Review model | empty: the bulk model while **Use the bulk model for high-volume stages** is on (`claude-haiku-5-5` on Anthropic), else `claude-sonnet-5-5` on Anthropic, else the default model | The model for finding review. The page offers it as "Same as the default model" (on Anthropic "Built-in:" and the model empty means there). |
 | Operations model | empty: `claude-haiku-5-5` on Anthropic, else the default model | The model for the operations check. |
 | Close false positives | **off** | On: the reviewer may close a finding as a false positive when it is sure and the evidence is not hard proof. Off: it records its verdicts and closes nothing ("Recommend only"). |
 | Reviews per day | 300 | The most findings reviewed in one UTC day. |

@@ -172,16 +172,19 @@ class SentinelTask(models.Model):
                    # ``sentinel_broker.scrub_stale_values`` (once a minute): finished secrets and route-probe results whose values are not scrubbed yet. The index holds only
                    # those rows (a row leaves it when it is scrubbed), so the select reads a handful of entries instead of the result column of every finished task
                    models.Index(fields=['id'], name='sentineltask_unscrubbed_idx',
-                                condition=models.Q(status='done', kind__in=['secrets_scan', 'route_probe']) & ~models.Q(result__has_key='values_scrubbed'))]
+                                condition=models.Q(status='done', kind__in=['secrets_scan', 'route_probe']) & ~models.Q(result__has_key='values_scrubbed')),
+                   # ``sentinel_broker.scrub_stale_images`` (once a minute): finished screenshot tasks whose pictures are still inside the result. Same idea as the index above
+                   models.Index(fields=['id'], name='sentineltask_unscrub_img_idx',
+                                condition=models.Q(status='done', kind='web_screenshot') & ~models.Q(result__has_key='images_scrubbed'))]
 
     def save(self, *args, **kwargs):
         """A new task is checked against the organization's do-not-scan address list before it is written, whoever creates it: the one place a kind added
-        later cannot go around (``agentapi.address_guard``). Raises ``reNgine.resources.AddressExcluded``; nothing is stored."""
+        later cannot go around (``agentapi.address_guard``). Raises ``cvengine.resources.AddressExcluded``; nothing is stored."""
         if self._state.adding and self.project_id:
             from agentapi import address_guard
             refusal = address_guard.dispatch_refusal(self.project_id, self.kind, self.target, self.host, self.ips, scan=self.scan if self.scan_id else None)
             if refusal:
-                from reNgine.resources import AddressExcluded
+                from cvengine.resources import AddressExcluded
                 raise AddressExcluded(self.kind, refusal)
         super().save(*args, **kwargs)
 

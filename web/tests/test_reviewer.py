@@ -92,6 +92,11 @@ class TokenTests(Fixture):
         status, data = call(self.raw, 'GET', '/api/v1/reviewer/config')
         self.assertEqual(status, 200)
         self.assertTrue(data['enabled'])
+        # the finding review is a high-volume stage: the bulk model (the provider's cheapest current one) while the switch is on
+        self.assertEqual((data['review']['model'], data['ops']['model']), ('claude-haiku-5-5', 'claude-haiku-5-5'))
+        from dashboard.models import AIProviderSettings
+        AIProviderSettings.objects.update(use_bulk_model=False)
+        data = call(self.raw, 'GET', '/api/v1/reviewer/config')[1]
         self.assertEqual((data['review']['model'], data['ops']['model']), ('claude-sonnet-5-5', 'claude-haiku-5-5'))
         row = ReviewerSettings.current()
         row.review_model, row.ops_model = 'claude-opus-5-5', 'claude-sonnet-5-5'
@@ -741,7 +746,7 @@ class OpsTests(Fixture):
         reviewer.sync_alerts(self.checks(system='problem'))
         self.assertEqual([a['code'] for a in reviewer.open_alerts()], ['system'])
         alert = AdminAlert.objects.get(code='system', resolved_at__isnull=True)
-        reviewer.dismiss_alert(alert.pk, self.admin)
+        reviewer.dismiss_alert(alert.pk, self.admin, now=timezone.now() - reviewer.ALERT_DISMISS_HOLD - timedelta(minutes=1))  # dismissed before the hold (cveFeed.reviewer.dismissal_holds)
         self.assertEqual(reviewer.open_alerts(), [])
         changed = self.checks(system='problem')
         changed[2]['facts'] = {'problems': ['the cache does not answer']}  # a different problem; a count moving inside the same one does not bring it back (AM-10)
@@ -817,7 +822,7 @@ class ContainerGuardTests(TestCase):
         self.assertIn(f'at most {reviewer.NOTE_MAX} characters', self.prompts.REVIEW_SYSTEM)
 
     def test_only_an_exact_answer_is_accepted(self):
-        schema = self.prompts.REVIEW_SCHEMA
+        schema = self.prompts.REVIEW_REPLY_SCHEMA  # what a reply is checked against: notes_effect may be left out (test_finding_host_notes)
         good = '{"verdict": "false_positive", "confidence": "high", "reason_code": "decoy", "note": "planted text"}'
         self.assertEqual(self.guard.parse_reply(good, schema)['verdict'], 'false_positive')
         self.assertEqual(self.guard.parse_reply('<think>hmm</think>' + good, schema)['reason_code'], 'decoy')
@@ -827,7 +832,7 @@ class ContainerGuardTests(TestCase):
                 self.guard.parse_reply(bad, schema)
 
     def test_scrub_removes_links_and_markup(self):
-        self.assertEqual(self.guard.scrub('see https://x.example/a <b>now</b>‮', 100), 'see [link removed] bnow/b')
+        self.assertEqual(self.guard.scrub('see https://x.example/a <b>now</b>\u202e', 100), 'see [link removed] bnow/b')
 
     def test_the_provider_schema_drops_the_length_limits(self):
         sent = self.guard.for_provider(self.prompts.REVIEW_SCHEMA)

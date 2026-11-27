@@ -1,7 +1,7 @@
 """Correlate stored cve.now entries against the discovered asset inventory.
 
 Deterministic candidate generation first: match each discovered Technology (and
-its version, when reNgine captured one) against the product/package names and
+its version, when the scan captured one) against the product/package names and
 version ranges in `CVEEntry.affected`. Candidates become `CVEMatch` rows with a
 heuristic confidence; the AI triage (cveFeed.triage) then judges each one,
 which is what makes exposure precise rather than noisy.
@@ -13,6 +13,11 @@ import json
 import logging
 import os
 import re
+import sys
+import threading
+import time
+from datetime import datetime, timedelta
+from datetime import timezone as dt_timezone
 from functools import cmp_to_key
 
 from cvengine_scanner import cms, versions
@@ -52,7 +57,7 @@ _BANNER_TECH_RE = re.compile(r"^([A-Za-z][\w.+-]*?)_(\d[\w.+~-]*)(?:\s|$)")
 
 
 def split_name_version(tech_name):
-    """reNgine stores tech as 'Name' or 'Name:version' (httpx tech-detect); a scanner may also store a CPE or a 'Name_version' banner."""
+    """Technology rows store tech as 'Name' or 'Name:version' (httpx tech-detect); a scanner may also store a CPE or a 'Name_version' banner."""
     if not tech_name:
         return "", ""
     name = tech_name.strip()
@@ -764,12 +769,7 @@ def build_product_index(cves):
 
     `cves` is any iterable of CVEEntry (a queryset or a list).
     """
-    index = ProductIndex()
-    for cve in cves:
-        for item in (cve.affected or []):
-            for token in affected_product_tokens(item):
-                index.setdefault(token, set()).add(cve.id)
-    return index
+    return _build_index(cves, None)
 
 
 def _candidate_tokens(token, product_index):
@@ -1026,11 +1026,65 @@ def prepared_ranges(ranges, keep_unusable=False):
     return paired + [r for r in ranges if not _bounded(r)] if keep_unusable else paired
 
 
-def range_verdict(ver, ranges):
+def _line(parsed):
+    """The release line (major.minor) of a parsed version, zero padded: 1.30.7 and 1.30 are both (1, 30)."""
+    return tuple(parsed[:2]) + (0,) * (2 - len(parsed[:2]))
+
+
+def _semver_range(rng):
+    return not isinstance(rng, _Unpaired) and str(rng.get("type") or "SEMVER").upper() in ("SEMVER", "ECOSYSTEM")
+
+
+def branch_fixes(ranges):
+    """``{release line: lowest fix}`` of the ranges of one entry that start and end on one release line (``1.30.2`` up to ``1.30.3``):
+    the entry's own statement that this line is fixed in that release."""
+    out = {}
+    for rng in ranges:
+        if not isinstance(rng, dict) or not _semver_range(rng) or not rng.get("introduced") or not rng.get("fixed"):
+            continue
+        low, fix = parse_version(rng["introduced"], strict=True), parse_version(rng["fixed"], strict=True)
+        if low is None or fix is None or isinstance(fix, _Build) or _line(low) != _line(fix) or _vcmp(fix, low) <= 0:
+            continue
+        line = _line(fix)
+        if line not in out or _vcmp(fix, out[line]) < 0:
+            out[line] = fix
+    return out
+
+
+def _runs_past(rng, line):
+    """True for a range whose upper bound is on a later release line than ``line``, or that has none: it spans past ``line``."""
+    upper = rng.get("fixed") or rng.get("lastAffected")
+    if not upper:
+        return bool(rng.get("introduced"))
+    parsed = parse_version(upper, strict=True)
+    return parsed is not None and _line(parsed) > line
+
+
+def branch_fixed(ver, rng, fixes):
+    """True when the entry's own branch fix (``branch_fixes``) leaves ``ver`` outside ``rng`` although ``rng`` holds it by its bounds.
+
+    F5 writes nginx 1.30.x and 1.31.x this way (CVE-2026-42055): ``1.13.10`` up to ``1.31.2`` and ``1.30.2`` up to ``1.30.3``, and nginx.org
+    states the meaning (not vulnerable: 1.31.2+, 1.30.3+). Read literally, 1.30.3 to 1.30.x lie inside the first range, so a patched
+    stable branch reads as vulnerable; the same holds for an open range (``0.6.18`` with no upper bound) next to ``1.31.0`` up to ``1.31.9``.
+    The rule: a version on a line the entry states a fix for, at or after that fix, is outside every range of the entry that runs past
+    that line (an upper bound on a later line, or none). A range that ends on the version's own line is the vendor's word on that line
+    and still decides, so a narrower statement never hides a wider one about the same line."""
+    if not fixes or not ver or isinstance(ver, _Build):
+        return False
+    line = _line(ver)
+    fix = fixes.get(line)
+    if fix is None or _vcmp(ver, fix) < 0 or not _semver_range(rng):
+        return False
+    return _runs_past(rng, line)
+
+
+def range_verdict(ver, ranges, branch_rule=True):
     """``(result, deciding range, no_lower_bound)`` for ``ver`` against the ranges of one affected entry: result True / False / None
     (unknown) as for ``version_in_range``. The deciding range is the one that put ``ver`` inside (None for any other result);
     ``no_lower_bound`` is True when the answer came from a fix-only branch list (``fix_only_branch_verdict``). One entry with no usable
-    bound is unknown. Main correlation and the WordPress matcher both decide through this, so they cannot read a range list differently."""
+    bound is unknown. Main correlation and the WordPress matcher both decide through this, so they cannot read a range list differently.
+    A range the entry's own branch fix closes for ``ver`` (``branch_fixed``) does not hold it; ``branch_rule=False`` reads the ranges literally, as
+    before that rule (``manage.py recheck_branch_fixes`` compares the two readings)."""
     prepared = prepared_ranges(ranges)
     if not prepared or isinstance(ver, _Build):
         return None, None, False  # a parenthesised build is compared only with listed builds (``item_verdict``)
@@ -1038,9 +1092,12 @@ def range_verdict(ver, ranges):
         # no lower bounds were published: each fix is compared only with the releases of its own line (issue 205)
         result, fixed = fix_only_branch_verdict(ver, prepared)
         return result, ({"fixed": str(fixed)[:60]} if result is True else None), True
+    fixes = branch_fixes(prepared) if branch_rule else {}
     unknown = False
     for rng in prepared:
         result = version_in_range(ver, rng)
+        if result is True and branch_fixed(ver, rng, fixes):
+            continue  # the entry states a fix on this version's own line, and the version is at or past it
         if result is True:
             return True, {k: str(v)[:60] for k, v in rng.items() if k in ("introduced", "fixed", "lastAffected")}, False
         unknown = unknown or result is None
@@ -1061,7 +1118,7 @@ def _exact_single(rng):
     return isinstance(rng, dict) and bool(rng.get("introduced")) and rng.get("introduced") == rng.get("lastAffected") and not rng.get("fixed")
 
 
-def item_verdict(ver, item, raw=None):
+def item_verdict(ver, item, raw=None, branch_rule=True):
     """``range_verdict`` for one affected entry, with the exact builds it lists (``builds``, see cveFeed.intel.convert_affected).
 
     ``raw`` is the version text as read (``ver`` parsed from it). A version that is one of the listed builds is in range. An entry that lists
@@ -1087,7 +1144,7 @@ def item_verdict(ver, item, raw=None):
                 return False, None, False  # a closed list of builds, and this version is not on it
     if isinstance(ver, _Build):
         return None, None, False
-    return range_verdict(ver, ranges)
+    return range_verdict(ver, ranges, branch_rule=branch_rule)
 
 
 def _is_branch_range(rng):
@@ -1753,7 +1810,9 @@ def _row_strength(row):
 def _carry_remediation(fresh):
     """Give each new match the remediation state of the same finding on the host's earlier scan. Hosts are stored once per scan, so
     the next scan's host row starts with no matches of its own; without this, everything a person marked fixed, in progress or accepted
-    risk would reappear as open after the next scan."""
+    risk would reappear as open after the next scan. A closure that only says the host was archived (``cveFeed.archive_closure``) is not
+    carried: the host is back, so the scan's match starts open and the scan decides."""
+    from cveFeed import archive_closure
     from cveFeed.models import CVEMatch
     from startScan.models import Subdomain
     hosts = {sid: (domain_id, name) for sid, domain_id, name in
@@ -1772,6 +1831,13 @@ def _carry_remediation(fresh):
                for m in base.order_by(*by_host_fields, "-id").distinct(*by_host_fields)}
     if not by_host:
         return
+    archived = set()  # (target, name) of the hosts still archived: their archive closures are carried like any other status
+    if any(archive_closure.is_archive_closed(m) for m in by_host.values()):
+        from cveFeed.counts import archived_keys
+        from targetApp.models import Domain
+        projects = dict(Domain.objects.filter(pk__in=domains).values_list("pk", "project_id"))
+        keys = archived_keys(set(projects.values()))
+        archived = {(d, n) for d, n in hosts.values() if (projects.get(d), (n or "").lower()) in keys}
     # A finding is paged as fire once per heat rule, not once per scan (cveFeed.notify): the new copy carries the page, under the rule in force,
     # of any earlier copy of the same CVE on the same host, whichever product label or source it had.
     from django.db.models import Max
@@ -1787,7 +1853,9 @@ def _carry_remediation(fresh):
         domain_id, name = hosts.get(match.subdomain_id, (None, None))
         key = (match.cve_entry_id, domain_id, name)
         before = by_host.get(key)
-        if before is not None:
+        if before is not None and archive_closure.is_archive_closed(before) and (domain_id, name) not in archived:
+            match.assignee_id = before.assignee_id  # closed only because the host was archived: a scan that sees it again starts it open
+        elif before is not None:
             match.remediation_status, match.remediation_note = before.remediation_status, before.remediation_note
             match.remediation_updated_at, match.remediation_by_id, match.assignee_id = (
                 before.remediation_updated_at, before.remediation_by_id, before.assignee_id)
@@ -2012,10 +2080,17 @@ def close_stale(current, covered):
     if not subdomain_ids:
         return set()
     stale_keep, hosts = [], set()
-    for m in CVEMatch.objects.filter(subdomain_id__in=list(subdomain_ids), source__in=_CORRELATED_SOURCES).order_by().only(
+    candidates = [m for m in CVEMatch.objects.filter(subdomain_id__in=list(subdomain_ids), source__in=_CORRELATED_SOURCES).order_by().only(
             "id", "cve_entry_id", "subdomain_id", "source", "matched_product", "matched_version", "evidence", "ai_verdict", "ai_reason",
-            "template_result", "remediation_status", "version_in_range", "assignee_id", "distro_status"):
-        if m.cve_entry_id not in cve_ids or (m.cve_entry_id, m.subdomain_id, m.source, m.matched_product) in current:
+            "template_result", "remediation_status", "remediation_by", "version_in_range", "assignee_id", "distro_status")
+            if m.cve_entry_id in cve_ids and (m.cve_entry_id, m.subdomain_id, m.source, m.matched_product) not in current]
+    # A match made only from a Shodan InternetDB reading (a lead for our own checks, never a finding: cveFeed.source_versions) is closed as a
+    # false positive with its own note, not with the generic "no longer matches" closure below
+    from cveFeed import source_versions
+    shodan_closed = set(source_versions.close_shodan_matches([m for m in candidates if (m.evidence or {}).get("reported")]))
+    for m in candidates:
+        if m.pk in shodan_closed:
+            hosts.add(m.subdomain_id)
             continue
         if m.template_result == 'vulnerable':
             continue  # a template hit is evidence of the vulnerability itself: not seeing the product's banner again does not retire it
@@ -2066,13 +2141,36 @@ def _vouched_on_another_row(subdomain, name, version):
     if not key or not subdomain.target_domain_id:
         return False
     tokens = {re.sub(r'[^a-z0-9]', '', key), re.sub(r'[^a-z0-9]', '', js_libraries.LIBRARIES[key][0].lower())}
-    for match in (CVEMatch.objects.filter(subdomain__name=subdomain.name, subdomain__target_domain_id=subdomain.target_domain_id, source='tech',
-                                          matched_version=version).exclude(subdomain_id=subdomain.pk)
-                  .only('id', 'source', 'matched_product', 'evidence', 'version_in_range', 'ai_verdict', 'remediation_status', 'assignee_id', 'template_result',
-                        'distro_status')):
-        if re.sub(r'[^a-z0-9]', '', (match.matched_product or '').lower()) in tokens and _library_standing(match):
+    rows = [match for match in (CVEMatch.objects.filter(subdomain__name=subdomain.name, subdomain__target_domain_id=subdomain.target_domain_id,
+                                                         source='tech', matched_version=version).exclude(subdomain_id=subdomain.pk)
+                                .only('id', 'source', 'matched_product', 'evidence', 'version_in_range', 'ai_verdict', 'remediation_status',
+                                      'assignee_id', 'template_result', 'distro_status'))
+            if re.sub(r'[^a-z0-9]', '', (match.matched_product or '').lower()) in tokens]
+    return _any_library_standing(rows)
+
+
+def _any_library_standing(matches):
+    """Whether ``_library_standing`` holds for any of ``matches``, read with four queries for all of them (``prime_standing``, their Triage
+    rows) instead of up to three per match."""
+    from django.db.models import Q
+
+    from cveFeed.models import Triage
+    from cveFeed.triage import library_body_proven
+    if not matches:
+        return False
+    match_policy.prime_standing(matches)
+    try:
+        if any(match_policy.has_standing(m) for m in matches):
             return True
-    return False
+        triaged = {}
+        for match_id, status, classification in (Triage.objects.filter(match_id__in=[m.pk for m in matches])
+                                                 .filter(Q(validation_status='hit') | Q(classification='confirmed'))
+                                                 .values_list('match_id', 'validation_status', 'classification')):
+            triaged.setdefault(match_id, []).append((status, classification))
+        return any(status == 'hit' or (classification == 'confirmed' and not library_body_proven(
+            m.source, m.evidence, m.version_in_range, m.distro_status)) for m in matches for status, classification in triaged.get(m.pk, ()))
+    finally:
+        match_policy.forget_primed(matches)
 
 
 def _library_closures(matches):
@@ -2103,7 +2201,7 @@ def collect_subdomain_matches(subdomain, product_index, cve_by_id, min_confidenc
     """The CVEMatch rows for one subdomain, appended to ``rows`` (a new list when omitted). Returns the rows.
 
     Two deterministic sources are correlated against the CVE product index:
-    - "tech": reNgine's httpx technology fingerprints (stored as name[:version]).
+    - "tech": the httpx technology fingerprints (stored as name[:version]).
     - "port": the Shodan-style nmap -sV service data on the host's open ports
       (Port.product / Port.version), reached via the subdomain's IP addresses.
     """
@@ -2255,22 +2353,176 @@ def correlate_subdomains(subdomains, product_index, cve_by_id, min_confidence=0.
     return hosts, matches + save_matches(rows, covered=(ids, pool), retriage=retriage)
 
 
-# One product index per process, rebuilt only when the CVE table changes (a new or re-synced entry moves the key).
+# One product index per process. When the CVE table changes (a new or re-synced entry moves the key) the cached pool is refreshed in place of
+# a full build: only the rows whose synced_at moved since the pool's own stamp are read, and the rows that left the pool (deleted, rejected,
+# only usable from the host) are found by one query of the ids. A full build of every row runs on the first call, when a test or caller
+# clears the key, and at most every POOL_FULL_EVERY_S seconds while the key keeps moving (a safety net for a write that changes a pool
+# column without moving synced_at, which the code base does not do: see cveFeed.intel's notes on synced_at).
 _INDEX_CACHE = {"key": None, "value": None}
 _LOCAL_CACHE = {"key": None, "value": None}
 _CVE_FIELDS = ("id", "cve_id", "affected", "kev", "epss_reached", "exploit_db", "cvss", "cvss_vector", "published_at",
                "local_only")  # the vector, date and locality: cveFeed.windows_builds.eligible
+POOL_OVERLAP = timedelta(minutes=10)  # rows stamped this long before the pool's newest stamp are read again: a writer commits after it stamps
+POOL_FULL_EVERY_S = 1800
+POOL_REFRESH_MAX = (500, 0.2)  # more changed or added rows than both this many and this share of the pool: a full build is as cheap
+_NO_DATE = datetime.min.replace(tzinfo=dt_timezone.utc)  # only ever compared with another entry that has no date
+POOL_YIELD_ROWS = 2000  # a build lets the other greenlets of a gevent worker run every this many rows
+_POOL_LOCKS = {"cve": threading.Lock(), "local": threading.Lock()}
 
 
-def _pool(qs, cache, key):
-    if cache["key"] == key:
+def _gevent_sleep():
+    """gevent.sleep in a gevent worker, else None. Never imports gevent: a process that has not loaded and patched it is not a gevent worker
+    (the gevent_db module's gevent_patched asks the same question)."""
+    monkey = sys.modules.get("gevent.monkey")
+    if monkey is None or not monkey.is_module_patched("socket"):
+        return None
+    return sys.modules["gevent"].sleep
+
+
+def _pool_order(cve):
+    """The pool's order, as the full build reads it: published_at DESC (Postgres puts an empty date first) then id DESC."""
+    return (cve.published_at is None, cve.published_at or _NO_DATE, cve.id)
+
+
+def _load_rows(qs, sleep):
+    """``{id: CVEEntry}`` of a queryset, each entry's affected list cleaned (``clean_affected``), yielding to gevent while it builds."""
+    out = {}
+    for n, cve in enumerate(qs, 1):
+        cve.affected = clean_affected(cve.affected)
+        out[cve.id] = cve
+        if sleep is not None and n % POOL_YIELD_ROWS == 0:
+            sleep(0)
+    return out
+
+
+def _cve_tokens(cve):
+    tokens = set()
+    for item in (cve.affected or []):
+        tokens |= affected_product_tokens(item)
+    return tokens
+
+
+def _build_index(cves, sleep):
+    """``build_product_index``, yielding to gevent every POOL_YIELD_ROWS entries."""
+    index = ProductIndex()
+    for n, cve in enumerate(cves, 1):
+        for token in _cve_tokens(cve):
+            index.setdefault(token, set()).add(cve.id)
+        if sleep is not None and n % POOL_YIELD_ROWS == 0:
+            sleep(0)
+    return index
+
+
+def patch_product_index(index, old_cves, new_cves):
+    """A new ProductIndex equal to ``build_product_index`` of the pool after ``old_cves`` (the cached entries of the changed and removed ids)
+    are taken out and ``new_cves`` (the fresh rows of the changed and added ids) are put in. The index is a union of each entry's own
+    ``{token: {id}}`` and nothing else, so removing an entry's tokens and adding the new ones gives what a full build gives; a token left with
+    no id is dropped, as a full build never makes one. ``index`` is never changed: every set this touches is a copy, so a caller still
+    holding the old pool keeps reading a whole one. The word map behind ``candidate_tokens`` depends only on the tokens and is patched the same
+    way when the old index had built it."""
+    new = ProductIndex(index)
+    owned = {}
+
+    def own(token):
+        ids = owned.get(token)
+        if ids is None:
+            ids = owned[token] = set(new.get(token, ()))
+            new[token] = ids
+        return ids
+
+    for cve in old_cves:
+        for token in _cve_tokens(cve):
+            own(token).discard(cve.id)
+    for cve in new_cves:
+        for token in _cve_tokens(cve):
+            own(token).add(cve.id)
+    gone = [token for token, ids in owned.items() if not ids]
+    for token in gone:
+        del new[token]
+    born = [token for token in owned if token in new and token not in index]
+    if index._by_word is not None:
+        by_word, words_owned = dict(index._by_word), {}
+        for token, change in [(t, "discard") for t in gone] + [(t, "add") for t in born]:
+            for words in _words_for(token):
+                for word in words:
+                    if word not in words_owned:
+                        words_owned[word] = by_word[word] = set(by_word.get(word, ()))
+                    getattr(words_owned[word], change)(token)
+        for word, tokens in words_owned.items():
+            if not tokens:
+                del by_word[word]
+        new._by_word = by_word
+    return new
+
+
+def _full(qs, sleep):
+    cve_by_id = _load_rows(qs, sleep)
+    return (cve_by_id, _build_index(cve_by_id.values(), sleep)), len(cve_by_id)
+
+
+def _refresh(base, value, since, sleep):
+    """The cached pool brought up to date, or None when a full build is the better way. ``base`` is the pool's own queryset (every
+    exclusion the full build applies), so a row that became rejected or only usable from the host is missing from the ids and leaves."""
+    old_by_id, old_index = value
+    ids = set(base.values_list("id", flat=True))
+    removed = old_by_id.keys() - ids
+    added = ids - old_by_id.keys()
+    most = max(POOL_REFRESH_MAX[0], POOL_REFRESH_MAX[1] * len(ids))
+    if len(added) > most:
+        return None
+    from django.db.models import Q
+
+    # read at most one row more than a refresh takes: a sync that moved more of the table is built whole without reading it twice
+    fresh = _load_rows(base.filter(Q(synced_at__gte=since) | Q(id__in=added)).only(*_CVE_FIELDS)[:int(most) + 1], sleep)
+    if len(fresh) > most:
+        return None
+    cve_by_id = dict(old_by_id)
+    for cid in removed:
+        del cve_by_id[cid]
+    moved = bool(added)
+    for cid, cve in fresh.items():
+        old = cve_by_id.get(cid)
+        if old is not None and old.published_at != cve.published_at:
+            moved = True
+        cve_by_id[cid] = cve
+    if moved:  # a new entry, or one whose date changed: put the pool back in the order the full build reads
+        cve_by_id = dict(sorted(cve_by_id.items(), key=lambda kv: _pool_order(kv[1]), reverse=True))
+    old_cves = [old_by_id[cid] for cid in removed] + [old_by_id[cid] for cid in fresh if cid in old_by_id]
+    return (cve_by_id, patch_product_index(old_index, old_cves, fresh.values())), len(fresh)
+
+
+def _pool(base, qs, cache, key, latest, kind):
+    """The cached ``(cve_by_id, product_index)`` for ``key``, refreshed or built when the key moved. A new pool is built aside and published
+    in one assignment, so a caller never sees a half patched one; one caller per pool builds while the others of the process wait for it."""
+    if cache["key"] == key and cache["value"] is not None:
         return cache["value"]
-    cve_by_id = {c.id: c for c in qs}
-    for c in cve_by_id.values():
-        c.affected = clean_affected(c.affected)
-    value = (cve_by_id, build_product_index(cve_by_id.values()))
-    cache.update(key=key, value=value)
-    return value
+    sleep = _gevent_sleep()
+    lock = _POOL_LOCKS[kind]
+    if not lock.acquire(blocking=False):
+        if sleep is None:
+            lock.acquire()
+        else:  # in a gevent worker the lock may be a real one: wait without blocking the other greenlets
+            while not lock.acquire(blocking=False):
+                sleep(0.05)
+    try:
+        if cache["key"] == key and cache["value"] is not None:
+            return cache["value"]
+        started, cpu = time.monotonic(), time.process_time()
+        state, done = cache.get("state") or {}, None
+        if (base is not None and cache["key"] is not None and cache["value"] is not None and state.get("latest") is not None
+                and latest is not None and latest >= state["latest"] and started - state.get("full_at", 0) < POOL_FULL_EVERY_S):
+            done = _refresh(base, cache["value"], state["latest"] - POOL_OVERLAP, sleep)
+        if done is None:
+            value, rows = _full(qs, sleep)
+            how, state = "full", {"full_at": started}
+        else:
+            (value, rows), how = done, "refresh"
+        cache.update(key=key, value=value, state={**state, "latest": latest})
+        logger.info("cve pool %s %s: %d entries, %d rows read, %.2f s (%.2f s CPU), pid %d", kind, how, len(value[0]), rows,
+                    time.monotonic() - started, time.process_time() - cpu, os.getpid())
+        return value
+    finally:
+        lock.release()
 
 
 def cve_pool(cve_limit=None):
@@ -2281,11 +2533,13 @@ def cve_pool(cve_limit=None):
 
     stamp = CVEEntry.objects.aggregate(n=Count("id"), latest=Max("synced_at"), local=Count("id", filter=Q(local_only=True)))
     key = (cve_limit, stamp["n"], stamp["latest"], stamp["local"])
-    if _INDEX_CACHE["key"] == key:
+    if _INDEX_CACHE["key"] == key and _INDEX_CACHE["value"] is not None:
         return _INDEX_CACHE["value"]
     # a rejected CVE matches nothing, and neither does one only usable from the host itself (cveFeed.locality)
-    qs = CVEEntry.objects.exclude(status__iregex=DEAD_STATUS_RE).exclude(local_only=True).only(*_CVE_FIELDS).order_by("-published_at")
-    return _pool(qs[:cve_limit] if cve_limit else qs, _INDEX_CACHE, key)
+    base = CVEEntry.objects.exclude(status__iregex=DEAD_STATUS_RE).exclude(local_only=True)
+    qs = base.only(*_CVE_FIELDS).order_by("-published_at", "-id")
+    # a capped pool (the newest cve_limit entries) is always built whole
+    return _pool(None if cve_limit else base, qs[:cve_limit] if cve_limit else qs, _INDEX_CACHE, key, stamp["latest"], "cve")
 
 
 def local_pool():
@@ -2295,9 +2549,10 @@ def local_pool():
 
     from cveFeed.models import CVEEntry
 
-    qs = CVEEntry.objects.exclude(status__iregex=DEAD_STATUS_RE).filter(local_only=True)
-    stamp = qs.aggregate(n=Count("id"), latest=Max("synced_at"))
-    return _pool(qs.only(*_CVE_FIELDS).order_by("-published_at"), _LOCAL_CACHE, (stamp["n"], stamp["latest"]))
+    base = CVEEntry.objects.exclude(status__iregex=DEAD_STATUS_RE).filter(local_only=True)
+    stamp = base.aggregate(n=Count("id"), latest=Max("synced_at"))
+    return _pool(base, base.only(*_CVE_FIELDS).order_by("-published_at", "-id"), _LOCAL_CACHE, (stamp["n"], stamp["latest"]),
+                 stamp["latest"], "local")
 
 
 def _index_hit(token, product_index):
@@ -2335,36 +2590,29 @@ def latest_scan_q(prefix=""):
     these scans, the newest row wins. A domain that has never had a successful full scan keeps all its rows (newest per host),
     so a first scan in progress (or one that failed part way) does not hide the hosts it found. ``prefix`` reaches the host
     from another model ("subdomain__" for a CVEMatch)."""
-    from django.db.models import Case, Exists, F, Max, OuterRef, Q, Value, When, Window
+    from django.db.models import Exists, OuterRef, Q
 
-    from cveFeed.discovery import HOST_PIPELINE_TASK
-    from startScan.models import ScanHistory, Subdomain
+    from cveFeed import current_scans  # noqa: F401 (registers the lookup in_current_scans)
+    from startScan.models import Subdomain
 
-    done = ScanHistory.objects.filter(scan_status=2)
-    full = done.exclude(tasks__contains=[HOST_PIPELINE_TASK])
-    latest_full = full.values("domain_id").annotate(last=Max("id")).values("last")
-    # A host-pipeline scan is "after the full scan" when it is newer than the newest full scan of its domain (any, when the domain has none). It was
-    # ``id > COALESCE((the newest full scan of the domain), 0)``, a subquery run once per finished host-pipeline scan that walked every finished scan of
-    # the domain to find it: a domain keeps 170 or more of them, so 3,300 scans meant 590,000 row visits (1.4 s) each time the set was built, and every
-    # host statement builds it once or twice. Now ONE pass over the finished scans: a window gives each row the newest full scan id of its domain, with
-    # nothing correlated for the planner to repeat per row (a NOT EXISTS version was hashed on PostgreSQL 16 and read 6.7 million buffers on 18).
-    # Both conditions are on windows so that both are applied after them (a plain filter on the tasks would cut the rows the window sees).
-    is_full = ~Q(tasks__contains=[HOST_PIPELINE_TASK])
-    after_full = (done.annotate(_newest_full=Window(Max(Case(When(is_full, then=F("id")))), partition_by=[F("domain_id")]),
-                                _is_pipeline=Window(Max(Case(When(is_full, then=Value(0)), default=Value(1))), partition_by=[F("id")]))
-                  .filter(_is_pipeline=1).filter(Q(_newest_full__isnull=True) | Q(id__gt=F("_newest_full"))).values("id"))
+    # The scan ids are read when the statement is compiled, in one small statement over two partial indexes (cveFeed.current_scans), and written
+    # into it as array literals. Embedded as subqueries they were rebuilt by every statement (a window over every finished scan and two seq scans
+    # of the scan table) and kept the planner from reaching the rows by them: it read every host and filtered most away (52,000 buffers, about
+    # 140 ms for the bare id query on a live install of 31,000 hosts; about 4,000 buffers and 15 ms this way). Same rows, read at the same moment.
     same_host = Subdomain.objects.filter(target_domain_id=OuterRef(prefix + "target_domain_id"),
                                          name=OuterRef(prefix + "name"))
-    newer_row = same_host.filter(scan_history_id__in=after_full,
+    newer_row = same_host.filter(scan_history_id__in_current_scans="after_full",
                                  scan_history_id__gt=OuterRef(prefix + "scan_history_id"))
     # Before the first successful full scan, keep the newest scanned copy of each host. A scanless row (certificate transparency,
     # an import) is not a copy of a scan: its own addresses and findings fold into the host, so it stays current beside the scanned copy.
     newer_fallback = same_host.filter(scan_history__isnull=False, id__gt=OuterRef(prefix + "id"))
-    return ((Q(**{prefix + "scan_history_id__in": latest_full}) | Q(**{prefix + "scan_history_id__in": after_full})
+    # "Not a domain with a full scan" is written as "a domain without one, or none": the same rows (every domain id is a Domain), and the
+    # planner can reach them by the domain index instead of reading every host.
+    return ((Q(**{prefix + "scan_history_id__in_current_scans": "current"})
              | Q(**{prefix + "scan_history__isnull": True})
-             | ~Q(**{prefix + "target_domain_id__in": full.values("domain_id")}))
+             | Q(**{prefix + "target_domain_id__in_current_scans": "unfull_domains"}) | Q(**{prefix + "target_domain_id__isnull": True}))
             & ~Q(Exists(newer_row))
-            & (Q(**{prefix + "scan_history__isnull": True}) | Q(**{prefix + "target_domain_id__in": full.values("domain_id")})
+            & (Q(**{prefix + "scan_history__isnull": True}) | Q(**{prefix + "target_domain_id__in_current_scans": "full_domains"})
                | ~Q(Exists(newer_fallback))))
 
 

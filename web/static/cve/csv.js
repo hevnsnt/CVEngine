@@ -22,7 +22,7 @@ export function toCsv(columns, rows) {
   const body = rows.map((row) =>
     columns.map((c) => csvCell(c.value(row))).join(","),
   );
-  return `﻿${[head, ...body].join("\r\n")}\r\n`; // the BOM makes Excel read the file as UTF-8
+  return `\uFEFF${[head, ...body].join("\r\n")}\r\n`; // the BOM makes Excel read the file as UTF-8
 }
 
 export function download(filename, text) {

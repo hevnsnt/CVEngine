@@ -370,14 +370,15 @@ def report_partial(ctx, task_id, body):
             SentinelTask.objects.filter(pk=task.pk, status='running').update(status='failed', finished_at=now, lease_expires_at=None,
                                                                              error=f'a partial result was rejected: {exc.message}'[:300])
         raise
-    from agentapi import address_guard
-    refusal = address_guard.task_refusal(task, wait_for_unknown=False)
-    if refusal and not getattr(refusal, 'unreadable', False):  # the domain itself now resolves into the do-not-scan list: the run ends here
-        broker.expire(task, f'cancelled: {refusal}')
-        raise ApiError(409, f'the task was cancelled ({refusal}): stop the run')
-    batch, _ = address_guard.filter_batch(task, batch)  # a batch about an excluded address is not stored (the address list is read again for every batch)
-    from agentapi import dns_crosscheck
-    batch = dns_crosscheck.screen_batch(task, batch)  # a resolution one Sentinel alone gives that would change a host is held, not stored (agentapi.dns_crosscheck)
+    from agentapi import address_guard, dns_crosscheck
+    from cveFeed import exclusions
+    with exclusions.memo():  # the do-not-scan list is read once for the checks of this batch (and from the shared cache, which every edit of the list resets)
+        refusal = address_guard.task_refusal(task, wait_for_unknown=False)
+        if refusal and not getattr(refusal, 'unreadable', False):  # the domain itself now resolves into the do-not-scan list: the run ends here
+            broker.expire(task, f'cancelled: {refusal}')
+            raise ApiError(409, f'the task was cancelled ({refusal}): stop the run')
+        batch, _ = address_guard.filter_batch(task, batch)  # a batch about an excluded address is not stored (the address list is checked for every batch)
+        batch = dns_crosscheck.screen_batch(task, batch)  # a resolution one Sentinel alone gives that would change a host is held, not stored (agentapi.dns_crosscheck)
     lease = min(now + broker.RUN_LEASE, (task.accepted_at or now) + broker.max_runtime(task))
     try:
         with transaction.atomic():
@@ -537,9 +538,9 @@ def provider_names(config):
 # --- the stage side: build the target, dispatch it, consume the batches ---------------------------------------------------------------
 
 def mode_options(mode):
-    """The presets, required flags and ``--force`` of a discovery mode, read from the server's own table (``reNgine.discovery_events.MODES``), so the scanner runs the
+    """The presets, required flags and ``--force`` of a discovery mode, read from the server's own table (``cvengine.discovery_events.MODES``), so the scanner runs the
     choices the server makes for a local run."""
-    from reNgine import discovery_events as bbot_lib
+    from cvengine import discovery_events as bbot_lib
     cfg = bbot_lib.MODES.get(mode) or bbot_lib.MODES['passive']
     args = list(cfg['args'])
     flags = [args[i + 1] for i, a in enumerate(args[:-1]) if a == '-rf']
@@ -590,10 +591,12 @@ def scope_policy(domain):
 
 def bbot_target(domain, mode, timeout, api_keys=False, trufflehog=False):
     """The ``target`` of a ``bbot_discovery`` task for ``domain`` (``$defs/targets/bbot_discovery``): what the mode runs (presets,
-    required flags, ``--force``, trufflehog excluded unless it may run, ``--strict-scope`` for a host-scoped target) and the scope it must keep to."""
+    required flags, ``--force``, trufflehog excluded unless it may run, the modules ``cveFeed.license_safe`` leaves out on a hosted install, ``--strict-scope`` for a host-scoped target) and the scope it must keep to."""
+    from cveFeed import license_safe
     options = mode_options(mode)
+    excluded = ([] if trufflehog else ['trufflehog']) + license_safe.excluded_bbot_modules()  # a hosted install leaves out the sources with non-commercial terms
     return {'domain': domain.name.strip().lower().rstrip('.'), 'mode': mode if mode in MODES else 'passive', **options,
-            'exclude_modules': [] if trufflehog else ['trufflehog'], 'strict_scope': bool(domain.is_host_scoped()),
+            'exclude_modules': excluded, 'strict_scope': bool(domain.is_host_scoped()),
             'timeout_seconds': max(60, min(86400, int(timeout))), 'api_keys': bool(api_keys), 'trufflehog': bool(trufflehog),
             'scope': scope_policy(domain)}
 
@@ -631,7 +634,7 @@ def dispatch_stream(project, kind, target, scan, on_partial, label='', secret_re
     The waits are ``sentinel_dispatch``'s (claim, queue), and the run's own: its target's ``timeout_seconds`` plus ``REPORT_GRACE`` from the claim.
     A task of the same kind and scan that is still active (the queue gave a lost worker's pipeline to a new one) is ended first."""
     from agentapi import sentinel_broker, sentinel_dispatch
-    from reNgine import resources
+    from cvengine import resources
     if scan is not None:
         for old in SentinelTask._base_manager.filter(scan=scan, kind=kind, status__in=('queued', 'claimed', 'running')).select_related('project'):
             sentinel_broker.expire(old, 'a new run of the same scan took the work over')

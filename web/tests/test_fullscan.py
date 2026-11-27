@@ -11,7 +11,7 @@ from cvengine_scanner import flags as scan_flags
 from cveFeed import discovery, fullscan
 from cveFeed.models import AgentActivity, AssetChange, HostState, ServiceRun
 from dashboard.models import Org, Project
-from reNgine import resources
+from cvengine import resources
 from scanEngine.models import EngineType
 from startScan.models import IpAddress, Port, ScanHistory, Subdomain, Vulnerability
 from targetApp.models import Domain
@@ -142,7 +142,7 @@ class SelectionTests(FullScanBase):
 		self.ip('192.0.2.1', cdn=True)
 		self.ip('192.0.2.2', name=False)  # attached to no host
 		self.ip('10.1.2.3')  # private
-		self.ip('127.0.0.1')  # always blocked
+		self.ip('127.0.0.1', name='lo.fs.test')  # always blocked (its own host: h1 is taken, a host is one row per scan)
 		orphan = Domain.objects.create(name='orphan.test', insert_date=timezone.now())  # no project
 		lonely = IpAddress.objects.create(address='192.0.2.9')
 		sub = Subdomain.objects.create(scan_history=self.scan, target_domain=orphan, name='x.orphan.test')
@@ -228,7 +228,7 @@ class SweepTests(FullScanBase):
 
 	def test_a_paused_scan_picks_and_claims_nothing(self):
 		ip = self.ip('192.0.2.1')
-		with mock.patch('reNgine.resources.global_pause_requested', return_value=True):
+		with mock.patch('cvengine.resources.global_pause_requested', return_value=True):
 			out = run_fullscan(runner=self.runner(xml('192.0.2.1', [])))
 		self.assertEqual(out, {'skipped': 'scanning is paused'})
 		ip.refresh_from_db()
@@ -275,7 +275,7 @@ class SweepTests(FullScanBase):
 		self.assertEqual((ip.full_scan_failures, ip.full_scan_retry_at), (0, None))
 
 	def test_waiting_for_memory_is_not_the_addresss_failure(self):
-		from reNgine.resources import MemoryBusy
+		from cvengine.resources import MemoryBusy
 		ip = self.ip('192.0.2.1')
 
 		def busy(targets, flags, host_timeout):

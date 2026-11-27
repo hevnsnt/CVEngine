@@ -69,7 +69,7 @@ class CandidateTests(TestCase):
 			self.assertEqual(path_probe.check()['state'], 'direct')
 
 	def test_with_no_scanner_the_survey_waits_and_nothing_is_sent_from_here(self):
-		from reNgine.resources import ScannerUnavailable
+		from cvengine.resources import ScannerUnavailable
 		for address in ('8.8.8.8', '1.1.1.1', '9.9.9.9', '4.4.4.4'):
 			self.make(address, 81)
 		with mock.patch.object(path_probe, 'holder', return_value=1), \

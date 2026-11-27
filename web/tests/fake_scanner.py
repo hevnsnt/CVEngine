@@ -156,7 +156,9 @@ class FakeScanner:
         stack = contextlib.ExitStack()
         try:
             directory = stack.enter_context(tempfile.TemporaryDirectory(prefix='fake-scanner-'))
-            stack.enter_context(mock.patch.dict(os.environ, {'CVENGINE_BUILTIN_SCANNER': '1', 'CVENGINE_SCANNER_BOOTSTRAP_DIR': directory}))
+            # the blob's group: the test runner's own (10002, the image's, is not the CI runner's)
+            stack.enter_context(mock.patch.dict(os.environ, {'CVENGINE_BUILTIN_SCANNER': '1', 'CVENGINE_SCANNER_BOOTSTRAP_DIR': directory,
+                                                             'CVENGINE_APP_GID': str(os.getgid())}))
             env = {name: '1' for name in ('CVENGINE_SENTINEL_CLAIM_TIMEOUT', 'CVENGINE_SENTINEL_DISPATCH_TIMEOUT') if name not in os.environ}
             stack.enter_context(mock.patch.dict(os.environ, env))
             admin = self._admin()
@@ -180,7 +182,7 @@ class FakeScanner:
             assert self.agent.token.user_id == admin.pk
             self.clock = _Clock(self)
             stack.enter_context(mock.patch('agentapi.sentinel_dispatch.time', self.clock))
-            # The test suite runs stages blocking (reNgine.test_runner); ``async_stages=True`` runs them the way a server does, and the test
+            # The test suite runs stages blocking (cvengine.test_runner); ``async_stages=True`` runs them the way a server does, and the test
             # continues them with ``drain()``.
             stack.enter_context(mock.patch.dict(os.environ, {'CVENGINE_ASYNC_STAGES': '1' if self.async_stages else '0'}))
             _ACTIVE.append(self)

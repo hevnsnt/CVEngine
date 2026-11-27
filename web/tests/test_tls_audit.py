@@ -7,7 +7,7 @@ from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
 from cveFeed import hygiene, tls_audit
-from reNgine import resources
+from cvengine import resources
 from cveFeed.models import BountyEngagement, BountyProgram, CVEEntry, CVEMatch, HygieneFinding, ProbeObservation, ServiceRun
 from startScan.models import Subdomain
 from tests.fake_scanner import LocalFallback, assert_ran_nowhere_locally
@@ -65,14 +65,14 @@ class EvaluateTests(SimpleTestCase):
         self.assertEqual({f['check'] for f in result.findings}, {'tlsa_beast', 'tlsa_lucky13'})
         self.assertEqual(result.vulnerable, {})
         beast = next(f for f in result.findings if f['check'] == 'tlsa_beast')
-        self.assertEqual((beast['severity'], beast['title']), (1, 'rt.test:443: BEAST may apply'))
+        self.assertEqual((beast['severity'], beast['title']), (1, 'BEAST (CVE-2011-3389): precondition present on rt.test:443, not confirmed exploitable'))
 
     def test_a_proven_vulnerability_is_evidence_with_its_cves(self):
         result = tls_audit.evaluate(report(HEARTBLEED), 'rt.test:443')
         self.assertEqual(result.vulnerable['heartbleed']['cves'], ['CVE-2014-0160'])
         self.assertNotIn('heartbleed', result.cleared)
         finding = next(f for f in result.findings if f['check'] == 'tlsa_heartbleed')
-        self.assertEqual((finding['severity'], finding['title']), (4, 'rt.test:443: Heartbleed is exploitable'))
+        self.assertEqual((finding['severity'], finding['title']), (4, 'Heartbleed (CVE-2014-0160) confirmed on rt.test:443'))
 
     def test_a_list_of_cves_is_split_and_sorted(self):
         robot = item('ROBOT', 'CRITICAL', 'VULNERABLE', 'CVE-2017-17382 CVE-2016-6883 cve-2017-13098')
@@ -119,7 +119,7 @@ class SweepTests(RouteFixture, TestCase):
         self.calls = []  # (host:port, starttls) of each task a Sentinel was handed
         self.output = CLEAN
         mock.patch('cveFeed.activity.log').start()
-        mock.patch('reNgine.resources.global_pause_requested', return_value=False).start()
+        mock.patch('cvengine.resources.global_pause_requested', return_value=False).start()
         LocalFallback('none').apply(self)
         self.guard = assert_ran_nowhere_locally(self, 'testssl')
         self.make_sentinel(['testssl'])
@@ -267,7 +267,7 @@ class SweepTests(RouteFixture, TestCase):
         self.assertEqual(self.calls, [])
 
     def test_nothing_runs_while_scanning_is_paused(self):
-        with mock.patch('reNgine.resources.global_pause_requested', return_value=True):
+        with mock.patch('cvengine.resources.global_pause_requested', return_value=True):
             out = self.sweep()
         self.assertIn('paused', out['skipped'])
         self.assertEqual(self.calls, [])

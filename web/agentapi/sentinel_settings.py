@@ -418,7 +418,10 @@ UPDATE_STATUSES = ('idle', 'waiting', 'draining', 'updating', 'done', 'failed')
 # them in a private file for the run and masks them. A Sentinel that does not say so (every older client) is never sent them; the field is optional.
 # ``credential_filter`` (any Sentinel): it leaves default-login and bruteforce templates and every installed template that sends a fixed credential out of a nuclei web
 # run whose task does not say a person allowed credential checks. While they are off a Sentinel that does not say so is not given nuclei web work.
-FEATURES = ('secret_read', 'vantage', 'bbot_keys', 'credential_filter')
+# ``secret_read_external`` (a Sentinel that is not the built-in scanner): it reads a stored sign-in through the same single-use read, writes it only to a 0600
+# file in a 0700 temporary directory for the run (deleted afterwards) and masks it in everything it reports. Only such a client is ever sent a sign-in, and
+# only one whose owner allowed external Sentinels for it (``signin_delivery``).
+FEATURES = ('secret_read', 'vantage', 'bbot_keys', 'credential_filter', 'secret_read_external')
 
 
 def clean_info(raw):
@@ -695,9 +698,20 @@ def record_info(agent, raw, now=None):
     if agent.update_requested_at and (version_changed or failed):
         fields['update_requested_at'] = None
     before = (agent.info or {}).get('tool_versions')
+    unchanged = merged == (agent.info or {}) and 'update_requested_at' not in fields  # the same report again: the row already says it, nothing is written
+    telemetry_only = ('update_requested_at' not in fields and merged.get('version') == (agent.info or {}).get('version')
+                      and merged.get('tool_versions') == before)  # a tool change also writes an audit entry, which must not outlive the row it compares
     for key, value in fields.items():
         setattr(agent, key, value)
-    Agent.objects.filter(pk=agent.pk).update(**fields)
+    if not unchanged:
+        # A refresh of what the Sentinel reports about itself (its machine numbers, its spool) with the same version, the same tools and no update
+        # request to settle is telemetry the next heartbeat sends again: its commit does not wait for the WAL flush (usage_stamps.relaxed_commit).
+        # A new version, a tool change or an update request answered keeps a normal commit.
+        from contextlib import nullcontext
+
+        from cvengine import usage_stamps
+        with usage_stamps.relaxed_commit() if telemetry_only else nullcontext():
+            Agent.objects.filter(pk=agent.pk).update(**fields)
     _note_tools_behind(agent, before, merged.get('tool_versions'))
     return True
 
