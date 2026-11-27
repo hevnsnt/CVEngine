@@ -268,7 +268,11 @@ Size of each system prompt, in characters (about 3.5 characters a token), before
   evidence makes a new key, and the finding is read again.
 - **What the model sees.** The finding kind and its heat, with the reason for that heat. The facts the triage built, with host names removed.
   The host context. The earlier triage classification, with its reason marked as model-written. The hard-evidence facts and the read-only
-  validation results, which cvENGINE computed itself. Any injection flags. Whether the server could close the finding at all.
+  validation results, which cvENGINE computed itself. Any injection flags. Whether the server could close the finding at all. The newest notes
+  on the finding and its host, in their own `OPERATOR_NOTES` block (see [The pipeline's AI jobs](#the-pipelines-ai-jobs)).
+- **Notes queue a fresh review.** A new note on a finding, or on its host, queues the finding (or the host's open findings) for a new review,
+  at most once in 15 minutes each (`cveFeed/notes.py`). The note itself never changes a status, and the stored reason says whether a note
+  changed the verdict.
 - **What it returns.** A verdict (`false_positive`, `true_open`, `true_in_progress`, `true_fixed`, `true_accepted_risk` or `uncertain`), a
   confidence, a reason code, and a closing note.
 - **What happens.**
