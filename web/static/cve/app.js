@@ -91,10 +91,13 @@ const internalBadge = (network) => {
   b.title = network ? `Inside ${network}: scanned only by a Sentinel in that network` : "Scanned only by a Sentinel inside the network";
   return b;
 };
-// a network printer (its fingerprint showed one): scanned gently, never on its print ports (cveFeed.internal_scan's gentle profile)
-const printerBadge = (evidence) => {
-  const b = badge("Printer: scanned gently", "internal");
-  b.title = `A printer (${evidence}): only read-only web checks run on it; no TLS audit, UDP sweep, targeted pass or OpenVAS, and nothing is ever sent to its print ports`;
+// a network printer (its fingerprint showed one): scanned gently, never on its print ports (cveFeed.internal_scan's gentle profile). The host page
+// shows the full sentence; a row of the Hosts list has room for one word, so it shows "Printer" and keeps the sentence in the tooltip.
+const PRINTER_LABEL = "Printer: scanned gently";
+const printerBadge = (evidence, short = false) => {
+  const b = badge(short ? "Printer" : PRINTER_LABEL, "internal");
+  const why = `A printer (${evidence}): only read-only web checks run on it; no TLS audit, UDP sweep, targeted pass or OpenVAS, and nothing is ever sent to its print ports`;
+  b.title = short ? `${PRINTER_LABEL}. ${why}` : why;
   return b;
 };
 // a CVE listed as exploited in the wild, shown on its row whatever the heat: under the KEV heat policy a KEV match is fire only when its
@@ -4281,7 +4284,7 @@ const pages = {
           meta.append(ribbon);
           if (h.cve_matches) meta.append(badge(`${h.cve_matches} CVE`, "fire"));
           if (h.internal) meta.append(internalBadge(h.network));
-          if (h.printer) meta.append(printerBadge(h.printer));
+          if (h.printer) meta.append(printerBadge(h.printer, true));
           const chip = projChip(h);
           if (chip) meta.append(chip);
           row.append(top, meta);
