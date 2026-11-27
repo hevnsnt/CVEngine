@@ -130,9 +130,9 @@ uninstall-updater:	## Remove the host's update watcher (the cron line install.sh
 
 scanner-build:	## Build the built-in scanner image from source, the known-good floor commit scanner.lock.json names (the offline fallback when the published image cannot be pulled).
 	@tag=$$(bash -c '. scripts/scanner.sh && cvengine_scanner_build' | tail -n1) && echo "Built $$tag (also cvengine-sentinel-local:latest)." && \
-	echo "To run it instead of the published image, set CVENGINE_SCANNER_IMAGE=$$tag in .env, then make up. Remove the line to follow the newest published image again."
+	echo "To run it instead of the published image, set CVENGINE_SCANNER_IMAGE=$$tag in .env, then make up. Remove the line to run the image this release pins again."
 
-scanner-update:	## Bring the built-in scanner to the newest published image: pull, start, keep it only once it checked in, else put the previous one back.
+scanner-update:	## Bring the built-in scanner to the image this release pins (scanner.lock.json): pull, start, keep it only once it checked in, else put the previous one back.
 	@scripts/scanner-update.sh
 
 scanner-logs:	## Tail the built-in scanner's log.

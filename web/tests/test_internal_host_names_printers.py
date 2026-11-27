@@ -6,6 +6,8 @@ read-only web pass: no TLS audit, no UDP sweep, no targeted pass, no OpenVAS, an
 """
 from unittest import mock
 
+from django.test import SimpleTestCase
+
 from agentapi import sentinel_dispatch
 from cveFeed import host_names, internal_discovery as idisc, internal_scan, internal_view, nuclei_scan, openvas_scan
 from cveFeed.discovery import SUCCESS
@@ -182,3 +184,23 @@ class PrinterTests(Base):
         _ready, verdicts = openvas_scan.assess(self.pa.id, {'10.20.0.7'}, forced={'10.20.0.7'}, internal=True)
         self.assertFalse(verdicts['10.20.0.7']['ready'])
         self.assertIn('a printer', verdicts['10.20.0.7']['reason'])
+
+
+class PrinterBadgeTextTests(SimpleTestCase):
+    """The Hosts list has room for one word on a row, so its printer badge reads "Printer" with the full sentence in its tooltip; the host page shows the sentence."""
+
+    def setUp(self):
+        from pathlib import Path
+        self.src = (Path(__file__).resolve().parents[1] / 'static' / 'cve' / 'app.js').read_text()
+
+    def test_the_badge_keeps_the_full_sentence_and_a_short_form(self):
+        start = self.src.index('const printerBadge =')
+        body = self.src[start:self.src.index('};', start)]
+        self.assertIn('const PRINTER_LABEL = "Printer: scanned gently";', self.src)
+        self.assertIn('short ? "Printer" : PRINTER_LABEL', body)
+        self.assertIn('${PRINTER_LABEL}. ${why}', body)  # the short badge's tooltip starts with the full sentence
+
+    def test_the_list_row_uses_the_short_form_and_the_host_page_the_full_one(self):
+        self.assertIn('if (h.printer) meta.append(printerBadge(h.printer, true));', self.src)
+        self.assertIn('if (h.printer) head.append(printerBadge(h.printer));', self.src)
+        self.assertEqual(self.src.count('printerBadge(h.printer'), 2)

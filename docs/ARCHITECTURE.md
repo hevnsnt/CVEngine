@@ -7,12 +7,18 @@ cvENGINE is one Docker Compose deployment. The server runs no scan tool: every s
 | Service | Role |
 | --- | --- |
 | `web` | Django app: the interface, the REST API, and the MCP server (Gunicorn) |
-| `celery` | Four gevent workers: discovery, CVE feed, a one-at-a-time validation lane, and everything else |
+| `celery` | Four gevent worker lanes: discovery, CVE feed, a one-at-a-time validation lane, and everything else (`classic`) |
 | `celery-beat` | The schedules: feeds, certificate watch, hygiene, sweeps, AI reviews, and housekeeping (see [PIPELINE.md](PIPELINE.md#schedules)) |
 | `db` | PostgreSQL 18 |
 | `redis` | Job broker, locks, cache, and the memory queue |
 | `proxy` | nginx, terminates TLS on 443 and redirects 8082 to HTTPS |
+| `ownership` | One-off, runs and exits: hands the paths the application writes to its account (uid 10002) |
+| `migrate` | One-off owner service: runs the migrations, creates the application's database role (`cvengine_app`) and checks it; the only service given the database owner's password |
+| `scanner` | The built-in Sentinel (the Sentinel image), on a network of its own that it shares only with `web`; every scan of the install leaves from here ([BUILTIN-SCANNER.md](BUILTIN-SCANNER.md)) |
+| `reviewer` | The AI reviewer, in its own small image with no cvENGINE source and no database or Redis credentials; it talks to the server only over `/api/v1/reviewer/*` ([AI-REVIEWER.md](AI-REVIEWER.md)) |
 | `tailscale` | Optional (`COMPOSE_PROFILES=tailscale`): a `tailscaled` sidecar in the built-in scanner's network namespace, so scans reach a tailnet (see [TAILSCALE.md](TAILSCALE.md)) |
+
+`web`, `celery` and `celery-beat` run as uid 10002 with every capability dropped, from the image's own copy of the source (`./web` is not mounted over it), and connect to PostgreSQL as `cvengine_app`, a role that can only read and write the application's tables; they do not hold the owner's password. The database runs with `synchronous_commit=off` (`POSTGRES_SYNCHRONOUS_COMMIT`), and the few writes that must survive a crash (audit rows, revocations, bans) commit with it on. The Django cache stores no pickled values. Details: [CONFIGURATION.md](CONFIGURATION.md), [DEPLOYMENT.md](DEPLOYMENT.md).
 
 The server image carries no scan tool and no template set: what it knows about [nuclei](https://github.com/projectdiscovery/nuclei)'s templates (their tags and products, the template of a CVE, whether a template passes the policy) comes from the template index of the Sentinel library it installs (`cvengine_scanner.template_index`), and it resolves no target name (the Sentinel that runs the work does). The scan tools live in the **Sentinel image** (the [cvENGINE-sentinel](https://github.com/hevnsnt/cvENGINE-sentinel) repository, pinned by digest in `scanner.lock.json`): [nmap](https://nmap.org), nuclei, [naabu](https://github.com/projectdiscovery/naabu), [testssl.sh](https://github.com/testssl/testssl.sh), [WPScan](https://wpscan.com/), [wafw00f](https://github.com/EnableSecurity/wafw00f), [bbot](https://github.com/blacklanternsecurity/bbot) (which installs [gowitness](https://github.com/sensepost/gowitness) for older discovery-time screenshots), [Kingfisher](https://github.com/mongodb/kingfisher) for secret detection, [sshamble](https://github.com/runZeroInc/sshamble) for the SSH host key check, [aardwolf](https://github.com/skelsec/aardwolf) for RDP login screens and [Playwright](https://playwright.dev)'s headless Chromium for web screenshots (kind `web_screenshot`, see [Web screenshots](PIPELINE.md#web-screenshots)). Every tool is pinned to a known-good version, so a rebuild does not change what a scan does. Only WPScan's vulnerability database, the badkeys blocklist and the CVE feeds refresh at runtime. The old reNgine scan engine and the Go tools it used (httpx, subfinder, katana, and others) are gone. The complete list, with versions and licenses, is on the About page and in [THIRD-PARTY.md](../THIRD-PARTY.md).
 
@@ -34,14 +40,14 @@ The server image carries no scan tool and no template set: what it knows about [
 
 ## Stack
 
-Ubuntu 26.04, Python 3.14 (a pinned CPython build, 3.14.10, not Ubuntu's 3.14.4: see `PYTHON_VERSION` in web/Dockerfile), Django 6.0, PostgreSQL 18, nmap 7.993, and Go 1.27 for building the scanners.
+Ubuntu 26.04, Python 3.14 (a pinned CPython build, 3.14.10, not Ubuntu's 3.14.4: see `PYTHON_VERSION` in web/Dockerfile), Django 6.0, PostgreSQL 18. The scan tools are in the Sentinel image, whose Go tools are built from source with Go 1.27.
 
 ## Main data
 
 | Model | Holds |
 | --- | --- |
 | `Org`, `Project` | The tenancy hierarchy ([TENANCY.md](TENANCY.md)) |
-| `Domain` | A target: a domain, IP, or URL host. It belongs to an organization, which can track a name that another organization also tracks |
+| `Domain` | A target: a domain, IP, or URL host. It belongs to an organization, which can track a name that another organization also tracks. An internal address also keeps the name the Sentinel read for it inside the network (`display_name`) and the printer mark ([HOST-INVENTORY.md](HOST-INVENTORY.md#internal-hosts-names-and-printers)) |
 | `Subdomain`, `IpAddress`, `Port` | The inventory: hosts, addresses (one row per address in an organization), and services with product and version |
 | `CVEDetection` | One shared detection strategy and validation profile per CVE, the same for every organization |
 | `RouteAuth`, `HygieneFinding`, `TlsCertificate` | Web route auth states, email and domain findings, and certificates |
@@ -53,6 +59,8 @@ Ubuntu 26.04, Python 3.14 (a pinned CPython build, 3.14.10, not Ubuntu's 3.14.4:
 | `Triage`, `TriageVerdict` | One triage per finding, and the AI answer shared by findings with the same evidence (a closing answer only within the project, and host, it was reached on) |
 | `GeneratedTemplate`, `GeneratedTemplateReview`, `AutoFireRun` | AI-drafted nuclei templates (a revision is a new row that supersedes the old one), the reviews of them, and auto-fire runs |
 | `HostState`, `AssetChange` | Each host's snapshot, and the change log built from comparing snapshots |
+| `FindingComment`, `HostNote` | Notes on a finding (with an optional observation and evidence) and on a host, which the AI reviewer reads as data ([AGENT-API.md](AGENT-API.md#notes-on-findings-and-hosts)) |
+| `CtLookupDay` | The certificate transparency watch's daily counts per source (crt.sh, Cert Spotter): lookups that worked, failed or were held back |
 | `HostProfile`, `HostLabel`, `HostExclusion`, `HostAssessment` | Owner, criticality, alias and note (one row per project and host name, so they outlast rescans), detection chips, exclusions, and rescans |
 | `HostInventory`, `HostInventoryReport` | What a host reported about itself with the reporter script, one row per machine, and its summarised report history ([HOST-INVENTORY.md](HOST-INVENTORY.md)) |
 | `ServiceRun` | The last finished run of each scanner on each asset |
@@ -106,27 +114,28 @@ A Sentinel's scope widens past one project: an organization-wide enrollment (`or
 
 - Triaging findings into confirmed, likely, needs validation, likely false positive, or not applicable. Fixed rules keep hard evidence from being dismissed. A reply the validator rejects is sent back to the model once with the reason.
 - Confirming CVE matches when auto-fire is on, planning **Validate now** checks, and re-triaging their evidence.
+- Reviewing every open finding once, and whole hosts when that is switched on, and checking the server's operations a few times a day: the AI reviewer container ([AI-REVIEWER.md](AI-REVIEWER.md)). It reads people's notes on findings and hosts as data, never as instructions.
 - Choosing nuclei template tags and severities from those the installed templates use.
 - Drafting a nuclei template when none exists for a CVE.
 - Writing detection checks for the CVEs attackers use, from feed text only, within a daily budget.
 - The advisor of the auto-tuner (a second opinion on the throughput settings, numbers only, every few hours; the deterministic controller tunes without it).
 - Reading RDP login-screen screenshots, and suggesting local checks for matches no external check can settle.
-- Report text on the bug bounty page.
 
-The AI never writes severity, CVSS, KEV, or EPSS data. It can suggest a one-step severity change, which is shown but not applied. Set the provider as described in [DEPLOYMENT.md](DEPLOYMENT.md#ai-models).
+The high-volume stages run on a cheaper bulk model, and an optional budget in US dollars stops AI work when it is spent ([AI-USAGE.md](AI-USAGE.md#ai-budget)). The AI and your data page (`/cve/ai/`, linked from AI Model Usage) says what each job sends ([AI-DATA.md](AI-DATA.md)). The AI never writes severity, CVSS, KEV, or EPSS data. It can suggest a one-step severity change, which is shown but not applied. Set the provider as described in [DEPLOYMENT.md](DEPLOYMENT.md#ai-models).
 
 ## Code layout
 
 | Path | Contents |
 | --- | --- |
 | `web/cveFeed/` | CVE feeds, discovery pipeline, nmap, nuclei, hygiene, correlation, triage, validation, bug bounty |
-| `web/agentapi/` | The REST API and MCP server |
+| `web/agentapi/` | The REST API and MCP server, the Sentinel broker and the AI reviewer's API |
 | `web/tenancy/` | Roles, two-step sign-in, and per-project data isolation |
-| `web/cvengine/` | Shared code: the bbot wrapper, AI providers, the memory queue |
-| `web/startScan/`, `web/targetApp/`, `web/dashboard/`, `web/scanEngine/` | Inventory, target, settings, and scan engine models inherited from reNgine |
+| `web/cvengine/` | The Django project and shared code: settings, the Celery app, AI providers and model routing, the input guard, database roles, the gevent helpers |
+| `web/startScan/`, `web/targetApp/`, `web/dashboard/`, `web/scanEngine/` | Inventory, target, settings, and scan engine models (first written for reNgine) |
+| `reviewer/` | The AI reviewer container's own code |
 | `web/static/cve/` | The front end ([FRONTEND.md](FRONTEND.md)) |
 | `scripts/`, `config/` | Update and deploy scripts, and the nginx config |
 
-cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The code under `web/cvengine/` keeps that name.
+cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. Since 1.5.0 the code and configuration carry the cvENGINE name only (the package `web/cvengine`, `CVENGINE_*` variables); `scripts/legacy_names.py` moves an older install to the new names, and names an installed host already holds in its database or volumes are kept.
 
 See also: [PIPELINE.md](PIPELINE.md), [DEPLOYMENT.md](DEPLOYMENT.md), [documentation index](README.md).

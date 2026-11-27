@@ -1,6 +1,6 @@
 # AI and your data
 
-This page says what cvENGINE sends to AI models, what an AI agent connected over MCP can read, and how to send less or nothing. The same text is in the app at **AI and your data** (account menu, `/cve/ai/`). Every signed-in person can read that page. It also shows which AI jobs are on for the install, and App Admins see each job's calls over the last 30 days.
+This page says what cvENGINE sends to AI models, what an AI agent connected over MCP can read, and how to send less or nothing. The same text is in the app at **AI and your data** (`/cve/ai/`, linked from a card on the AI Model Usage page and from About). Every signed-in person can read that page. It also shows which AI jobs are on for the install, and App Admins see each job's calls over the last 30 days.
 
 The in-app text lives in `web/cveFeed/ai_disclosure.py`. `web/tests/test_ai_disclosure.py` fails when an AI stage is added to `cvengine/ai_prompts.STAGES` without a description there, so no AI job ships without saying what it sends.
 
@@ -20,6 +20,7 @@ The in-app text lives in `web/cveFeed/ai_disclosure.py`. `web/tests/test_ai_disc
 |---|---|---|
 | AI provider (Settings, AI) | off | Off: no AI job is queued; every stage falls back to its rules |
 | `CVENGINE_REVIEWER=0` | on | Jobs wait and are never sent; only the connection test works |
+| AI budget (Settings, AI model, or `CVENGINE_AI_MONTHLY_BUDGET_USD` and `CVENGINE_AI_DAILY_BUDGET_USD`) | none | Once the monthly or daily dollar budget is spent, no AI job is handed out and the finding review and operations check stop until the next UTC day or month ([AI-USAGE.md](AI-USAGE.md#ai-budget)) |
 | Settings, AI reviewer, "Review findings and check operations with the AI reviewer" | off | Gates the finding review, the operations check and (with its own switch) the host review. **It does not gate the pipeline jobs** (triage, validation plans, CVE guidance, templates, RDP reading, template targeting), which run whenever a provider is on |
 
 ## The jobs
@@ -29,8 +30,8 @@ The in-app text lives in `web/cveFeed/ai_disclosure.py`. `web/tests/test_ai_disc
 | Triage (`finding_triage`, `_repair`) | on with a provider | The finding's details, minus host, URL, request, response, cookie, token and key fields. For a CVE match, also the CVE and the host context. A repair also sends the model's previous answer. `ai_providers.triage_parts`, `triage.describe` | Its verdict and remediation text, never a closure |
 | Validation plan (`validation_plan`) | on with a provider; 200 a day, 20 a project | The CVE (description cut to 500 characters), the match evidence, the allowed checks, the host context, and up to 6 earlier check summaries with the host's names replaced. `validation_plan.plan` | Which approved checks run |
 | Local check suggestions (`local_check_suggestion`) | on with a provider | The CVE id and title, affected products, the matched product | Nothing; read-only commands are shown as suggestions |
-| Host review (`host_review`, `_repair`) | **off** | Up to 60 findings with heat, status and validation results; the heat reason (a person's note, never their login); the host context; secrets as counts only; screenshots as titles only. Capped at 80,000 characters. `host_review.build` | A note; closes false positives only with its own auto-close switch (off) |
-| Finding review (`finding_review`) | **off** | The finding, the host context, the earlier triage reason (800 characters) and the heat reason. Secret-masked like every other job. `reviewer.build_packet` | Closes false positives only with auto-close (off) and the server's close gate |
+| Host review (`host_review`, `_repair`) | **off** | Up to 60 findings with heat, status and validation results; the heat reason (a person's note, never their login); the host context; secrets as counts only; screenshots as titles only; the newest notes people and agents wrote on the host and its findings, fenced as data. Capped at 80,000 characters. `host_review.build` | A note; closes false positives only with its own auto-close switch (off) |
+| Finding review (`finding_review`) | **off** | The finding, the host context, the earlier triage reason (800 characters), the heat reason, and the newest notes on the finding and its host (fenced as data, never instructions). Secret-masked like every other job. `reviewer.build_packet` | Closes false positives only with auto-close (off) and the server's close gate |
 | Operations check (`operations_check`) | **off** | Health checks and measurements, Sentinel names, and the latest error and activity messages of failing tasks (200–300 characters each), which can name hosts. Also auto-tuning decisions. Secret-masked. `reviewer.snapshot` | Its alert text; the `feed_sentinels` action; tuning proposals stay suggestions unless the agent policy is Auto |
 | RDP login screen (`rdp_screenshot`) | on with a provider (`CVENGINE_RDP_SHOT`) | **The full screenshot image**, unredacted, up to 4 MB. No host name or address as text. `rdp_shot` | Stores the user name shown and an informational finding |
 | Template targeting (`nuclei_targeting`) | on with a provider | Software names per host (numbered, no host names or IPs, no versions), plus the installed template tags. `nuclei_templates` | Which installed templates a scan runs |
