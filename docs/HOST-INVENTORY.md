@@ -274,6 +274,23 @@ report.
 - It does not match language package managers (pip, npm, gem) or container image contents. Containers are listed by image name only.
 - macOS and Windows reporting could not be exercised against real systems where this was built; see the notes in the changelog.
 
+## Internal hosts: names and printers
+
+A host inside a declared internal range is stored by its address, and nobody has to run a script for it to get a name. The Sentinel's
+`discover` sweep, run inside the network, reports what each address is called: the reverse DNS name its own resolver got (a home or office
+router answers for the devices it leased an address to), else the host's mDNS name, else its NetBIOS computer name. A router's own suffix
+(`.lan`, `.local`, `.home` and the like) is dropped, so `johnny.lan` reads as `johnny`; a real domain is kept whole. The name is kept on the
+target row (`targetApp.Domain.display_name`, with `display_name_source` and `display_name_at`; `cveFeed/host_names.py`) and refreshed at each
+sweep. Every page, report and REST or MCP row then writes the host as `brwa8934a937f17 (192.168.1.71)` (`host_label`). The address stays the
+identity for links, filters, exports and the internal host rule, and this server never asks the range anything itself.
+
+A host whose fingerprint shows a printer is marked (`Domain.printer`, with `printer_evidence` saying what showed it, from
+`cvengine_scanner.printers.printer_evidence`), and the mark is set or cleared by each fingerprint. A printer prints what reaches its raw print
+ports, so no Sentinel tool sends data to TCP 515 or 9100 to 9107 on any host, and each internal scan of a marked printer runs only the read-only
+nuclei web pass on ports 80, 443 and 631 and CVE correlation: no TLS audit, UDP sweep, WordPress scan or AI-targeted pass
+(`cveFeed/internal_scan.py`). The OpenVAS sweep refuses a printer even when a person names it. Hosts and the host page show
+**Printer: scanned gently**.
+
 ## Settings
 
 Per project (the Host inventory dialog, `GET/PUT projects/{slug}/settings` `{"inventory": {"create_hosts": false, "stale_days": 14}}`, MCP
