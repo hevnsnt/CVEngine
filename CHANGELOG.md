@@ -2,7 +2,21 @@
 
 cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The history of reNgine up to the fork is in [its changelog](https://github.com/yogeshojha/rengine/blob/master/CHANGELOG.md).
 
-## Unreleased
+## v1.5.0 (2026-11-27)
+
+### Highlights
+- **Internal networks are kept apart.** A Sentinel inside a private network takes only work for the internal ranges its project declares, never a public host. A new Internal network page lists those hosts, and every internal host is shown by name with its address, `hostname (192.168.1.71)`.
+- **Printers are scanned gently.** No tool sends data to a raw print port (515, 9100 to 9107) on any target, and an internal host recognized as a printer gets only read-only web checks, with no TLS audit, UDP sweep or OpenVAS.
+- **The cvENGINE server never scans itself.** Its own names and origin addresses are on every do-not-scan list, the installer and every update find those addresses for you, and sites behind a shared CDN are no longer refused because the server sits behind the same CDN.
+- **Signed-in scanning on your own external Sentinels, if you allow it.** A stored sign-in still goes only to the built-in scanner by default; its owner can allow the organization's own external Sentinels per sign-in, and every delivery is audited.
+- **License-safe mode for hosted services.** `CVENGINE_HOSTED_LICENSE_SAFE=1` turns off WPScan and every data source that needs a commercial license.
+- **AI spend you can cap.** A monthly or daily budget in dollars stops AI spend when it is reached, and the high-volume stages use the provider's cheaper model unless you turn that off. An agent token can only lower the budget, never raise or clear it. The new AI and your data page says what is sent to AI models.
+- **Reporting.** Findings and discovered-hosts reports for an organization or a project as PDF or CSV, weekly or monthly email reports, and a findings PDF that reads like a penetration test report.
+- **An MCP page** shows how to connect an agent, what to ask it, and the history of every MCP call.
+- **Stronger defaults on the server.** The application runs as its own account instead of root and connects to the database as a least-privilege role, the owner password is out of the application containers, every image and the Sentinel commit are pinned, and idle sessions end after 12 hours.
+- **The abuse guard no longer locks people out.** It never disables an account or revokes a token, the server sees each visitor's real address, and the update enables again the accounts the old guard disabled.
+- **Much less database work.** The Overview, Situations, Hosts, Findings, the graph and Sentinel polling read far less, and writes no longer wait for the disk.
+- **One button to update from 1.4.2.** The update renames the old reNgine names on the host, sizes the database memory for the machine and refuses a proxy configuration nginx rejects before it changes anything ([UPGRADE.md](docs/UPGRADE.md#upgrading-from-142-to-150)). The new [1.5 operator notes](docs/1.5-OPERATOR-NOTES.md) list what to check first, every doc was checked against the code, and the README has a new demo tour of the 1.5.0 screens.
 
 ### Added
 - **README: a 1.5.0 demo tour.** The README GIF (`docs/images/cvengine-tour-1.5.gif`, 49 seconds, under 10 MB) adds the Hosts with open findings tile, the Internal network page with internal hosts as `name (address)`, a printer marked **Printer: scanned gently**, and the Sentinels outside and inside the network to the 1.4 beats. `scripts/demo/make_gif.sh` films it on a copy of the demo seed with invented company names (`scripts/demo/rebrand.py`), and `seed_tour_projects.py` adds the internal host names, the printer, two invented CVEs for the week's threats and three weeks of daily figures for the Overview tiles. The older GIFs stay in `docs/images/`.

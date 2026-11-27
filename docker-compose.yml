@@ -341,7 +341,7 @@ services:
 
   proxy:
     restart: always
-    image: nginx:alpine@sha256:b50897d5c7b1aa08067c3d90c5e8b3e47ec4e3c91c91446f67820228f7b41e34
+    image: nginx:alpine@sha256:7fc0fb4af7bf006aeb31aea88069976060f8f0a0a86b667126742cc17f4e31ae
     # A stock image is only as new as the day it was first pulled. The update scripts pull it before they build, while nothing is stopped, and
     # keep the image on the host when the registry cannot be reached: `pull_policy: always` made the pull part of `up`, which runs after the
     # database migration, so a registry outage failed an update that was otherwise done and an offline host could never update.
