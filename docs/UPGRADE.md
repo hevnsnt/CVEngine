@@ -73,11 +73,16 @@ and when you come forward again, before the update, delete the `django_migration
 
 **To undo the migrations themselves**, the only complete way back is the database dump the update took just before it migrated (`.git/cvengine-update/backups`, or `.git/cvengine-auto-deploy/backups` with automatic deployment, or a nightly dump from before the update, [DEPLOYMENT.md](DEPLOYMENT.md#backups)). Restoring it loses everything written since. Reversing the migrations with `manage.py migrate APP NUMBER` works only while 1.5.0's code is still checked out (1.4.2 does not have the migration files), drops the new tables with their data, and for `cveFeed` 0179 fails once an organization report exists; it is not needed for any of the above.
 
-## Upgrading to 1.4
+## Upgrading to 1.5.0
 
-### Each Sentinel is auto-tuned
+Update from 1.4.2 the way you always do: the Update button, `scripts/update.sh`, or automatic deployment ([UPDATES.md](UPDATES.md)). The update does every step below by itself; the short list of what an operator should know is in [1.5-OPERATOR-NOTES.md](1.5-OPERATOR-NOTES.md). Before you start:
 
-After the update, auto-tuning (when in Auto, the default) also tunes each Sentinel's tasks at once and the slots of its memory-heavy kinds, from the machine numbers a current Sentinel client reports in its heartbeat. Nothing is stored or migrated: a Sentinel nobody tuned keeps running at its machine's own setting, and the tuner only lowers it on trouble and brings it back. A Sentinel whose tasks at once (or a kind's cap) you set on the Sentinels page stays as you set it. A Sentinel on an older client sends no machine report and is left as it is until it updates. To stop it, choose Off or Suggest under Settings, configMaxxing, Auto-tuning (every Sentinel goes back to its own numbers at once).
+- **Back up**, and keep `.env` and `web/secret` apart from the dump ([DEPLOYMENT.md](DEPLOYMENT.md#backups)). The update takes its own dump just before it migrates.
+- **Free disk.** The built-in scanner moves from the moving tag `:main` to the image this release pins by digest, which is usually not on the host yet, so the first update to 1.5.0 wants about 14 GB free where Docker keeps its images (8.9 GB with the scanner off). The Update screen says so before you approve.
+- **No hand edits in the checkout.** 1.4.2's own update script runs the first press, and it stops on any change to a tracked file other than `.env` ("local changes to tracked files"). Run `git status --short` in the checkout and commit or undo (`git restore <file>`) what it lists. From 1.5.0 on, a file changed by hand to exactly what the approved commit has no longer stops an update.
+- **Update your external Sentinels** after the server, from the Sentinels page. An older client keeps working; the new client is needed for the ban backoff, signed-in checks on external Sentinels, the printer rules and host names on internal networks.
+
+What the update does, and how to go back, is below. [Rolling back](#rolling-back) covers the way back to 1.4.2.
 
 ### Duplicate rows merged before unique constraints
 
@@ -216,6 +221,22 @@ The self exclusion denies this server's origin addresses (`CVENGINE_SELF_ADDRESS
 - `config/nginx/rengine.conf` becomes `config/nginx/cvengine.conf` with the update. The update refuses a checkout whose tracked files were changed by hand, so a line you added to the old file must be committed, or removed with `git checkout -- config/nginx/rengine.conf`, before you approve: every update script since 1.3 stops there with "local changes to tracked files". From 1.5.0 on, a file changed by hand to exactly what the approved commit has (a fix you applied before it was released, such as the `map_hash_bucket_size` line) no longer stops an update: it is put back and the update brings the same content. A copy of the old file still in `config/nginx/` after the update (or the empty folder Docker leaves at its path) is kept as `rengine.conf.pre-cvengine-rename` (the folder is removed); the proxy reads only `cvengine.conf`.
 - What is **not** renamed: the Compose project (and so the volume names), the database and its owner role. They stay what `.env` says (`COMPOSE_PROJECT_NAME`, `POSTGRES_DB`, `POSTGRES_USER`, `rengine` on an install made with the old default); renaming a volume or a database on a running install hides or loses data. New installs get `cvengine`.
 - `scanEngine` 0009 renames one column of the report settings, `show_rengine_banner` to `show_cvengine_banner` (the PDF report's credit line), and gives it a database default of true. Catalogue changes only: no row is read or written.
+
+### The update checks the proxy before it changes anything
+
+These checks live in `scripts/update-deploy.sh`, which the update reads after it merges the new files, so they already run on the first press from 1.4.2.
+
+- **Before anything is migrated or recreated**, `scripts/proxy-check.sh` runs `nginx -t` on the new proxy configuration, with the new upstream secret, in a throwaway container of the proxy image. A refusal stops the update and puts the previous version back, still serving.
+- **After the restart** the update checks `nginx -t` inside the running proxy, that its restart count does not move while it watches, and one request through the proxy that only the web service answers (`CVENGINE_VERIFY_PROXY_TRIES`). A failure keeps the maintenance page up and the phase `failed`; it does not report done while the site answers 502.
+- **An update that is put back** no longer leaves scanning paused and the Update screen on "applying": the `ownership` service makes the update lock (`web/.update-lock`) the folder owner's, with group 10002 and mode 0660, so the old release's root containers, the new uid 10002 ones and the host's watchdog can all open it.
+
+The way back by hand, and what each 1.5.0 migration means for 1.4.2, is in [Rolling back](#rolling-back).
+
+## Upgrading to 1.4
+
+### Each Sentinel is auto-tuned
+
+After the update, auto-tuning (when in Auto, the default) also tunes each Sentinel's tasks at once and the slots of its memory-heavy kinds, from the machine numbers a current Sentinel client reports in its heartbeat. Nothing is stored or migrated: a Sentinel nobody tuned keeps running at its machine's own setting, and the tuner only lowers it on trouble and brings it back. A Sentinel whose tasks at once (or a kind's cap) you set on the Sentinels page stays as you set it. A Sentinel on an older client sends no machine report and is left as it is until it updates. To stop it, choose Off or Suggest under Settings, configMaxxing, Auto-tuning (every Sentinel goes back to its own numbers at once).
 
 ### Questions after an update
 
