@@ -14,9 +14,11 @@ class AgentsPageSchemeTests(TestCase):
 
 	def test_snippets_follow_the_request_scheme(self):
 		# the commands are built in the browser from the address the page was loaded from (window.location.origin), so the scheme and
-		# host are the page's own; the server no longer writes any address into the page (test_connect_card.mjs checks the https case)
+		# host are the page's own; the server writes no address into the page unless CVENGINE_PUBLIC_API_URL is set (test_public_api_url),
+		# and test_connect_card.mjs checks the https case
 		from pathlib import Path
 		page = client_for(self.user).get('/cve/agents/', secure=True)
 		self.assertNotContains(page, 'http://testserver/')
 		static = Path(__file__).resolve().parents[1] / 'static' / 'cve'
-		self.assertIn('createCard(window.location.origin)', (static / 'api-keys-page.js').read_text())
+		self.assertIn('|| window.location.origin)', (static / 'api-keys-page.js').read_text())
+		self.assertNotContains(page, 'data-api-origin')

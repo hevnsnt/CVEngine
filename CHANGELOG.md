@@ -2,6 +2,11 @@
 
 cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The history of reNgine up to the fork is in [its changelog](https://github.com/yogeshojha/rengine/blob/master/CHANGELOG.md).
 
+## Unreleased
+
+### Added
+- **`CVENGINE_PUBLIC_API_URL`: one public address for agents, Sentinels and email links.** A server behind a public address that is not its `DOMAIN_NAME` (a hosted server behind its shared host) sets it, and the Sentinel enrollment `server_url` (and its blob), the default link base of server emails, the MCP address on the MCP page and the host on the API keys and Sentinels pages use it. Unset, nothing changes ([CONFIGURATION.md](docs/CONFIGURATION.md)).
+
 ## v1.5.0 (2026-11-27)
 
 ### Highlights

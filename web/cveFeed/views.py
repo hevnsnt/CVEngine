@@ -878,7 +878,9 @@ def mcp_page(request):
     as the viewer (an App Admin sees everyone's). Every signed-in person may open it: the History is filtered to what they may read
     (``agentapi.mcp_log.visible_to``)."""
     from cveFeed import mcp_page as page
-    url = request.build_absolute_uri('/mcp/')
+    from cvengine import public_url
+    base = public_url.base_url()  # CVENGINE_PUBLIC_API_URL when set: the address agents are meant to use, not this origin's own name
+    url = f'{base}/mcp/' if base else request.build_absolute_uri('/mcp/')
     return render(request, 'cveFeed/mcp.html', {**ui_context(request, 'mcp'), 'mcp_url': url, 'mcp_clients': page.clients(url),
                                                 'mcp_examples': page.EXAMPLES, 'mcp_fix_loop': page.FIX_LOOP, **page.history(request),
                                                 'no_scanner_bar': True})
@@ -898,8 +900,17 @@ def settings_page(request):
     return render(request, 'cveFeed/settings.html', ui_context(request, 'settings'))
 
 
+def _public_host_context(request):
+    """``host`` and ``api_origin`` for the API keys and Sentinels pages: CVENGINE_PUBLIC_API_URL when set, else this request's own host."""
+    from cvengine import public_url
+    base = public_url.base_url()
+    if base:
+        return {'host': public_url.host(), 'api_origin': base}
+    return {'host': request.get_host(), 'api_origin': ''}
+
+
 def agents_page(request):
-    return render(request, 'cveFeed/agents.html', {'host': request.get_host(), **ui_context(request, 'agents')})
+    return render(request, 'cveFeed/agents.html', {**_public_host_context(request), **ui_context(request, 'agents')})
 
 
 def sentinels_page(request):
@@ -908,7 +919,7 @@ def sentinels_page(request):
     # the organizations this person may provision an organization-wide Sentinel for: the same check the enroll endpoint applies
     enroll_orgs = list(Org.objects.filter(pk__in=roles.managed_org_ids(request.user)).order_by('name').values('slug', 'name'))
     from agentapi import sentinel_source
-    return render(request, 'cveFeed/sentinels.html', {'host': request.get_host(), 'enroll_orgs': enroll_orgs, 'sentinel_contract_line': sentinel_source.contract_line(),
+    return render(request, 'cveFeed/sentinels.html', {**_public_host_context(request), 'enroll_orgs': enroll_orgs, 'sentinel_contract_line': sentinel_source.contract_line(),
                                                       **ui_context(request, 'sentinels')})
 
 
