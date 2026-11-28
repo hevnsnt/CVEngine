@@ -7,6 +7,9 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 ### Added
 - **`CVENGINE_PUBLIC_API_URL`: one public address for agents, Sentinels and email links.** A server behind a public address that is not its `DOMAIN_NAME` (a hosted server behind its shared host) sets it, and the Sentinel enrollment `server_url` (and its blob), the default link base of server emails, the MCP address on the MCP page and the host on the API keys and Sentinels pages use it. Unset, nothing changes ([CONFIGURATION.md](docs/CONFIGURATION.md)).
 
+### Fixed
+- **A CVE match made from a port now tells the triage which port it came from.** The FINDING payload of a port match carries the port number and protocol (read from the port row the match names), and the triage prompt says a probe result counts as evidence only for the service on the same port: a version read on another port of the host belongs to another service (on a host with two Grafanas or a Go service beside Grafana, a model had applied the other port's version to the matched service). A version read on the same port is now evidence the model can tie to the match instead of a guess (#915).
+
 ## v1.5.0 (2026-11-27)
 
 ### Highlights

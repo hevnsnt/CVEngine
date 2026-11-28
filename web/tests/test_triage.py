@@ -1531,3 +1531,60 @@ class StableSignatureTests(TriageDbBase):
 		self.assertNotEqual(key(route(40, 3, 'Index of /backup')), key(route(40, 3, 'Admin console')))
 		self.assertNotIn('sensitive_score', triage.stable(route(40, 3, 'x')['payload']))
 		self.assertEqual(route(40, 3, 'x')['payload']['sensitive_score'], 40)  # the prompt keeps it
+
+
+class PortInFindingTests(TriageDbBase):
+	"""A port match's FINDING names the port it was made from (issue 915), so a probe result can be tied to the matched service: a version read
+	on another port of the same host belongs to another service and is not evidence for this one."""
+
+	def port_match(self, number=3000, protocol='tcp', product='Golang net/http server', version=''):
+		from startScan.models import Port
+		port = Port.objects.create(number=number, protocol=protocol, service_name='http', product=product)
+		m = self.match('go.tr.test', version=version, in_range=False, evidence={'source': 'port', 'source_id': port.pk})
+		CVEMatch.objects.filter(pk=m.pk).update(matched_product=product)
+		return CVEMatch.objects.select_related('subdomain__target_domain', 'cve_entry').get(pk=m.pk)
+
+	def probe(self, port, version):
+		from cveFeed.models import ProbeObservation
+		ProbeObservation.objects.create(project=self.project, domain=self.domain, host='go.tr.test', probe='go-version', kind='version',
+										product='Golang net/http server', version=version, port=port, confidence=0.9, source='header:server')
+
+	def test_payload_names_the_port_number_and_protocol(self):
+		d = triage.describe(self.port_match(number=161, protocol='udp'))
+		self.assertEqual(d['payload']['port'], {'number': 161, 'protocol': 'udp'})
+		finding = next(p for p in ai_providers.triage_parts(d['kind'], d['payload'], d.get('host_context')) if p.get('fence') == 'FINDING')
+		self.assertEqual(finding['data']['port'], {'number': 161, 'protocol': 'udp'})  # survives the prompt's own cleaning
+
+	def test_version_read_on_another_port_is_told_apart(self):
+		m = self.port_match(number=3000)
+		self.probe(3001, '1.25.7')  # a Grafana on another port of the host read the Go version
+		d = triage.describe(m)
+		probes = d['host_context']['probe_results']
+		self.assertEqual(d['payload']['port']['number'], 3000)
+		self.assertEqual([(p['port'], p['version']) for p in probes], [(3001, '1.25.7')])
+		self.assertFalse([p for p in probes if p['port'] == d['payload']['port']['number']])  # nothing read on the matched service's port
+
+	def test_version_read_on_the_same_port_is_tied_to_the_match(self):
+		m = self.port_match(number=3000, product='Grafana')
+		self.probe(3000, '12.3.3')
+		d = triage.describe(m)
+		same = [p for p in d['host_context']['probe_results'] if p['port'] == d['payload']['port']['number']]
+		self.assertEqual([p['version'] for p in same], ['12.3.3'])
+
+	def test_the_chunk_read_carries_the_port_too(self):
+		m = self.port_match(number=8443)
+		pairs = triage.track([m])
+		self.assertEqual(pairs[0][1]['payload']['port'], {'number': 8443, 'protocol': 'tcp'})
+
+	def test_no_port_key_without_a_port_row(self):
+		m = self.port_match()
+		from startScan.models import Port
+		Port.objects.all().delete()
+		self.assertNotIn('port', triage.describe(m)['payload'])
+		CVEMatch.objects.filter(pk=m.pk).update(source='tech')
+		self.assertNotIn('port', triage.describe(CVEMatch.objects.select_related('subdomain__target_domain', 'cve_entry').get(pk=m.pk))['payload'])
+
+	def test_the_system_prompt_ties_a_probe_to_its_port(self):
+		prompt = ai_providers.TRIAGE_SYSTEM_PROMPT
+		self.assertIn('counts as evidence for this service only when its port is the same', prompt)
+		self.assertIn('a version read on another port belongs to another service on the host and is not evidence for this one', prompt)
