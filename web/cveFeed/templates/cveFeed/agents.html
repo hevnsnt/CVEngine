@@ -22,7 +22,7 @@
     <div id="secret" hidden></div>
   </form>
 
-  <section class="card" id="connect" aria-labelledby="connect-h">
+  <section class="card" id="connect" aria-labelledby="connect-h"{% if api_origin %} data-api-origin="{{ api_origin }}"{% endif %}>
     <h2 id="connect-h">Connect an agent</h2>
     <div id="connect-body"></div>
     <p class="visually-hidden" id="connect-live" role="status" aria-live="polite"></p>

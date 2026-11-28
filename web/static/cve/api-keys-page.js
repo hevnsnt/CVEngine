@@ -3,7 +3,8 @@ import { api, button, copyText, el, toast } from "/staticfiles/cve/ui.js";
 import { TABS, createCard } from "/staticfiles/cve/connect-card-logic.js";
 import { renderTokenList } from "/staticfiles/cve/api-keys-list.js";
 
-const card = createCard(window.location.origin);
+// The address agents use: CVENGINE_PUBLIC_API_URL when the server sets one (data-api-origin), else the address this page was opened on.
+const card = createCard(document.getElementById("connect")?.getAttribute("data-api-origin") || window.location.origin);
 const $ = (id) => document.getElementById(id);
 
 function block(text) {

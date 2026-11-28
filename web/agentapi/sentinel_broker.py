@@ -589,10 +589,9 @@ def generate_instance_enrollment(ctx, network='external'):
 
 
 def _server_url():
-    import os
-    domain = os.environ.get('DOMAIN_NAME', 'localhost').strip() or 'localhost'
-    scheme = 'http' if domain in ('localhost', '127.0.0.1') else 'https'
-    return f'{scheme}://{domain}'
+    """The address a Sentinel is told to reach: ``CVENGINE_PUBLIC_API_URL`` when set (a hosted server's shared host), else ``DOMAIN_NAME``."""
+    from cvengine import public_url
+    return public_url.base_url() or public_url.domain_base_url()
 
 
 # --- provisioning blob: no new crypto, just one copy-pasteable string for generate_enrollment's own payload -------------

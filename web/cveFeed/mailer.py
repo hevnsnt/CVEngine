@@ -53,10 +53,12 @@ def ready(cfg=None):
 
 
 def base_url(cfg=None):
-    """The address links in a message start with: the one set under Settings, Email, else ``https://`` and ``DOMAIN_NAME``. Never
-    taken from a request, so a forged Host header cannot point a link at another site."""
+    """The address links in a message start with: the one set under Settings, Email, else ``CVENGINE_PUBLIC_API_URL`` when it is set
+    (cvengine.public_url), else ``https://`` and ``DOMAIN_NAME``. Never taken from a request, so a forged Host header cannot point a link
+    at another site."""
+    from cvengine import public_url
     cfg = cfg or row()
-    return (cfg.link_base or f'https://{settings.DOMAIN_NAME}').rstrip('/')
+    return (cfg.link_base or public_url.base_url() or f'https://{settings.DOMAIN_NAME}').rstrip('/')
 
 
 def _sender(cfg):

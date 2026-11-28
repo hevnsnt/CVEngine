@@ -42,6 +42,9 @@ CSRF_COOKIE_SECURE = not DEBUG
 # their public TLS path; never preload or include sibling subdomains implicitly.
 SECURE_HSTS_SECONDS = env.int('CVENGINE_HSTS_SECONDS', default=0 if DEBUG else 3600)
 DOMAIN_NAME = env('DOMAIN_NAME', default='localhost:8000')
+# A public address in front of this server that is not DOMAIN_NAME (a hosted server's shared host): Sentinel enrollments, email links, the MCP
+# address and the API keys and Sentinels pages use it when set (cvengine.public_url).
+CVENGINE_PUBLIC_API_URL = env('CVENGINE_PUBLIC_API_URL', default='')
 SECRET_FILE = os.path.join(CVENGINE_HOME, 'secret')
 
 # Globals
