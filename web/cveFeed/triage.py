@@ -524,6 +524,10 @@ def describe_cve_match(m):
                 'kev': bool(getattr(cve, 'kev', False)), 'epss_reached': bool(getattr(cve, 'epss_reached', False)),
                 'exploit_db': bool(getattr(cve, 'exploit_db', False)),
                 'affected': affected_brief(cve.affected, names)}}
+    port = evidence_port(m)
+    if port is not None:
+        # the port the matched service answered on: a probe result in host_context counts for this service only when it was read on the same port
+        payload['port'] = {'number': port[1], 'protocol': _s(port[3] or 'tcp', 8)}
     guidance = detection.prompt_guidance(cve)  # earlier notes on what makes this CVE apply or not: a hint, the evidence above decides
     if guidance:
         payload['cve']['guidance'] = guidance
@@ -1002,7 +1006,7 @@ def _port_for(sub, number):
 
 # one host's context is read once while ``track`` runs; outside it nothing is remembered (a long-lived worker must never serve a stale context)
 _CONTEXT_MEMO = contextvars.ContextVar('triage_context_memo', default=None)
-_PORTS = '_ports'  # the memo's entry for the evidence ports ``_prime`` read (``{port id: (service_name, number, extra) or None}``)
+_PORTS = '_ports'  # the memo's entry for the evidence ports ``_prime`` read (``{port id: (service_name, number, extra, protocol) or None}``)
 
 
 def _prime(findings):
@@ -1025,7 +1029,7 @@ def _prime(findings):
         ids = {(m.evidence or {}).get('source_id') for m in matches if m.source == 'port'} - {None} - set(memo.get(_PORTS) or {})
         ids = {i for i in ids if isinstance(i, int) and not isinstance(i, bool)}
         if ids:
-            found = {pk: row for pk, *row in Port.objects.filter(pk__in=ids).values_list('pk', 'service_name', 'number', 'extra')}
+            found = {pk: row for pk, *row in Port.objects.filter(pk__in=ids).values_list('pk', 'service_name', 'number', 'extra', 'protocol')}
             memo.setdefault(_PORTS, {}).update({pk: tuple(found[pk]) if pk in found else None for pk in ids})
         match_policy.prime_standing(matches)
         entries = {m.cve_entry_id: m._state.fields_cache['cve_entry'] for m in matches if m._state.fields_cache.get('cve_entry') is not None}
@@ -1036,6 +1040,21 @@ def _prime(findings):
         logger.exception('could not read the host contexts of %d matches together', len(matches))
 
 
+def evidence_port(match):
+    """The port row a port match was made from (``evidence['source_id']``): ``(service_name, number, extra, protocol)``, or None for any other
+    match or a port that is gone. Inside ``track`` it comes from the chunk's read (``_prime``)."""
+    if getattr(match, 'source', '') != 'port':
+        return None
+    from startScan.models import Port
+    source_id = (getattr(match, 'evidence', None) or {}).get('source_id')
+    if not isinstance(source_id, int) or isinstance(source_id, bool):
+        return None
+    primed = (_CONTEXT_MEMO.get() or {}).get(_PORTS)  # ``track`` reads the evidence ports of a chunk at once (``_prime``)
+    if primed is not None and source_id in primed:
+        return primed[source_id]
+    return Port.objects.filter(pk=source_id).values_list('service_name', 'number', 'extra', 'protocol').first()
+
+
 def _web_evidence(match):
     """Whether a match was made from something an HTTP response (and so a CDN edge) can speak for: a technology tag, or a port that serves
     HTTP. An SSH, database or mail port is never the CDN's: its banner is the host's own."""
@@ -1044,13 +1063,7 @@ def _web_evidence(match):
         return True
     if match.source != 'port':
         return False
-    from startScan.models import Port
-    source_id = (match.evidence or {}).get('source_id')
-    primed = (_CONTEXT_MEMO.get() or {}).get(_PORTS)  # ``track`` reads the evidence ports of a chunk at once (``_prime``)
-    if primed is not None and source_id in primed:
-        row = primed[source_id]
-    else:
-        row = Port.objects.filter(pk=source_id).values_list('service_name', 'number', 'extra').first()
+    row = evidence_port(match)
     if row is None:
         return False
     service, number, extra = (row[0] or '').lower(), row[1], row[2] or {}
